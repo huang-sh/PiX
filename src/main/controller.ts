@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, posix, resolve } from "node:path";
 import type {
   AgentControl,
@@ -568,12 +568,15 @@ export class MainController {
           !(await this.platform.confirm("Delete this Pi session?", p))
         )
           return { cancelled: true, sessions: await this.sessions() };
-        if (this.pi.state().sessionFile === p) await this.pi.close();
+        const runtimePath = this.pi.state().sessionFile;
+        const currentPath = this.current?.session.path;
+        const deletingCurrent = currentPath && realpathSync(currentPath) === p;
+        if (runtimePath && realpathSync(runtimePath) === p) await this.pi.close();
         this.files.delete(p);
-        if (this.current?.session.path === p) this.current = undefined;
+        if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
         this.rememberProject(sessions);
-        this.emit({ type: "sessions", payload: { deletedPath: p, sessions } });
+        this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
       }
       case "agent.control": {

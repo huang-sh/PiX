@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
@@ -15,7 +15,9 @@ for (const streaming of [false, true]) {
     process.env.PIX_HOME = home;
     process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
     const cwd = join(home, "ws");
-    mkdirSync(cwd);
+    const realCwd = join(home, "real-ws");
+    mkdirSync(realCwd);
+    symlinkSync(realCwd, cwd, process.platform === "win32" ? "junction" : "dir");
     const controller = new MainController(cwd, {
       pickProject: async () => undefined,
       pickSession: async () => undefined,
