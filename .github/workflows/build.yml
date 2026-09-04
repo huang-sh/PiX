@@ -69,7 +69,7 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.zip
-            release/*.yml
+            release/latest*.yml
             release/*.blockmap
           if-no-files-found: error
 
