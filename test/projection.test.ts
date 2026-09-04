@@ -226,3 +226,132 @@ test("reads saved node footer usage without recalculating assistant usage", () =
   });
   assert.equal(projectSession(entries.slice(0, -3), "a1").nodes[0]?.footer?.contextUsage, undefined);
 });
+test("turns inherit effective settings while streaming, before the footer entry lands", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "model_change", id: "m1", parentId: null, timestamp: "1", provider: "zai", modelId: "glm-5.3" },
+    { type: "thinking_level_change", id: "t1", parentId: "m1", timestamp: "2", thinkingLevel: "high" },
+    { type: "message", id: "u1", parentId: "t1", timestamp: "3", message: { role: "user", content: "first" } },
+    {
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      timestamp: "4",
+      message: { role: "assistant", content: "answer", provider: "zai", model: "glm-5.3" },
+    },
+    {
+      type: "custom",
+      customType: "pix.node-footer",
+      id: "f1",
+      parentId: "a1",
+      timestamp: "5",
+      data: {
+        contextUsage: { tokens: 10, contextWindow: 1000, percent: 1 },
+        model: { provider: "zai", id: "glm-5.3", name: "GLM-5.3", reasoning: true },
+        thinkingLevel: "high",
+      },
+    },
+    { type: "message", id: "u2", parentId: "f1", timestamp: "6", message: { role: "user", content: "second" } },
+    {
+      type: "message",
+      id: "a2",
+      parentId: "u2",
+      timestamp: "7",
+      message: { role: "assistant", content: "partial", provider: "zai", model: "glm-5.3" },
+    },
+  ];
+  const footer = projectSession(entries, "a2").nodes[1]?.footer;
+  assert.equal(footer?.thinkingLevel, "high");
+  assert.deepEqual(footer?.model, { provider: "zai", id: "glm-5.3" });
+  assert.equal(footer?.contextUsage, undefined);
+});
+test("branch-local thinking changes apply to their branch only", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "model_change", id: "m1", parentId: null, timestamp: "1", provider: "zai", modelId: "glm-5.3" },
+    { type: "thinking_level_change", id: "t1", parentId: "m1", timestamp: "2", thinkingLevel: "high" },
+    { type: "message", id: "u1", parentId: "t1", timestamp: "3", message: { role: "user", content: "root" } },
+    {
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      timestamp: "4",
+      message: { role: "assistant", content: "answer", provider: "zai", model: "glm-5.3" },
+    },
+    {
+      type: "custom",
+      customType: "pix.node-footer",
+      id: "f1",
+      parentId: "a1",
+      timestamp: "5",
+      data: { model: { provider: "zai", id: "glm-5.3", name: "GLM-5.3", reasoning: true }, thinkingLevel: "high" },
+    },
+    { type: "message", id: "u2", parentId: "f1", timestamp: "6", message: { role: "user", content: "A" } },
+    {
+      type: "message",
+      id: "a2",
+      parentId: "u2",
+      timestamp: "7",
+      message: { role: "assistant", content: "branch A", provider: "zai", model: "glm-5.3" },
+    },
+    { type: "thinking_level_change", id: "t2", parentId: "f1", timestamp: "8", thinkingLevel: "low" },
+    { type: "message", id: "u3", parentId: "t2", timestamp: "9", message: { role: "user", content: "B" } },
+    {
+      type: "message",
+      id: "a3",
+      parentId: "u3",
+      timestamp: "10",
+      message: { role: "assistant", content: "branch B", provider: "zai", model: "glm-5.3" },
+    },
+  ];
+  const p = projectSession(entries, "a3");
+  assert.equal(p.nodes.find((n) => n.id === "turn:u1")?.footer?.thinkingLevel, "high");
+  assert.equal(p.nodes.find((n) => n.id === "turn:u2")?.footer?.thinkingLevel, "high");
+  assert.equal(p.nodes.find((n) => n.id === "turn:u3")?.footer?.thinkingLevel, "low");
+});
+test("sessions without footer entries still show the effective thinking level", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "model_change", id: "m1", parentId: null, timestamp: "1", provider: "zai", modelId: "glm-5.3" },
+    { type: "thinking_level_change", id: "t1", parentId: "m1", timestamp: "2", thinkingLevel: "high" },
+    { type: "message", id: "u1", parentId: "t1", timestamp: "3", message: { role: "user", content: "hello" } },
+    {
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      timestamp: "4",
+      message: { role: "assistant", content: "hi", provider: "zai", model: "glm-5.3" },
+    },
+  ];
+  const footer = projectSession(entries, "a1").nodes[0]?.footer;
+  assert.equal(footer?.thinkingLevel, "high");
+  assert.deepEqual(footer?.model, { provider: "zai", id: "glm-5.3" });
+});
+test("a turn's own settled footer entry beats the inherited chain", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "model_change", id: "m1", parentId: null, timestamp: "1", provider: "zai", modelId: "glm-5.3" },
+    { type: "thinking_level_change", id: "t1", parentId: "m1", timestamp: "2", thinkingLevel: "high" },
+    { type: "message", id: "u1", parentId: "t1", timestamp: "3", message: { role: "user", content: "first" } },
+    {
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      timestamp: "4",
+      message: { role: "assistant", content: "answer", provider: "zai", model: "glm-5.3" },
+    },
+    { type: "message", id: "u2", parentId: "a1", timestamp: "5", message: { role: "user", content: "second" } },
+    {
+      type: "message",
+      id: "a2",
+      parentId: "u2",
+      timestamp: "6",
+      message: { role: "assistant", content: "answer", provider: "zai", model: "glm-5.3" },
+    },
+    {
+      type: "custom",
+      customType: "pix.node-footer",
+      id: "f2",
+      parentId: "a2",
+      timestamp: "7",
+      data: { model: { provider: "zai", id: "glm-5.3", name: "GLM-5.3", reasoning: true }, thinkingLevel: "low" },
+    },
+  ];
+  assert.equal(projectSession(entries, "f2").nodes[1]?.footer?.thinkingLevel, "low");
+});

@@ -32,12 +32,24 @@ const flow = ref<VueFlowStore>();
 const dragged = new Set<string>();
 const draftParent = ref<string | null>();
 const draftModel = ref<RuntimeModel | null>();
+// Draft-local thinking override for model-driven clamps only; explicit picks go
+// to session.userThinking so they outlive this draft.
 const draftThinking = ref<string>();
 let activeSession: string | undefined;
 const readableZoom = 0.9;
 const booted = ref(false);
 
 const projection = computed(() => session.current?.projection);
+
+// Default thinking for a draft: the user's last explicit pick wins over the
+// parent node's footer, which in turn wins over the live runtime level.
+function inheritThinking(parentId: string | null | undefined): string {
+  const parent = parentId ? projection.value?.nodes.find((item) => item.id === parentId) : undefined;
+  return session.userThinking
+    ?? parent?.footer?.thinkingLevel
+    ?? session.current?.runtime.thinkingLevel
+    ?? "off";
+}
 
 function nodeContent(id: string) {
   const current = session.current;
@@ -142,10 +154,7 @@ function rebuild() {
   const model = draftModel.value === undefined
     ? parent?.footer?.model ?? session.current?.runtime.model ?? null
     : draftModel.value;
-  const thinkingLevel = draftThinking.value
-    ?? parent?.footer?.thinkingLevel
-    ?? session.current?.runtime.thinkingLevel
-    ?? "off";
+  const thinkingLevel = draftThinking.value ?? inheritThinking(draftParent.value);
   const draftId = parent ? `draft:${parent.id}` : "draft:root";
   const siblings = parent ? children.get(parent.id) ?? [] : [];
   const draft: Node<DraftNodeData> | undefined = (parent || rootDraft) && !pending ? {
@@ -165,8 +174,13 @@ function rebuild() {
         if (next.reasoning === false) draftThinking.value = "off";
         rebuild();
       },
-      onThinking: (level: string) => {
-        draftThinking.value = level;
+      onThinking: (level: string, explicit: boolean) => {
+        if (explicit) {
+          session.setUserThinking(level);
+          draftThinking.value = undefined;
+        } else {
+          draftThinking.value = level;
+        }
         rebuild();
       },
       onCancel: parent ? cancelDraft : undefined,
@@ -199,7 +213,7 @@ async function compose(id: string) {
   const node = projection.value?.nodes.find((item) => item.id === id);
   draftParent.value = id;
   draftModel.value = node?.footer?.model ?? session.current?.runtime.model ?? null;
-  draftThinking.value = node?.footer?.thinkingLevel ?? session.current?.runtime.thinkingLevel ?? "off";
+  draftThinking.value = undefined;
   rebuild();
   await center(`draft:${id}`, true);
 }
@@ -216,7 +230,12 @@ function resetDraft() {
 }
 
 async function submitDraft(text: string) {
-  const delivered = await runDraftSubmit(draftParent.value ?? null, text, draftModel.value, draftThinking.value);
+  const delivered = await runDraftSubmit(
+    draftParent.value ?? null,
+    text,
+    draftModel.value,
+    draftThinking.value ?? inheritThinking(draftParent.value),
+  );
   if (!delivered) return false;
   const id = acceptSubmittedNode();
   if (id) {

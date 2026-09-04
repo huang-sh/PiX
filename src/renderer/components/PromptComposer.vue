@@ -25,7 +25,9 @@ const props = defineProps<{
   placeholder?: string;
   autofocus?: boolean;
   onModel: (model: RuntimeModel) => void;
-  onThinking: (level: string) => void;
+  // explicit=true marks a user pick from the thinking menu; explicit=false marks a
+  // model-driven adjustment so hosts can avoid persisting it as a user choice.
+  onThinking: (level: string, explicit: boolean) => void;
   onSubmit: (text: string) => Promise<boolean>;
 }>();
 
@@ -66,7 +68,7 @@ function selectModel(model: RuntimeModel) {
   const requested = THINKING_LEVELS.indexOf(props.thinkingLevel as typeof THINKING_LEVELS[number]);
   props.onThinking(levels.find((level) => THINKING_LEVELS.indexOf(level as typeof THINKING_LEVELS[number]) >= requested)
     ?? levels.at(-1)
-    ?? "off");
+    ?? "off", false);
 }
 
 async function submit() {
@@ -171,7 +173,7 @@ defineExpose({ focus: focusEditor });
               :key="level"
               class="menu-item node-model-option"
               :data-thinking-level="level"
-              @select="onThinking(level)"
+              @select="onThinking(level, true)"
             >
               <Check v-if="level === (thinkingLevel || 'off')" :size="12" />
               <i v-else />

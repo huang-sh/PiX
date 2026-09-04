@@ -33,6 +33,9 @@ export const useSessionStore = defineStore("session", {
     activeProjectId: "",
     current: undefined as SessionSnapshot | undefined,
     focusedNode: null as string | null,
+    // Last thinking level the user picked explicitly in a composer; it stays in
+    // effect for later drafts until they pick again or the session changes.
+    userThinking: undefined as string | undefined,
     query: "",
     commands: [] as RuntimeCommand[],
     models: [] as RuntimeModel[],
@@ -113,6 +116,7 @@ export const useSessionStore = defineStore("session", {
     },
     applySnapshot(snapshot: SessionSnapshot) {
       const pending = this.pendingPrompt;
+      if (this.current?.session.path !== snapshot.session.path) this.userThinking = undefined;
       this.current = snapshot;
       if (snapshot.session.path)
         this.sessions = [
@@ -165,6 +169,11 @@ export const useSessionStore = defineStore("session", {
     },
     async selectNode(id: string) {
       this.focusedNode = id;
+    },
+    // Only explicit thinking-menu picks may update the sticky level; model-driven
+    // clamps stay local to the composer so they never pollute it.
+    setUserThinking(level: string) {
+      this.userThinking = level;
     },
     async prompt(text: string, targetNodeId?: string | null, model?: RuntimeModel | null, thinkingLevel?: string) {
       const value = text.trim();

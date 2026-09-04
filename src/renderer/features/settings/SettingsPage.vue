@@ -400,17 +400,6 @@ function setModelThinkingOverride(event: Event) {
   else delete overrides[key];
 }
 
-async function setCurrentThinking(event: Event) {
-  const level = (event.target as HTMLSelectElement).value;
-  if (!level || !session.current) return;
-  try {
-    await session.control({ action: "setThinking", level });
-    layout.showNotice(t("settings.thinkingSet", { level }));
-  } catch (error) {
-    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
-  }
-}
-
 async function save() {
   if (!draft.value || saving.value) return;
   saving.value = true;
@@ -447,26 +436,18 @@ async function save() {
   }
 }
 
-async function applyModel(persist: boolean) {
+// Model changes belong to draft input only; settings just record the default
+// used by new sessions.
+async function applyModel() {
   const model = models.value.find((item) => modelKey(item) === selectedModel.value);
   if (!model) return;
   try {
-    if (session.current) {
-      await session.control({ action: "setModel", provider: model.provider, modelId: model.id, persist });
-    } else if (persist) {
-      const settings = await desktop.invoke<SettingsBundle>("settings.update", {
-        scope: "global",
-        patch: { defaultProvider: model.provider, defaultModel: model.id },
-      });
-      layout.hydrate(settings, layout.layout);
-    } else {
-      throw new Error(t("settings.openSessionFirst"));
-    }
-    if (persist) {
-      const settings = await desktop.invoke<SettingsBundle>("settings.get");
-      layout.hydrate(settings, layout.layout);
-    }
-    layout.showNotice(t(persist ? "settings.defaultModelSet" : "settings.modelSet", { model: `${model.provider}/${model.id}` }));
+    const settings = await desktop.invoke<SettingsBundle>("settings.update", {
+      scope: "global",
+      patch: { defaultProvider: model.provider, defaultModel: model.id },
+    });
+    layout.hydrate(settings, layout.layout);
+    layout.showNotice(t("settings.defaultModelSet", { model: `${model.provider}/${model.id}` }));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
@@ -647,8 +628,7 @@ async function logout(provider: RuntimeProvider) {
                 <span>{{ t(providerModels(provider).length === 1 ? "settings.oneModel" : "settings.models", { n: providerModels(provider).length }) }}</span>
                 <Button variant="ghost" size="sm" @click="setAllCycling(true)">{{ t("settings.cycleAll") }}</Button>
                 <Button variant="ghost" size="sm" @click="setAllCycling(false)">{{ t("settings.clearCycle") }}</Button>
-                <Button data-model-action="session" variant="outline" :disabled="!selectedModel || !session.current" @click="applyModel(false)">{{ t("settings.useForSession") }}</Button>
-                <Button data-model-action="default" :disabled="!selectedModel" @click="applyModel(true)">{{ t("settings.setDefault") }}</Button>
+                <Button data-model-action="default" :disabled="!selectedModel" @click="applyModel">{{ t("settings.setDefault") }}</Button>
               </footer>
             </div>
           </section>
@@ -661,12 +641,6 @@ async function logout(provider: RuntimeProvider) {
             <span><strong>{{ t("settings.modelPreferences") }}</strong><small>{{ t("settings.modelPreferencesHint") }}</small></span>
             <Button :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.savePreferences") }}</Button>
           </header>
-          <label v-if="session.current" class="setting-row" data-setting-path="currentThinkingLevel">
-            <span><strong>{{ t("settings.currentThinking") }}</strong><small>{{ t("settings.currentThinkingHint") }}</small></span>
-            <select :value="session.current.runtime.thinkingLevel" @change="setCurrentThinking">
-              <option v-for="level in session.current.runtime.availableThinkingLevels" :key="level" :value="level">{{ level }}</option>
-            </select>
-          </label>
           <label v-if="selectedRuntimeModel" class="setting-row" data-setting-path="modelThinkingLevels">
             <span>
               <strong>{{ t("settings.thinkingFor", { id: selectedRuntimeModel.id }) }}</strong>

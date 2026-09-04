@@ -91,7 +91,7 @@ describe("PromptNode branch action", () => {
     expect([...document.querySelectorAll("[data-thinking-level]")].map((item) => item.getAttribute("data-thinking-level")))
       .toEqual(["off", "low", "high"]);
     (document.querySelector('[data-thinking-level="low"]') as HTMLElement).click();
-    expect(onThinking).toHaveBeenCalledWith("low");
+    expect(onThinking).toHaveBeenCalledWith("low", true);
     menu.unmount();
   });
 });

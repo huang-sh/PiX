@@ -86,24 +86,37 @@ function errorMessageText(e: RawSessionEntry) {
 function modelState(current: NodeFooterState["model"], provider: string, id: string) {
   return current?.provider === provider && current.id === id ? current : { provider, id };
 }
-function footerState(path: RawSessionEntry[]): NodeFooterState | undefined {
+// Effective settings at a position in the tree: the runtime resolves model/thinking
+// from the last change entries on the root chain, so turns must inherit the same
+// values before their settled footer entry is appended (and when it never lands on
+// failed or aborted turns).
+interface SettingsState {
+  model: NodeFooterState["model"];
+  thinkingLevel: string;
+}
+function applySettingEntry(entry: RawSessionEntry, state: SettingsState) {
+  const message = msg(entry);
+  if (entry.type === "model_change") {
+    const provider = typeof entry.provider === "string" ? entry.provider : "";
+    const id = typeof entry.modelId === "string" ? entry.modelId : "";
+    if (provider && id) state.model = modelState(state.model, provider, id);
+  } else if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+    state.thinkingLevel = entry.thinkingLevel;
+  } else if (entry.type === "message" && message?.role === "assistant") {
+    const provider = typeof message.provider === "string" ? message.provider : "";
+    const id = typeof message.model === "string" ? message.model : "";
+    if (provider && id) state.model = modelState(state.model, provider, id);
+  }
+}
+function footerState(path: RawSessionEntry[], inherited?: SettingsState): NodeFooterState | undefined {
+  const state: SettingsState = {
+    model: inherited?.model ?? null,
+    thinkingLevel: inherited?.thinkingLevel ?? "off",
+  };
   let contextUsage: NodeFooterState["contextUsage"];
-  let model: NodeFooterState["model"] = null;
-  let thinkingLevel = "off";
   let saved = false;
   for (const entry of path) {
-    const message = msg(entry);
-    if (!saved && entry.type === "model_change") {
-      const provider = typeof entry.provider === "string" ? entry.provider : "";
-      const id = typeof entry.modelId === "string" ? entry.modelId : "";
-      if (provider && id) model = modelState(model, provider, id);
-    } else if (!saved && entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
-      thinkingLevel = entry.thinkingLevel;
-    } else if (!saved && entry.type === "message" && message?.role === "assistant") {
-      const provider = typeof message.provider === "string" ? message.provider : "";
-      const id = typeof message.model === "string" ? message.model : "";
-      if (provider && id) model = modelState(model, provider, id);
-    } else if (entry.type === "custom" && entry.customType === NODE_FOOTER_CUSTOM_TYPE) {
+    if (entry.type === "custom" && entry.customType === NODE_FOOTER_CUSTOM_TYPE) {
       const data = rec(entry.data);
       const usage = rec(data?.contextUsage);
       const savedModel = rec(data?.model);
@@ -115,12 +128,16 @@ function footerState(path: RawSessionEntry[]): NodeFooterState | undefined {
         };
       }
       if (savedModel && typeof savedModel.provider === "string" && typeof savedModel.id === "string")
-        model = savedModel as unknown as NonNullable<NodeFooterState["model"]>;
-      if (typeof data?.thinkingLevel === "string") thinkingLevel = data.thinkingLevel;
+        state.model = savedModel as unknown as NonNullable<NodeFooterState["model"]>;
+      if (typeof data?.thinkingLevel === "string") state.thinkingLevel = data.thinkingLevel;
       saved = true;
+    } else if (!saved) {
+      applySettingEntry(entry, state);
     }
   }
-  return saved || model ? { contextUsage, model, thinkingLevel } : undefined;
+  return saved || state.model
+    ? { contextUsage, model: state.model, thinkingLevel: state.thinkingLevel }
+    : undefined;
 }
 const clip = (s: string, n: number) => {
   const c = s.replace(/\s+/g, " ").trim();
@@ -142,16 +159,26 @@ function nearest(
   }
   return null;
 }
-function branch(byId: Map<string, RawSessionEntry>, leaf: string | null) {
-  const out: string[] = [];
+function branchEntries(byId: Map<string, RawSessionEntry>, leaf: string | null) {
+  const out: RawSessionEntry[] = [];
   const seen = new Set<string>();
   let e = leaf ? byId.get(leaf) : undefined;
   while (e && !seen.has(e.id)) {
     seen.add(e.id);
-    out.push(e.id);
+    out.push(e);
     e = e.parentId ? byId.get(e.parentId) : undefined;
   }
   return out.reverse();
+}
+function branch(byId: Map<string, RawSessionEntry>, leaf: string | null) {
+  return branchEntries(byId, leaf).map((e) => e.id);
+}
+// Settings in effect for a turn = last model/thinking change on its root chain,
+// mirroring how the runtime itself restores state for a leaf position.
+function chainSettings(byId: Map<string, RawSessionEntry>, leafId: string | null): SettingsState {
+  const state: SettingsState = { model: null, thinkingLevel: "off" };
+  for (const entry of branchEntries(byId, leafId)) applySettingEntry(entry, state);
+  return state;
 }
 export function projectSession(
   entries: RawSessionEntry[],
@@ -176,6 +203,13 @@ export function projectSession(
   const users = entries.filter(
     (e) => e.type === "message" && role(e) === "user",
   );
+  // Siblings share their parent chain, so resolve each distinct chain once.
+  const settingsCache = new Map<string | null, SettingsState>();
+  const inheritedSettings = (parentId: string | null): SettingsState => {
+    let base = settingsCache.get(parentId);
+    if (!base) settingsCache.set(parentId, (base = chainSettings(byId, parentId)));
+    return base;
+  };
   const nodes: GraphNode[] = users.map((e) => {
     const owned = entries.filter((x) => owners.get(x.id) === e.id);
     const leafEntryId = owned.at(-1)?.id ?? e.id;
@@ -201,7 +235,7 @@ export function projectSession(
       toolCallCount: owned.reduce((n, x) => n + calls(x), 0),
       hasError: finalAssistantReply ? error(finalAssistantReply) : false,
       depth: 0,
-      footer: footerState(owned),
+      footer: footerState(owned, inheritedSettings(e.parentId)),
     };
   });
   const map = new Map(nodes.map((n) => [n.id, n]));

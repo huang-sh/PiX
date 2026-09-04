@@ -12,7 +12,7 @@ export interface DraftNodeData {
   thinkingLevel: string;
   models: RuntimeModel[];
   onModel: (model: RuntimeModel) => void;
-  onThinking: (level: string) => void;
+  onThinking: (level: string, explicit: boolean) => void;
   onCancel?: () => void;
   onSubmit: (text: string) => Promise<boolean>;
 }

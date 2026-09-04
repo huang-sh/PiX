@@ -387,6 +387,22 @@ try {
   );
   if (!sessionState.current && !allowEmpty)
     throw new Error(`Fixture session did not open: ${JSON.stringify(sessionState)}`);
+  if (sessionState.current) {
+    // The node footer must render the persisted context usage (the fixture
+    // carries pix.node-footer entries), never the "—" placeholder.
+    await retry(async () => {
+      const usage = await cdp.evaluate(`(() => {
+        const current = [...document.querySelectorAll('.prompt-node')].find((node) => node.classList.contains('current'));
+        if (!current) return null;
+        return {
+          percent: current.querySelector('.node-context-usage b')?.textContent.trim(),
+          window: current.querySelector('.node-context-usage em')?.textContent.trim(),
+        };
+      })()`);
+      if (!usage || !/^\d+%$/.test(usage.percent) || usage.window === "—")
+        throw new Error(`Current node context usage not rendered: ${JSON.stringify(usage)}`);
+    });
+  }
   const projectNavigator = await cdp.evaluate(`({
     projects: document.querySelectorAll('.project-group').length,
     active: document.querySelectorAll('.project-row.active').length,
@@ -565,6 +581,25 @@ try {
       })`);
       if (!value.draft || !value.settings || !value.connected || !value.parentStable || !value.focused || !value.fullyVisible || !value.readableAndCentered)
         throw new Error(`Graph draft node is not connected: ${JSON.stringify(value)}`);
+      return value;
+    });
+    await retry(async () => {
+      const value = await cdp.evaluate(`(() => {
+        const current = window.__pixTest.state().current;
+        const expected = current.projection.nodes.map((node) => node.footer?.thinkingLevel ?? "off");
+        const shown = [...document.querySelectorAll('.prompt-node .node-thinking-value')]
+          .map((element) => element.textContent.trim());
+        const selected = current.projection.nodes.find((node) => node.id === window.__pixTest.state().focusedNode)
+          ?? current.projection.nodes.find((node) => node.id === current.projection.activeNodeId);
+        const draft = document.querySelector('button[aria-label="Draft thinking level"]')?.textContent ?? "";
+        return {
+          count: shown.length === expected.length,
+          mirrorsProjection: JSON.stringify([...shown].sort()) === JSON.stringify([...expected].sort()),
+          draftInherits: !selected || draft.includes(selected.footer?.thinkingLevel ?? "off"),
+        };
+      })()`);
+      if (!value.count || !value.mirrorsProjection || !value.draftInherits)
+        throw new Error(`Graph thinking-level display does not follow the projection: ${JSON.stringify(value)}`);
       return value;
     });
     await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 350))");
@@ -817,10 +852,11 @@ try {
       search: Boolean(document.querySelector('[data-model-search]')),
       models: document.querySelectorAll('[data-model]').length,
       actions: document.querySelectorAll('[data-model-action]').length,
+      defaultOnly: Boolean(document.querySelector('[data-model-action=default]')) && !document.querySelector('[data-model-action=session]'),
       thinking: Boolean(document.querySelector('[data-setting-path=modelThinkingLevels]')),
       cycling: Boolean(document.querySelector('.model-cycle input'))
     })`);
-    if (!value.search || !value.models || value.actions !== 2 || !value.thinking || !value.cycling)
+    if (!value.search || !value.models || value.actions !== 1 || !value.defaultOnly || !value.thinking || !value.cycling)
       throw new Error(`Model settings are not usable: ${JSON.stringify(value)}`);
   });
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });

@@ -19,7 +19,9 @@ const followingOutput = ref(true);
 let resizeObserver: ResizeObserver | undefined;
 
 // Composer overrides follow the same inheritance rules as the graph draft node:
-// undefined = inherit from the target node footer (or session runtime) until picked.
+// model resets when the target changes, while an explicitly picked thinking level
+// persists in the session store for later drafts. The local thinking ref only
+// holds model-driven clamps, which must not pollute that user choice.
 const composerModel = ref<RuntimeModel | null>();
 const composerThinking = ref<string>();
 
@@ -31,6 +33,7 @@ const composerModelValue = computed(() => {
 });
 const composerThinkingValue = computed(() =>
   composerThinking.value
+  ?? session.userThinking
   ?? session.selectedNode?.footer?.thinkingLevel
   ?? session.current?.runtime.thinkingLevel
   ?? "off");
@@ -55,8 +58,13 @@ function setComposerModel(model: RuntimeModel) {
   if (model.reasoning === false) composerThinking.value = "off";
 }
 
-function setComposerThinking(level: string) {
-  composerThinking.value = level;
+function setComposerThinking(level: string, explicit: boolean) {
+  if (explicit) {
+    session.setUserThinking(level);
+    composerThinking.value = undefined;
+  } else {
+    composerThinking.value = level;
+  }
 }
 
 // Same delivery path as the graph draft node: branch from the selected node,

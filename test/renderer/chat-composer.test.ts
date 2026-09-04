@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectSession } from "../../src/shared/session";
@@ -11,6 +11,8 @@ import { useSessionStore } from "../../src/renderer/stores/session";
 const first: RawSessionEntry[] = [
   { type: "message", id: "u1", parentId: null, timestamp: "2026-09-02T10:00:00Z", message: { role: "user", content: "first" } },
   { type: "message", id: "a1", parentId: "u1", timestamp: "2026-09-02T10:00:01Z", message: { role: "assistant", content: "answer" } },
+  { type: "message", id: "u2", parentId: "a1", timestamp: "2026-09-02T10:00:02Z", message: { role: "user", content: "second" } },
+  { type: "message", id: "a2", parentId: "u2", timestamp: "2026-09-02T10:00:03Z", message: { role: "assistant", content: "answer two" } },
 ];
 const project: ProjectInfo = { name: "PiX", path: "D:/dev/PiX" };
 
@@ -114,6 +116,60 @@ describe("chat panel composer", () => {
     await textarea.setValue("retry me");
     await panel.get(".composer-submit").trigger("click");
     await vi.waitFor(() => expect(textarea.element.value).toBe("retry me"));
+    panel.unmount();
+  });
+
+  it("keeps an explicitly picked thinking level across target changes", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    session.models = [{ provider: "openai", id: "gpt-5.4", name: "GPT-5.4", reasoning: true }];
+
+    await panel.get('button[aria-label="Draft thinking level"]').trigger("click");
+    await flushPromises();
+    (document.querySelector('[data-thinking-level="low"]') as HTMLElement).click();
+    await flushPromises();
+    expect(session.userThinking).toBe("low");
+    expect(panel.get('button[aria-label="Draft thinking level"]').text()).toContain("low");
+
+    // Switching the branch target must not drop the user's pick.
+    session.focusedNode = "turn:u2";
+    await flushPromises();
+    expect(session.userThinking).toBe("low");
+    expect(panel.get('button[aria-label="Draft thinking level"]').text()).toContain("low");
+    panel.unmount();
+  });
+
+  it("resets the sticky thinking level when the session changes", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    session.setUserThinking("low");
+    expect(session.userThinking).toBe("low");
+
+    const other = snapshot(first, "a2");
+    other.session.path = "another.jsonl";
+    session.applySnapshot(other);
+    expect(session.userThinking).toBeUndefined();
+    panel.unmount();
+  });
+
+  it("model-driven clamps show locally without polluting the sticky level", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    session.setUserThinking("high");
+    session.models = [
+      { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", reasoning: true },
+      { provider: "xai", id: "grok-fast", name: "Grok Fast", reasoning: false },
+    ];
+
+    await panel.get(".node-model-select").trigger("click");
+    await flushPromises();
+    (document.querySelector('[data-model-provider="xai"]') as HTMLElement).click();
+    await flushPromises();
+    (document.querySelector('[data-model-id="grok-fast"]') as HTMLElement).click();
+    await flushPromises();
+
+    expect(panel.get('button[aria-label="Draft thinking level"]').text()).toContain("off");
+    expect(session.userThinking).toBe("high");
     panel.unmount();
   });
 
