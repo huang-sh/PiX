@@ -387,10 +387,10 @@ kbd {
 .draft-node > header button:hover { background: var(--muted-surface); color: var(--text); }
 .prompt-composer textarea { width: 100%; min-height: 92px; max-height: 190px; margin-top: 4px; padding: 10px 11px; resize: vertical; border-color: var(--border-strong); background: var(--surface); font-size: 11px; line-height: 1.55; }
 .prompt-composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring); }
-.prompt-composer > footer { display: grid; grid-template-columns: auto minmax(0,1fr) 26px; align-items: center; gap: 4px; min-height: 30px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border); }
+.prompt-composer > footer { display: flex; align-items: center; gap: 4px; min-height: 30px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border); }
 .prompt-composer > footer > span { color: var(--faint); font-size: 9px; white-space: nowrap; }
-.composer-settings { display: grid; grid-template-columns: minmax(0,1fr) 59px; align-items: center; gap: 2px; min-width: 0; height: 26px; }
-.prompt-composer .composer-submit { width: 26px; height: 26px; padding: 0; }
+.composer-settings { display: flex; align-items: center; gap: 2px; min-width: 0; height: 26px; margin-left: auto; }
+.prompt-composer .composer-submit { flex: none; width: 26px; height: 26px; padding: 0; }
 .vue-flow__handle { width: 8px; height: 8px; border: 2px solid var(--surface); background: var(--accent); }
 .vue-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.4; }
 .vue-flow__edge.active-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2.2; }
@@ -462,7 +462,6 @@ kbd {
 .chat-composer .prompt-composer textarea:focus { border: 0; box-shadow: none; }
 .chat-composer .prompt-composer textarea::placeholder { color: var(--faint); }
 .chat-composer .prompt-composer > footer {
-  grid-template-columns: auto minmax(0,1fr) 32px;
   gap: 6px;
   min-height: 34px;
   margin-top: 1px;
@@ -470,7 +469,7 @@ kbd {
   border-top: 0;
 }
 .chat-composer .prompt-composer > footer > span { color: var(--text); font-size: 9px; }
-.chat-composer .composer-settings { display: flex; justify-content: flex-end; gap: 2px; height: 32px; }
+.chat-composer .composer-settings { height: 32px; }
 .chat-composer .node-footer-select { height: 30px; padding: 0 7px; border-radius: 8px; color: var(--text); }
 .chat-composer .node-footer-select > span { color: var(--text); font-size: 9px; }
 .chat-composer .node-thinking-select > svg:first-child { color: var(--text); }

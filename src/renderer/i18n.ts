@@ -89,7 +89,8 @@ export const messages = {
       close: "Close draft",
       placeholder: "Describe the next step…",
       working: "Pi is working…",
-      sendHint: "Ctrl/Cmd ↵ to send",
+      sendHint: "Enter to send · Shift+Enter for newline",
+      sendHintCtrl: "Ctrl/Cmd ↵ to send",
     },
     branch: {
       title: "Branch context",
@@ -318,6 +319,8 @@ export const messages = {
       },
       rows: {
         language: "Interface language",
+        enterToSend: "Enter sends message",
+        enterToSendDesc: "On: Enter sends, Shift+Enter inserts a newline. Off: Enter inserts a newline, Ctrl/Cmd+Enter sends.",
         defaultProjectTrust: "Default project trust",
         defaultProjectTrustDesc: "Whether Pi asks before running commands in a new project.",
         installTelemetry: "Install telemetry",
@@ -486,7 +489,8 @@ export const messages = {
       close: "关闭草稿",
       placeholder: "描述下一步…",
       working: "Pi 正在处理…",
-      sendHint: "Ctrl/Cmd ↵ 发送",
+      sendHint: "Enter 发送 · Shift+Enter 换行",
+      sendHintCtrl: "Ctrl/Cmd ↵ 发送",
     },
     branch: {
       title: "分支上下文",
@@ -715,6 +719,8 @@ export const messages = {
       },
       rows: {
         language: "界面语言",
+        enterToSend: "Enter 发送消息",
+        enterToSendDesc: "开启时 Enter 发送、Shift+Enter 换行；关闭时 Enter 换行、Ctrl/Cmd+Enter 发送。",
         defaultProjectTrust: "默认项目信任",
         defaultProjectTrustDesc: "Pi 在新项目中运行命令前是否先询问。",
         installTelemetry: "安装遥测",

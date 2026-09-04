@@ -284,6 +284,7 @@ export interface AppSettings {
   confirmDestructiveActions: boolean;
   browserHome: string;
   openLastSessionOnStartup: boolean;
+  enterToSend: boolean;
 }
 export interface SettingsBundle {
   app: AppSettings;

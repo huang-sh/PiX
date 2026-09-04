@@ -10,9 +10,11 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "reka-ui";
+import { getActivePinia } from "pinia";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { THINKING_LEVELS, type RuntimeModel } from "../../shared/types";
+import { useLayoutStore } from "../stores/layout";
 import Button from "./ui/Button.vue";
 
 // Shared prompt editor used by the graph draft node and the chat panel composer,
@@ -32,6 +34,9 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
+// The composer is also mounted in isolated tests with no pinia installed; without
+// an active pinia keep the default Enter-to-send behavior instead of crashing.
+const layout = getActivePinia() ? useLayoutStore() : undefined;
 const draft = ref("");
 const busy = ref(false);
 const editor = ref<HTMLTextAreaElement>();
@@ -84,6 +89,18 @@ async function submit() {
   }
 }
 
+const enterToSend = computed(() => layout?.settings?.app.enterToSend !== false);
+const sendHint = computed(() => t(enterToSend.value ? "draft.sendHint" : "draft.sendHintCtrl"));
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
+  // Enter confirming an IME composition (e.g. pinyin) must insert text, not send the draft.
+  if (event.isComposing || event.keyCode === 229) return;
+  if (!enterToSend.value && !event.ctrlKey && !event.metaKey) return;
+  event.preventDefault();
+  void submit();
+}
+
 async function focusEditor() {
   await nextTick();
   editor.value?.focus();
@@ -107,11 +124,10 @@ defineExpose({ focus: focusEditor });
       v-model="draft"
       :disabled="!runnable || busy"
       :placeholder="placeholder ?? t('draft.placeholder')"
-      @keydown.ctrl.enter.prevent="submit"
-      @keydown.meta.enter.prevent="submit"
+      @keydown="onKeydown"
     />
     <footer>
-      <span>{{ busy ? t("draft.working") : t("draft.sendHint") }}</span>
+      <span v-if="busy">{{ t("draft.working") }}</span>
       <div class="composer-settings">
       <DropdownMenuRoot :modal="false">
         <DropdownMenuTrigger as-child :disabled="!runnable || busy || !modelOptions.length">
@@ -183,7 +199,7 @@ defineExpose({ focus: focusEditor });
         </DropdownMenuPortal>
       </DropdownMenuRoot>
       </div>
-      <Button class="composer-submit" type="button" size="sm" :aria-label="t('draft.sendHint')" :disabled="!draft.trim() || busy || !runnable" @click="submit">
+      <Button class="composer-submit" type="button" size="sm" :aria-label="sendHint" :disabled="!draft.trim() || busy || !runnable" @click="submit">
         <Send :size="14" />
       </Button>
     </footer>

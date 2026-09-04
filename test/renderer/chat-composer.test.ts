@@ -2,10 +2,11 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectSession } from "../../src/shared/session";
-import type { ProjectGroup, ProjectInfo, RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
+import type { ProjectGroup, ProjectInfo, RawSessionEntry, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import BranchContextPanel from "../../src/renderer/features/branch-context/BranchContextPanel.vue";
 import { i18n } from "../../src/renderer/i18n";
+import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useSessionStore } from "../../src/renderer/stores/session";
 
 const first: RawSessionEntry[] = [
@@ -65,6 +66,12 @@ async function mountComposer(invoke: ReturnType<typeof vi.spyOn>) {
   return { session, panel, invoke };
 }
 
+function promptCalls(invoke: ReturnType<typeof vi.spyOn>) {
+  return invoke.mock.calls
+    .filter(([route, input]) => route === "agent.control" && (input as { action?: string }).action === "prompt")
+    .map(([, input]) => input);
+}
+
 describe("chat panel composer", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => {
@@ -84,6 +91,61 @@ describe("chat panel composer", () => {
 
     expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
       .toContainEqual({ action: "prompt", text: "continue from chat" });
+    panel.unmount();
+  });
+
+  it("sends on Enter and reserves Shift+Enter for newlines", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { panel } = await mountComposer(invoke);
+    // desktop.invoke is the preloaded window.pix mock, so spy history survives
+    // restoreAllMocks between tests; reset it so call counts stay per-test.
+    invoke.mockClear();
+    const textarea = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
+
+    await textarea.setValue("via enter");
+    await textarea.trigger("keydown", { key: "Enter" });
+    await vi.waitFor(() => expect(textarea.element.value).toBe(""));
+    expect(promptCalls(invoke)).toContainEqual({ action: "prompt", text: "via enter" });
+    await flushPromises();
+
+    await textarea.setValue("line one");
+    await textarea.trigger("keydown", { key: "Enter", shiftKey: true });
+    await flushPromises();
+    expect(textarea.element.value).toBe("line one");
+    expect(promptCalls(invoke)).toHaveLength(1);
+    panel.unmount();
+  });
+
+  it("does not send when Enter confirms an IME composition", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { panel } = await mountComposer(invoke);
+    invoke.mockClear();
+    const textarea = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
+
+    await textarea.setValue("中文输入");
+    await textarea.trigger("keydown", { key: "Enter", isComposing: true });
+    await flushPromises();
+    expect(textarea.element.value).toBe("中文输入");
+    expect(promptCalls(invoke)).toHaveLength(0);
+    panel.unmount();
+  });
+
+  it("moves sending to Ctrl+Enter when the enterToSend setting is off", async () => {
+    useLayoutStore().settings = { app: { enterToSend: false } } as unknown as SettingsBundle;
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { panel } = await mountComposer(invoke);
+    invoke.mockClear();
+    const textarea = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
+
+    await textarea.setValue("controlled");
+    await textarea.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(textarea.element.value).toBe("controlled");
+    expect(promptCalls(invoke)).toHaveLength(0);
+
+    await textarea.trigger("keydown", { key: "Enter", ctrlKey: true });
+    await vi.waitFor(() => expect(textarea.element.value).toBe(""));
+    expect(promptCalls(invoke)).toContainEqual({ action: "prompt", text: "controlled" });
     panel.unmount();
   });
 

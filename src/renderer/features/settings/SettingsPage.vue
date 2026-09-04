@@ -81,6 +81,7 @@ const rows = computed<Row[]>(() => {
     case "general":
       return [
         { path: "language", label: "settings.rows.language", scope: "app", type: "select", options: ["system", "zh-CN", "en"] },
+        { path: "enterToSend", label: "settings.rows.enterToSend", scope: "app", type: "check", fallback: true, description: "settings.rows.enterToSendDesc" },
         { path: "defaultProjectTrust", label: "settings.rows.defaultProjectTrust", scope: "global", type: "select", options: ["ask", "always", "never"], fallback: "ask", description: "settings.rows.defaultProjectTrustDesc" },
         { path: "enableInstallTelemetry", label: "settings.rows.installTelemetry", scope: "global", type: "check", fallback: true, description: "settings.rows.installTelemetryDesc" },
         { path: "warnings.anthropicExtraUsage", label: "settings.rows.anthropicWarnings", scope: "global", type: "check", fallback: true },
