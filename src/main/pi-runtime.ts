@@ -266,22 +266,39 @@ export class PiRuntime {
     if (!s && input.action !== "newSession" && !modelAction)
       throw new Error("Open a session first");
     switch (input.action) {
-      case "prompt":
-        await s.prompt(input.text, { source: "interactive" });
-        s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
-          contextUsage: s.getContextUsage() ?? null,
-          model: s.model
-            ? {
-                provider: String(s.model.provider),
-                id: String(s.model.id),
-                name: s.model.name,
-                contextWindow: s.model.contextWindow,
-                reasoning: Boolean(s.model.reasoning),
-              }
-            : null,
-          thinkingLevel: String(s.thinkingLevel ?? "off"),
-        });
+      case "prompt": {
+        // prompt() also resolves without a turn for handled extension
+        // commands and throws before appending anything (busy, no model, no
+        // auth) — the footer may only be recorded when this call created one.
+        const before = s.sessionManager.getEntries().length;
+        try {
+          await s.prompt(input.text, { source: "interactive" });
+        } finally {
+          const createdTurn = s.sessionManager
+            .getEntries()
+            .slice(before)
+            .some(
+              (e: RawSessionEntry) =>
+                e.type === "message" &&
+                (e.message as { role?: string } | undefined)?.role === "user",
+            );
+          if (createdTurn)
+            s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
+              contextUsage: s.getContextUsage() ?? null,
+              model: s.model
+                ? {
+                    provider: String(s.model.provider),
+                    id: String(s.model.id),
+                    name: s.model.name,
+                    contextWindow: s.model.contextWindow,
+                    reasoning: Boolean(s.model.reasoning),
+                  }
+                : null,
+              thinkingLevel: String(s.thinkingLevel ?? "off"),
+            });
+        }
         break;
+      }
       case "steer":
         await s.steer(input.text);
         break;
@@ -292,7 +309,8 @@ export class PiRuntime {
         await s.abort();
         break;
       case "clearQueue":
-        return s.clearQueue();
+        await s.clearQueue();
+        break;
       case "getState":
         return this.state();
       case "getModels": {
@@ -315,21 +333,24 @@ export class PiRuntime {
         break;
       }
       case "cycleModel":
-        return s.cycleModel();
+        await s.cycleModel();
+        break;
       case "getThinkingLevels":
         return s.getAvailableThinkingLevels();
       case "setThinking":
         s.setThinkingLevel(input.level);
         break;
       case "cycleThinking":
-        return s.cycleThinkingLevel();
+        await s.cycleThinkingLevel();
+        break;
       case "setQueueMode":
         input.kind === "steering"
           ? s.setSteeringMode(input.mode)
           : s.setFollowUpMode(input.mode);
         break;
       case "compact":
-        return s.compact(input.instructions);
+        await s.compact(input.instructions);
+        break;
       case "setAutoCompaction":
         s.setAutoCompactionEnabled(input.enabled);
         break;
@@ -343,9 +364,10 @@ export class PiRuntime {
         s.abortCompaction();
         break;
       case "bash":
-        return s.executeBash(input.command, undefined, {
+        await s.executeBash(input.command, undefined, {
           excludeFromContext: input.excludeFromContext,
         });
+        break;
       case "abortBash":
         s.abortBash();
         break;

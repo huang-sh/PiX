@@ -84,9 +84,13 @@ export class MainController {
       this.emit(e as DesktopEvent);
       const p = (e as DesktopEvent).payload as { type?: string };
       if (
-        ["agent_settled", "entry_appended", "session_info_changed"].includes(
-          p?.type ?? "",
-        )
+        [
+          "agent_settled",
+          "entry_appended",
+          "session_info_changed",
+          "compaction_start",
+          "compaction_end",
+        ].includes(p?.type ?? "")
       ) {
         try {
           this.current = this.pi.snapshot();
@@ -572,8 +576,15 @@ export class MainController {
       }
       case "agent.control": {
         const r = await this.pi.control(v as unknown as AgentControl);
-        if (r && typeof r === "object" && "projection" in r)
+        if (r && typeof r === "object" && "projection" in r) {
           this.current = r as SessionSnapshot;
+          // Mutating actions append entries after the last agent event (e.g.
+          // the node-footer usage record written when a prompt settles), and
+          // the invoke reply only reaches the page that started the action —
+          // a page reloaded mid-run loses it. Broadcast so every attached
+          // renderer converges on the settled state.
+          this.emit({ type: "sessions", payload: { current: this.current } });
+        }
         return r;
       }
       case "workspace.tree":

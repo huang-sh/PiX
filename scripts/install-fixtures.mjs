@@ -100,6 +100,31 @@ function generated(id, index) {
       },
       parent,
     );
+  // Mirrors the entry PiX appends after each finished turn so the GUI has
+  // context-usage data to render on the node footer.
+  const footer = (parent, tokens) =>
+    add(
+      {
+        type: "custom",
+        customType: "pix.node-footer",
+        data: {
+          contextUsage: {
+            tokens,
+            contextWindow: 128_000,
+            percent: (tokens / 128_000) * 100,
+          },
+          model: {
+            provider: "openai",
+            id: "gpt-5.6",
+            name: "GPT-5.6",
+            contextWindow: 128_000,
+            reasoning: true,
+          },
+          thinkingLevel: "high",
+        },
+      },
+      parent,
+    );
   let u1 = user(
       index
         ? "Review the workspace architecture and identify the smallest useful implementation."
@@ -112,9 +137,10 @@ function generated(id, index) {
       "read",
     ),
     r1 = result("read", "Loaded src/example.ts and .pi/settings.json", a1),
+    f1 = footer(r1, 4_200),
     u2 = user(
       "Implement a horizontal conversation graph and branch-only chat projection.",
-      r1,
+      f1,
     ),
     a2 = assistant(
       "The graph now derives from stable id/parentId relationships.",
@@ -122,11 +148,13 @@ function generated(id, index) {
       "write",
     ),
     r2 = result("write", "Updated graph projection and renderer", a2),
-    u3 = user("Add resizable panels and a collapsible utility dock.", r2),
+    f2 = footer(r2, 8_600),
+    u3 = user("Add resizable panels and a collapsible utility dock.", f2),
     a3 = assistant(
       "Navigator, Chat, Content, and the bottom dock now have independent layout state.",
       u3,
     );
+  footer(a3, 12_800);
   const alt = add(
       {
         type: "branch_summary",
@@ -143,7 +171,7 @@ function generated(id, index) {
       "edit",
     ),
     r4 = result("edit", "Horizontal layout applied", a4);
-  let leaf = r4;
+  let leaf = footer(r4, 21_000);
   if (index === 0) {
     const mc = add(
         { type: "model_change", provider: "openai", modelId: "gpt-5.6" },
@@ -162,6 +190,7 @@ function generated(id, index) {
       { type: "label", targetId: u5, label: "workbench-complete" },
       a5,
     );
+    leaf = footer(leaf, 33_600);
   } else {
     const compact = add(
         {
@@ -190,6 +219,7 @@ function generated(id, index) {
       },
       a5,
     );
+    leaf = footer(leaf, 33_600);
   }
   add(
     {
