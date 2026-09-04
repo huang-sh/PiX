@@ -19,6 +19,10 @@ jobs:
           - os: macos-14
             targets: --mac --arm64 --x64
     runs-on: ${{ matrix.os }}
+    # Publishing a GitHub Release on tag builds needs contents write access
+    # for the workflow's built-in token.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -54,9 +58,9 @@ jobs:
         # tag publishes the installers to a GitHub Release via GH_TOKEN.
         run: npx electron-builder ${{ matrix.targets }} --publish onTag
         env:
-          # Fine-grained PAT (Contents: read/write on this repo) stored as the
-          # PIX_TOKEN Actions secret; required for tag-triggered releases only.
-          GH_TOKEN: ${{ secrets.PIX_TOKEN }}
+          # The workflow's built-in token with contents:write covers release
+          # publishing; no personal access token is needed.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No signing identity exists on runners; keep unsigned builds explicit.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
