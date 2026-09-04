@@ -34,19 +34,39 @@ const chatPanel = ref<PanelHandle>();
 const contentPanel = ref<PanelHandle>();
 const saveTimer = ref<ReturnType<typeof setTimeout>>();
 let restoringLayout = true;
+
+// reka-ui 2.10.4 (latest) mis-handles px-sized panels: the initial layout is
+// computed before the group is measured, so px panels boot at their min size
+// (and programmatic resize is unreliable for them). Panels are therefore
+// declared in percent and converted to/from the persisted pixel widths here.
+// The inner group estimate only bootstraps the first render; drag events and
+// settle checks measure the real group afterwards.
+const innerEstimate = Math.max(
+  1,
+  window.innerWidth - (layout.layout.collapsed.content ? 0 : layout.layout.widths.content),
+);
+const pct = (px: number) => Math.min(80, Math.max(0, (px / innerEstimate) * 100));
+const groupWidth = (id: string) =>
+  document.querySelector(`[data-panel-group-id="${id}"]`)?.getBoundingClientRect().width ||
+  innerEstimate;
+
 function sync(panel: PanelId, handle?: PanelHandle) {
   if (!handle) return;
+  // expand() alone restores the panel's pre-collapse size, which starts as the
+  // persisted width (default-size) and tracks drags afterwards. Calling
+  // resize() here is redundant: reka-ui mis-computes the delta for the last
+  // panel of a group (chat, content), clamping them to min size or collapsing
+  // them outright.
   if (layout.layout.collapsed[panel]) handle.collapse();
-  else {
-    handle.expand();
-    handle.resize(layout.layout.widths[panel]);
-  }
+  else handle.expand();
 }
 
 function resized(panel: PanelId, size: number) {
   if (restoringLayout) return;
   if (size <= 0) return;
-  layout.layout.widths[panel] = Math.round(size);
+  const width = Math.round((size / 100) * groupWidth(panel === "content" ? "pix-workbench" : "pix-primary"));
+  if (width <= 0) return;
+  layout.layout.widths[panel] = width;
   if (saveTimer.value) clearTimeout(saveTimer.value);
   saveTimer.value = setTimeout(() => void layout.save(), 250);
 }
@@ -110,18 +130,17 @@ watch(() => layout.hydrated, async (hydrated) => {
 <template>
   <div ref="shell" class="shell">
     <SplitterGroup id="pix-workbench" direction="horizontal" class="workbench-splitter">
-      <SplitterPanel id="primary-panels" :order="1" size-unit="px">
+      <SplitterPanel id="primary-panels" :order="1">
         <SplitterGroup id="pix-primary" direction="horizontal" class="workbench-splitter">
           <SplitterPanel
             id="navigator-panel"
             ref="navigatorPanel"
             :order="1"
-            size-unit="px"
             collapsible
             :collapsed-size="0"
-            :default-size="layout.layout.widths.navigator"
-            :min-size="210"
-            :max-size="420"
+            :default-size="pct(layout.layout.widths.navigator)"
+            :min-size="pct(210)"
+            :max-size="pct(420)"
             @resize="resized('navigator', $event)"
             @collapse="panelState('navigator', true)"
             @expand="panelState('navigator', false)"
@@ -149,12 +168,10 @@ watch(() => layout.hydrated, async (hydrated) => {
             id="chat-panel"
             ref="chatPanel"
             :order="3"
-            size-unit="px"
             collapsible
             :collapsed-size="0"
-            :default-size="layout.layout.widths.chat"
-            :min-size="310"
-            :max-size="10000"
+            :default-size="pct(layout.layout.widths.chat)"
+            :min-size="pct(310)"
             @resize="resized('chat', $event)"
             @collapse="panelState('chat', true)"
             @expand="panelState('chat', false)"
@@ -169,11 +186,10 @@ watch(() => layout.hydrated, async (hydrated) => {
         id="content-panel"
         ref="contentPanel"
         :order="2"
-        size-unit="px"
         collapsible
         :collapsed-size="0"
-        :default-size="layout.layout.widths.content"
-        :min-size="300"
+        :default-size="pct(layout.layout.widths.content)"
+        :min-size="pct(300)"
         @resize="resized('content', $event)"
         @collapse="panelState('content', true)"
         @expand="panelState('content', false)"

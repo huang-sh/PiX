@@ -235,6 +235,7 @@ kbd {
   width: 1px;
   background: var(--border);
   outline: none;
+  cursor: col-resize;
   transition: background 120ms ease, opacity 180ms ease, flex-basis 260ms ease;
 }
 .resize-handle::after { content: ""; position: absolute; inset: 0 -4px; }
