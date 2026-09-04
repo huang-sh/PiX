@@ -532,7 +532,7 @@ onBeforeUnmount(() => {
       <SettingsPage v-if="layout.screen === 'settings'" />
       <KeepAlive>
         <Workbench
-          v-if="layout.screen === 'workbench'"
+          v-if="layout.hydrated && layout.screen === 'workbench'"
           @settings="layout.screen = 'settings'"
           @pick-project="pickProject"
           @new-session="session.create"

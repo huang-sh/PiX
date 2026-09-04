@@ -37,6 +37,14 @@ import TerminalView from "./TerminalView.vue";
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
 const { t } = useI18n();
+
+// reka-ui 2.10.4 boots px-sized panels at their min size (initial layout runs
+// before the group is measured), which jammed the editor against its 100px
+// floor and left the file divider draggable one way only. Declare the panels
+// in percent instead; the content width is current at mount because the
+// workbench keeps widths.content updated on every drag.
+const contentEstimate = Math.max(1, layout.layout.widths.content);
+const pct = (px: number) => Math.min(95, Math.max(0, (px / contentEstimate) * 100));
 const launchUrl = ref(workspace.browserUrl);
 const fileQuery = ref("");
 const fileTreeOpen = ref(true);
@@ -253,7 +261,7 @@ async function save(tab: WorkspaceTab) {
         direction="horizontal"
         class="file-workspace"
       >
-        <SplitterPanel id="file-editor-panel" :order="1" size-unit="px" :min-size="100">
+        <SplitterPanel id="file-editor-panel" :order="1" :min-size="pct(100)">
           <main class="file-main">
           <header class="file-toolbar">
             <nav class="file-breadcrumb" :aria-label="t('tools.filePath')">
@@ -319,12 +327,11 @@ async function save(tab: WorkspaceTab) {
           id="file-tree-panel"
           ref="fileTreePanel"
           :order="2"
-          size-unit="px"
           collapsible
           :collapsed-size="0"
-          :default-size="320"
-          :min-size="180"
-          :max-size="800"
+          :default-size="pct(320)"
+          :min-size="pct(180)"
+          :max-size="pct(800)"
           @collapse="fileTreeOpen = false"
           @expand="fileTreeOpen = true"
         >
