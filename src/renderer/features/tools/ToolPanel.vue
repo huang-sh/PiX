@@ -347,7 +347,7 @@ async function save(tab: WorkspaceTab) {
           :order="2"
           collapsible
           :collapsed-size="0"
-          :default-size="pct(240)"
+          :default-size="pct(200)"
           :min-size="pct(180)"
           :max-size="pct(800)"
           @collapse="fileTreeOpen = false"
