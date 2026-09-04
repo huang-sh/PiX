@@ -136,6 +136,7 @@ export class SettingsService {
       openLastSessionOnStartup: false,
       enterToSend: true,
       openLinksInApp: true,
+      closeToTray: true,
     };
     const app = merge(
       defaults as unknown as Record<string, unknown>,

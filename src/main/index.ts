@@ -5,7 +5,9 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   shell,
+  Tray,
 } from "electron";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +15,46 @@ import { MainController } from "./controller.js";
 import type { DesktopRoute } from "../shared/types.js";
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
+let tray: Tray | undefined;
+let isQuitting = false;
+const zhUi = () => {
+  const lang = controller.settings.bundle().app.language;
+  return (
+    lang === "zh-CN" ||
+    (lang === "system" && app.getLocale().startsWith("zh"))
+  );
+};
+// The tray icon only exists while it can be needed: it appears on the first
+// close-to-tray hide and lives until quit (restore-from-tray keeps it, the
+// way tray-native apps behave).
+function ensureTray() {
+  if (tray) return;
+  const zh = zhUi();
+  const icon = nativeImage
+    .createFromPath(join(app.getAppPath(), "resources/icon.png"))
+    .resize({ width: 16, height: 16 });
+  tray = new Tray(icon);
+  tray.setToolTip("PiX");
+  const restore = () => {
+    win?.show();
+    win?.focus();
+  };
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: zh ? "显示 PiX" : "Show PiX", click: restore },
+      { type: "separator" },
+      { label: zh ? "退出 PiX" : "Quit PiX", click: () => void app.quit() },
+    ]),
+  );
+  tray.on("click", restore);
+  if (process.platform === "win32")
+    tray.displayBalloon({
+      title: "PiX",
+      content: zh
+        ? "PiX 已最小化到系统托盘，仍在后台运行。"
+        : "PiX keeps running in the system tray.",
+    });
+}
 async function openExternal(url: string) {
   const target = new URL(url);
   if (!["https:", "http:", "mailto:"].includes(target.protocol))
@@ -89,6 +131,18 @@ async function create() {
       p.sandbox = true;
     },
   );
+  // Close-to-tray (Windows/Linux): the X button hides the window instead of
+  // destroying it, keeping the process alive. Real quits bypass this via the
+  // isQuitting flag (before-quit fires before close events) or the tray
+  // menu's Quit item. macOS keeps native behavior: the window closes and the
+  // app stays in the dock.
+  win.on("close", (e: { preventDefault(): void }) => {
+    if (isQuitting || process.platform === "darwin") return;
+    if (controller.settings.bundle().app.closeToTray === false) return;
+    e.preventDefault();
+    win.hide();
+    ensureTray();
+  });
   if (process.env.ELECTRON_RENDERER_URL)
     await win.loadURL(process.env.ELECTRON_RENDERER_URL);
   else await win.loadFile(join(dir, "../renderer/index.html"));
@@ -142,7 +196,12 @@ app.whenReady().then(async () => {
   );
   await create();
 });
-app.on("before-quit", () => controller?.dispose());
+app.on("before-quit", () => {
+  isQuitting = true;
+  tray?.destroy();
+  tray = undefined;
+  controller?.dispose();
+});
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });

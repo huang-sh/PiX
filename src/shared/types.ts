@@ -286,6 +286,7 @@ export interface AppSettings {
   openLastSessionOnStartup: boolean;
   enterToSend: boolean;
   openLinksInApp: boolean;
+  closeToTray: boolean;
 }
 export interface SettingsBundle {
   app: AppSettings;
