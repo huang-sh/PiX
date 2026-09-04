@@ -54,13 +54,10 @@ jobs:
         run: npm run build
 
       - name: Package
-        # onTag: branch builds only produce workflow artifacts; pushing a v*
-        # tag publishes the installers to a GitHub Release via GH_TOKEN.
-        run: npx electron-builder ${{ matrix.targets }} --publish onTag
+        # Publishing from both matrix jobs in parallel would race and create
+        # two draft releases; the release job below publishes everything once.
+        run: npx electron-builder ${{ matrix.targets }} --publish never
         env:
-          # The workflow's built-in token with contents:write covers release
-          # publishing; no personal access token is needed.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No signing identity exists on runners; keep unsigned builds explicit.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
@@ -72,4 +69,30 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.zip
+            release/*.yml
+            release/*.blockmap
           if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: package
+    # Only tag builds publish; branch builds stop at workflow artifacts.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PiX ${{ github.ref_name }}" \
+            --generate-notes \
+            release/*
