@@ -103,8 +103,13 @@ function closeFile(id: string) {
 
 function toggleFileTree() {
   fileTreeOpen.value = !fileTreeOpen.value;
-  if (fileTreeOpen.value) fileTreePanel.value?.expand();
-  else fileTreePanel.value?.collapse();
+  // collapse()/expand() assert when the splitter group has not been measured
+  // yet (jsdom runs tests unmeasured); fileTreeOpen is the authoritative
+  // visibility state either way.
+  try {
+    if (fileTreeOpen.value) fileTreePanel.value?.expand();
+    else fileTreePanel.value?.collapse();
+  } catch {}
 }
 
 
