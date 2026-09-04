@@ -67,7 +67,7 @@ jobs:
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: PiX-${{ runner.os }}-0.0.1
+          name: PiX-${{ runner.os }}-${{ github.ref_name }}
           path: |
             release/*.exe
             release/*.dmg

@@ -55,7 +55,7 @@ mac:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  artifactName: PiX-Setup-${version}.exe
+  artifactName: PiX-Setup-${version}-${arch}.exe
   include: build/installer.nsh
   displayLanguageSelector: true
   installerLanguages:
@@ -63,4 +63,4 @@ nsis:
     - zh_CN
 
 portable:
-  artifactName: PiX-Portable-${version}.exe
+  artifactName: PiX-Portable-${version}-${arch}.exe

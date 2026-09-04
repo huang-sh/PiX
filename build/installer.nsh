@@ -9,6 +9,27 @@
   WriteRegStr HKCU "Software\PiX" "installerLanguage" "$LANGUAGE"
 !macroend
 
+; electron-builder's finish page launches the app through the Start Menu
+; shortcut ($launchLink). If that .lnk disappears between the install section
+; and the Finish click (antivirus, Start Menu cleanup, manual delete), Windows
+; reports "Windows cannot find ...PiX.lnk" and the app never starts. Launch the
+; installed executable directly instead — the same fallback electron-builder
+; itself uses when the shortcut is missing at install time.
+!macro customFinishPage
+  Function StartApp
+    ${if} ${isUpdated}
+      StrCpy $1 "--updated"
+    ${else}
+      StrCpy $1 ""
+    ${endif}
+    ${StdUtils.ExecShellAsUser} $0 "$INSTDIR\${APP_EXECUTABLE_FILENAME}" "open" "$1"
+  FunctionEnd
+
+  !define MUI_FINISHPAGE_RUN
+  !define MUI_FINISHPAGE_RUN_FUNCTION "StartApp"
+  !insertmacro MUI_PAGE_FINISH
+!macroend
+
 !macro customUnInstall
   DeleteRegValue HKCU "Software\PiX" "installerLanguage"
   DeleteRegKey /ifempty HKCU "Software\PiX"
