@@ -1,0 +1,49 @@
+appId: works.earendil.pix
+productName: PiX
+directories:
+  output: release
+  buildResources: build
+
+# out/ (main, preload, renderer) and resources/ (window icon) go into the
+# asar; pruned production node_modules are added automatically.
+files:
+  - out/**
+  - resources/**
+
+# node-pty ships NAPI prebuilds for every platform (node_modules/node-pty/
+# prebuilds), so skip the electron rebuild entirely.
+npmRebuild: false
+
+# The SSH/WSL host installer looks for the server build at
+# <resources>/server (see src/main/ssh-host-installer.ts candidate paths).
+# The remote side npm-installs its own dependencies, so node_modules is
+# excluded here.
+extraResources:
+  - from: server
+    to: server
+    filter:
+      - "**/*"
+      - "!node_modules/**"
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: PiX-Setup-${version}.exe
+  include: build/installer.nsh
+  displayLanguageSelector: true
+  installerLanguages:
+    - en_US
+    - zh_CN
+
+portable:
+  artifactName: PiX-Portable-${version}.exe

@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": { "rootDir": ".", "outDir": "out-test", "noEmit": false },
+  "include": ["src/shared/**/*.ts", "src/renderer/graph-layout.ts", "src/main/services.ts", "src/main/pi-runtime.ts", "src/main/bash-resolution.ts", "src/main/wsl-host-client.ts", "src/main/ssh-host-installer.ts", "test/*.ts", "types/**/*.d.ts"]
+}

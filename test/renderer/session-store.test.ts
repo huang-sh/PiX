@@ -1,0 +1,167 @@
+import { createPinia, setActivePinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { projectSession } from "../../src/shared/session";
+import type { ProjectGroup, ProjectInfo, RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
+import { desktop } from "../../src/renderer/api";
+import { useSessionStore } from "../../src/renderer/stores/session";
+
+const first: RawSessionEntry[] = [
+  { type: "message", id: "u1", parentId: null, timestamp: "2026-09-02T10:00:00Z", message: { role: "user", content: "first" } },
+  { type: "message", id: "a1", parentId: "u1", timestamp: "2026-09-02T10:00:01Z", message: { role: "assistant", content: "answer" } },
+];
+const project: ProjectInfo = { name: "PiX", path: "D:/dev/PiX" };
+
+function hydrate(session: ReturnType<typeof useSessionStore>, current: SessionSnapshot) {
+  const projects: ProjectGroup[] = [{
+    id: `local:${project.path}`,
+    project,
+    sessions: [],
+    lastOpened: "2026-09-03T00:00:00Z",
+    connected: true,
+  }];
+  session.hydrate(project, [], projects, current);
+}
+
+function snapshot(entries: RawSessionEntry[], leafId: string): SessionSnapshot {
+  return {
+    session: {
+      id: "session",
+      path: "session.jsonl",
+      cwd: ".",
+      created: "2026-09-02T10:00:00Z",
+      modified: "2026-09-02T10:00:00Z",
+      messageCount: entries.length,
+      firstMessage: "first",
+    },
+    entries,
+    projection: projectSession(entries, leafId),
+    runtime: { isStreaming: true } as SessionSnapshot["runtime"],
+  };
+}
+
+describe("session stream focus", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps the current streamed session in the navigator", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+
+    expect(session.sessions).toEqual([session.current?.session]);
+  });
+
+  it("keeps models when command discovery fails", async () => {
+    const session = useSessionStore();
+    const current = snapshot(first, "a1");
+    current.runtime = { ...current.runtime, available: true };
+    hydrate(session, current);
+    vi.spyOn(desktop, "invoke").mockImplementation(async (_route, input) => {
+      if ((input as { action?: string }).action === "commands") throw new Error("commands unavailable");
+      return [{ provider: "deepseek", id: "deepseek-chat" }] as never;
+    });
+
+    await session.loadCommands();
+
+    expect(session.commands).toEqual([]);
+    expect(session.models).toEqual([{ provider: "deepseek", id: "deepseek-chat" }]);
+  });
+
+  it("follows the new active node when a continued run starts", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    session.focusedNode = "turn:u1";
+    const continued = [
+      ...first,
+      { type: "message", id: "u2", parentId: "a1", timestamp: "2026-09-02T10:01:00Z", message: { role: "user", content: "second" } },
+    ] satisfies RawSessionEntry[];
+
+    session.applySnapshot(snapshot(continued, "u2"));
+    expect(session.selectedNode?.id).toBe("turn:u1");
+
+    session.onAgentEvent({ type: "agent_start" });
+    expect(session.focusedNode).toBeNull();
+    expect(session.selectedNode?.id).toBe("turn:u2");
+    expect(session.activity?.active).toBe(true);
+  });
+
+  it("shows a submitted user message before the runtime responds", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    let resolve!: (value: SessionSnapshot) => void;
+    const response = new Promise<SessionSnapshot>((done) => (resolve = done));
+    vi.spyOn(desktop, "invoke").mockReturnValue(response);
+
+    const running = session.prompt("second");
+    expect(session.selectedMessages.at(-1)).toMatchObject({ role: "user", text: "second" });
+
+    const continued = [
+      ...first,
+      { type: "message", id: "u2", parentId: "a1", timestamp: "2026-09-02T10:01:00Z", message: { role: "user", content: "second" } },
+    ] satisfies RawSessionEntry[];
+    resolve(snapshot(continued, "u2"));
+    await running;
+    expect(session.selectedMessages.filter((message) => message.text === "second")).toHaveLength(1);
+  });
+
+  it("removes the optimistic message when sending fails", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    vi.spyOn(desktop, "invoke").mockRejectedValue(new Error("send failed"));
+
+    await expect(session.prompt("second")).rejects.toThrow("send failed");
+    expect(session.pendingPrompt).toBeUndefined();
+    expect(session.selectedMessages.some((message) => message.text === "second")).toBe(false);
+  });
+
+  it("applies draft settings after branch navigation and before prompting", async () => {
+    const session = useSessionStore();
+    const current = snapshot(first, "a1");
+    current.projection.activeNodeId = null;
+    current.runtime = {
+      ...current.runtime,
+      available: true,
+      model: { provider: "openai", id: "gpt-5.4" },
+      thinkingLevel: "high",
+    };
+    hydrate(session, current);
+    const inputs: unknown[] = [];
+    vi.spyOn(desktop, "invoke").mockImplementation(async (_route, input) => {
+      inputs.push(input);
+      return {} as never;
+    });
+
+    await session.promptAt(
+      "turn:u1",
+      "second",
+      { provider: "zai", id: "glm-5.3" },
+      "low",
+    );
+
+    expect(inputs).toEqual([
+      { action: "navigateTree", entryId: "a1" },
+      { action: "setModel", provider: "zai", modelId: "glm-5.3" },
+      { action: "setThinking", level: "low" },
+      { action: "prompt", text: "second" },
+    ]);
+  });
+
+  it("does not show an optimistic message on another branch", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    let resolve!: (value: SessionSnapshot) => void;
+    const response = new Promise<SessionSnapshot>((done) => (resolve = done));
+    vi.spyOn(desktop, "invoke").mockReturnValue(response);
+
+    const running = session.prompt("second");
+    expect(session.selectedMessages.at(-1)?.text).toBe("second");
+    await session.selectNode("turn:other");
+    expect(session.selectedMessages.some((message) => message.text === "second")).toBe(false);
+
+    const continued = [
+      ...first,
+      { type: "message", id: "u2", parentId: "a1", timestamp: "2026-09-02T10:01:00Z", message: { role: "user", content: "second" } },
+    ] satisfies RawSessionEntry[];
+    resolve(snapshot(continued, "u2"));
+    await running;
+  });
+});

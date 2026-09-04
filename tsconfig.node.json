@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "out"
+  },
+  "include": [
+    "src/main/**/*.ts",
+    "src/server/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/shared/**/*.ts",
+    "types/**/*.d.ts"
+  ]
+}

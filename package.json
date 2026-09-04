@@ -1,0 +1,69 @@
+{
+  "name": "pix",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Graph-first Electron workbench for Pi Agent",
+  "main": "out/main/index.js",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "fixtures": "node scripts/install-fixtures.mjs",
+    "build:server": "tsc -p tsconfig.server.json",
+    "install:server:wsl": "node scripts/install-wsl-server.mjs",
+    "test:wsl": "node scripts/install-wsl-server.mjs && tsc -p tsconfig.test.json && node scripts/wsl-server-test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && vue-tsc --noEmit -p tsconfig.app.json",
+    "build": "npm run build:server && electron-vite build",
+    "test": "tsc -p tsconfig.test.json && node --test out-test/test/*.test.js && npm run test:renderer && npm run test:terminal",
+    "test:renderer": "vitest run --config vitest.config.ts",
+    "test:terminal": "node scripts/electron-pty-test.mjs",
+    "test:pi": "node scripts/pi-session-test.mjs",
+    "test:gui": "npm run build && node scripts/gui-test.mjs",
+    "test:gui:terminal": "npm run build && node scripts/terminal-gui-test.mjs",
+    "test:gui:wsl": "node scripts/install-wsl-server.mjs && npm run build && node scripts/gui-test.mjs --wsl",
+    "test:gui:ssh": "npm run build && node scripts/gui-test.mjs --ssh",
+    "verify": "npm run typecheck && npm test && npm run test:pi && npm run test:gui",
+    "dist": "npm run build && electron-builder --win",
+    "test:packaged": "node scripts/packaged-smoke-test.mjs",
+    "dev": "electron-vite dev"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@lucide/vue": "^1.39.0",
+    "@vue-flow/core": "^1.48.2",
+    "@vue-flow/minimap": "^1.5.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.1.0-beta.302",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "markstream-vue": "^2.0.6",
+    "node-pty": "^1.2.0-beta.15",
+    "pinia": "^4.0.3",
+    "reka-ui": "^2.10.4",
+    "tailwind-merge": "^3.6.0",
+    "vue": "^3.5.42",
+    "vue-i18n": "^11.4.10",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/test-utils": "^2.5.0",
+    "electron": "^44.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^30.0.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "5.8.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.11",
+    "vue-tsc": "^3.3.11"
+  },
+  "allowScripts": {
+    "electron@44.1.1": true,
+    "node-pty@1.2.0-beta.15": true
+  }
+}

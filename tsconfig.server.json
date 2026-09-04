@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "server/dist",
+    "sourceMap": false
+  },
+  "include": [
+    "src/server/**/*.ts",
+    "src/main/controller.ts",
+    "src/main/model-broker.ts",
+    "src/main/bash-resolution.ts",
+    "src/main/pi-runtime.ts",
+    "src/main/services.ts",
+    "src/shared/**/*.ts",
+    "types/**/*.d.ts"
+  ]
+}

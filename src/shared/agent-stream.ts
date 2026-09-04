@@ -1,0 +1,147 @@
+import type { AgentActivity, AgentActivityItem } from "./types.js";
+import { withoutToolLabels } from "./session.js";
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+function content(message: unknown, key: "text" | "thinking") {
+  const parts = record(message)?.content;
+  if (!Array.isArray(parts)) return "";
+  const text = parts
+    .map((part) => record(part)?.[key])
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  return key === "text" ? withoutToolLabels(text) : text;
+}
+
+function resultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  const result = record(value);
+  const parts = result?.content;
+  if (Array.isArray(parts)) {
+    return parts
+      .map((part) => record(part)?.text)
+      .filter((text): text is string => typeof text === "string")
+      .join("\n");
+  }
+  return result ? JSON.stringify(result) : "";
+}
+
+function inputText(value: unknown): string {
+  if (typeof value === "string") return value;
+  const args = record(value);
+  for (const key of ["command", "path", "query", "pattern", "url"]) {
+    if (typeof args?.[key] === "string") return args[key];
+  }
+  return value === undefined ? "" : JSON.stringify(value);
+}
+
+function failureText(message: unknown): string | undefined {
+  const m = record(message);
+  if (m?.stopReason !== "error") return undefined;
+  const value = m.errorMessage;
+  return typeof value === "string" && value.trim() ? value : "";
+}
+
+function updateItem(
+  activity: AgentActivity,
+  id: string,
+  patch: Partial<AgentActivityItem>,
+): AgentActivity {
+  return {
+    ...activity,
+    items: activity.items.map((item) => item.id === id ? { ...item, ...patch } : item),
+  };
+}
+
+/** Mirrors Pi TUI's message/tool lifecycle while keeping Electron events untyped. */
+export function reduceAgentActivity(
+  activity: AgentActivity | undefined,
+  raw: unknown,
+): AgentActivity | undefined {
+  const event = record(raw);
+  if (!event) return activity;
+  const type = event?.type;
+  if (type === "agent_start") {
+    if (!activity || !activity.active) {
+      return {
+        startedAt: new Date().toISOString(),
+        pass: 1,
+        active: true,
+        items: [],
+      };
+    }
+    return { ...activity, pass: activity.pass + 1 };
+  }
+  if (!activity) return undefined;
+  if (type === "agent_settled") {
+    return { ...activity, active: false, currentAssistantId: undefined };
+  }
+
+  const message = event.message;
+  const role = record(message)?.role;
+  if (type === "message_start" && role === "assistant") {
+    const id = `assistant:${activity.pass}:${activity.items.length}`;
+    return {
+      ...activity,
+      currentAssistantId: id,
+      items: [...activity.items, {
+        id,
+        kind: "assistant",
+        text: content(message, "text"),
+        thinking: content(message, "thinking"),
+        timestamp: new Date().toISOString(),
+        status: "running",
+        pass: activity.pass,
+      }],
+    };
+  }
+  if ((type === "message_update" || type === "message_end") && role === "assistant") {
+    const id = activity.currentAssistantId;
+    if (!id) return activity;
+    const failure = failureText(message);
+    return {
+      ...updateItem(activity, id, {
+        text: content(message, "text"),
+        thinking: content(message, "thinking"),
+        status: type === "message_end" ? (failure === undefined ? "complete" : "error") : "running",
+        ...(failure === undefined ? {} : { errorMessage: failure }),
+      }),
+      currentAssistantId: type === "message_end" ? undefined : id,
+    };
+  }
+
+  const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+  if (!toolCallId) return activity;
+  const id = `tool:${toolCallId}`;
+  if (type === "tool_execution_start") {
+    return {
+      ...activity,
+      items: [...activity.items.filter((item) => item.id !== id), {
+        id,
+        kind: "tool",
+        title: typeof event.toolName === "string" ? event.toolName : "Tool",
+        input: inputText(event.args),
+        text: "",
+        timestamp: new Date().toISOString(),
+        status: "running",
+        pass: activity.pass,
+      }],
+    };
+  }
+  if (type === "tool_execution_update") {
+    return updateItem(activity, id, {
+      text: resultText(event.partialResult),
+      status: "running",
+    });
+  }
+  if (type === "tool_execution_end") {
+    return updateItem(activity, id, {
+      text: resultText(event.result),
+      status: event.isError === true ? "error" : "complete",
+    });
+  }
+  return activity;
+}

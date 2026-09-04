@@ -1,0 +1,27 @@
+# Dependencies (matches at any depth, incl. server/node_modules)
+node_modules/
+
+# Build output
+out/
+out-test/
+server/dist/
+release/
+
+# Test artifacts (screenshots, logs, reports)
+artifacts/
+
+# Pi agent session data (test-workspace/.pi/settings.json is a tracked fixture)
+/.pi/
+test-workspace/.pi/sessions/
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
