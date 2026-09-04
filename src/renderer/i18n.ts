@@ -190,6 +190,9 @@ export const messages = {
       body: "“{name}” will be permanently deleted. This cannot be undone.",
       delete: "Delete",
     },
+    links: {
+      fileNotFound: "File not found in this project: {path}",
+    },
     hotkeys: {
       body: "PiX shortcuts\n\nCtrl/Cmd+K — Commands\nCtrl/Cmd+` — Terminal\nCtrl/Cmd+B — Navigator\nCtrl/Cmd+Alt+B — Tools\nEscape — Close overlay",
     },
@@ -321,6 +324,8 @@ export const messages = {
         language: "Interface language",
         enterToSend: "Enter sends message",
         enterToSendDesc: "On: Enter sends, Shift+Enter inserts a newline. Off: Enter inserts a newline, Ctrl/Cmd+Enter sends.",
+        openLinksInApp: "Open chat links inside PiX",
+        openLinksInAppDesc: "Web links open in the built-in Browser and local-file links open in Files; Ctrl/Cmd/middle-click on web links still opens the system browser.",
         defaultProjectTrust: "Default project trust",
         defaultProjectTrustDesc: "Whether Pi asks before running commands in a new project.",
         installTelemetry: "Install telemetry",
@@ -590,6 +595,9 @@ export const messages = {
       body: "「{name}」将被永久删除，此操作无法撤销。",
       delete: "删除",
     },
+    links: {
+      fileNotFound: "项目中找不到该文件：{path}",
+    },
     hotkeys: {
       body: "PiX 快捷键\n\nCtrl/Cmd+K — 命令\nCtrl/Cmd+` — 终端\nCtrl/Cmd+B — 导航器\nCtrl/Cmd+Alt+B — 工具\nEscape — 关闭浮层",
     },
@@ -721,6 +729,8 @@ export const messages = {
         language: "界面语言",
         enterToSend: "Enter 发送消息",
         enterToSendDesc: "开启时 Enter 发送、Shift+Enter 换行；关闭时 Enter 换行、Ctrl/Cmd+Enter 发送。",
+        openLinksInApp: "在 PiX 内打开聊天链接",
+        openLinksInAppDesc: "网页链接在内置浏览器打开、本地文件链接在文件面板打开；网页链接 Ctrl/Cmd 单击或中键仍用系统浏览器打开。",
         defaultProjectTrust: "默认项目信任",
         defaultProjectTrustDesc: "Pi 在新项目中运行命令前是否先询问。",
         installTelemetry: "安装遥测",

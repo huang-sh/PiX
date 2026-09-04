@@ -135,6 +135,7 @@ export class SettingsService {
       browserHome: "https://pi.dev",
       openLastSessionOnStartup: false,
       enterToSend: true,
+      openLinksInApp: true,
     };
     const app = merge(
       defaults as unknown as Record<string, unknown>,

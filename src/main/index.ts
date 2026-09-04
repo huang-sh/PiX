@@ -71,6 +71,15 @@ async function create() {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
   });
+  // Belt-and-braces alongside the window-open denial: no link, drop, or
+  // script may ever navigate the app window itself. The renderer intercepts
+  // known link kinds; anything that still reaches a navigation attempt goes
+  // through the same protocol-allowlisted external open (and is dropped for
+  // non-web protocols such as file:).
+  win.webContents.on("will-navigate", (event: Event, url: string) => {
+    event.preventDefault();
+    void openExternal(url).catch(() => {});
+  });
   win.webContents.on(
     "will-attach-webview",
     (_e: unknown, p: Record<string, unknown>) => {

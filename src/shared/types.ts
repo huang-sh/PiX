@@ -285,6 +285,7 @@ export interface AppSettings {
   browserHome: string;
   openLastSessionOnStartup: boolean;
   enterToSend: boolean;
+  openLinksInApp: boolean;
 }
 export interface SettingsBundle {
   app: AppSettings;
