@@ -49,7 +49,9 @@ jobs:
         run: npm run build
 
       - name: Package
-        run: npx electron-builder ${{ matrix.targets }}
+        # --publish never: electron-builder would otherwise auto-publish to
+        # GitHub Releases on CI detection and fail without GH_TOKEN.
+        run: npx electron-builder ${{ matrix.targets }} --publish never
         env:
           # No signing identity exists on runners; keep unsigned builds explicit.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
