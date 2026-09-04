@@ -29,6 +29,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # npm ci does not run electron's postinstall on the runners, so the
+      # dist binary the tests spawn is missing; install.js is idempotent.
+      - name: Download Electron binary
+        run: node node_modules/electron/install.js
+
       - name: Typecheck
         run: npm run typecheck
 
