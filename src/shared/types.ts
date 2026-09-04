@@ -290,7 +290,7 @@ export interface SettingsBundle {
   piGlobal: PiSettings;
   piProject: PiSettings;
   effective: PiSettings;
-  paths: { app: string; global: string; project: string };
+  paths: { app: string; global: string; project: string | null };
 }
 export interface LayoutState {
   version?: number;

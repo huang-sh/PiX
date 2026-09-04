@@ -26,6 +26,11 @@ export const messages = {
       days: "{n}d",
       aMoment: "a moment",
     },
+    welcome: {
+      tagline:
+        "A non-linear AI agent workbench — sessions are graphs: branch anytime, and context follows the branch",
+      openProject: "Open a project",
+    },
     nav: {
       projects: "Projects",
       newSession: "Start",
@@ -172,6 +177,7 @@ export const messages = {
       disconnectedRemote: "Disconnected from remote",
       exportedTo: "Exported to {path}",
       copiedLast: "Copied last Pi response",
+      openProjectFirst: "Open a project to start a session.",
     },
     renameDialog: {
       title: "Rename session",
@@ -424,6 +430,10 @@ export const messages = {
       days: "{n} 天",
       aMoment: "片刻",
     },
+    welcome: {
+      tagline: "非线性的 AI Agent 工作台 —— 会话是一张图，随时分叉，上下文跟随分支",
+      openProject: "打开项目…",
+    },
     nav: {
       projects: "项目",
       newSession: "开始",
@@ -570,6 +580,7 @@ export const messages = {
       disconnectedRemote: "已断开远程连接",
       exportedTo: "已导出到 {path}",
       copiedLast: "已复制 Pi 的最近回复",
+      openProjectFirst: "请先打开一个项目再创建会话。",
     },
     renameDialog: {
       title: "重命名会话",

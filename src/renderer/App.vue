@@ -25,6 +25,7 @@ import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
+import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
@@ -32,7 +33,7 @@ import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
 
 interface BootstrapData {
-  project: ProjectInfo;
+  project: ProjectInfo | null;
   sessions: SessionSummary[];
   projects: ProjectGroup[];
   settings: SettingsBundle;
@@ -75,7 +76,10 @@ function applyLanguage(settings: SettingsBundle) {
     : settings.app.language;
 }
 
-async function hydrate(data: BootstrapData, openFirst = true) {
+// Opening or switching a project never auto-opens a session — the user
+// lands in the project's empty state and picks or starts a session. The
+// only auto-open left is the opt-in "open last session on startup".
+async function hydrate(data: BootstrapData, openFirst = false) {
   workspace.hydrate(data.project, data.settings.app.browserHome);
   layout.hydrate(data.settings, data.layout);
   applyLanguage(data.settings);
@@ -161,7 +165,7 @@ async function connectSsh(input: { host: string; cwd: string; browse?: boolean }
   wslError.value = "";
   try {
     const data = await desktop.invoke<BootstrapData | { project: ProjectInfo }>("ssh.connect", input);
-    if (input.browse) await browseRemoteDirectory(data.project.path);
+    if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
       await hydrate(data as BootstrapData);
       remoteBrowseRoot.value = "";
@@ -192,7 +196,7 @@ async function connectWsl(input: { distro: string; cwd: string; browse?: boolean
       if (!input.cwd) throw new Error(t("remote.wslHomeUnavailable"));
     }
     const data = await desktop.invoke<BootstrapData | { project: ProjectInfo }>("wsl.connect", input);
-    if (input.browse) await browseRemoteDirectory(data.project.path);
+    if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
       await hydrate(data as BootstrapData);
       remoteBrowseRoot.value = "";
@@ -282,11 +286,11 @@ async function activateProject(record: ProjectGroup) {
             cwd: record.project.path,
           })
         : await desktop.invoke<BootstrapData>("app.openProject", { id: record.id });
-    await hydrate(data, false);
+    await hydrate(data);
     return true;
   } catch (error) {
     try {
-      await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap"), false);
+      await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap"));
     } catch {}
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     return false;
@@ -493,6 +497,7 @@ onMounted(() => {
       state: () => JSON.parse(JSON.stringify({
         loading: session.loading,
         project: workspace.project,
+        welcome: !workspace.project,
         sessions: session.sessions,
         current: session.current,
         focusedNode: session.focusedNode,
@@ -539,6 +544,10 @@ onBeforeUnmount(() => {
           @forget-project="forgetProject"
         />
       </KeepAlive>
+      <WelcomeScreen
+        v-if="layout.screen === 'workbench' && !workspace.project"
+        @open-project="pickProject"
+      />
     </div>
   </div>
   <CommandPalette @run="runCommand" />

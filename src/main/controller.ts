@@ -51,7 +51,7 @@ const unavailable = (): RuntimeState => ({
   pendingMessageCount: 0,
 });
 export class MainController {
-  project: ProjectInfo;
+  project: ProjectInfo | null;
   settings: SettingsService;
   workspace: WorkspaceService;
   git: GitService;
@@ -60,23 +60,25 @@ export class MainController {
   pi: PiRuntime;
   current?: SessionSnapshot;
   platform: Platform;
-  localProjectPath: string;
+  localProjectPath: string | null;
   wsl?: WslHostClient;
   wslSettings?: SettingsBundle;
   stopWslEvents?: () => void;
   remoteBrokerModels = new Set<string>();
   listeners = new Set<(e: DesktopEvent) => void>();
-  constructor(path: string, platform: Platform) {
-    path = resolve(path);
+  constructor(path: string | null, platform: Platform) {
+    path = path ? resolve(path) : null;
     this.localProjectPath = path;
-    this.project = { name: basename(path), path };
+    this.project = path ? { name: basename(path), path } : null;
     this.platform = platform;
     this.settings = new SettingsService(path);
     this.settings.applyInstallerLanguage();
     this.workspace = new WorkspaceService(path);
     this.git = new GitService(path);
     this.shell = new ShellService(path, (e) => this.emit(e as DesktopEvent));
-    const dir = configuredSessionDir(path, this.settings.bundle());
+    const dir = path
+      ? configuredSessionDir(path, this.settings.bundle())
+      : null;
     this.files = new SessionFiles(path, dir);
     this.pi = new PiRuntime(path, dir, (e) => {
       this.emit(e as DesktopEvent);
@@ -108,18 +110,26 @@ export class MainController {
       this.rememberSnapshot(current);
     this.emit(event);
   }
-  configure(path: string) {
-    path = resolve(path);
-    if (!existsSync(path)) throw new Error("Project not found");
-    this.localProjectPath = path;
+  configure(path: string | null) {
+    if (path) {
+      path = resolve(path);
+      if (!existsSync(path)) throw new Error("Project not found");
+      this.localProjectPath = path;
+      this.project = { name: basename(path), path };
+      this.settings.setProject(path);
+      this.settings.lastProject(path);
+    } else {
+      this.localProjectPath = null;
+      this.project = null;
+      this.settings.setProject(null);
+    }
     this.current = undefined;
-    this.project = { name: basename(path), path };
-    this.settings.setProject(path);
-    this.settings.lastProject(path);
     this.workspace.setRoot(path);
     this.git.setRoot(path);
     this.shell.setRoot(path);
-    const dir = configuredSessionDir(path, this.settings.bundle());
+    const dir = path
+      ? configuredSessionDir(path, this.settings.bundle())
+      : null;
     this.files.set(path, dir);
     this.pi.setProject(path, dir);
   }
@@ -226,9 +236,9 @@ export class MainController {
     }
   }
   async openRemoteProject(path: string) {
-    if (!this.wsl || !this.project.remote)
+    const remote = this.project?.remote;
+    if (!this.wsl || !remote)
       throw new Error("Remote host is not connected");
-    const remote = this.project.remote;
     const selected = await this.wsl.request<{ path: string }>("workspace.open", {
       path,
     });
@@ -329,7 +339,7 @@ export class MainController {
     return result;
   }
   projectGroups(): ProjectGroup[] {
-    const active = projectId(this.project);
+    const active = this.project ? projectId(this.project) : "";
     return this.settings.projectHistory().map((record) => ({
       ...record,
       connected: record.project.remote
@@ -338,12 +348,15 @@ export class MainController {
     }));
   }
   rememberProject(sessions: SessionSummary[]) {
+    if (!this.project) return this.projectGroups();
     this.settings.rememberProject(this.project, sessions);
     return this.projectGroups();
   }
   rememberSnapshot(snapshot: SessionSnapshot) {
+    const project = this.project;
+    if (!project) return;
     const old = this.settings.projectHistory().find(
-      (record) => record.id === projectId(this.project),
+      (record) => record.id === projectId(project),
     )?.sessions ?? [];
     this.rememberProject([
       snapshot.session,
@@ -368,7 +381,7 @@ export class MainController {
       summary = this.files.list().find((s) => s.path === resolve(path)) ?? {
         id: String(x.header?.id ?? path),
         path: resolve(path),
-        cwd: String(x.header?.cwd ?? this.project.path),
+        cwd: String(x.header?.cwd ?? this.project?.path ?? path),
         created: String(x.header?.timestamp ?? new Date().toISOString()),
         modified: new Date().toISOString(),
         messageCount: x.entries.filter((e) => e.type === "message").length,
@@ -413,7 +426,7 @@ export class MainController {
     }
     if (route === "app.forgetProject") {
       const id = String(v.id);
-      if (id === projectId(this.project))
+      if (this.project && id === projectId(this.project))
         throw new Error("The open project cannot be removed from the list");
       this.settings.forgetProject(id);
       return this.projectGroups();
@@ -434,17 +447,41 @@ export class MainController {
     if (this.wsl && route === "session.import")
       throw new Error("Importing sessions into a remote host is not available yet");
     if (this.wsl && isProjectRoute(route)) return this.invokeWsl(route, v);
+    if (
+      !this.project &&
+      [
+        "session.list",
+        "session.open",
+        "session.import",
+        "session.rename",
+        "session.delete",
+        "workspace.tree",
+        "workspace.read",
+        "workspace.write",
+        "git.status",
+        "git.diff",
+        "shell.run",
+        "shell.abort",
+        "terminal.create",
+        "terminal.write",
+        "terminal.resize",
+        "terminal.kill",
+      ].includes(route)
+    )
+      throw new Error("Open a project first");
     switch (route) {
       case "app.bootstrap": {
         if (this.wsl) return this.wslBootstrap();
         const last = this.settings.bundle().app.lastProject;
-        if (last && existsSync(last) && resolve(last) !== this.project.path)
+        if (last && existsSync(last) && resolve(last) !== this.project?.path)
           this.configure(last);
-        const sessions = await this.sessions();
+        const sessions = this.project ? await this.sessions() : [];
         return {
           project: this.project,
           sessions,
-          projects: this.rememberProject(sessions),
+          projects: this.project
+            ? this.rememberProject(sessions)
+            : this.projectGroups(),
           settings: this.settings.bundle(),
           layout: this.settings.layout(),
           current: this.current,
@@ -595,16 +632,15 @@ export class MainController {
       case "settings.get":
         return this.settings.bundle();
       case "settings.update": {
-        const previousDir = configuredSessionDir(
-          this.project.path,
-          this.settings.bundle(),
-        );
+        const previousDir = this.project
+          ? configuredSessionDir(this.project.path, this.settings.bundle())
+          : null;
         const b = this.settings.update(
           v.scope as "app" | "global" | "project",
           v.patch as Record<string, unknown>,
           v.replace === true,
         );
-        if (v.scope === "project") {
+        if (v.scope === "project" && this.project) {
           const d = configuredSessionDir(this.project.path, b);
           this.files.set(this.project.path, d);
           if (d !== previousDir) {

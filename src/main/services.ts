@@ -88,7 +88,7 @@ export const DEFAULT_LAYOUT: LayoutState = {
   },
 };
 export class SettingsService {
-  project: string;
+  project: string | null;
   appPath = join(process.env.PIX_HOME ?? homedir(), ".pix", "settings.json");
   globalPath = join(
     process.env.PIX_HOME ?? homedir(),
@@ -96,11 +96,11 @@ export class SettingsService {
     "agent",
     "settings.json",
   );
-  constructor(project: string) {
-    this.project = resolve(project);
+  constructor(project: string | null) {
+    this.project = project ? resolve(project) : null;
   }
-  setProject(p: string) {
-    this.project = resolve(p);
+  setProject(p: string | null) {
+    this.project = p ? resolve(p) : null;
   }
   // The Windows installer records the setup-wizard language under
   // HKCU\Software\PiX. Adopt it once as the interface language; the value is
@@ -124,7 +124,7 @@ export class SettingsService {
     this.update("app", { language });
   }
   get projectPath() {
-    return join(this.project, ".pi", "settings.json");
+    return this.project ? join(this.project, ".pi", "settings.json") : null;
   }
   bundle(): SettingsBundle {
     const defaults: AppSettings = {
@@ -140,7 +140,9 @@ export class SettingsService {
       readJson(this.appPath),
     ) as unknown as AppSettings;
     const piGlobal = readJson<PiSettings>(this.globalPath),
-      piProject = readJson<PiSettings>(this.projectPath);
+      piProject = this.project && this.projectPath
+        ? readJson<PiSettings>(this.projectPath)
+        : {};
     return {
       app,
       piGlobal,
@@ -164,6 +166,7 @@ export class SettingsService {
         : scope === "global"
           ? this.globalPath
           : this.projectPath;
+    if (!p) throw new Error("Open a project first");
     atomic(p, replace ? patch : merge(readJson(p), patch));
     return this.bundle();
   }
@@ -174,6 +177,7 @@ export class SettingsService {
         : scope === "global"
           ? this.globalPath
           : this.projectPath;
+    if (!p) throw new Error("Open a project first");
     atomic(p, {});
     return this.bundle();
   }
@@ -225,26 +229,30 @@ export class SettingsService {
   }
 }
 export class WorkspaceService {
-  root: string;
-  constructor(p: string) {
-    this.root = resolve(p);
+  root: string | null;
+  constructor(p: string | null) {
+    this.root = p ? resolve(p) : null;
   }
-  setRoot(p: string) {
-    this.root = resolve(p);
+  setRoot(p: string | null) {
+    this.root = p ? resolve(p) : null;
   }
   safe(p: string) {
-    const target = resolve(this.root, p),
-      r = relative(this.root, target);
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const target = resolve(root, p),
+      r = relative(root, target);
     if (r === ".." || r.startsWith(`..${sep}`))
       throw new Error("Path escapes project");
-    const root = realpathSync(this.root),
+    const realRoot = realpathSync(root),
       resolved = realpathSync(existsSync(target) ? target : dirname(target)),
-      real = relative(root, resolved);
+      real = relative(realRoot, resolved);
     if (real === ".." || real.startsWith(`..${sep}`))
       throw new Error("Path escapes project through a symbolic link");
     return target;
   }
   tree(p = "") {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
     const directory = this.safe(p);
     if (!statSync(directory).isDirectory()) throw new Error("Directory not found");
     return readdirSync(directory)
@@ -257,7 +265,7 @@ export class WorkspaceService {
         } catch {
           return [];
         }
-        const path = relative(this.root, entry).split(sep).join("/");
+        const path = relative(root, entry).split(sep).join("/");
         return stat.isDirectory()
           ? [{ name, path, kind: "directory", modified: stat.mtime.toISOString() }]
           : [{ name, path, kind: "file", size: stat.size, modified: stat.mtime.toISOString() }];
@@ -281,6 +289,8 @@ export class WorkspaceService {
     return { path: target.split(sep).join("/"), entries };
   }
   read(p: string): FileDocument {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
     const a = this.safe(p),
       b = readFileSync(a),
       ext = extname(a).toLowerCase(),
@@ -299,7 +309,7 @@ export class WorkspaceService {
       s = truncated ? b.subarray(0, 2 * 1024 * 1024) : b;
     if (mime[ext])
       return {
-        path: relative(this.root, a).split(sep).join("/"),
+        path: relative(root, a).split(sep).join("/"),
         name: basename(a),
         content: "",
         dataUrl: `data:${mime[ext]};base64,${b.toString("base64")}`,
@@ -322,7 +332,7 @@ export class WorkspaceService {
       ".yaml": "yaml",
     };
     return {
-      path: relative(this.root, a).split(sep).join("/"),
+      path: relative(root, a).split(sep).join("/"),
       name: basename(a),
       content: s.toString("utf8"),
       language: language[ext] ?? "text",
@@ -338,27 +348,29 @@ export class WorkspaceService {
 }
 const git = promisify(execFile);
 export class GitService {
-  root: string;
-  constructor(p: string) {
+  root: string | null;
+  constructor(p: string | null) {
     this.root = p;
   }
-  setRoot(p: string) {
+  setRoot(p: string | null) {
     this.root = p;
   }
   async status(): Promise<GitStatus> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
     let stdout: string;
     try {
         ({ stdout } = await git(
           "git",
           [
             "-c",
-            `safe.directory=${this.root}`,
+            `safe.directory=${root}`,
             "status",
             "--porcelain=v1",
             "-b",
           ],
           {
-            cwd: this.root,
+            cwd: root,
             encoding: "utf8",
             windowsHide: true,
           },
@@ -394,15 +406,17 @@ export class GitService {
     };
   }
   async diff(p?: string, staged = false) {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
     const a = ["diff", "--no-ext-diff", "--minimal"];
     if (staged) a.push("--cached");
     if (p) a.push("--", p);
     const { stdout } = await git("git", [
       "-c",
-      `safe.directory=${this.root}`,
+      `safe.directory=${root}`,
       ...a,
     ], {
-      cwd: this.root,
+      cwd: root,
       encoding: "utf8",
       windowsHide: true,
     });
@@ -410,15 +424,15 @@ export class GitService {
   }
 }
 export class ShellService {
-  root: string;
+  root: string | null;
   running = new Map<string, any>();
   terminals = new Map<string, IPty>();
   emit: (e: unknown) => void;
-  constructor(p: string, emit: (e: unknown) => void) {
+  constructor(p: string | null, emit: (e: unknown) => void) {
     this.root = p;
     this.emit = emit;
   }
-  setRoot(p: string) {
+  setRoot(p: string | null) {
     this.closeTerminals();
     this.root = p;
   }
@@ -432,7 +446,7 @@ export class ShellService {
     );
     const terminal = spawnPty(executable, args, {
       name: "xterm-256color",
-      cwd: this.root,
+      cwd: this.root ?? undefined,
       env,
       cols,
       rows,
@@ -477,7 +491,7 @@ export class ShellService {
         : ["-lc", command];
     return new Promise((ok, fail) => {
       const child = spawn(bin, args, {
-        cwd: this.root,
+        cwd: this.root ?? undefined,
         env: process.env,
         windowsHide: true,
       });
@@ -519,19 +533,21 @@ export class ShellService {
   }
 }
 export class SessionFiles {
-  cwd: string;
-  dir: string;
-  constructor(cwd: string, dir: string) {
-    this.cwd = resolve(cwd);
-    this.dir = resolve(dir);
-    mkdirSync(this.dir, { recursive: true });
+  cwd: string | null;
+  dir: string | null;
+  constructor(cwd: string | null, dir: string | null) {
+    this.cwd = cwd ? resolve(cwd) : null;
+    this.dir = dir ? resolve(dir) : null;
+    if (this.dir) mkdirSync(this.dir, { recursive: true });
   }
-  set(cwd: string, dir: string) {
-    this.cwd = resolve(cwd);
-    this.dir = resolve(dir);
-    mkdirSync(this.dir, { recursive: true });
+  set(cwd: string | null, dir: string | null) {
+    this.cwd = cwd ? resolve(cwd) : null;
+    this.dir = dir ? resolve(dir) : null;
+    if (this.dir) mkdirSync(this.dir, { recursive: true });
   }
   managed(p: string) {
+    if (!this.dir)
+      throw new Error("Open a project first");
     const root = realpathSync(this.dir);
     const target = realpathSync(resolve(p));
     const path = relative(root, target);
@@ -546,37 +562,39 @@ export class SessionFiles {
     return target;
   }
   list(): SessionSummary[] {
-    return existsSync(this.dir)
-      ? readdirSync(this.dir)
-          .filter((n) => n.endsWith(".jsonl"))
-          .flatMap((n) => {
-            const p = join(this.dir, n);
-            try {
-              const s = statSync(p),
-                x = parseSessionJsonl(readFileSync(p, "utf8"));
-              return [
-                summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
-              ];
-            } catch {
-              return [];
-            }
-          })
-          .sort((a, b) => b.modified.localeCompare(a.modified))
-      : [];
+    const dir = this.dir;
+    if (!dir || !existsSync(dir)) return [];
+    return readdirSync(dir)
+      .filter((n) => n.endsWith(".jsonl"))
+      .flatMap((n) => {
+        const p = join(dir, n);
+        try {
+          const s = statSync(p),
+            x = parseSessionJsonl(readFileSync(p, "utf8"));
+          return [
+            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
+          ];
+        } catch {
+          return [];
+        }
+      })
+      .sort((a, b) => b.modified.localeCompare(a.modified));
   }
   read(p: string) {
     return parseSessionJsonl(readFileSync(this.managed(p), "utf8"));
   }
   import(source: string) {
+    const dir = this.dir;
+    if (!dir) throw new Error("Open a project first");
     const raw = readFileSync(resolve(source), "utf8");
     const x = parseSessionJsonl(raw);
     if (x.header?.type !== "session") throw new Error("Not a Pi session");
     let target = join(
-      this.dir,
+      dir,
       basename(source).replace(/\(1\)(?=\.jsonl$)/, ""),
     );
     if (existsSync(target))
-      target = join(this.dir, `${Date.now()}-${basename(target)}`);
+      target = join(dir, `${Date.now()}-${basename(target)}`);
     const lines = raw.split(/\r?\n/),
       i = lines.findIndex((l) => l.trim());
     const h = JSON.parse(lines[i]!);

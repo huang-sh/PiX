@@ -7,7 +7,6 @@ import {
   Menu,
   shell,
 } from "electron";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
@@ -86,13 +85,11 @@ async function create() {
   else await win.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
-  // Finder/Dock launches of a packaged app set cwd to "/", so macOS builds
-  // fall back to the home directory instead of opening the filesystem root.
+  // No implicit project: without an explicit PIX_PROJECT override the app
+  // starts project-less and the welcome screen asks for one.
   const initial = process.env.PIX_PROJECT
     ? resolve(process.env.PIX_PROJECT)
-    : app.isPackaged && process.platform === "darwin"
-      ? homedir()
-      : process.cwd();
+    : null;
   controller = new MainController(initial, {
     async pickProject() {
       const r = await dialog.showOpenDialog(win, {

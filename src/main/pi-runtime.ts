@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   detectWindowsBash,
@@ -25,8 +26,8 @@ const detectBash = memoizeOnce(detectWindowsBash);
 export class PiRuntime {
   mod: any;
   runtime: any;
-  cwd: string;
-  dir: string;
+  cwd: string | null;
+  dir: string | null;
   emit: (e: unknown) => void;
   unsubscribe?: () => void;
   modelServices: any;
@@ -34,8 +35,8 @@ export class PiRuntime {
   modelBroker?: (model: any, context: any, options: any) => any;
   openExternal: (url: string) => Promise<void>;
   constructor(
-    cwd: string,
-    dir: string,
+    cwd: string | null,
+    dir: string | null,
     emit: (e: unknown) => void,
     openExternal: (url: string) => Promise<void>,
   ) {
@@ -44,7 +45,7 @@ export class PiRuntime {
     this.emit = emit;
     this.openExternal = openExternal;
   }
-  setProject(cwd: string, dir: string) {
+  setProject(cwd: string | null, dir: string | null) {
     this.dispose();
     this.modelServices = undefined;
     this.cwd = cwd;
@@ -62,8 +63,10 @@ export class PiRuntime {
     if (this.runtime?.session?.modelRuntime)
       return this.runtime.session.modelRuntime;
     const pi = await this.pi();
+    // Project-less model actions (settings, login) still need a real cwd for
+    // the agent services; the home directory carries no project state.
     this.modelServices ??= await pi.createAgentSessionServices({
-      cwd: this.cwd,
+      cwd: this.cwd ?? homedir(),
       agentDir: this.agentDir(pi),
     });
     return this.modelServices.modelRuntime;
@@ -258,6 +261,8 @@ export class PiRuntime {
       "logout",
       "setBrokerProviders",
     ].includes(input.action);
+    if (!this.cwd && !modelAction)
+      throw new Error("Open a project first");
     if (!s && input.action !== "newSession" && !modelAction)
       throw new Error("Open a session first");
     switch (input.action) {

@@ -44,14 +44,18 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
   },
   actions: {
-    hydrate(project: ProjectInfo, browserHome?: string) {
+    hydrate(project: ProjectInfo | null | undefined, browserHome?: string) {
       const previous = this.project;
+      const next = project ?? undefined;
+      // Entering the project-less state (welcome screen) must drop the
+      // previous project's files, git state and tabs.
       const changed =
-        previous &&
-        (previous.path !== project.path ||
-          previous.remote?.kind !== project.remote?.kind ||
-          JSON.stringify(previous.remote) !== JSON.stringify(project.remote));
-      this.project = project;
+        !next ||
+        (previous &&
+          (previous.path !== next.path ||
+            previous.remote?.kind !== next.remote?.kind ||
+            JSON.stringify(previous.remote) !== JSON.stringify(next.remote)));
+      this.project = next;
       this.browserUrl = browserHome || "https://pi.dev";
       if (changed) {
         this.files = [];
@@ -63,6 +67,11 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
     },
     async load() {
+      if (!this.project) {
+        this.files = [];
+        this.git = unavailableGit();
+        return;
+      }
       await Promise.all([this.loadFiles(), this.loadGit()]);
     },
     async loadFiles() {

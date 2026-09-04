@@ -13,6 +13,9 @@ import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
 import { entryAnchorForNode, projectSession } from "../../shared/session";
 import { desktop } from "../api";
+import { i18n } from "../i18n";
+import { useLayoutStore } from "./layout";
+import { useWorkspaceStore } from "./workspace";
 
 interface PendingPrompt {
   message: BranchMessage;
@@ -86,13 +89,13 @@ export const useSessionStore = defineStore("session", {
   },
   actions: {
     hydrate(
-      project: ProjectInfo,
+      project: ProjectInfo | null,
       sessions: SessionSummary[],
       projects: ProjectGroup[],
       current?: SessionSnapshot,
     ) {
       this.projects = projects;
-      this.activeProjectId = projectId(project);
+      this.activeProjectId = project ? projectId(project) : "";
       this.sessions = sessions;
       this.focusedNode = current?.projection.activeNodeId ?? null;
       this.activity = undefined;
@@ -209,6 +212,13 @@ export const useSessionStore = defineStore("session", {
       await this.prompt(text, nodeId, model, thinkingLevel);
     },
     async create() {
+      if (!useWorkspaceStore().project) {
+        useLayoutStore().showNotice(
+          i18n.global.t("notice.openProjectFirst"),
+          "warning",
+        );
+        return;
+      }
       this.applySnapshot(await this.control<SessionSnapshot>({ action: "newSession" }));
       this.focusedNode = this.current?.projection.activeNodeId ?? null;
       await this.refresh();
