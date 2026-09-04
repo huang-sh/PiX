@@ -24,10 +24,11 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { desktop } from "../../api";
+import { whenMeasured } from "../../lib/frame";
 import { useLayoutStore, type ContentTab } from "../../stores/layout";
 import { useWorkspaceStore, type WorkspaceTab } from "../../stores/workspace";
 import FileTree from "./FileTree.vue";
@@ -106,6 +107,23 @@ function toggleFileTree() {
   if (fileTreeOpen.value) fileTreePanel.value?.expand();
   else fileTreePanel.value?.collapse();
 }
+
+// The tree is part of the Files tool's default presentation: expand it every
+// time the section (re)mounts, even if the splitter's saved state is
+// collapsed. expand() no-ops before the group is measured, so wait for a real
+// measurement first.
+watch(
+  () => layout.contentSection,
+  async (section) => {
+    if (section !== "files") return;
+    await nextTick();
+    const group = document.querySelector('[data-panel-group-id="pix-file-workspace"]');
+    if (group) await whenMeasured(group);
+    fileTreeOpen.value = true;
+    fileTreePanel.value?.expand();
+  },
+  { immediate: true },
+);
 
 async function save(tab: WorkspaceTab) {
   if (tab.document) await workspace.saveFile(tab, tab.document.content);
@@ -329,7 +347,7 @@ async function save(tab: WorkspaceTab) {
           :order="2"
           collapsible
           :collapsed-size="0"
-          :default-size="pct(320)"
+          :default-size="pct(240)"
           :min-size="pct(180)"
           :max-size="pct(800)"
           @collapse="fileTreeOpen = false"
