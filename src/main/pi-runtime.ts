@@ -1,11 +1,13 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { fileURLToPath } from "node:url";
+import { getSupportedThinkingLevels, type ModelsRefreshResult } from "@earendil-works/pi-ai";
 import {
   detectWindowsBash,
   memoizeOnce,
   withDetectedBashShell,
 } from "./bash-resolution.js";
+import { resolveBuiltinPackages } from "./builtin-packages.js";
 import type {
   AgentControl,
   RawSessionEntry,
@@ -34,6 +36,8 @@ export class PiRuntime {
   brokerProviders = new Set<string>();
   modelBroker?: (model: any, context: any, options: any) => any;
   openExternal: (url: string) => Promise<void>;
+  private closing = false;
+  private pendingControls = new Set<Promise<unknown>>();
   constructor(
     cwd: string | null,
     dir: string | null,
@@ -64,11 +68,13 @@ export class PiRuntime {
       return this.runtime.session.modelRuntime;
     const pi = await this.pi();
     // Project-less model actions (settings, login) still need a real cwd for
-    // the agent services; the home directory carries no project state.
-    this.modelServices ??= await pi.createAgentSessionServices({
-      cwd: this.cwd ?? homedir(),
-      agentDir: this.agentDir(pi),
-    });
+    // the agent services; the home directory carries no project state. The
+    // services' resource loader also backs the settings page's skills and
+    // extensions lists before any session opens, so bundled packages load
+    // here too.
+    this.modelServices ??= await pi.createAgentSessionServices(
+      this.sessionServicesOptions(pi, this.cwd ?? homedir()),
+    );
     return this.modelServices.modelRuntime;
   }
   setModelBroker(broker?: (model: any, context: any, options: any) => any) {
@@ -99,20 +105,41 @@ export class PiRuntime {
     modelRuntime.streamSimple = (model: any, context: any, options: any) =>
       broker(model, context, options);
   }
+  /**
+   * Options shared by every createAgentSessionServices call, so session and
+   * session-less services behave the same.
+   */
+  private sessionServicesOptions(pi: any, cwd: string) {
+    const agentDir = this.agentDir(pi);
+    // Pi's bash tool otherwise only finds Git Bash under Program Files or
+    // directly on PATH; derive it from git.exe so custom install roots
+    // (e.g. D:\software\Git) get a POSIX shell without user setup.
+    const settingsManager = withDetectedBashShell(
+      pi.SettingsManager.create(cwd, agentDir),
+      detectBash(),
+    );
+    return {
+      cwd,
+      agentDir,
+      settingsManager,
+      // Bundled pi packages (computer-use) load alongside user extensions;
+      // resolveBuiltinPackages skips any package the user installed
+      // themselves. Paths are relative to this module's location so the
+      // same resolution works for dev runs, the packaged app (extraResources
+      // pi-builtin/), and remote server hosts (server npm dependencies).
+      resourceLoaderOptions: {
+        additionalExtensionPaths: resolveBuiltinPackages(
+          dirname(fileURLToPath(import.meta.url)),
+          settingsManager,
+        ),
+      },
+    };
+  }
   factory(pi: any) {
     return async ({ cwd, sessionManager, sessionStartEvent }: any) => {
-      const agentDir = this.agentDir(pi);
-      const services = await pi.createAgentSessionServices({
-        cwd,
-        agentDir,
-        // Pi's bash tool otherwise only finds Git Bash under Program Files or
-        // directly on PATH; derive it from git.exe so custom install roots
-        // (e.g. D:\software\Git) get a POSIX shell without user setup.
-        settingsManager: withDetectedBashShell(
-          pi.SettingsManager.create(cwd, agentDir),
-          detectBash(),
-        ),
-      });
+      const services = await pi.createAgentSessionServices(
+        this.sessionServicesOptions(pi, cwd),
+      );
       await this.applyModelBroker(services.modelRuntime);
       const created = await pi.createAgentSessionFromServices({
         services,
@@ -147,6 +174,7 @@ export class PiRuntime {
     }));
   }
   async open(path: string) {
+    if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
     if (this.runtime)
       await this.runtime.switchSession(path, { cwdOverride: this.cwd });
@@ -162,6 +190,7 @@ export class PiRuntime {
     return this.snapshot();
   }
   async create() {
+    if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
     if (this.runtime) await this.runtime.newSession();
     else {
@@ -249,10 +278,17 @@ export class PiRuntime {
     const pi = await this.pi();
     pi.SessionManager.open(path, this.dir, this.cwd).appendSessionInfo(name);
   }
-  async control(input: AgentControl): Promise<unknown> {
+  control(input: AgentControl): Promise<unknown> {
+    if (this.closing) return Promise.reject(new Error("Session is closing"));
+    const pending = this.runControl(input);
+    this.pendingControls.add(pending);
+    return pending.finally(() => this.pendingControls.delete(pending));
+  }
+  private async runControl(input: AgentControl): Promise<unknown> {
     const s = this.runtime?.session;
     const modelAction = [
       "getModels",
+      "refreshModels",
       "getProviders",
       "getSkills",
       "getExtensions",
@@ -313,6 +349,22 @@ export class PiRuntime {
         break;
       case "getState":
         return this.state();
+      case "refreshModels": {
+        const signal = AbortSignal.timeout(15_000);
+        const modelRuntime = await this.modelRuntime();
+        const result: ModelsRefreshResult = await modelRuntime.refresh({
+          allowNetwork: true,
+          force: true,
+          signal,
+        });
+        if (result.aborted || signal.aborted)
+          throw new Error("Model catalog refresh timed out. Please try again.");
+        if (result.errors.size) {
+          const details = Array.from(result.errors, ([provider, error]) => `${provider}: ${error.message}`).join("; ");
+          throw new Error(`Could not refresh model catalogs: ${details}`);
+        }
+        return { ok: true };
+      }
       case "getModels": {
         const modelRuntime = await this.modelRuntime();
         return (await modelRuntime.getAvailable()).map(
@@ -522,6 +574,23 @@ export class PiRuntime {
         break;
     }
     return this.snapshot();
+  }
+  async close() {
+    const runtime = this.runtime;
+    if (!runtime) return;
+    this.closing = true;
+    this.unsubscribe?.();
+    try {
+      runtime.session.abortBash();
+      await runtime.session.abort();
+      // A prompt can still be in preflight, or writing its footer after abort.
+      // Drain controller calls before unlinking the session file.
+      await Promise.allSettled([...this.pendingControls]);
+      await runtime.dispose();
+      if (this.runtime === runtime) this.runtime = undefined;
+    } finally {
+      this.closing = false;
+    }
   }
   dispose() {
     this.unsubscribe?.();

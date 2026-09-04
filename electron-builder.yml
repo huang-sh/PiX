@@ -10,6 +10,10 @@ files:
   - out/**
   - resources/**
 
+# Cross-platform binary pruning (esbuild ships ~230MB of other-platform
+# binaries via pi's chord dependency); see the hook for details.
+afterPack: scripts/strip-cross-platform-binaries.mjs
+
 # node-pty ships NAPI prebuilds for every platform (node_modules/node-pty/
 # prebuilds), so skip the electron rebuild entirely.
 npmRebuild: false
@@ -27,6 +31,25 @@ extraResources:
 
 win:
   icon: build/icon.png
+  # The pi-computer-use helper prebuilts for other OSes are dead weight;
+  # scripts/ stays because the extension runs its setup script at runtime.
+  extraResources:
+    - from: server
+      to: server
+      filter:
+        - "**/*"
+        - "!node_modules/**"
+    # Bundled pi package (computer-use), resolved at runtime by
+    # src/main/builtin-packages.ts from <resources>/pi-builtin. Shipped as
+    # real files outside the asar because pi's extension loader expects
+    # on-disk paths, same as user extensions in ~/.pi. The node_modules-style
+    # layout keeps room for additional bundled packages.
+    - from: node_modules/@injaneity/pi-computer-use
+      to: pi-builtin/node_modules/@injaneity/pi-computer-use
+      filter:
+        - "**/*"
+        - "!prebuilt/linux/**"
+        - "!prebuilt/macos/**"
   target:
     - target: nsis
       arch:
@@ -42,6 +65,18 @@ mac:
   category: public.app-category.developer-tools
   identity: null
   artifactName: PiX-${version}-${arch}.${ext}
+  extraResources:
+    - from: server
+      to: server
+      filter:
+        - "**/*"
+        - "!node_modules/**"
+    - from: node_modules/@injaneity/pi-computer-use
+      to: pi-builtin/node_modules/@injaneity/pi-computer-use
+      filter:
+        - "**/*"
+        - "!prebuilt/linux/**"
+        - "!prebuilt/windows/**"
   target:
     - target: dmg
       arch:

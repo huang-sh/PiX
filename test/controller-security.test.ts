@@ -157,6 +157,24 @@ test("remote OAuth login runs on the desktop and only syncs models", async () =>
   }]);
 });
 
+test("remote model refresh uses the desktop catalog and resyncs the model broker", async () => {
+  const controller = new MainController(root, denied);
+  const localCalls: unknown[] = [];
+  const remoteCalls: Array<{ route: string; input: unknown }> = [];
+  controller.pi.control = async (input) => {
+    localCalls.push(input);
+    return input.action === "getModels" ? [{ provider: "openai", id: "new-model" }] : { ok: true };
+  };
+  controller.wsl = { request: async (route: string, input: unknown) => {
+    remoteCalls.push({ route, input });
+    return { ok: true };
+  } } as any;
+  await controller.invoke("agent.control", { action: "refreshModels" });
+  assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels" }]);
+  assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openai"] } }]);
+  assert.ok(controller.remoteBrokerModels.has("openai\0new-model"));
+});
+
 test("WSL shell commands keep the local main-process approval boundary", async () => {
   const controller = new MainController(root, denied);
   const calls: string[] = [];

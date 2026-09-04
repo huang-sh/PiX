@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, History, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, CircleAlert, Folder, History, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
 import { computed, reactive, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
@@ -31,6 +31,7 @@ const draft = ref<SettingsBundle>();
 const models = ref<RuntimeModel[]>([]);
 const providers = ref<RuntimeProvider[]>([]);
 const modelQuery = ref("");
+const providerFilter = ref<"all" | "configured" | "other">("all");
 const selectedModel = ref("");
 const expandedProvider = ref("");
 const editingProvider = ref("");
@@ -45,6 +46,7 @@ const skillBusy = ref(false);
 const skillError = ref("");
 const extensions = ref<RuntimeExtension[]>([]);
 const extensionQuery = ref("");
+const extensionScope = ref<"all" | RuntimeExtension["scope"]>("all");
 const extensionBusy = ref(false);
 const extensionError = ref("");
 const categories = computed(() => [
@@ -143,9 +145,14 @@ const rows = computed<Row[]>(() => {
   }
 });
 
+const providerFilters = computed(() => [
+  { id: "all", count: providers.value.length },
+  { id: "configured", count: providers.value.filter((provider) => provider.status).length },
+  { id: "other", count: providers.value.filter((provider) => !provider.status).length },
+] as const);
 const filteredProviders = computed(() => {
   const query = modelQuery.value.trim().toLowerCase();
-  return providers.value.filter((provider) =>
+  return providers.value.filter((provider) => providerFilter.value === "all" || (providerFilter.value === "configured" ? !!provider.status : !provider.status)).filter((provider) =>
     !query ||
     `${provider.name} ${provider.id}`.toLowerCase().includes(query) ||
     models.value.some((model) =>
@@ -196,6 +203,7 @@ const skillSections = computed(() => (["project", "user", "temporary"] as const)
 const filteredExtensions = computed(() => {
   const query = extensionQuery.value.trim().toLowerCase();
   return extensions.value
+    .filter((extension) => extensionScope.value === "all" || extension.scope === extensionScope.value)
     .filter((extension) => !query || [
       extensionName(extension.path),
       extension.path,
@@ -205,13 +213,12 @@ const filteredExtensions = computed(() => {
     ].join(" ").toLowerCase().includes(query))
     .sort((a, b) => extensionName(a.path).localeCompare(extensionName(b.path)));
 });
-const extensionSections = computed(() => (["project", "user", "temporary"] as const)
-  .map((scope) => ({
-    scope,
-    label: t(`settings.extensionScopes.${scope}`),
-    extensions: filteredExtensions.value.filter((extension) => extension.scope === scope),
-  }))
-  .filter((section) => section.extensions.length));
+const extensionFilters = computed(() => (["all", "project", "user", "temporary"] as const)
+  .map((scope) => ({ scope, count: extensions.value.filter((extension) => scope === "all" || extension.scope === scope).length })));
+const extensionTotals = computed(() => ({
+  tools: extensions.value.reduce((total, extension) => total + extension.tools.length, 0),
+  commands: extensions.value.reduce((total, extension) => total + extension.commands.length, 0),
+}));
 
 function extensionName(path: string) {
   const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
@@ -260,11 +267,12 @@ function toggleProviderSetup(provider: RuntimeProvider) {
   editingProvider.value = editingProvider.value === provider.id ? "" : provider.id;
 }
 
-async function loadRuntime() {
+async function loadRuntime(refresh = false) {
   if (layout.settingsCategory !== "models" || runtimeBusy.value) return;
   runtimeBusy.value = true;
   runtimeError.value = "";
   try {
+    if (refresh) await session.control({ action: "refreshModels" });
     [models.value, providers.value] = await Promise.all([
       session.control<RuntimeModel[]>({ action: "getModels" }),
       session.control<RuntimeProvider[]>({ action: "getProviders" }),
@@ -273,6 +281,10 @@ async function loadRuntime() {
     selectedModel.value = models.value.some((model) => modelKey(model) === preferred)
       ? preferred
       : modelKey(models.value[0] ?? { provider: "", id: "" });
+    if (refresh) {
+      session.models = models.value;
+      layout.showNotice(t("settings.modelCatalogRefreshed"));
+    }
   } catch (error) {
     runtimeError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -550,31 +562,60 @@ async function logout(provider: RuntimeProvider) {
         </nav>
       </header>
 
-      <template v-if="layout.settingsCategory === 'models'">
-        <section class="settings-card provider-card model-card">
-          <div class="settings-toolbar">
-            <label class="settings-search">
-              <Search :size="15" />
-              <input v-model="modelQuery" data-model-search :placeholder="t('settings.searchModels')" />
-            </label>
-            <details class="credential-note">
-              <summary><KeyRound :size="14" />{{ t("settings.credentialStorage") }}</summary>
-              <span>{{ t("settings.apiKeysNotePrefix") }}<code>~/.pi/agent/auth.json</code>{{ t("settings.apiKeysNoteSuffix") }}</span>
-            </details>
+      <div v-if="layout.settingsCategory === 'models'" class="model-workspace">
+        <section class="model-overview" :aria-label="t('settings.modelOverview')">
+          <div class="model-default-summary">
+            <span class="model-overview-icon"><Box :size="25" aria-hidden="true" /></span>
+            <div>
+              <span class="model-eyebrow">{{ t("settings.defaultModelLabel") }}</span>
+              <h2 data-default-model>{{ draft.effective.defaultModel || t("settings.noDefaultModel") }}</h2>
+              <span v-if="draft.effective.defaultProvider" class="model-summary-provider">{{ draft.effective.defaultProvider }}</span>
+              <p>{{ t("settings.defaultModelHint") }}</p>
+            </div>
           </div>
-          <p v-if="runtimeError" class="settings-error">{{ runtimeError }}</p>
-          <p v-else-if="runtimeBusy" class="settings-empty">{{ t("settings.loadingProviders") }}</p>
-          <p v-else-if="!filteredProviders.length" class="settings-empty">{{ t("settings.noMatchingModels") }}</p>
-          <template v-else>
+          <div class="model-session-summary">
+            <span class="model-eyebrow"><Bot :size="14" />{{ t("settings.sessionModelLabel") }}</span>
+            <strong>{{ session.current?.runtime.model?.id || t("settings.noSessionModel") }}</strong>
+            <span v-if="session.current?.runtime.model" class="model-summary-provider">{{ session.current.runtime.model.provider }}</span>
+            <p>{{ t("settings.sessionModelHint") }}</p>
+          </div>
+          <div class="model-overview-footer">
+            <span><Check :size="14" />{{ t("settings.connectedProviderCount", { n: providerFilters[1].count }) }}</span>
+            <span><Box :size="14" />{{ t("settings.availableModelCount", { n: models.length }) }}</span>
+            <a href="#model-preferences"><SlidersHorizontal :size="13" />{{ t("settings.modelPreferences") }}<ChevronDown :size="13" /></a>
+          </div>
+        </section>
+        <section class="provider-card model-card" :aria-busy="runtimeBusy">
+          <div class="settings-toolbar model-toolbar">
+            <label class="settings-search">
+              <Search :size="16" aria-hidden="true" />
+              <input v-model="modelQuery" data-model-search :aria-label="t('settings.searchModels')" :placeholder="t('settings.searchModels')" />
+              <button v-if="modelQuery" type="button" class="model-search-clear" :aria-label="t('settings.modelClearSearch')" @click="modelQuery = ''"><X :size="14" /></button>
+            </label>
+            <Button variant="outline" :disabled="runtimeBusy || !!providerBusy" data-model-refresh :title="t('settings.refreshModelsHint')" @click="loadRuntime(true)"><RefreshCw :size="15" :class="{ spin: runtimeBusy }" />{{ t(runtimeBusy ? "settings.refreshingModels" : "settings.refreshModels") }}</Button>
+          </div>
+          <div class="model-filter-bar">
+            <div class="model-filters" role="group" :aria-label="t('settings.providerFilterLabel')">
+              <button v-for="filter in providerFilters" :key="filter.id" type="button" :data-provider-filter="filter.id" :aria-pressed="providerFilter === filter.id" @click="providerFilter = filter.id">{{ t(`settings.providerFilters.${filter.id}`) }}<span>{{ filter.count }}</span></button>
+            </div>
+            <span class="model-result-count" role="status">{{ t("settings.providerResults", { n: filteredProviders.length }) }}</span>
+          </div>
+          <div v-if="runtimeError" class="model-feedback" role="alert"><CircleAlert :size="18" /><div><strong>{{ t("settings.modelLoadError") }}</strong><p>{{ runtimeError }}</p></div></div>
+          <div v-if="runtimeBusy && !providers.length" class="model-empty" role="status"><RefreshCw :size="26" class="spin" /><strong>{{ t("settings.loadingProviders") }}</strong></div>
+          <div v-else-if="!filteredProviders.length && !runtimeError" class="model-empty">
+            <Search :size="28" /><strong>{{ t("settings.noMatchingModels") }}</strong><p>{{ t("settings.modelSearchHint") }}</p>
+            <Button v-if="modelQuery || providerFilter !== 'all'" variant="outline" @click="modelQuery = ''; providerFilter = 'all'">{{ t("settings.modelResetFilters") }}</Button>
+          </div>
+          <template v-else-if="filteredProviders.length">
           <template v-for="section in providerSections" :key="section.id">
           <header class="provider-section-title" :data-provider-section="section.id">
-            <strong>{{ section.label }}</strong><span>{{ section.providers.length }}</span>
+            <div><h2>{{ section.label }}<span>{{ section.providers.length }}</span></h2><p>{{ t(`settings.providerSectionHints.${section.id}`) }}</p></div>
           </header>
           <div class="provider-section-grid" :data-provider-section-grid="section.id">
-          <section v-for="provider in section.providers" :key="provider.id" class="provider-group" :class="{ expanded: expandedProvider === provider.id || editingProvider === provider.id }" :data-provider="provider.id">
+          <section v-for="provider in section.providers" :key="provider.id" class="provider-group" :class="{ configured: !!provider.status, expanded: expandedProvider === provider.id || editingProvider === provider.id }" :data-provider="provider.id">
             <div class="provider-row">
               <div class="provider-identity">
-                <span class="provider-icon">{{ provider.name.slice(0, 1).toUpperCase() }}</span>
+                <span class="provider-icon" aria-hidden="true">{{ provider.name.slice(0, 1).toUpperCase() }}</span>
                 <span class="provider-name">
                   <strong>{{ provider.name }}</strong>
                   <small>{{ provider.id }}</small>
@@ -583,24 +624,29 @@ async function logout(provider: RuntimeProvider) {
               <div v-if="provider.status" class="provider-status configured" :title="provider.status.source">
                 <Check :size="13" />{{ t("settings.connected") }}
               </div>
+              <div v-else class="provider-status">{{ t("settings.notConfigured") }}</div>
+            </div>
+            <div class="provider-card-footer">
+              <span class="provider-auth-type"><KeyRound :size="13" />{{ provider.authTypes.map(type => t(`settings.providerAuthTypes.${type}`)).join(' / ') || t('settings.providerAuthTypes.custom') }}</span>
               <div class="provider-actions">
                 <button v-if="providerModels(provider).length" type="button" class="provider-model-toggle" :aria-expanded="expandedProvider === provider.id" @click="toggleProvider(provider)">
                   {{ t(providerModels(provider).length === 1 ? "settings.oneModel" : "settings.models", { n: providerModels(provider).length }) }}
                   <ChevronDown :size="14" :class="{ open: expandedProvider === provider.id }" />
                 </button>
-                <Button :variant="provider.status ? 'outline' : 'default'" size="sm" :data-provider-configure="provider.id" @click="toggleProviderSetup(provider)">
-                  {{ t(provider.status ? "settings.manageProvider" : "settings.configureProvider") }}
+                <Button variant="outline" size="sm" :data-provider-configure="provider.id" :aria-expanded="editingProvider === provider.id" @click="toggleProviderSetup(provider)">
+                  {{ t(editingProvider === provider.id ? "settings.closeProviderSetup" : provider.status ? "settings.manageProvider" : "settings.configureProvider") }}
                 </Button>
               </div>
             </div>
 
             <div v-if="editingProvider === provider.id" class="provider-setup" :data-provider-setup="provider.id">
+              <div class="provider-setup-heading"><strong>{{ t("settings.providerSetupTitle", { name: provider.name }) }}</strong><small>{{ t(provider.authTypes.includes('api_key') ? 'settings.providerKeyHint' : 'settings.providerLoginHint') }}</small></div>
               <form v-if="provider.authTypes.includes('api_key')" class="provider-auth" @submit.prevent="saveApiKey(provider)">
                 <label>
                   <KeyRound :size="14" />
-                  <input v-model="keyDrafts[provider.id]" type="password" autocomplete="off" :data-provider-api-key="provider.id" :placeholder="provider.status?.type === 'api_key' ? t('settings.replaceApiKey') : t('settings.enterApiKey')" />
+                  <input v-model="keyDrafts[provider.id]" type="password" autocomplete="off" :aria-label="t('settings.providerApiKeyLabel', { name: provider.name })" :data-provider-api-key="provider.id" :placeholder="provider.status?.type === 'api_key' ? t('settings.replaceApiKey') : t('settings.enterApiKey')" />
                 </label>
-                <Button size="sm" :disabled="providerBusy === provider.id || !keyDrafts[provider.id]?.trim()">{{ t("settings.saveKey") }}</Button>
+                <Button size="sm" class="model-primary-button" :disabled="providerBusy === provider.id || !keyDrafts[provider.id]?.trim()">{{ t("settings.saveKey") }}</Button>
               </form>
               <div v-else-if="provider.authTypes.includes('oauth')" class="provider-auth">
                 <Button variant="outline" size="sm" :data-provider-oauth="provider.id" data-oauth-method="browser" :disabled="providerBusy === provider.id" @click="loginOAuth(provider, 'browser')">
@@ -611,14 +657,16 @@ async function logout(provider: RuntimeProvider) {
                 </Button>
               </div>
               <small v-else class="provider-auth-note">{{ t("settings.providerSetupNote") }}</small>
-              <Button v-if="provider.status" variant="ghost" size="sm" class="provider-remove" :disabled="providerBusy === provider.id" @click="logout(provider)">{{ t("common.remove") }}</Button>
+              <Button v-if="provider.status" variant="ghost" size="sm" class="provider-remove" :disabled="providerBusy === provider.id" @click="logout(provider)">{{ t("settings.removeProviderCredentials") }}</Button>
             </div>
 
             <div v-if="expandedProvider === provider.id" class="provider-model-list" :data-provider-models="provider.id">
+              <div class="provider-model-heading"><strong>{{ t("settings.chooseModel") }}</strong><span>{{ t("settings.chooseModelHint") }}</span></div>
               <p v-if="!providerModels(provider).length" class="settings-empty">{{ t("settings.noModels") }}</p>
               <article v-for="model in providerModels(provider)" :key="modelKey(model)" class="model-row" :class="{ selected: selectedModel === modelKey(model) }" :data-model="`${model.provider}/${model.id}`">
-                <button type="button" class="model-select" @click="selectedModel = modelKey(model)">
-                  <span><strong>{{ model.id }}</strong><small>{{ model.name || model.provider }}</small></span>
+                <button type="button" class="model-select" :aria-pressed="selectedModel === modelKey(model)" @click="selectedModel = modelKey(model)">
+                  <span class="model-selection-mark" aria-hidden="true"><Check v-if="selectedModel === modelKey(model)" :size="12" /></span>
+                  <span><strong>{{ model.id }}</strong><small>{{ model.name || model.provider }}</small><span v-if="model.contextWindow || model.reasoning" class="model-specs"><span v-if="model.contextWindow">{{ t("settings.modelContext", { n: model.contextWindow.toLocaleString(locale) }) }}</span><span v-if="model.reasoning"><Sparkles :size="11" />{{ t("settings.modelReasoning") }}</span></span></span>
                 </button>
                 <span class="model-meta">
                   <em v-if="currentModel === modelKey(model)" class="active">{{ t("settings.badgeCurrent") }}</em>
@@ -628,21 +676,23 @@ async function logout(provider: RuntimeProvider) {
                 </span>
               </article>
               <footer class="model-actions">
-                <span>{{ t(providerModels(provider).length === 1 ? "settings.oneModel" : "settings.models", { n: providerModels(provider).length }) }}</span>
-                <Button variant="ghost" size="sm" @click="setAllCycling(true)">{{ t("settings.cycleAll") }}</Button>
-                <Button variant="ghost" size="sm" @click="setAllCycling(false)">{{ t("settings.clearCycle") }}</Button>
-                <Button data-model-action="default" :disabled="!selectedModel" @click="applyModel">{{ t("settings.setDefault") }}</Button>
+                <span><small>{{ t("settings.selectedModelLabel") }}</small><strong>{{ selectedRuntimeModel?.id || '—' }}</strong></span>
+                <Button class="model-primary-button" data-model-action="default" :disabled="!selectedModel || selectedModel === defaultModel" @click="applyModel">{{ t(selectedModel === defaultModel ? "settings.alreadyDefault" : "settings.setDefault") }}</Button>
               </footer>
             </div>
           </section>
           </div>
           </template>
           </template>
+          <details class="credential-note">
+            <summary><KeyRound :size="14" />{{ t("settings.credentialStorage") }}<ChevronDown :size="13" /></summary>
+            <span>{{ t("settings.apiKeysNotePrefix") }}<code>~/.pi/agent/auth.json</code>{{ t("settings.apiKeysNoteSuffix") }}</span>
+          </details>
         </section>
-        <section class="settings-card model-options">
+        <section id="model-preferences" class="settings-card model-options">
           <header class="model-options-header">
-            <span><strong>{{ t("settings.modelPreferences") }}</strong><small>{{ t("settings.modelPreferencesHint") }}</small></span>
-            <Button :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.savePreferences") }}</Button>
+            <span class="model-preferences-title"><SlidersHorizontal :size="19" /><span><strong>{{ t("settings.modelPreferences") }}</strong><small>{{ t("settings.modelPreferencesHint") }}</small></span></span>
+            <Button class="model-primary-button" :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.savePreferences") }}</Button>
           </header>
           <label v-if="selectedRuntimeModel" class="setting-row" data-setting-path="modelThinkingLevels">
             <span>
@@ -662,8 +712,9 @@ async function logout(provider: RuntimeProvider) {
             </select>
             <input v-else-if="row.type !== 'check'" :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @input="setValue(row, $event)" />
           </label>
+          <footer class="model-cycle-actions"><span>{{ t("settings.cyclePreferencesHint") }}</span><Button variant="ghost" size="sm" @click="setAllCycling(true)">{{ t("settings.cycleAll") }}</Button><Button variant="ghost" size="sm" @click="setAllCycling(false)">{{ t("settings.clearCycle") }}</Button></footer>
         </section>
-      </template>
+      </div>
       <section v-else-if="layout.settingsCategory === 'skills'" class="settings-card skill-card">
         <div class="settings-toolbar">
           <label class="settings-search">
@@ -699,57 +750,72 @@ async function logout(provider: RuntimeProvider) {
           </section>
         </template>
       </section>
-      <section v-else-if="layout.settingsCategory === 'extensions'" class="settings-card extension-card">
-        <div class="settings-toolbar">
-          <label class="settings-search">
-            <Search :size="15" />
-            <input v-model="extensionQuery" data-extension-search :placeholder="t('settings.searchExtensions')" />
-          </label>
-          <Button variant="outline" size="icon" :title="t('settings.refreshExtensions')" :disabled="extensionBusy" @click="loadExtensions(true)">
-            <RefreshCw :size="15" :class="{ spin: extensionBusy }" />
-          </Button>
+      <section v-else-if="layout.settingsCategory === 'extensions'" class="extension-card" :aria-busy="extensionBusy">
+        <div class="extension-overview">
+          <div class="extension-intro">
+            <span class="extension-intro-icon"><Puzzle :size="25" aria-hidden="true" /></span>
+            <div><h2>{{ t("settings.extensionLibrary") }}</h2><p>{{ t("settings.extensionLibraryHint") }}</p></div>
+          </div>
+          <dl class="extension-stats">
+            <div><dt><Puzzle :size="14" />{{ t("settings.extensionDetected") }}</dt><dd>{{ extensionBusy && !extensions.length ? '—' : extensions.length }}</dd></div>
+            <div><dt><Wrench :size="14" />{{ t("settings.extensionToolLabel") }}</dt><dd>{{ extensionBusy && !extensions.length ? '—' : extensionTotals.tools }}</dd></div>
+            <div><dt><Terminal :size="14" />{{ t("settings.extensionCommandLabel") }}</dt><dd>{{ extensionBusy && !extensions.length ? '—' : extensionTotals.commands }}</dd></div>
+          </dl>
         </div>
-        <p v-if="extensionError" class="settings-error">{{ extensionError }}</p>
-        <p v-else-if="extensionBusy && !extensions.length" class="settings-empty">{{ t("settings.loadingExtensions") }}</p>
-        <p v-else-if="!extensions.length" class="settings-empty">{{ t("settings.noExtensions") }}</p>
-        <p v-else-if="!filteredExtensions.length" class="settings-empty">{{ t("settings.noMatchingExtensions") }}</p>
-        <template v-else>
-          <section v-for="section in extensionSections" :key="section.scope" class="resource-section">
-            <header class="provider-section-title">
-              <strong>{{ section.label }}</strong><span>{{ section.extensions.length }}</span>
-            </header>
-            <div class="resource-list">
-              <article v-for="extension in section.extensions" :key="extension.resolvedPath" class="resource-row extension-row" :data-extension="extensionName(extension.path)" :title="extension.resolvedPath">
-                <span class="resource-icon"><Puzzle :size="17" /></span>
-                <span class="resource-info">
-                  <strong>{{ extensionName(extension.path) }}</strong>
-                  <small>{{ extension.path }}</small>
-                </span>
-                <span class="resource-badges">
-                  <em>{{ extension.source }}</em>
-                  <em v-if="extension.tools.length">{{ t("settings.extensionTools", { n: extension.tools.length }) }}</em>
-                  <em v-if="extension.commands.length">{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</em>
-                </span>
-                <div v-if="extension.tools.length || extension.commands.length" class="extension-capabilities">
-                  <section v-if="extension.tools.length">
-                    <strong>{{ t("settings.extensionTools", { n: extension.tools.length }) }}</strong>
-                    <span v-for="tool in extension.tools" :key="tool.name" class="extension-capability">
-                      <code>{{ tool.name }}</code>
-                      <small v-if="tool.description">{{ tool.description }}</small>
-                    </span>
-                  </section>
-                  <section v-if="extension.commands.length">
-                    <strong>{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</strong>
-                    <span v-for="command in extension.commands" :key="command.name" class="extension-capability">
-                      <code>/{{ command.name }}</code>
-                      <small v-if="command.description">{{ command.description }}</small>
-                    </span>
-                  </section>
-                </div>
-              </article>
+        <div class="extension-controls">
+          <div class="settings-toolbar">
+            <label class="settings-search">
+              <Search :size="16" aria-hidden="true" />
+              <input v-model="extensionQuery" data-extension-search :aria-label="t('settings.searchExtensions')" :placeholder="t('settings.searchExtensions')" />
+              <button v-if="extensionQuery" type="button" :aria-label="t('settings.extensionClearSearch')" @click="extensionQuery = ''"><X :size="14" /></button>
+            </label>
+            <Button variant="outline" :title="t('settings.refreshExtensions')" :disabled="extensionBusy" @click="loadExtensions(true)">
+              <RefreshCw :size="15" :class="{ spin: extensionBusy }" aria-hidden="true" />{{ t(extensionBusy ? "settings.extensionRefreshing" : "settings.refreshExtensions") }}
+            </Button>
+          </div>
+          <div class="extension-filter-bar">
+            <div class="extension-filters" role="group" :aria-label="t('settings.extensionFilterLabel')">
+              <button v-for="filter in extensionFilters" :key="filter.scope" type="button" :data-extension-scope="filter.scope" :aria-pressed="extensionScope === filter.scope" @click="extensionScope = filter.scope">
+                {{ t(`settings.extensionFilters.${filter.scope}`) }}<span>{{ filter.count }}</span>
+              </button>
             </div>
-          </section>
-        </template>
+            <span class="extension-result-count" role="status">{{ t("settings.extensionResults", { n: filteredExtensions.length }) }}</span>
+          </div>
+        </div>
+        <div v-if="extensionError" class="extension-feedback extension-error" role="alert"><CircleAlert :size="19" /><div><strong>{{ t("settings.extensionLoadError") }}</strong><p>{{ extensionError }}</p></div></div>
+        <div v-if="extensionBusy && !extensions.length" class="extension-empty" role="status"><RefreshCw :size="26" class="spin" /><h3>{{ t("settings.loadingExtensions") }}</h3></div>
+        <div v-else-if="!extensions.length && !extensionError" class="extension-empty">
+          <span class="extension-empty-icon"><Puzzle :size="28" /></span><h3>{{ t("settings.noExtensions") }}</h3><p>{{ t("settings.extensionEmptyHint") }}</p>
+        </div>
+        <div v-else-if="extensions.length && !filteredExtensions.length" class="extension-empty">
+          <span class="extension-empty-icon"><Search :size="26" /></span><h3>{{ t("settings.noMatchingExtensions") }}</h3><p>{{ t("settings.extensionSearchHint") }}</p>
+          <Button variant="outline" @click="extensionQuery = ''; extensionScope = 'all'">{{ t("settings.extensionResetFilters") }}</Button>
+        </div>
+        <div v-else-if="filteredExtensions.length" class="extension-grid">
+          <article v-for="extension in filteredExtensions" :key="extension.resolvedPath" class="extension-item" :data-extension="extensionName(extension.path)" :data-scope="extension.scope">
+            <header class="extension-item-header">
+              <span class="extension-item-icon"><Puzzle :size="22" aria-hidden="true" /></span>
+              <div class="extension-identity"><h3 :title="extensionName(extension.path)">{{ extensionName(extension.path) }}</h3><span>{{ extension.source }}</span></div>
+              <span class="extension-scope-badge">{{ t(`settings.extensionFilters.${extension.scope}`) }}</span>
+            </header>
+            <div class="extension-item-body">
+              <p class="extension-summary">{{ extension.tools.find(tool => tool.description)?.description || extension.commands.find(command => command.description)?.description || t("settings.extensionNoDescription") }}</p>
+              <div class="extension-metrics"><span><Wrench :size="13" />{{ t("settings.extensionTools", { n: extension.tools.length }) }}</span><span><Terminal :size="13" />{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</span></div>
+            </div>
+            <details class="extension-details">
+              <summary>{{ t("settings.extensionDetails") }}<ChevronDown :size="15" /></summary>
+              <div class="extension-detail-body">
+                <div class="extension-path"><strong><Folder :size="13" />{{ t("settings.extensionLocation") }}</strong><code>{{ extension.resolvedPath }}</code></div>
+                <div v-if="extension.tools.length || extension.commands.length" class="extension-capabilities">
+                  <section v-if="extension.tools.length"><strong>{{ t("settings.extensionTools", { n: extension.tools.length }) }}</strong><div v-for="tool in extension.tools" :key="tool.name" class="extension-capability"><code>{{ tool.name }}</code><p v-if="tool.description">{{ tool.description }}</p></div></section>
+                  <section v-if="extension.commands.length"><strong>{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</strong><div v-for="command in extension.commands" :key="command.name" class="extension-capability"><code>/{{ command.name }}</code><p v-if="command.description">{{ command.description }}</p></div></section>
+                </div>
+                <p v-else class="extension-no-capabilities">{{ t("settings.extensionNoCapabilities") }}</p>
+              </div>
+            </details>
+          </article>
+        </div>
+        <p class="extension-footnote"><Folder :size="14" aria-hidden="true" />{{ t("settings.extensionDiscoveryNote") }}</p>
       </section>
       <section v-else class="settings-card">
         <label v-for="row in rows" :key="`${row.scope}:${row.path}`" class="setting-row" :data-setting-path="row.path">

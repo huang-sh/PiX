@@ -261,7 +261,7 @@ export class MainController {
       const action = String(v.action);
       if (action === "getProviders" || action === "getModels")
         return this.pi.control(v as unknown as AgentControl);
-      if (action === "loginApiKey" || action === "loginOAuth") {
+      if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels") {
         const result = await this.pi.control(v as unknown as AgentControl);
         await this.syncModelBroker(this.wsl);
         return result;
@@ -568,10 +568,12 @@ export class MainController {
           !(await this.platform.confirm("Delete this Pi session?", p))
         )
           return { cancelled: true, sessions: await this.sessions() };
+        if (this.pi.state().sessionFile === p) await this.pi.close();
         this.files.delete(p);
         if (this.current?.session.path === p) this.current = undefined;
         const sessions = await this.sessions();
         this.rememberProject(sessions);
+        this.emit({ type: "sessions", payload: { deletedPath: p, sessions } });
         return { sessions };
       }
       case "agent.control": {

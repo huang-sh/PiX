@@ -251,10 +251,22 @@ export const useSessionStore = defineStore("session", {
       this.current = result.current ?? this.current;
       this.syncProject();
     },
-    async remove(path: string, confirmed = false) {
-      const result = await desktop.invoke<{ sessions: SessionSummary[] }>("session.delete", confirmed ? { path, confirmed } : { path });
-      this.sessions = result.sessions;
+    applyDeletion(path: string, sessions: SessionSummary[]) {
+      this.sessions = sessions;
+      if (this.current?.session.path === path) {
+        this.current = undefined;
+        this.focusedNode = null;
+        this.activity = undefined;
+        this.pendingPrompt = undefined;
+        this.userThinking = undefined;
+        this.commands = [];
+        this.models = [];
+      }
       this.syncProject();
+    },
+    async remove(path: string, confirmed = false) {
+      const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>("session.delete", confirmed ? { path, confirmed } : { path });
+      if (!result.cancelled) this.applyDeletion(path, result.sessions);
     },
   },
 });

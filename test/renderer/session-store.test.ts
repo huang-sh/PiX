@@ -50,6 +50,47 @@ describe("session stream focus", () => {
     expect(session.sessions).toEqual([session.current?.session]);
   });
 
+  it("clears the current session after deletion, including broadcast-only deletion", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    session.onAgentEvent({ type: "agent_start" });
+    session.userThinking = "high";
+    session.commands = [{ name: "test" }];
+    session.models = [{ provider: "test", id: "test" }];
+    vi.spyOn(desktop, "invoke").mockResolvedValue({ sessions: [] });
+
+    await session.remove("session.jsonl", true);
+
+    expect(session.current).toBeUndefined();
+    expect(session.focusedNode).toBeNull();
+    expect(session.activity).toBeUndefined();
+    expect(session.pendingPrompt).toBeUndefined();
+    expect(session.userThinking).toBeUndefined();
+    expect(session.commands).toEqual([]);
+    expect(session.models).toEqual([]);
+    expect(session.selectedMessages).toEqual([]);
+    expect(session.projects[0]?.sessions).toEqual([]);
+
+    hydrate(session, snapshot(first, "a1"));
+    session.applyDeletion("session.jsonl", []);
+    expect(session.current).toBeUndefined();
+  });
+
+  it("preserves the current session when deletion is cancelled or targets another session", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const current = session.current;
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({ cancelled: true, sessions: [] });
+    await session.remove("session.jsonl");
+    expect(session.current).toBe(current);
+    expect(session.sessions).toHaveLength(1);
+
+    invoke.mockResolvedValue({ sessions: [current!.session] });
+    await session.remove("other.jsonl", true);
+    expect(session.current).toBe(current);
+    expect(session.selectedMessages).toHaveLength(2);
+  });
+
   it("keeps models when command discovery fails", async () => {
     const session = useSessionStore();
     const current = snapshot(first, "a1");

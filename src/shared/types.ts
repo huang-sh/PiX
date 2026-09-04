@@ -337,6 +337,7 @@ export type AgentControl =
         | "clearQueue"
         | "getState"
         | "getModels"
+        | "refreshModels"
         | "cycleModel"
         | "getThinkingLevels"
         | "cycleThinking"

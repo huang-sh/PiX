@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import type { AgentControl } from "../src/shared/types.js";
 
@@ -177,6 +180,44 @@ test("every mutating control action returns the refreshed snapshot", async () =>
   }
 });
 
+test("forces an online model catalog refresh without opening a project or session", async (t) => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+    assert.equal(milliseconds, 15_000);
+    return controller.signal;
+  });
+  let refreshes = 0;
+  runtime.modelServices = { modelRuntime: {
+    refresh: async (options: unknown) => {
+      assert.deepEqual(options, { allowNetwork: true, force: true, signal: controller.signal });
+      refreshes++;
+      return { aborted: false, errors: new Map() };
+    },
+    getAvailable: async () => [],
+  } };
+  await runtime.control({ action: "getModels" });
+  assert.equal(refreshes, 0, "ordinary list reads must not force a refresh");
+  assert.deepEqual(await runtime.control({ action: "refreshModels" }), { ok: true });
+  assert.equal(refreshes, 1);
+  assert.equal(runtime.runtime, undefined);
+});
+
+test("model refresh reports provider failures and timeouts without changing the active session", async () => {
+  const runtime = new PiRuntime("/project", "/sessions", () => assert.fail("must not emit session changes"), async () => undefined);
+  const activeModel = { provider: "openai", id: "current-model" };
+  const session = { model: activeModel, modelRuntime: { refresh: async (): Promise<unknown> => ({
+    aborted: false,
+    errors: new Map([["openai", new Error("Network unavailable")]]),
+  }) } };
+  runtime.runtime = { session };
+  await assert.rejects(runtime.control({ action: "refreshModels" }), /openai: Network unavailable/);
+  session.modelRuntime.refresh = async () => ({ aborted: true, errors: new Map() });
+  await assert.rejects(runtime.control({ action: "refreshModels" }), /timed out/);
+  assert.equal(runtime.runtime.session, session);
+  assert.equal(session.model, activeModel);
+});
+
 test("reports each model's supported thinking levels", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.modelServices = { modelRuntime: { getAvailable: async () => [
@@ -283,4 +324,48 @@ test("maps visible extensions discovered by the SDK resource loader", async () =
     tools: [{ name: "review", label: "Review", description: "Review changed files" }],
     commands: [{ name: "review", description: "Start a review" }],
   }]);
+});
+
+test("factory loads bundled packages as additional extension paths", async () => {
+  const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+  let servicesOptions: any;
+  const packages = ["npm:@injaneity/pi-computer-use"];
+  const fakePi = {
+    getAgentDir: () => "/agent",
+    SettingsManager: {
+      create: () => ({ getPackages: () => packages, getShellPath: () => undefined }),
+    },
+    createAgentSessionServices: async (options: any) => {
+      servicesOptions = options;
+      return {};
+    },
+    createAgentSessionFromServices: async () => ({}),
+  };
+  const create = () =>
+    runtime.factory(fakePi)({ cwd: "/project", sessionManager: {}, sessionStartEvent: undefined });
+
+  // The user's own install suppresses the bundled copy.
+  await create();
+  assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
+
+  // The bundled copy loads once no user install is configured. Factory
+  // resolves relative to pi-runtime's compiled location (out-test/src/main),
+  // so the package fixture lands next to that layout's node_modules root.
+  packages.length = 0;
+  const fixtureDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "node_modules",
+    "@injaneity",
+    "pi-computer-use",
+  );
+  mkdirSync(fixtureDir, { recursive: true });
+  try {
+    writeFileSync(join(fixtureDir, "package.json"), "{}");
+    await create();
+    const [builtinPath] = servicesOptions.resourceLoaderOptions.additionalExtensionPaths;
+    assert.equal(builtinPath, fixtureDir);
+  } finally {
+    rmSync(join(dirname(fixtureDir), "@injaneity"), { recursive: true, force: true });
+  }
 });

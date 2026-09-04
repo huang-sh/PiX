@@ -494,15 +494,19 @@ try {
           const selected = document.querySelector('.prompt-node.selected');
           const node = selected?.getBoundingClientRect();
           const footer = selected?.querySelector('.node-footer')?.getBoundingClientRect();
+          // Vue Flow scales nodes inside the transformationpane, so measured
+          // rects shrink with the viewport zoom. Normalize by the node's
+          // computed (pre-transform) width to assert designed CSS sizes.
+          const scale = node && selected ? node.width / parseFloat(getComputedStyle(selected).width) : 1;
           return node ? {
             selected: true,
             embeddedComposer: Boolean(selected.querySelector('textarea')),
             addAction: Boolean(selected.querySelector('.node-add')),
             centered: Math.abs((node.left + node.width / 2) - (flow.left + flow.width / 2)) < 90,
             centerDelta: Math.round((node.left + node.width / 2) - (flow.left + flow.width / 2)),
-            geometry: { flowLeft: Math.round(flow.left), flowWidth: Math.round(flow.width), nodeLeft: Math.round(node.left), nodeWidth: Math.round(node.width) },
+            geometry: { flowLeft: Math.round(flow.left), flowWidth: Math.round(flow.width), nodeLeft: Math.round(node.left), nodeWidth: Math.round(node.width), scale: Math.round(scale * 1000) / 1000 },
             footer: {
-              height: Math.round(footer?.height ?? 0),
+              height: Math.round((footer?.height ?? 0) / scale),
               context: Boolean(selected.querySelector('.node-context-usage')),
               controls: Number(Boolean(selected.querySelector('button[aria-label="Node model"]'))) + selected.querySelectorAll('.node-footer select').length
             },

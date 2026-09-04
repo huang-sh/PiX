@@ -1,6 +1,6 @@
 {
   "name": "pix",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "type": "module",
   "description": "Graph-first Electron workbench for Pi Agent",
@@ -31,8 +31,9 @@
     "dev": "electron-vite dev"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.4",
-    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-ai": "0.85.0",
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-server": "0.85.0",
     "@lucide/vue": "^1.39.0",
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",
@@ -50,6 +51,7 @@
     "ws": "8.21.0"
   },
   "devDependencies": {
+    "@injaneity/pi-computer-use": "0.5.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/ws": "8.18.1",
     "@vitejs/plugin-vue": "^6.0.8",

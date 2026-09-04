@@ -467,8 +467,10 @@ function onEvent(event: DesktopEvent) {
     const payload = event.payload as { level?: string; message?: string };
     if (payload.message) layout.showNotice(payload.message, payload.level);
   } else if (event.type === "sessions") {
-    const payload = event.payload as { current?: SessionSnapshot };
-    if (payload.current) session.applySnapshot(payload.current);
+    const payload = event.payload as { current?: SessionSnapshot; deletedPath?: string; sessions?: SessionSummary[] };
+    if (payload.deletedPath && payload.sessions)
+      session.applyDeletion(payload.deletedPath, payload.sessions);
+    else if (payload.current) session.applySnapshot(payload.current);
   }
 }
 
