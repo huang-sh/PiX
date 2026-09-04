@@ -1,6 +1,6 @@
 {
   "name": "pix",
-  "version": "0.3.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "Graph-first Electron workbench for Pi Agent",
@@ -25,6 +25,7 @@
     "test:gui:ssh": "npm run build && node scripts/gui-test.mjs --ssh",
     "verify": "npm run typecheck && npm test && npm run test:pi && npm run test:gui",
     "dist": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
     "test:packaged": "node scripts/packaged-smoke-test.mjs",
     "dev": "electron-vite dev"
   },

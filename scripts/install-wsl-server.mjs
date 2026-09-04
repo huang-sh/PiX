@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 
+if (process.platform !== "win32") {
+  console.error("install-wsl-server requires Windows: wsl.exe drives the WSL host.");
+  process.exit(1);
+}
+
 const distroIndex = process.argv.indexOf("--distro");
 const distro = distroIndex < 0 ? undefined : process.argv[distroIndex + 1];
 const root = resolve(import.meta.dirname, "..");

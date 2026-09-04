@@ -35,6 +35,23 @@ win:
       arch:
         - x64
 
+# Unsigned CI builds: identity null keeps electron-builder from discovering a
+# signing identity (none exists on GitHub runners) and failing the build.
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  identity: null
+  artifactName: PiX-${version}-${arch}.${ext}
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

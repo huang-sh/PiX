@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import { MainController } from "../out-test/src/main/controller.js";
 import { WslHostClient } from "../out-test/src/main/wsl-host-client.js";
 
+if (process.platform !== "win32") {
+  console.error("test:wsl requires Windows: it drives a WSL distribution through wsl.exe.");
+  process.exit(1);
+}
+
 const distributions = await WslHostClient.distributions();
 const distro = process.env.PIX_WSL_DISTRO || distributions[0]?.name;
 if (!distro) throw new Error("No WSL distribution is installed");

@@ -64,6 +64,11 @@ const renameInput = ref<HTMLInputElement>();
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
 
+// The custom titlebar needs platform knowledge only for the macOS traffic
+// lights (see .platform-darwin in app.css); the sandboxed renderer gets it
+// from the user agent instead of a preload addition.
+const isDarwin = /Macintosh/i.test(navigator.userAgent);
+
 function applyLanguage(settings: SettingsBundle) {
   locale.value = settings.app.language === "system"
     ? navigator.language === "zh-CN" ? "zh-CN" : "en"
@@ -512,7 +517,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-frame">
+  <div class="app-frame" :class="{ 'platform-darwin': isDarwin }">
     <AppTitlebar
       @pick-project="pickProject"
       @connect-remote="openRemote"

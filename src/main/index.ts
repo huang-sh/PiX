@@ -7,6 +7,7 @@ import {
   Menu,
   shell,
 } from "electron";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
@@ -20,10 +21,11 @@ async function openExternal(url: string) {
   await shell.openExternal(target.href);
 }
 async function create() {
+  const darwin = process.platform === "darwin";
   Menu.setApplicationMenu(
     // macOS dispatches editing shortcuts (Cmd+C/V/X/A) through the
     // application menu, so a null menu would disable them entirely.
-    process.platform === "darwin"
+    darwin
       ? Menu.buildFromTemplate([
           { label: app.name, submenu: [{ role: "about" }, { role: "quit" }] },
           { role: "editMenu" },
@@ -38,13 +40,22 @@ async function create() {
     minHeight: 700,
     title: "PiX",
     backgroundColor: "#f2f6f6",
-    frame: process.platform === "darwin",
+    frame: darwin,
     titleBarStyle: "hidden",
-    titleBarOverlay: {
-      color: "#eef2f1",
-      symbolColor: "#17201e",
-      height: 40,
-    },
+    // Windows/Linux draw overlay window controls into the page; the renderer
+    // reserves their space via env(titlebar-area-*). macOS has no overlay, so
+    // the native traffic lights sit over the hidden title bar — position them
+    // inside the 40px custom titlebar and let the renderer pad around them
+    // (env(titlebar-area-*) stays 0 there).
+    ...(darwin
+      ? { trafficLightPosition: { x: 14, y: 14 } }
+      : {
+          titleBarOverlay: {
+            color: "#eef2f1",
+            symbolColor: "#17201e",
+            height: 40,
+          },
+        }),
     webPreferences: {
       preload: join(dir, "../preload/index.cjs"),
       contextIsolation: true,
@@ -75,9 +86,13 @@ async function create() {
   else await win.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
+  // Finder/Dock launches of a packaged app set cwd to "/", so macOS builds
+  // fall back to the home directory instead of opening the filesystem root.
   const initial = process.env.PIX_PROJECT
     ? resolve(process.env.PIX_PROJECT)
-    : process.cwd();
+    : app.isPackaged && process.platform === "darwin"
+      ? homedir()
+      : process.cwd();
   controller = new MainController(initial, {
     async pickProject() {
       const r = await dialog.showOpenDialog(win, {

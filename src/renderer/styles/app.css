@@ -196,6 +196,9 @@ kbd {
 .window-controls-spacer.right {
   width: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 138px)));
 }
+/* macOS has no overlay controls, so env(titlebar-area-*) stays 0 while the
+   native traffic lights still cover the custom titlebar's top-left corner. */
+.platform-darwin .window-controls-spacer.left { width: 78px; }
 
 .shell, .workbench-splitter { width: 100%; height: 100%; }
 .shell { position: relative; overflow: hidden; background: var(--surface); }
