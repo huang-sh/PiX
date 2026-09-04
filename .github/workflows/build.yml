@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -49,10 +50,13 @@ jobs:
         run: npm run build
 
       - name: Package
-        # --publish never: electron-builder would otherwise auto-publish to
-        # GitHub Releases on CI detection and fail without GH_TOKEN.
-        run: npx electron-builder ${{ matrix.targets }} --publish never
+        # onTag: branch builds only produce workflow artifacts; pushing a v*
+        # tag publishes the installers to a GitHub Release via GH_TOKEN.
+        run: npx electron-builder ${{ matrix.targets }} --publish onTag
         env:
+          # Fine-grained PAT (Contents: read/write on this repo) stored as the
+          # PIX_TOKEN Actions secret; required for tag-triggered releases only.
+          GH_TOKEN: ${{ secrets.PIX_TOKEN }}
           # No signing identity exists on runners; keep unsigned builds explicit.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
