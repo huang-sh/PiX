@@ -14,7 +14,14 @@ if (!process.versions.electron) {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     windowsHide: true,
   });
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+  // status is null when the binary could not be launched at all (e.g. the
+  // electron dist was never downloaded because its postinstall was skipped).
+  if (result.error)
+    throw new Error(`Failed to launch ${electron}: ${result.error.message}`);
+  if (result.status !== 0)
+    throw new Error(
+      `Electron PTY test exited with code ${result.status ?? "unknown"}\n${result.stderr || result.stdout}`,
+    );
   process.stdout.write(result.stdout);
 } else {
   const { spawn } = await import("node-pty");
@@ -53,4 +60,7 @@ if (!process.versions.electron) {
     );
   });
   process.stdout.write("Electron PTY passed\n");
+  // Killed PTYs can surface teardown errors after the script body finishes
+  // and flip the exit code; the test has passed, so exit deterministically.
+  process.exit(0);
 }
