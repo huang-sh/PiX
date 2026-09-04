@@ -4,7 +4,7 @@
 
 <h1 align="center">PiX</h1>
 
-<p align="center">A desktop workbench for Pi Agent built around the graph session</p>
+<p align="center">A non-linear AI agent workbench — sessions are graphs: branch anytime, and context follows the branch</p>
 
 <p align="center">English · <a href="README.md">中文</a></p>
 

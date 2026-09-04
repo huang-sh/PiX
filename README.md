@@ -4,7 +4,7 @@
 
 <h1 align="center">PiX</h1>
 
-<p align="center">以图会话（Graph Session）为中心的 Pi Agent 桌面工作台</p>
+<p align="center">非线性的 AI Agent 工作台 —— 会话是一张图，随时分叉，上下文跟随分支</p>
 
 <p align="center"><a href="README.en.md">English</a> · 中文</p>
 
