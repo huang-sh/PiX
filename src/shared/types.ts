@@ -326,6 +326,8 @@ export interface RuntimeExtension {
   resolvedPath: string;
   source: string;
   scope: "user" | "project" | "temporary";
+  /** Distribution hint for the UI; source and scope retain pi's metadata. */
+  bundled?: boolean;
   tools: Array<{ name: string; label?: string; description?: string }>;
   commands: Array<{ name: string; description?: string }>;
 }

@@ -1,6 +1,25 @@
 import { extractFile } from "@electron/asar";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+
+// Missing optional dependencies must fail packaging, not the user's first search.
+export function checkPackagedFff(resources, platform, arch) {
+  const modules = join(resources, "pi-builtin", "node_modules");
+  const ffiTarget = `${platform}-${arch}${platform === "win32" ? "-msvc" : ""}`;
+  for (const name of [
+    "@ff-labs/pi-fff", "@ff-labs/fff-node", "ffi-rs",
+    `@ff-labs/fff-bin-${platform}-${arch}`, `@yuuang/ffi-rs-${ffiTarget}`,
+  ]) {
+    try {
+      const dir = join(modules, name);
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+      const entry = pkg.pi?.extensions[0] ?? pkg.main;
+      if (!statSync(join(dir, entry)).size) throw new Error("empty entry point");
+    } catch (cause) {
+      throw new Error(`Incomplete PiX package: ${name}. Run npm ci and package on ${platform}-${arch}.`, { cause });
+    }
+  }
+}
 
 // Check the finished archive, not just the build directory: packaging can
 // otherwise succeed while a concurrent build has temporarily emptied it.

@@ -108,7 +108,7 @@ describe("SettingsPage save", () => {
     const layout = useLayoutStore();
     layout.hydrate(initial);
     layout.settingsCategory = "models";
-    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
 
     expect(wrapper.get('[data-default-model]').text()).toBe("gpt-base");
@@ -123,7 +123,17 @@ describe("SettingsPage save", () => {
     await wrapper.get('.model-empty button').trigger("click");
     expect(wrapper.findAll('[data-provider]')).toHaveLength(2);
 
-    await wrapper.get('[data-provider="openai"] .provider-model-toggle').trigger("click");
+    const modelToggle = wrapper.get('[data-provider="openai"] .provider-model-toggle');
+    await modelToggle.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('#model-details-title').text()).toBe("OpenAI");
+    expect(wrapper.find('[data-provider="openai"] [data-provider-models]').exists()).toBe(false);
+    expect(wrapper.get('.model-inspector > .model-actions').exists()).toBe(true);
+    expect(document.activeElement).toBe(wrapper.get('.settings-inspector-close').element);
+    await wrapper.get('.model-inspector').trigger("keydown", { key: "Escape" });
+    expect(wrapper.find('.model-inspector').exists()).toBe(false);
+    expect(document.activeElement).toBe(modelToggle.element);
+    await modelToggle.trigger("click");
     expect(wrapper.get('[data-model="openai/gpt-base"]').text()).toContain("128,000 token context");
     expect(wrapper.get('[data-model-action="default"]').attributes('disabled')).toBeDefined();
     await wrapper.get('[data-model="openai/gpt-fast"] .model-select').trigger("click");
@@ -145,7 +155,13 @@ describe("SettingsPage save", () => {
 
     await wrapper.get('[data-provider-configure="other"]').trigger("click");
     expect(wrapper.find('[data-provider-models]').exists()).toBe(false);
+    expect(wrapper.get('#model-details-title').text()).toBe("Other");
+    expect(wrapper.find('[data-provider="other"] .provider-setup').exists()).toBe(false);
+    expect(wrapper.get('.model-inspector [data-provider-setup="other"]').exists()).toBe(true);
     expect(wrapper.findAll('[data-provider-oauth="other"]')).toHaveLength(2);
+    await wrapper.get('.settings-inspector-close').trigger("click");
+    expect(wrapper.find('.model-inspector').exists()).toBe(false);
+    expect(wrapper.classes()).not.toContain("has-details-panel");
     wrapper.unmount();
   });
 
@@ -261,7 +277,7 @@ describe("SettingsPage save", () => {
     expect(wrapper.get(".model-actions").text()).toContain("gpt-fast");
 
     await wrapper.get('[data-provider-configure="openai"]').trigger("click");
-    await wrapper.get('[data-provider="openai"] .provider-remove').trigger("click");
+    await wrapper.get('[data-provider-setup="openai"] .provider-remove').trigger("click");
     await flushPromises();
 
     // The selected model disappeared with the credential; the selection must
@@ -302,6 +318,7 @@ describe("SettingsPage save", () => {
     const extensions: RuntimeExtension[] = [
       { path: "/project/.pi/extensions/reviewer/index.ts", resolvedPath: "/project/.pi/extensions/reviewer/index.ts", source: "local", scope: "project", tools: [{ name: "review", description: "Review changed files" }, { name: "summarize" }], commands: [{ name: "review", description: "Start a review" }] },
       { path: "/home/me/.pi/agent/extensions/status.ts", resolvedPath: "/home/me/.pi/agent/extensions/status.ts", source: "local", scope: "user", tools: [], commands: [{ name: "status" }] },
+      { path: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", resolvedPath: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", source: "cli", scope: "temporary", bundled: true, tools: [{ name: "observe_ui" }], commands: [{ name: "computer-use" }] },
     ];
     vi.mocked(desktop.invoke).mockImplementation(async (route) =>
       route === "agent.control" ? extensions : settings,
@@ -312,15 +329,44 @@ describe("SettingsPage save", () => {
     const layout = useLayoutStore();
     layout.hydrate(settings);
     layout.settingsCategory = "extensions";
-    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
 
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("2 tools");
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("Review changed files");
-    expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("/review");
+    expect(wrapper.find('.extension-inspector').exists()).toBe(false);
+    expect(wrapper.find('.extension-grid details').exists()).toBe(false);
     expect(wrapper.get('[data-extension="status"]').text()).toContain("1 commands");
-    expect(wrapper.findAll('.extension-stats dd').map((item) => item.text())).toEqual(["2", "2", "2"]);
-    expect(wrapper.get('[data-extension="reviewer"] details').attributes('open')).toBeUndefined();
+    expect(wrapper.find('.extension-stats').exists()).toBe(false);
+    expect(wrapper.get('[data-extension-scope="temporary"]').text()).toContain("Built-in");
+    expect(wrapper.get('[data-extension="@injaneity/pi-computer-use"] .extension-scope-badge').text()).toBe("Built-in");
+    expect(wrapper.get('[data-extension="@injaneity/pi-computer-use"]').text()).toContain("Built into PiX. Loaded as a pi extension.");
+    expect(wrapper.get('[data-extension="reviewer"]').text()).not.toContain("Built into PiX");
+    expect(wrapper.find('[data-extension-scope="bundled"]').exists()).toBe(false);
+    await wrapper.get('[data-extension-scope="temporary"]').trigger("click");
+    expect(wrapper.findAll('[data-extension]')).toHaveLength(1);
+    expect(wrapper.get('[data-extension="@injaneity/pi-computer-use"] .extension-identity').text()).toContain("cli");
+    await wrapper.get('[data-extension-scope="all"]').trigger("click");
+    const reviewerDetails = wrapper.get('[data-extension="reviewer"] .extension-details');
+    await reviewerDetails.trigger("click");
+    await flushPromises();
+    expect(wrapper.classes()).toContain("has-details-panel");
+    expect(wrapper.get('.extension-inspector').text()).toContain("/review");
+    expect(wrapper.get('.extension-inspector').text()).toContain(extensions[0]!.resolvedPath);
+    expect(wrapper.find('.extension-grid .extension-detail-body').exists()).toBe(false);
+    expect(reviewerDetails.attributes('aria-expanded')).toBe("true");
+    expect(document.activeElement).toBe(wrapper.get('.settings-inspector-close').element);
+    await wrapper.get('.extension-inspector').trigger("keydown", { key: "Escape" });
+    expect(wrapper.find('.extension-inspector').exists()).toBe(false);
+    expect(document.activeElement).toBe(reviewerDetails.element);
+    await reviewerDetails.trigger("click");
+    await wrapper.get('[data-extension="@injaneity/pi-computer-use"] .extension-details').trigger("click");
+    expect(wrapper.get('#extension-details-title').text()).toBe("@injaneity/pi-computer-use");
+    expect(wrapper.get('.extension-inspector').text()).toContain("observe_ui");
+    expect(wrapper.get('.extension-inspector').text()).not.toContain("/review");
+    await wrapper.get('.settings-inspector-close').trigger("click");
+    expect(wrapper.find('.extension-inspector').exists()).toBe(false);
+    expect(wrapper.classes()).not.toContain("has-details-panel");
     await wrapper.get('[data-extension-scope="user"]').trigger("click");
     expect(wrapper.find('[data-extension="reviewer"]').exists()).toBe(false);
     expect(wrapper.get('[data-extension-scope="user"]').attributes('aria-pressed')).toBe("true");
@@ -331,10 +377,11 @@ describe("SettingsPage save", () => {
     await wrapper.get("[data-extension-search]").setValue("does-not-exist");
     expect(wrapper.get('.extension-empty').text()).toContain("No matching extensions");
     await wrapper.get('.extension-empty button').trigger("click");
-    expect(wrapper.findAll('[data-extension]')).toHaveLength(2);
+    expect(wrapper.findAll('[data-extension]')).toHaveLength(3);
     await wrapper.get("[data-extension-search]").setValue("status");
     expect(wrapper.find('[data-extension="reviewer"]').exists()).toBe(false);
 
+    await wrapper.get('[data-extension="status"] .extension-details').trigger("click");
     await wrapper.get('.extension-card button[title="Refresh extensions"]').trigger("click");
     await flushPromises();
     expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "getExtensions", reload: true });
@@ -350,5 +397,7 @@ describe("SettingsPage save", () => {
     await flushPromises();
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
     expect(wrapper.get('.extension-empty').text()).toContain("No extensions detected");
+    expect(wrapper.find('.extension-inspector').exists()).toBe(false);
+    wrapper.unmount();
   });
 });

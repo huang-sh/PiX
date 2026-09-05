@@ -58,6 +58,8 @@ Navigator | Session Graph | Branch Chat | Content Workspace
 
 ## Download
 
+PiX includes `@injaneity/pi-computer-use`, `@ff-labs/pi-fff`, and `pi-web-access`, loaded through Pi's extension mechanism. The extensions and their runtime dependencies ship with the app. No separate install is needed; an npm copy you installed through Pi takes precedence. Web search services still use your own configuration and credentials.
+
 Grab the installer for your platform from [GitHub Releases](https://github.com/huang-sh/PiX/releases):
 
 - **Windows**: `PiX-Setup-x.y.z.exe` (installer) or `PiX-Portable-x.y.z.exe` (portable), x64.
@@ -76,5 +78,7 @@ npm run dev
 ```
 
 `npm run verify` runs the full typecheck, test, and startup smoke suite.
+
+`npm run test:fff` checks bundled file search; `npm run test:web` checks web dependency packaging and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; CI builds on separate Apple Silicon and Intel runners to include the matching native libraries.
 
 </details>

@@ -321,6 +321,7 @@ test("maps visible extensions discovered by the SDK resource loader", async () =
     resolvedPath: "/project/.pi/extensions/review.ts",
     source: "local",
     scope: "project",
+    bundled: false,
     tools: [{ name: "review", label: "Review", description: "Review changed files" }],
     commands: [{ name: "review", description: "Start a review" }],
   }]);
@@ -346,7 +347,7 @@ test("factory loads bundled packages as additional extension paths", async () =>
 
   // The user's own install suppresses the bundled copy.
   await create();
-  assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
+  assert.deepEqual(servicesOptions.resourceLoaderOptions, { additionalExtensionPaths: [] });
 
   // The bundled copy loads once no user install is configured. Factory
   // resolves relative to pi-runtime's compiled location (out-test/src/main),
@@ -365,6 +366,18 @@ test("factory loads bundled packages as additional extension paths", async () =>
     await create();
     const [builtinPath] = servicesOptions.resourceLoaderOptions.additionalExtensionPaths;
     assert.equal(builtinPath, fixtureDir);
+    const extensionPath = join(fixtureDir, "extensions", "computer-use.ts");
+    runtime.runtime = { session: { resourceLoader: { getExtensions: () => ({ extensions: [{
+      path: extensionPath,
+      resolvedPath: extensionPath,
+      sourceInfo: { source: "cli", scope: "temporary" },
+      tools: new Map(),
+      commands: new Map(),
+    }] }) } } };
+    const [extension] = await runtime.control({ action: "getExtensions" }) as any[];
+    assert.equal(extension.scope, "temporary");
+    assert.equal(extension.source, "cli");
+    assert.equal(extension.bundled, true);
   } finally {
     rmSync(join(dirname(fixtureDir), "@injaneity"), { recursive: true, force: true });
   }

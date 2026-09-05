@@ -7,7 +7,7 @@ import {
   memoizeOnce,
   withDetectedBashShell,
 } from "./bash-resolution.js";
-import { resolveBuiltinPackages } from "./builtin-packages.js";
+import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
 import type {
   AgentControl,
   RawSessionEntry,
@@ -486,6 +486,7 @@ export class PiRuntime {
               resolvedPath: String(extension.resolvedPath),
               source: String(extension.sourceInfo?.source ?? "local"),
               scope: extension.sourceInfo?.scope ?? "project",
+              bundled: isBundledExtension(dirname(fileURLToPath(import.meta.url)), extension.path),
               tools: Array.from(extension.tools?.entries?.() ?? [], ([name, tool]: [string, any]) => ({
                 name,
                 label: String(tool.definition?.label ?? name),

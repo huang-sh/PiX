@@ -1,14 +1,14 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 /**
  * Pi packages PiX bundles with the app so they work without `pi install`.
  * Loaded through resourceLoaderOptions.additionalExtensionPaths, which pi
- * resolves with "user" scope: the packages are available without project
+ * resolves with "temporary" scope: the packages are available without project
  * trust and pi's own package management (pi list / pi update) never touches
  * them.
  */
-const BUILTIN_PACKAGE_NAMES = ["@injaneity/pi-computer-use"];
+const BUILTIN_PACKAGE_NAMES = ["@injaneity/pi-computer-use", "@ff-labs/pi-fff", "pi-web-access"];
 
 export interface BuiltinPackageSettings {
   getPackages(): unknown[];
@@ -85,4 +85,16 @@ export function resolveBuiltinPackages(
     if (found) packages.push(found);
   }
   return packages;
+}
+
+/** Identify distribution separately from pi's tool/extension classification. */
+export function isBundledExtension(moduleDir: string, extensionPath: string): boolean {
+  for (const name of BUILTIN_PACKAGE_NAMES) {
+    const root = resolveBuiltinPackage(moduleDir, name);
+    if (!root) continue;
+    const child = relative(root, extensionPath);
+    if (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
+      return true;
+  }
+  return false;
 }

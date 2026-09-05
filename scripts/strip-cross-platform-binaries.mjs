@@ -5,7 +5,8 @@
 // directory and delete the rest after the app is packed.
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { checkPackagedFiles } from "./check-packaged-files.mjs";
+import { checkPackagedFiles, checkPackagedFff } from "./check-packaged-files.mjs";
+import { bundlePiPackage } from "./bundle-pi-package.mjs";
 
 // electron-builder's context.arch is the numeric Arch enum (builder-util).
 const ARCH_NAMES = { 0: "ia32", 1: "x64", 2: "universal", 3: "arm64" };
@@ -55,7 +56,11 @@ function esbuildScopes(root) {
 
 export default async function afterPack(context) {
   const resources = context.packager.getResourcesDir(context.appOutDir);
+  const webPackages = bundlePiPackage(context.packager.info.appDir, resources, "pi-web-access");
+  console.log(`  • bundled pi-web-access with ${webPackages - 1} runtime dependencies`);
   checkPackagedFiles(join(resources, "app.asar"), context.packager.info.appDir);
+  if (["win32", "darwin"].includes(context.electronPlatformName))
+    checkPackagedFff(resources, context.electronPlatformName, ARCH_NAMES[context.arch]);
   const keep = new Set(hostDirectories(context.electronPlatformName, context.arch));
   if (!keep.size) return; // unknown platform/arch: keep everything
   const unpacked = join(context.appOutDir, "resources", "app.asar.unpacked");

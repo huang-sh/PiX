@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, CircleAlert, Folder, History, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
-import { computed, reactive, ref, toRaw, watch } from "vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
+import { computed, nextTick, reactive, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
@@ -37,6 +37,7 @@ const providerFilter = ref<"all" | "configured" | "other">("all");
 const selectedModel = ref("");
 const expandedProvider = ref("");
 const editingProvider = ref("");
+const selectedProvider = computed(() => providers.value.find((provider) => provider.id === (editingProvider.value || expandedProvider.value)));
 const keyDrafts = reactive<Record<string, string>>({});
 const runtimeBusy = ref(false);
 const providerBusy = ref("");
@@ -51,6 +52,28 @@ const extensionQuery = ref("");
 const extensionScope = ref<"all" | RuntimeExtension["scope"]>("all");
 const extensionBusy = ref(false);
 const extensionError = ref("");
+const selectedExtensionPath = ref("");
+const selectedExtension = computed(() => extensions.value.find((extension) => extension.resolvedPath === selectedExtensionPath.value));
+const detailsCloseButton = ref<HTMLButtonElement>();
+let detailsTrigger: HTMLButtonElement | undefined;
+
+async function focusDetailsPanel(event: MouseEvent) {
+  detailsTrigger = event.currentTarget as HTMLButtonElement;
+  await nextTick();
+  detailsCloseButton.value?.focus();
+}
+
+function openExtensionDetails(extension: RuntimeExtension, event: MouseEvent) {
+  selectedExtensionPath.value = extension.resolvedPath;
+  void focusDetailsPanel(event);
+}
+
+function closeDetailsPanel() {
+  selectedExtensionPath.value = "";
+  expandedProvider.value = "";
+  editingProvider.value = "";
+  detailsTrigger?.focus();
+}
 const categories = computed(() => [
   ["general", t("settings.categories.general"), SlidersHorizontal],
   ["appearance", t("settings.categories.appearance"), Palette],
@@ -217,10 +240,6 @@ const filteredExtensions = computed(() => {
 });
 const extensionFilters = computed(() => (["all", "project", "user", "temporary"] as const)
   .map((scope) => ({ scope, count: extensions.value.filter((extension) => scope === "all" || extension.scope === scope).length })));
-const extensionTotals = computed(() => ({
-  tools: extensions.value.reduce((total, extension) => total + extension.tools.length, 0),
-  commands: extensions.value.reduce((total, extension) => total + extension.commands.length, 0),
-}));
 
 function extensionName(path: string) {
   const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
@@ -252,21 +271,24 @@ function providerModels(provider: RuntimeProvider) {
     );
 }
 
-function toggleProvider(provider: RuntimeProvider) {
+function toggleProvider(provider: RuntimeProvider, event: MouseEvent) {
   editingProvider.value = "";
   if (expandedProvider.value === provider.id) {
-    expandedProvider.value = "";
+    closeDetailsPanel();
     return;
   }
   expandedProvider.value = provider.id;
   const available = providerModels(provider);
   if (!available.some((model) => modelKey(model) === selectedModel.value))
     selectedModel.value = modelKey(available[0] ?? { provider: "", id: "" });
+  void focusDetailsPanel(event);
 }
 
-function toggleProviderSetup(provider: RuntimeProvider) {
+function toggleProviderSetup(provider: RuntimeProvider, event: MouseEvent) {
   expandedProvider.value = "";
   editingProvider.value = editingProvider.value === provider.id ? "" : provider.id;
+  if (editingProvider.value) void focusDetailsPanel(event);
+  else closeDetailsPanel();
 }
 
 // Keeps the settings selection pointing at a real model after the catalog
@@ -336,6 +358,9 @@ async function loadExtensions(reload = false) {
 watch(
   [() => layout.settingsCategory, () => session.current?.session.id],
   () => {
+    selectedExtensionPath.value = "";
+    expandedProvider.value = "";
+    editingProvider.value = "";
     void loadRuntime();
     void loadSkills();
     void loadExtensions();
@@ -533,7 +558,7 @@ async function logout(provider: RuntimeProvider) {
 </script>
 
 <template>
-  <div class="settings-page" v-if="draft">
+  <div class="settings-page" :class="{ 'has-details-panel': (layout.settingsCategory === 'extensions' && selectedExtension) || (layout.settingsCategory === 'models' && selectedProvider) }" v-if="draft">
     <aside>
       <Button variant="ghost" class="justify-start" @click="layout.screen = 'workbench'">
         <ArrowLeft :size="16" />{{ t("settings.back") }}
@@ -618,7 +643,7 @@ async function logout(provider: RuntimeProvider) {
             <div><h2>{{ section.label }}<span>{{ section.providers.length }}</span></h2><p>{{ t(`settings.providerSectionHints.${section.id}`) }}</p></div>
           </header>
           <div class="provider-section-grid" :data-provider-section-grid="section.id">
-          <section v-for="provider in section.providers" :key="provider.id" class="provider-group" :class="{ configured: !!provider.status, expanded: expandedProvider === provider.id || editingProvider === provider.id }" :data-provider="provider.id">
+          <section v-for="provider in section.providers" :key="provider.id" class="provider-group" :class="{ configured: !!provider.status, 'is-selected': selectedProvider === provider }" :data-provider="provider.id">
             <div class="provider-row">
               <div class="provider-identity">
                 <span class="provider-icon" aria-hidden="true">{{ provider.name.slice(0, 1).toUpperCase() }}</span>
@@ -635,57 +660,16 @@ async function logout(provider: RuntimeProvider) {
             <div class="provider-card-footer">
               <span class="provider-auth-type"><KeyRound :size="13" />{{ provider.authTypes.map(type => t(`settings.providerAuthTypes.${type}`)).join(' / ') || t('settings.providerAuthTypes.custom') }}</span>
               <div class="provider-actions">
-                <button v-if="providerModels(provider).length" type="button" class="provider-model-toggle" :aria-expanded="expandedProvider === provider.id" @click="toggleProvider(provider)">
+                <button v-if="providerModels(provider).length" type="button" class="provider-model-toggle" :aria-expanded="expandedProvider === provider.id" :aria-controls="expandedProvider === provider.id ? 'model-details-panel' : undefined" @click="toggleProvider(provider, $event)">
                   {{ t(providerModels(provider).length === 1 ? "settings.oneModel" : "settings.models", { n: providerModels(provider).length }) }}
-                  <ChevronDown :size="14" :class="{ open: expandedProvider === provider.id }" />
+                  <ChevronRight :size="14" />
                 </button>
-                <Button variant="outline" size="sm" :data-provider-configure="provider.id" :aria-expanded="editingProvider === provider.id" @click="toggleProviderSetup(provider)">
+                <Button variant="outline" size="sm" :data-provider-configure="provider.id" :aria-expanded="editingProvider === provider.id" :aria-controls="editingProvider === provider.id ? 'model-details-panel' : undefined" @click="toggleProviderSetup(provider, $event)">
                   {{ t(editingProvider === provider.id ? "settings.closeProviderSetup" : provider.status ? "settings.manageProvider" : "settings.configureProvider") }}
                 </Button>
               </div>
             </div>
 
-            <div v-if="editingProvider === provider.id" class="provider-setup" :data-provider-setup="provider.id">
-              <div class="provider-setup-heading"><strong>{{ t("settings.providerSetupTitle", { name: provider.name }) }}</strong><small>{{ t(provider.authTypes.includes('api_key') ? 'settings.providerKeyHint' : 'settings.providerLoginHint') }}</small></div>
-              <form v-if="provider.authTypes.includes('api_key')" class="provider-auth" @submit.prevent="saveApiKey(provider)">
-                <label>
-                  <KeyRound :size="14" />
-                  <input v-model="keyDrafts[provider.id]" type="password" autocomplete="off" :aria-label="t('settings.providerApiKeyLabel', { name: provider.name })" :data-provider-api-key="provider.id" :placeholder="provider.status?.type === 'api_key' ? t('settings.replaceApiKey') : t('settings.enterApiKey')" />
-                </label>
-                <Button size="sm" class="model-primary-button" :disabled="providerBusy === provider.id || !keyDrafts[provider.id]?.trim()">{{ t("settings.saveKey") }}</Button>
-              </form>
-              <div v-else-if="provider.authTypes.includes('oauth')" class="provider-auth">
-                <Button variant="outline" size="sm" :data-provider-oauth="provider.id" data-oauth-method="browser" :disabled="providerBusy === provider.id" @click="loginOAuth(provider, 'browser')">
-                  {{ providerBusy === provider.id ? t("settings.waitingSignIn") : t("settings.browser") }}
-                </Button>
-                <Button variant="outline" size="sm" :data-provider-oauth="provider.id" data-oauth-method="device-code" :disabled="providerBusy === provider.id" @click="loginOAuth(provider, 'device-code')">
-                  {{ t("settings.deviceCode") }}
-                </Button>
-              </div>
-              <small v-else class="provider-auth-note">{{ t("settings.providerSetupNote") }}</small>
-              <Button v-if="provider.status" variant="ghost" size="sm" class="provider-remove" :disabled="providerBusy === provider.id" @click="logout(provider)">{{ t("settings.removeProviderCredentials") }}</Button>
-            </div>
-
-            <div v-if="expandedProvider === provider.id" class="provider-model-list" :data-provider-models="provider.id">
-              <div class="provider-model-heading"><strong>{{ t("settings.chooseModel") }}</strong><span>{{ t("settings.chooseModelHint") }}</span></div>
-              <p v-if="!providerModels(provider).length" class="settings-empty">{{ t("settings.noModels") }}</p>
-              <article v-for="model in providerModels(provider)" :key="modelKey(model)" class="model-row" :class="{ selected: selectedModel === modelKey(model) }" :data-model="`${model.provider}/${model.id}`">
-                <button type="button" class="model-select" :aria-pressed="selectedModel === modelKey(model)" @click="selectedModel = modelKey(model)">
-                  <span class="model-selection-mark" aria-hidden="true"><Check v-if="selectedModel === modelKey(model)" :size="12" /></span>
-                  <span><strong>{{ model.id }}</strong><small>{{ model.name || model.provider }}</small><span v-if="model.contextWindow || model.reasoning" class="model-specs"><span v-if="model.contextWindow">{{ t("settings.modelContext", { n: model.contextWindow.toLocaleString(locale) }) }}</span><span v-if="model.reasoning"><Sparkles :size="11" />{{ t("settings.modelReasoning") }}</span></span></span>
-                </button>
-                <span class="model-meta">
-                  <em v-if="currentModel === modelKey(model)" class="active">{{ t("settings.badgeCurrent") }}</em>
-                  <em v-if="defaultModel === modelKey(model)" class="default">{{ t("settings.badgeDefault") }}</em>
-                  <em v-if="draft.piGlobal.modelThinkingLevels?.[modelSettingsKey(model)]" class="default">{{ t("settings.badgeThinking") }}</em>
-                  <label class="model-cycle" :title="t('settings.cycleTitle')"><input type="checkbox" :checked="cyclingEnabled(model)" @change="toggleCycling(model)" />{{ t("settings.cycle") }}</label>
-                </span>
-              </article>
-              <footer class="model-actions">
-                <span><small>{{ t("settings.selectedModelLabel") }}</small><strong>{{ selectedRuntimeModel?.id || '—' }}</strong></span>
-                <Button class="model-primary-button" data-model-action="default" :disabled="!selectedModel || selectedModel === defaultModel" @click="applyModel">{{ t(selectedModel === defaultModel ? "settings.alreadyDefault" : "settings.setDefault") }}</Button>
-              </footer>
-            </div>
           </section>
           </div>
           </template>
@@ -762,11 +746,6 @@ async function logout(provider: RuntimeProvider) {
             <span class="extension-intro-icon"><Puzzle :size="25" aria-hidden="true" /></span>
             <div><h2>{{ t("settings.extensionLibrary") }}</h2><p>{{ t("settings.extensionLibraryHint") }}</p></div>
           </div>
-          <dl class="extension-stats">
-            <div><dt><Puzzle :size="14" />{{ t("settings.extensionDetected") }}</dt><dd>{{ extensionBusy && !extensions.length ? '—' : extensions.length }}</dd></div>
-            <div><dt><Wrench :size="14" />{{ t("settings.extensionToolLabel") }}</dt><dd>{{ extensionBusy && !extensions.length ? '—' : extensionTotals.tools }}</dd></div>
-            <div><dt><Terminal :size="14" />{{ t("settings.extensionCommandLabel") }}</dt><dd>{{ extensionBusy && !extensions.length ? '—' : extensionTotals.commands }}</dd></div>
-          </dl>
         </div>
         <div class="extension-controls">
           <div class="settings-toolbar">
@@ -798,27 +777,18 @@ async function logout(provider: RuntimeProvider) {
           <Button variant="outline" @click="extensionQuery = ''; extensionScope = 'all'">{{ t("settings.extensionResetFilters") }}</Button>
         </div>
         <div v-else-if="filteredExtensions.length" class="extension-grid">
-          <article v-for="extension in filteredExtensions" :key="extension.resolvedPath" class="extension-item" :data-extension="extensionName(extension.path)" :data-scope="extension.scope">
+          <article v-for="extension in filteredExtensions" :key="extension.resolvedPath" class="extension-item" :class="{ 'is-selected': selectedExtension === extension }" :data-extension="extensionName(extension.path)" :data-scope="extension.scope">
             <header class="extension-item-header">
               <span class="extension-item-icon"><Puzzle :size="22" aria-hidden="true" /></span>
               <div class="extension-identity"><h3 :title="extensionName(extension.path)">{{ extensionName(extension.path) }}</h3><span>{{ extension.source }}</span></div>
               <span class="extension-scope-badge">{{ t(`settings.extensionFilters.${extension.scope}`) }}</span>
             </header>
             <div class="extension-item-body">
+              <p v-if="extension.bundled" class="extension-no-capabilities">{{ t("settings.extensionBundledNote") }}</p>
               <p class="extension-summary">{{ extension.tools.find(tool => tool.description)?.description || extension.commands.find(command => command.description)?.description || t("settings.extensionNoDescription") }}</p>
               <div class="extension-metrics"><span><Wrench :size="13" />{{ t("settings.extensionTools", { n: extension.tools.length }) }}</span><span><Terminal :size="13" />{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</span></div>
             </div>
-            <details class="extension-details">
-              <summary>{{ t("settings.extensionDetails") }}<ChevronDown :size="15" /></summary>
-              <div class="extension-detail-body">
-                <div class="extension-path"><strong><Folder :size="13" />{{ t("settings.extensionLocation") }}</strong><code>{{ extension.resolvedPath }}</code></div>
-                <div v-if="extension.tools.length || extension.commands.length" class="extension-capabilities">
-                  <section v-if="extension.tools.length"><strong>{{ t("settings.extensionTools", { n: extension.tools.length }) }}</strong><div v-for="tool in extension.tools" :key="tool.name" class="extension-capability"><code>{{ tool.name }}</code><p v-if="tool.description">{{ tool.description }}</p></div></section>
-                  <section v-if="extension.commands.length"><strong>{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</strong><div v-for="command in extension.commands" :key="command.name" class="extension-capability"><code>/{{ command.name }}</code><p v-if="command.description">{{ command.description }}</p></div></section>
-                </div>
-                <p v-else class="extension-no-capabilities">{{ t("settings.extensionNoCapabilities") }}</p>
-              </div>
-            </details>
+            <button type="button" class="extension-details" :aria-expanded="selectedExtension === extension" :aria-controls="selectedExtension === extension ? 'extension-details-panel' : undefined" @click="openExtensionDetails(extension, $event)">{{ t("settings.extensionDetails") }}<ChevronRight :size="15" /></button>
           </article>
         </div>
         <p class="extension-footnote"><Folder :size="14" aria-hidden="true" />{{ t("settings.extensionDiscoveryNote") }}</p>
@@ -840,5 +810,71 @@ async function logout(provider: RuntimeProvider) {
         </label>
       </section>
     </main>
+    <aside v-if="layout.settingsCategory === 'models' && selectedProvider" id="model-details-panel" class="settings-inspector model-inspector" aria-labelledby="model-details-title" @keydown.esc.stop="closeDetailsPanel">
+      <header class="settings-inspector-header">
+        <div><small>{{ t(editingProvider ? "settings.manageProvider" : "settings.chooseModel") }}</small><h2 id="model-details-title">{{ selectedProvider.name }}</h2><span>{{ selectedProvider.id }}</span></div>
+        <button ref="detailsCloseButton" type="button" class="settings-inspector-close" :aria-label="t('common.close')" @click="closeDetailsPanel"><X :size="18" /></button>
+      </header>
+      <div :key="selectedProvider.id + (editingProvider ? ':setup' : ':models')" class="settings-inspector-body model-inspector-body" tabindex="0" :aria-label="t(editingProvider ? 'settings.manageProvider' : 'settings.chooseModel')">
+        <div v-if="editingProvider === selectedProvider.id" class="provider-setup" :data-provider-setup="selectedProvider.id">
+          <div class="provider-setup-heading"><strong>{{ t("settings.providerSetupTitle", { name: selectedProvider.name }) }}</strong><small>{{ t(selectedProvider.authTypes.includes('api_key') ? 'settings.providerKeyHint' : 'settings.providerLoginHint') }}</small></div>
+          <form v-if="selectedProvider.authTypes.includes('api_key')" class="provider-auth" @submit.prevent="saveApiKey(selectedProvider)">
+            <label>
+              <KeyRound :size="14" />
+              <input v-model="keyDrafts[selectedProvider.id]" type="password" autocomplete="off" :aria-label="t('settings.providerApiKeyLabel', { name: selectedProvider.name })" :data-provider-api-key="selectedProvider.id" :placeholder="selectedProvider.status?.type === 'api_key' ? t('settings.replaceApiKey') : t('settings.enterApiKey')" />
+            </label>
+            <Button size="sm" class="model-primary-button" :disabled="providerBusy === selectedProvider.id || !keyDrafts[selectedProvider.id]?.trim()">{{ t("settings.saveKey") }}</Button>
+          </form>
+          <div v-else-if="selectedProvider.authTypes.includes('oauth')" class="provider-auth">
+            <Button variant="outline" size="sm" :data-provider-oauth="selectedProvider.id" data-oauth-method="browser" :disabled="providerBusy === selectedProvider.id" @click="loginOAuth(selectedProvider, 'browser')">
+              {{ providerBusy === selectedProvider.id ? t("settings.waitingSignIn") : t("settings.browser") }}
+            </Button>
+            <Button variant="outline" size="sm" :data-provider-oauth="selectedProvider.id" data-oauth-method="device-code" :disabled="providerBusy === selectedProvider.id" @click="loginOAuth(selectedProvider, 'device-code')">
+              {{ t("settings.deviceCode") }}
+            </Button>
+          </div>
+          <small v-else class="provider-auth-note">{{ t("settings.providerSetupNote") }}</small>
+          <Button v-if="selectedProvider.status" variant="ghost" size="sm" class="provider-remove" :disabled="providerBusy === selectedProvider.id" @click="logout(selectedProvider)">{{ t("settings.removeProviderCredentials") }}</Button>
+        </div>
+
+        <div v-if="expandedProvider === selectedProvider.id" class="provider-model-list" :data-provider-models="selectedProvider.id">
+          <div class="provider-model-heading"><strong>{{ t("settings.chooseModel") }}</strong><span>{{ t("settings.chooseModelHint") }}</span></div>
+          <p v-if="!providerModels(selectedProvider).length" class="settings-empty">{{ t("settings.noModels") }}</p>
+          <article v-for="model in providerModels(selectedProvider)" :key="modelKey(model)" class="model-row" :class="{ selected: selectedModel === modelKey(model) }" :data-model="`${model.provider}/${model.id}`">
+            <button type="button" class="model-select" :aria-pressed="selectedModel === modelKey(model)" @click="selectedModel = modelKey(model)">
+              <span class="model-selection-mark" aria-hidden="true"><Check v-if="selectedModel === modelKey(model)" :size="12" /></span>
+              <span><strong>{{ model.id }}</strong><small>{{ model.name || model.provider }}</small><span v-if="model.contextWindow || model.reasoning" class="model-specs"><span v-if="model.contextWindow">{{ t("settings.modelContext", { n: model.contextWindow.toLocaleString(locale) }) }}</span><span v-if="model.reasoning"><Sparkles :size="11" />{{ t("settings.modelReasoning") }}</span></span></span>
+            </button>
+            <span class="model-meta">
+              <em v-if="currentModel === modelKey(model)" class="active">{{ t("settings.badgeCurrent") }}</em>
+              <em v-if="defaultModel === modelKey(model)" class="default">{{ t("settings.badgeDefault") }}</em>
+              <em v-if="draft.piGlobal.modelThinkingLevels?.[modelSettingsKey(model)]" class="default">{{ t("settings.badgeThinking") }}</em>
+              <label class="model-cycle" :title="t('settings.cycleTitle')"><input type="checkbox" :checked="cyclingEnabled(model)" @change="toggleCycling(model)" />{{ t("settings.cycle") }}</label>
+            </span>
+          </article>
+
+        </div>
+      </div>
+      <footer v-if="expandedProvider" class="model-actions">
+        <span><small>{{ t("settings.selectedModelLabel") }}</small><strong>{{ selectedRuntimeModel?.id || '—' }}</strong></span>
+        <Button class="model-primary-button" data-model-action="default" :disabled="!selectedModel || selectedModel === defaultModel" @click="applyModel">{{ t(selectedModel === defaultModel ? "settings.alreadyDefault" : "settings.setDefault") }}</Button>
+      </footer>
+    </aside>
+    <aside v-if="layout.settingsCategory === 'extensions' && selectedExtension" id="extension-details-panel" class="settings-inspector extension-inspector" aria-labelledby="extension-details-title" @keydown.esc.stop="closeDetailsPanel">
+      <header class="settings-inspector-header">
+        <div><small>{{ t("settings.extensionDetails") }}</small><h2 id="extension-details-title">{{ extensionName(selectedExtension.path) }}</h2><span>{{ selectedExtension.source }}</span></div>
+        <button ref="detailsCloseButton" type="button" class="settings-inspector-close" :aria-label="t('common.close')" @click="closeDetailsPanel"><X :size="18" /></button>
+      </header>
+      <div :key="selectedExtension.resolvedPath" class="settings-inspector-body extension-detail-body" tabindex="0" :aria-label="t('settings.extensionDetails')">
+        <span class="extension-scope-badge">{{ t(`settings.extensionFilters.${selectedExtension.scope}`) }}</span>
+        <p v-if="selectedExtension.bundled" class="extension-no-capabilities">{{ t("settings.extensionBundledNote") }}</p>
+        <div class="extension-path"><strong><Folder :size="13" />{{ t("settings.extensionLocation") }}</strong><code>{{ selectedExtension.resolvedPath }}</code></div>
+        <div v-if="selectedExtension.tools.length || selectedExtension.commands.length" class="extension-capabilities">
+          <section v-if="selectedExtension.tools.length"><h3>{{ t("settings.extensionTools", { n: selectedExtension.tools.length }) }}</h3><div v-for="tool in selectedExtension.tools" :key="tool.name" class="extension-capability"><code>{{ tool.name }}</code><p v-if="tool.description">{{ tool.description }}</p></div></section>
+          <section v-if="selectedExtension.commands.length"><h3>{{ t("settings.extensionCommands", { n: selectedExtension.commands.length }) }}</h3><div v-for="command in selectedExtension.commands" :key="command.name" class="extension-capability"><code>/{{ command.name }}</code><p v-if="command.description">{{ command.description }}</p></div></section>
+        </div>
+        <p v-else class="extension-no-capabilities">{{ t("settings.extensionNoCapabilities") }}</p>
+      </div>
+    </aside>
   </div>
 </template>

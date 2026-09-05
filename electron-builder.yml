@@ -11,7 +11,8 @@ files:
   - resources/**
 
 # Cross-platform binary pruning (esbuild ships ~230MB of other-platform
-# binaries via pi's chord dependency); see the hook for details.
+# binaries via pi's chord dependency). The hook also copies pi-web-access
+# and its installed runtime dependency tree outside asar.
 afterPack: scripts/strip-cross-platform-binaries.mjs
 
 # node-pty ships NAPI prebuilds for every platform (node_modules/node-pty/
@@ -50,6 +51,18 @@ win:
         - "**/*"
         - "!prebuilt/linux/**"
         - "!prebuilt/macos/**"
+    # Keep the extension, Node SDK, and target-native libraries together so
+    # imports resolve outside app.asar without a user install or download.
+    - from: node_modules/@ff-labs/pi-fff
+      to: pi-builtin/node_modules/@ff-labs/pi-fff
+    - from: node_modules/@ff-labs/fff-node
+      to: pi-builtin/node_modules/@ff-labs/fff-node
+    - from: node_modules/@ff-labs/fff-bin-win32-${arch}
+      to: pi-builtin/node_modules/@ff-labs/fff-bin-win32-${arch}
+    - from: node_modules/ffi-rs
+      to: pi-builtin/node_modules/ffi-rs
+    - from: node_modules/@yuuang/ffi-rs-win32-${arch}-msvc
+      to: pi-builtin/node_modules/@yuuang/ffi-rs-win32-${arch}-msvc
   target:
     - target: nsis
       arch:
@@ -77,15 +90,21 @@ mac:
         - "**/*"
         - "!prebuilt/linux/**"
         - "!prebuilt/windows/**"
+    - from: node_modules/@ff-labs/pi-fff
+      to: pi-builtin/node_modules/@ff-labs/pi-fff
+    - from: node_modules/@ff-labs/fff-node
+      to: pi-builtin/node_modules/@ff-labs/fff-node
+    - from: node_modules/@ff-labs/fff-bin-darwin-${arch}
+      to: pi-builtin/node_modules/@ff-labs/fff-bin-darwin-${arch}
+    - from: node_modules/ffi-rs
+      to: pi-builtin/node_modules/ffi-rs
+    - from: node_modules/@yuuang/ffi-rs-darwin-${arch}
+      to: pi-builtin/node_modules/@yuuang/ffi-rs-darwin-${arch}
+  # npm installs native optional dependencies for the build machine. Build
+  # each architecture on its matching runner (see .github/workflows/build.yml).
   target:
     - target: dmg
-      arch:
-        - x64
-        - arm64
     - target: zip
-      arch:
-        - x64
-        - arm64
 
 nsis:
   oneClick: false

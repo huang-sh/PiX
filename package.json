@@ -28,6 +28,8 @@
     "dist": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
     "test:packaged": "node scripts/packaged-smoke-test.mjs",
+    "test:fff": "node scripts/builtin-fff-smoke-test.mjs",
+    "test:web": "node --test scripts/bundle-pi-package.test.mjs && node scripts/builtin-web-smoke-test.mjs",
     "dev": "electron-vite dev"
   },
   "dependencies": {
@@ -51,6 +53,7 @@
     "ws": "8.21.0"
   },
   "devDependencies": {
+    "@ff-labs/pi-fff": "0.10.6",
     "@injaneity/pi-computer-use": "0.5.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/ws": "8.18.1",
@@ -60,6 +63,7 @@
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "jsdom": "^30.0.1",
+    "pi-web-access": "0.27.0",
     "tailwindcss": "^4.3.3",
     "typescript": "5.8.3",
     "vite": "^7.3.6",

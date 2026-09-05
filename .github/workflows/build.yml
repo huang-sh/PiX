@@ -15,9 +15,11 @@ jobs:
         include:
           - os: windows-latest
             targets: --win
-          # Apple Silicon runner; x64 targets cross-build from it.
+          # FFF and ffi-rs install native optional dependencies per architecture.
           - os: macos-14
-            targets: --mac --arm64 --x64
+            targets: --mac --arm64
+          - os: macos-15-intel
+            targets: --mac --x64
     runs-on: ${{ matrix.os }}
     # Publishing a GitHub Release on tag builds needs contents write access
     # for the workflow's built-in token.
@@ -50,6 +52,12 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test bundled FFF native search
+        run: npm run test:fff
+
+      - name: Test bundled web extension
+        run: npm run test:web
+
       - name: Build
         run: npm run build
 
@@ -64,7 +72,7 @@ jobs:
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: PiX-${{ runner.os }}-${{ github.ref_name }}
+          name: PiX-${{ matrix.os }}-${{ github.ref_name }}
           path: |
             release/*.exe
             release/*.dmg

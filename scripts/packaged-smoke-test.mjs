@@ -5,7 +5,7 @@
 // their packaged form.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -19,6 +19,26 @@ const defaultTarget =
 const target = exe || defaultTarget;
 if (!existsSync(target))
   throw new Error(`Packaged PiX executable not found: ${target}`);
+const resources = process.platform === "darwin"
+  ? join(dirname(target), "..", "Resources") : join(dirname(target), "resources");
+// A portable launcher extracts resources only after startup; run this direct
+// SDK check for the unpacked executable, where the resources are addressable.
+const bundledChecks = existsSync(join(resources, "app.asar"));
+if (bundledChecks) {
+  for (const name of ["fff", "web"]) {
+    const result = spawnSync(target, [
+      join(root, "scripts", `builtin-${name}-smoke-test.mjs`),
+      join(resources, "pi-builtin", "node_modules"),
+      join(resources, "app.asar", "node_modules"),
+    ], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      encoding: "utf8", timeout: 60_000, windowsHide: true,
+    });
+    if (result.status !== 0)
+      throw new Error(`Packaged ${name} check failed: ${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
+    console.log(result.stdout.trim());
+  }
+}
 const artifacts = join(root, "artifacts");
 const testHome = join(artifacts, "packaged-home");
 mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
@@ -233,6 +253,9 @@ try {
     rendererReady: true,
     sessions: session.sessions,
     terminal: true,
+    fffind: bundledChecks,
+    ffgrep: bundledChecks,
+    webFetch: bundledChecks,
     passed: true,
   };
   writeFileSync(
