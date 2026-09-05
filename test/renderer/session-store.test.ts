@@ -67,7 +67,9 @@ describe("session stream focus", () => {
     expect(session.pendingPrompt).toBeUndefined();
     expect(session.userThinking).toBeUndefined();
     expect(session.commands).toEqual([]);
-    expect(session.models).toEqual([]);
+    // The model catalog is global state, not session state — deleting the
+    // session must not clear it.
+    expect(session.models).toEqual([{ provider: "test", id: "test" }]);
     expect(session.selectedMessages).toEqual([]);
     expect(session.projects[0]?.sessions).toEqual([]);
 
@@ -91,7 +93,7 @@ describe("session stream focus", () => {
     expect(session.selectedMessages).toHaveLength(2);
   });
 
-  it("keeps models when command discovery fails", async () => {
+  it("loads commands and models independently, keeping the catalog when discovery fails or the session goes away", async () => {
     const session = useSessionStore();
     const current = snapshot(first, "a1");
     current.runtime = { ...current.runtime, available: true };
@@ -102,7 +104,15 @@ describe("session stream focus", () => {
     });
 
     await session.loadCommands();
+    expect(session.commands).toEqual([]);
 
+    await session.loadModels();
+    expect(session.models).toEqual([{ provider: "deepseek", id: "deepseek-chat" }]);
+
+    // Commands are session-scoped and clear without a usable session; the
+    // catalog is global and survives.
+    current.runtime = { ...current.runtime, available: false };
+    await session.loadCommands();
     expect(session.commands).toEqual([]);
     expect(session.models).toEqual([{ provider: "deepseek", id: "deepseek-chat" }]);
   });

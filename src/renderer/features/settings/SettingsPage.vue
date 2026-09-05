@@ -28,7 +28,9 @@ const workspace = useWorkspaceStore();
 const session = useSessionStore();
 const { locale, t, te } = useI18n();
 const draft = ref<SettingsBundle>();
-const models = ref<RuntimeModel[]>([]);
+// The model catalog lives in the session store so every consumer (settings,
+// graph, branch context) reads one list; this page only reloads it.
+const models = computed(() => session.models);
 const providers = ref<RuntimeProvider[]>([]);
 const modelQuery = ref("");
 const providerFilter = ref<"all" | "configured" | "other">("all");
@@ -267,24 +269,37 @@ function toggleProviderSetup(provider: RuntimeProvider) {
   editingProvider.value = editingProvider.value === provider.id ? "" : provider.id;
 }
 
+// Keeps the settings selection pointing at a real model after the catalog
+// changes (login can add models, logout can remove the selected one); a valid
+// pick always wins so reloading never stomps an explicit choice.
+function normalizeSelectedModel() {
+  if (selectedModel.value && models.value.some((model) => modelKey(model) === selectedModel.value)) return;
+  const preferred = currentModel.value || defaultModel.value;
+  selectedModel.value = models.value.some((model) => modelKey(model) === preferred)
+    ? preferred
+    : modelKey(models.value[0] ?? { provider: "", id: "" });
+}
+
+// Reloads the catalog pair shown here and, through the store, everywhere else
+// (graph draft picker, branch-context composer). Used after any action that can
+// change which models are available.
+async function loadRuntimeCatalog() {
+  const [, providerList] = await Promise.all([
+    session.loadModels(),
+    session.control<RuntimeProvider[]>({ action: "getProviders" }),
+  ]);
+  providers.value = providerList;
+  normalizeSelectedModel();
+}
+
 async function loadRuntime(refresh = false) {
   if (layout.settingsCategory !== "models" || runtimeBusy.value) return;
   runtimeBusy.value = true;
   runtimeError.value = "";
   try {
     if (refresh) await session.control({ action: "refreshModels" });
-    [models.value, providers.value] = await Promise.all([
-      session.control<RuntimeModel[]>({ action: "getModels" }),
-      session.control<RuntimeProvider[]>({ action: "getProviders" }),
-    ]);
-    const preferred = currentModel.value || defaultModel.value;
-    selectedModel.value = models.value.some((model) => modelKey(model) === preferred)
-      ? preferred
-      : modelKey(models.value[0] ?? { provider: "", id: "" });
-    if (refresh) {
-      session.models = models.value;
-      layout.showNotice(t("settings.modelCatalogRefreshed"));
-    }
+    await loadRuntimeCatalog();
+    if (refresh) layout.showNotice(t("settings.modelCatalogRefreshed"));
   } catch (error) {
     runtimeError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -476,10 +491,7 @@ async function saveApiKey(provider: RuntimeProvider) {
     await session.control({ action: "loginApiKey", provider: provider.id, apiKey });
     keyDrafts[provider.id] = "";
     editingProvider.value = "";
-    [models.value, providers.value] = await Promise.all([
-      session.control<RuntimeModel[]>({ action: "getModels" }),
-      session.control<RuntimeProvider[]>({ action: "getProviders" }),
-    ]);
+    await loadRuntimeCatalog();
     layout.showNotice(t("settings.apiKeySaved", { name: provider.name }));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -492,10 +504,7 @@ async function loginOAuth(provider: RuntimeProvider, method: "browser" | "device
   providerBusy.value = provider.id;
   try {
     await session.control({ action: "loginOAuth", provider: provider.id, method });
-    [models.value, providers.value] = await Promise.all([
-      session.control<RuntimeModel[]>({ action: "getModels" }),
-      session.control<RuntimeProvider[]>({ action: "getProviders" }),
-    ]);
+    await loadRuntimeCatalog();
     if (!providers.value.find((item) => item.id === provider.id)?.status)
       throw new Error(`${provider.name} login did not produce a usable credential.`);
     editingProvider.value = "";
@@ -512,10 +521,7 @@ async function logout(provider: RuntimeProvider) {
   try {
     await session.control({ action: "logout", provider: provider.id });
     editingProvider.value = "";
-    [models.value, providers.value] = await Promise.all([
-      session.control<RuntimeModel[]>({ action: "getModels" }),
-      session.control<RuntimeProvider[]>({ action: "getProviders" }),
-    ]);
+    await loadRuntimeCatalog();
     layout.showNotice(t("settings.credentialsRemoved", { name: provider.name }));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");

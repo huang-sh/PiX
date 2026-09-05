@@ -142,23 +142,34 @@ export const useSessionStore = defineStore("session", {
       this.sessions = await desktop.invoke<SessionSummary[]>("session.list");
       this.syncProject();
     },
+    // Commands are session-scoped: no usable session means none to offer.
     async loadCommands() {
       if (!this.current?.runtime.available) {
         this.commands = [];
-        this.models = [];
         return;
       }
-      [this.commands, this.models] = await Promise.all([
-        desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []),
-        desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" }).catch(() => []),
-      ]);
+      this.commands = await desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
+    },
+    // Single source of truth for the model catalog: every path that can change
+    // it (bootstrap, settings open, login/logout, catalog refresh, session
+    // open) reloads through here so pickers never serve a stale list. The
+    // catalog is global — project-less fetch is fine, the runtime serves model
+    // actions without an open session.
+    async loadModels(): Promise<RuntimeModel[]> {
+      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
+      this.models = models;
+      return models;
     },
     async open(path: string) {
       this.loading = true;
       const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
       this.applySnapshot(snapshot);
       this.focusedNode = snapshot.projection.activeNodeId;
-      await Promise.all([this.refresh(), this.loadCommands()]);
+      await Promise.all([
+        this.refresh(),
+        this.loadCommands(),
+        this.loadModels().catch(() => {}),
+      ]);
       this.loading = false;
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
@@ -260,7 +271,6 @@ export const useSessionStore = defineStore("session", {
         this.pendingPrompt = undefined;
         this.userThinking = undefined;
         this.commands = [];
-        this.models = [];
       }
       this.syncProject();
     },

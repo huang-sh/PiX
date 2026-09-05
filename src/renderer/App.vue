@@ -87,7 +87,7 @@ async function hydrate(data: BootstrapData, openFirst = false) {
   await workspace.load();
   if (openFirst && !session.current && session.sessions[0])
     await session.open(session.sessions[0].path);
-  await session.loadCommands();
+  await Promise.all([session.loadCommands(), session.loadModels().catch(() => {})]);
   session.loading = false;
 }
 

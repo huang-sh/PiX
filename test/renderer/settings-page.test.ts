@@ -192,6 +192,85 @@ describe("SettingsPage save", () => {
     wrapper.unmount();
   });
 
+  it("updates the shared model list used by the graph after saving an API key", async () => {
+    const available: RuntimeModel[] = [{ provider: "openai", id: "existing-model" }];
+    const providers: RuntimeProvider[] = [{ id: "openai", name: "OpenAI", authTypes: ["api_key"] }];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action?: string }).action;
+      if (action === "getModels") return [...available];
+      if (action === "getProviders") return providers;
+      if (action === "loginApiKey") {
+        available.push({ provider: "openai", id: "new-model" });
+        return { ok: true };
+      }
+      return {};
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+
+    const store = useSessionStore();
+    expect(store.models.map((model) => model.id)).toEqual(["existing-model"]);
+
+    await wrapper.get('[data-provider-configure="openai"]').trigger("click");
+    await wrapper.get('[data-provider-api-key="openai"]').setValue("sk-test");
+    await wrapper.get("form.provider-auth").trigger("submit");
+    await flushPromises();
+
+    // The store list — what the graph and branch-context pickers read — must
+    // pick up the model the new credential unlocked without a restart, session
+    // reopen, or manual catalog refresh.
+    expect(store.models.map((model) => model.id)).toEqual(["existing-model", "new-model"]);
+    wrapper.unmount();
+  });
+
+  it("re-points the settings selection when logout removes the selected model", async () => {
+    let available: RuntimeModel[] = [
+      { provider: "openai", id: "gpt-base" },
+      { provider: "openai", id: "gpt-fast" },
+    ];
+    const providers: RuntimeProvider[] = [
+      { id: "openai", name: "OpenAI", authTypes: ["api_key"], status: { type: "api_key" } },
+    ];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action?: string }).action;
+      if (action === "getModels") return [...available];
+      if (action === "getProviders") return providers;
+      if (action === "logout") {
+        available = [available[0]];
+        return { ok: true };
+      }
+      return {};
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+
+    await wrapper.get('[data-provider="openai"] .provider-model-toggle').trigger("click");
+    await wrapper.get('[data-model="openai/gpt-fast"] .model-select').trigger("click");
+    expect(wrapper.get(".model-actions").text()).toContain("gpt-fast");
+
+    await wrapper.get('[data-provider-configure="openai"]').trigger("click");
+    await wrapper.get('[data-provider="openai"] .provider-remove').trigger("click");
+    await flushPromises();
+
+    // The selected model disappeared with the credential; the selection must
+    // fall back to a real model instead of dangling on a missing one.
+    await wrapper.get('[data-provider="openai"] .provider-model-toggle').trigger("click");
+    expect(wrapper.get(".model-actions").text()).toContain("gpt-base");
+    wrapper.unmount();
+  });
+
   it("shows, filters, and refreshes skills detected by Pi", async () => {
     const skills: RuntimeSkill[] = [
       { name: "docx", description: "Create Word documents", path: "/home/me/.pi/agent/skills/docx/SKILL.md", source: "local", scope: "user", disableModelInvocation: false },

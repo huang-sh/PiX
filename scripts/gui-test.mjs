@@ -916,6 +916,34 @@ try {
   if (!workbenchAfterSettings.contentClosed || workbenchAfterSettings.graphTransform !== workbenchBeforeSettings.graphTransform)
     throw new Error(`Workbench layout changed after navigation: ${JSON.stringify({ workbenchBeforeSettings, workbenchAfterSettings })}`);
   result.workbenchPreserved = true;
+  // The catalog the settings page just reloaded (the API key login above) must
+  // reach the graph draft's model picker without a restart or session reopen.
+  if (await cdp.evaluate("Boolean(window.__pixTest.state().current)")) {
+    await cdp.evaluate(`(() => {
+      if (!document.querySelector('.draft-node')) {
+        const node = document.querySelector('.prompt-node.selected') ?? document.querySelector('.prompt-node');
+        node.querySelector('.node-add').click();
+      }
+    })()`);
+    await retry(async () => {
+      if (!(await cdp.evaluate(`Boolean(document.querySelector('.draft-node button[aria-label="Draft model"]'))`)))
+        throw new Error("Graph draft did not open after returning from settings");
+    });
+    await cdp.evaluate(`document.querySelector('.draft-node button[aria-label="Draft model"]').click()`);
+    await retry(async () => {
+      if (!(await cdp.evaluate(`Boolean(document.querySelector('.node-model-menu [data-model-provider=openai]'))`)))
+        throw new Error("Graph draft model picker did not include the provider configured in settings");
+    });
+    await cdp.evaluate(`(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      document.querySelector('.vue-flow__pane')?.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    })()`);
+    await retry(async () => {
+      if (await cdp.evaluate("Boolean(document.querySelector('.node-model-menu'))"))
+        throw new Error("Draft model menu did not close");
+    });
+    result.graphPickerSynced = true;
+  }
   await cdp.evaluate("document.querySelector('[data-tool-tab=terminal] .tool-tab-close').click()");
   await retry(async () => {
     if ((await cdp.evaluate("window.__pixTest.state().contentTabs.length")) !== 1)
