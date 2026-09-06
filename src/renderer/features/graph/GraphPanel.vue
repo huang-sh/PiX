@@ -453,7 +453,7 @@ watch(
 <template>
   <main class="panel graph-panel">
     <div v-if="!session.current" class="graph-empty">
-      <div><Network :size="36" /></div>
+      <div aria-hidden="true"><Network :size="64" :stroke-width="1.6" /></div>
       <span>
         {{ t("graph.empty") }}
       </span>
