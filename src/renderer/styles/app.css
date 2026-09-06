@@ -295,7 +295,7 @@ kbd {
 .session-flow {
   flex: 1;
   min-height: 0;
-  background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 40%,transparent) 1px, transparent 1px) 0 0/24px 24px var(--surface-subtle);
+  background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 25%,transparent) 1px, transparent 1px) 0 0/24px 24px var(--surface-subtle);
 }
 .graph-controls { position: absolute; right: 8px; bottom: 33px; z-index: 10; display: flex; gap: 2px; }
 .graph-controls button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
@@ -320,29 +320,29 @@ kbd {
 .prompt-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring), 0 4px 12px rgba(28,36,48,.06); }
 .draft-node > header { display: flex; align-items: center; justify-content: space-between; color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
 .draft-node > header span { display: flex; align-items: center; gap: 4px; color: var(--accent-strong); font-weight: 800; }
-.node-meta { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 9px; font-style: normal; }
+.node-meta { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 10px; font-style: normal; }
 .node-meta span { display: flex; align-items: center; gap: 2px; }
 .node-meta .node-error { color: var(--danger); }
 .turn-copy { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 5px 7px; }
 .turn-role { display: flex; justify-content: center; padding-top: 2px; color: var(--faint); }
 .turn-role.pi { color: var(--accent); }
-.turn-copy strong { display: -webkit-box; overflow: hidden; font-size: 12px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.turn-copy p { display: -webkit-box; grid-column: 2 / 4; min-height: 34px; margin: 0; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.turn-copy strong { display: -webkit-box; overflow: hidden; font-size: 13px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.turn-copy p { display: -webkit-box; grid-column: 2 / 4; min-height: 34px; margin: 0; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .turn-copy p.node-running { display: flex; align-items: center; gap: 5px; color: var(--accent-strong); }
 .node-footer { display: grid; grid-template-columns: 60px minmax(0,1fr) 59px; align-items: end; gap: 2px; height: 34px; margin: 7px -8px -8px; padding: 5px 2px 0; border-top: 1px solid var(--border); color: var(--faint); }
 .node-context-usage { display: flex; align-items: center; gap: 3px; min-width: 0; height: 25px; padding: 0 3px; white-space: nowrap; }
 .node-context-usage i { --usage: 0deg; position: relative; flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--accent) var(--usage), var(--border) 0); }
 .node-context-usage i::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--surface); }
-.node-context-usage b { color: var(--muted); font-size: 8px; font-weight: 650; }
-.node-context-usage em { overflow: hidden; font-size: 8px; font-style: normal; text-overflow: ellipsis; }
-.node-footer-value { display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; color: var(--muted); font-size: 8px; font-weight: 600; text-transform: capitalize; }
+.node-context-usage b { color: var(--muted); font-size: 9px; font-weight: 650; }
+.node-context-usage em { overflow: hidden; font-size: 9px; font-style: normal; text-overflow: ellipsis; }
+.node-footer-value { display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; color: var(--muted); font-size: 9px; font-weight: 600; text-transform: capitalize; }
 .node-footer-value > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-model-value { justify-self: end; max-width: 100%; }
 .node-thinking-value { justify-content: flex-end; }
 .node-thinking-value > svg { flex: 0 0 auto; margin-right: 3px; }
 .node-footer-select { position: relative; display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; border: 1px solid transparent; border-radius: 6px; transition: border-color 120ms ease, background 120ms ease, opacity 120ms ease; }
 .node-footer-select:hover, .node-footer-select:focus-within { border-color: var(--border); background: var(--surface-subtle); }
-.node-footer-select > span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 8px; font-weight: 600; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
+.node-footer-select > span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 9px; font-weight: 600; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
 .node-footer-select > svg { flex: 0 0 auto; margin-left: 2px; }
 .node-footer-select:disabled { cursor: not-allowed; opacity: .52; }
 .node-model-select { justify-self: end; max-width: 100%; }
@@ -369,7 +369,7 @@ kbd {
 .draft-node > header i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--ring); }
 .draft-node > header button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--faint); }
 .draft-node > header button:hover { background: var(--muted-surface); color: var(--text); }
-.prompt-composer textarea { width: 100%; min-height: 92px; max-height: 190px; margin-top: 4px; padding: 10px 11px; resize: vertical; border-color: var(--border-strong); background: var(--surface); font-size: 11px; line-height: 1.55; }
+.prompt-composer textarea { width: 100%; min-height: 92px; max-height: 190px; margin-top: 4px; padding: 10px 11px; resize: vertical; border-color: var(--border-strong); background: var(--surface); font-size: 12px; line-height: 1.55; }
 .prompt-composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring); }
 .composer-image-picker { display: none; }
 .composer-images { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0; }
@@ -388,7 +388,7 @@ kbd {
 .composer-settings { display: flex; align-items: center; gap: 2px; min-width: 0; height: 26px; margin-left: auto; }
 .prompt-composer .composer-submit { flex: none; width: 26px; height: 26px; padding: 0; }
 .vue-flow__handle { width: 8px; height: 8px; border: 2px solid var(--surface); background: var(--accent); }
-.vue-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.4; }
+.vue-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.6; }
 .vue-flow__edge.active-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2.2; }
 .vue-flow__edge.draft-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 6 5; }
 /* Windows ships grab/grabbing/crosshair as solid black cursors, which vanish on the dark canvas; use two-tone SVG cursors (slate-blue core, white halo) instead. */
@@ -497,7 +497,7 @@ kbd {
 }
 .agent-markdown .node-slot:first-of-type .paragraph-node { margin-top: 0; }
 .agent-markdown .node-slot:last-of-type .paragraph-node { margin-bottom: 0; }
-.process-item .agent-markdown { color: var(--text); --ms-text-body: 11px; }
+.process-item .agent-markdown { color: var(--text); --ms-text-body: 12px; }
 .chat-turn { margin-bottom: 4px; }
 .agent-process { margin: -4px 0 17px; }
 .agent-process > summary { display: flex; align-items: center; gap: 7px; min-height: 37px; padding: 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 10px; cursor: pointer; list-style: none; }
@@ -509,7 +509,7 @@ kbd {
 .process-item + .process-item { border-top: 1px solid color-mix(in srgb,var(--border) 70%,transparent); }
 .process-item > span { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: var(--faint); font-weight: 600; }
 .process-item > p, .process-item > pre { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.process-item > p { font-size: 11px; line-height: 1.65; }
+.process-item > p { font-size: 12px; line-height: 1.65; }
 .process-item > pre { font: 10px/1.55 ui-monospace, Consolas, monospace; }
 .process-thinking { padding: 0; }
 .process-thinking > summary { display: grid; grid-template-columns: 14px minmax(0,1fr) auto; align-items: center; gap: 7px; min-height: 35px; cursor: pointer; list-style: none; }
