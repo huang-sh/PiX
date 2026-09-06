@@ -24,7 +24,7 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { desktop } from "../../api";
@@ -75,6 +75,37 @@ const activeFile = computed(() =>
 );
 const filteredFiles = computed(() => filterFileTree(workspace.files, fileQuery.value));
 const terminalProjectKey = computed(() => JSON.stringify(workspace.project ?? {}));
+watch(
+  () => layout.contentSection === "files" && fileTreeOpen.value &&
+    !layout.layout.collapsed.content && terminalConnected.value && terminalProjectKey.value,
+  (visible, _, onCleanup) => {
+    if (!visible || !workspace.project) return;
+    let stopped = false;
+    let refreshing = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      if (stopped || refreshing) return;
+      clearTimeout(timer);
+      refreshing = true;
+      try {
+        if (!document.hidden) await workspace.loadFiles();
+      } finally {
+        refreshing = false;
+        if (!stopped) timer = setTimeout(refresh, 2000);
+      }
+    };
+    void refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    onCleanup(() => {
+      stopped = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    });
+  },
+  { immediate: true },
+);
 const breadcrumb = computed(() => activeFile.value?.path?.split("/") ?? []);
 const gutter = computed(() => {
   const lines = activeFile.value?.document?.content.split("\n").length ?? 1;

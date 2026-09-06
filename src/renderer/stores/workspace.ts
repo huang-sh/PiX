@@ -30,6 +30,7 @@ export const useWorkspaceStore = defineStore("workspace", {
   state: () => ({
     project: undefined as ProjectInfo | undefined,
     files: [] as FileNode[],
+    filesRequest: 0,
     git: unavailableGit(),
     diff: "",
     tabs: [] as WorkspaceTab[],
@@ -58,6 +59,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.project = next;
       this.browserUrl = browserHome || "https://pi.dev";
       if (changed) {
+        this.filesRequest++;
         this.files = [];
         this.git = unavailableGit();
         this.diff = "";
@@ -75,11 +77,31 @@ export const useWorkspaceStore = defineStore("workspace", {
       await Promise.all([this.loadFiles(), this.loadGit()]);
     },
     async loadFiles() {
-      try {
-        this.files = await desktop.invoke<FileNode[]>("workspace.tree", { path: "" });
-      } catch {
-        this.files = [];
-      }
+      if (!this.project) return;
+      const project = this.project;
+      const request = ++this.filesRequest;
+      const current = () => this.project === project && this.filesRequest === request;
+      const refresh = async (path: string, previous: FileNode[]): Promise<FileNode[]> => {
+        try {
+          const entries = await desktop.invoke<FileNode[]>("workspace.tree", { path });
+          if (!current()) return previous;
+          const old = new Map(previous.map((node) => [node.path, node]));
+          return await Promise.all(entries.map(async (entry) => {
+            const existing = old.get(entry.path);
+            const node = existing?.kind === entry.kind ? Object.assign(existing, entry) : entry;
+            if (node.kind === "directory" && node.children !== undefined) {
+              const children = await refresh(node.path, node.children);
+              if (current()) node.children = children;
+            }
+            return node;
+          }));
+        } catch {
+          // Keep the last listing during transient local or remote failures.
+          return previous;
+        }
+      };
+      const files = await refresh("", this.files);
+      if (current()) this.files = files;
     },
     async loadChildren(node: FileNode) {
       if (node.kind !== "directory" || node.children) return;
