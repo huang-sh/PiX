@@ -477,6 +477,7 @@ kbd {
 .draft-node .prompt-composer textarea { min-height: 120px; max-height: 260px; font-size: 12px; }
 .branch-message { margin: 0 0 19px; }
 .branch-message.user { width: fit-content; max-width: calc(100% - 28px); margin-left: auto; }
+.branch-message.user > .copy-button { display: flex; margin-left: auto; }
 .branch-message.user > p { margin: 0; padding: 10px 12px; border-radius: 13px 13px 4px 13px; background: var(--surface-subtle); font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; white-space: pre-wrap; }
 .agent-markdown {
   min-width: 0;

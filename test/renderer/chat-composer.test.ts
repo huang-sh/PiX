@@ -79,6 +79,26 @@ describe("chat panel composer", () => {
     document.body.innerHTML = "";
   });
 
+  it("copies user and assistant messages without adding a copy button to the composer", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const copy = vi.spyOn(desktop, "copy");
+    const { panel } = await mountComposer(invoke);
+    try {
+      await panel.get(".branch-message.user .copy-button").trigger("click");
+      await flushPromises();
+      expect(copy).toHaveBeenLastCalledWith("first");
+      expect(panel.get(".branch-message.user .copy-button").attributes("aria-label")).toBe("Copied");
+      await panel.get(".final-response .copy-button").trigger("click");
+      expect(copy).toHaveBeenLastCalledWith("answer");
+      expect(panel.find(".prompt-composer .copy-button").exists()).toBe(false);
+      const text = "  草稿 **Markdown**\nsecond line  ";
+      await panel.get("textarea").setValue(text);
+      expect(panel.find(".prompt-composer .copy-button").exists()).toBe(false);
+      expect(panel.get<HTMLTextAreaElement>("textarea").element.value).toBe(text);
+      expect(promptCalls(invoke)).toHaveLength(0);
+    } finally { panel.unmount(); }
+  });
+
   it("starts collapsed, expands, and submits through the same pipeline as typing in a node", async () => {
     const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
     const { panel } = await mountComposer(invoke);

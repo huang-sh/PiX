@@ -3,6 +3,9 @@ import { createI18n } from "vue-i18n";
 export const messages = {
   en: {
     common: {
+      copy: "Copy",
+      copied: "Copied",
+      copyFailed: "Copy failed. Please try again.",
       cancel: "Cancel",
       save: "Save",
       delete: "Delete",
@@ -553,6 +556,9 @@ export const messages = {
   },
   "zh-CN": {
     common: {
+      copy: "复制",
+      copied: "已复制",
+      copyFailed: "复制失败，请重试。",
       cancel: "取消",
       save: "保存",
       delete: "删除",

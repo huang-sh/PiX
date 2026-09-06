@@ -6,6 +6,7 @@ import { withoutToolLabels } from "../../../shared/session";
 import type { BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
+import CopyButton from "../../components/CopyButton.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
@@ -224,12 +225,14 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
         <article v-for="input in session.current.graph.recoveredInputs" :key="input.requestId" class="branch-message user">
           <p>{{ input.text }}</p>
           <MessageImages :images="input.images" />
+          <CopyButton :text="input.text" />
         </article>
       </details>
       <section v-for="turn in turns" :key="turn.id" class="chat-turn">
         <article v-if="turn.user" class="branch-message user">
           <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
           <MessageImages :images="turn.user.images" />
+          <CopyButton :text="turn.user.text" />
         </article>
 
         <details v-if="turn.process.length || turn.final?.thinking" class="agent-process">
@@ -257,6 +260,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
               </details>
               <div v-else-if="message.text" class="process-item assistant">
                 <MarkdownRenderer :content="message.text" :custom-id="message.entryId" />
+                <CopyButton :text="message.text" />
               </div>
             </template>
             <details v-if="turn.final?.thinking" class="process-item process-thinking">
@@ -268,6 +272,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 
         <article v-if="turn.error" class="branch-message assistant error-response">
           <p class="error-message">{{ errorText(turn.error) }}</p>
+          <CopyButton :text="errorText(turn.error)" />
         </article>
 
         <article v-if="turn.final" class="branch-message assistant final-response">
@@ -275,6 +280,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
             :content="turn.final.text || t('common.empty')"
             :custom-id="turn.final.entryId"
           />
+          <CopyButton :text="turn.final.text" />
         </article>
       </section>
 
@@ -321,6 +327,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
                 :custom-id="item.id"
                 :streaming="item.status === 'running'"
               />
+              <CopyButton :text="item.text" />
             </div>
             <div v-if="item.kind === 'assistant' && item.status === 'error'" class="process-item error">
               {{ errorText(item) }}
