@@ -445,6 +445,15 @@ export const messages = {
         skills: "Skills",
         extensions: "Extensions",
         shell: "Shell & network",
+        about: "About",
+      },
+      about: {
+        builtOn: "Built on Pi Coding Agent",
+        version: "Version {version}",
+        checkUpdates: "Check for updates",
+        sourceFeedback: "Source code & feedback",
+        updatesHint: "Check for new versions on the GitHub releases page.",
+        openFailed: "Could not open the link. Please try again.",
       },
       rows: {
         language: "Interface language",
@@ -978,6 +987,15 @@ export const messages = {
         skills: "技能",
         extensions: "扩展",
         shell: "Shell 与网络",
+        about: "关于",
+      },
+      about: {
+        builtOn: "基于 Pi Coding Agent 构建",
+        version: "版本 {version}",
+        checkUpdates: "检查更新",
+        sourceFeedback: "源代码与反馈",
+        updatesHint: "在 GitHub 发布页面查看新版本。",
+        openFailed: "无法打开链接，请重试。",
       },
       rows: {
         language: "界面语言",

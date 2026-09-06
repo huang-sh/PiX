@@ -7,6 +7,7 @@ import SettingsPage from "../../src/renderer/features/settings/SettingsPage.vue"
 import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useSessionStore } from "../../src/renderer/stores/session";
+import { version } from "../../package.json";
 
 const settings = {
   app: {
@@ -35,6 +36,46 @@ describe("SettingsPage save", () => {
   beforeEach(() => {
     vi.mocked(desktop.invoke).mockReset();
     vi.mocked(desktop.invoke).mockImplementation(async () => settings);
+  });
+
+  it("opens About from settings and links to releases and source, with localized errors", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    const previousLocale = i18n.global.locale.value;
+    try {
+      i18n.global.locale.value = "en";
+      await wrapper.get('[data-settings-category="about"]').trigger("click");
+      expect(wrapper.get("#about-name").text()).toBe("PiX");
+      expect(wrapper.get(".about-version").text()).toBe(`Version ${version}`);
+      expect(wrapper.get(".about-logo").attributes("src")).toBe("icon.png");
+      expect(wrapper.find("main > header nav").exists()).toBe(false);
+      expect(wrapper.findAll(".settings-card").filter(card => card.isVisible())).toHaveLength(0);
+      await wrapper.get("[data-about-updates]").trigger("click");
+      await flushPromises();
+      expect(desktop.invoke).toHaveBeenCalledWith("app.openExternal", { url: "https://github.com/huang-sh/PiX/releases" });
+      await wrapper.get("[data-about-source]").trigger("click");
+      await flushPromises();
+      expect(desktop.invoke).toHaveBeenCalledWith("app.openExternal", { url: "https://github.com/huang-sh/PiX" });
+      i18n.global.locale.value = "zh-CN";
+      vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("Browser unavailable"));
+      await wrapper.get("[data-about-source]").trigger("click");
+      await flushPromises();
+      expect(wrapper.get("main > header h1").text()).toBe("关于");
+      expect(wrapper.get(".about-version").text()).toBe(`版本 ${version}`);
+      expect(wrapper.get('[role="alert"]').text()).toBe("无法打开链接，请重试。");
+      await wrapper.get("[data-about-source]").trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+      await wrapper.get('[data-settings-category="general"]').trigger("click");
+      expect(wrapper.find(".about-page").exists()).toBe(false);
+      expect(wrapper.find("main > header nav").exists()).toBe(true);
+    } finally {
+      i18n.global.locale.value = previousLocale;
+      wrapper.unmount();
+    }
   });
 
   it("sends IPC payloads that survive structured clone when switching language", async () => {

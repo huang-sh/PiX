@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, reactive, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
 import CustomModelForm from "./CustomModelForm.vue";
 import KeyboardShortcuts from "./KeyboardShortcuts.vue";
+import AboutPage from "./AboutPage.vue";
 import { desktop } from "../../api";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
@@ -99,6 +100,7 @@ const categories = computed(() => [
   ["skills", t("settings.categories.skills"), Sparkles],
   ["extensions", t("settings.categories.extensions"), Puzzle],
   ["shell", t("settings.categories.shell"), Terminal],
+  ["about", t("settings.categories.about"), Info],
 ] as const);
 
 function optionLabel(option: string) {
@@ -625,7 +627,7 @@ async function logout(provider: RuntimeProvider) {
           <p v-else-if="layout.settingsCategory === 'extensions'">{{ t("settings.extensionsDescription", { n: extensions.length }) }}</p>
           <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
         </div>
-        <nav v-if="!['models', 'skills', 'extensions', 'shortcuts'].includes(layout.settingsCategory)">
+        <nav v-if="!['models', 'skills', 'extensions', 'shortcuts', 'about'].includes(layout.settingsCategory)">
           <Button :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.saveChanges") }}</Button>
         </nav>
       </header>
@@ -833,6 +835,7 @@ async function logout(provider: RuntimeProvider) {
         </div>
         <p class="extension-footnote"><Folder :size="14" aria-hidden="true" />{{ t("settings.extensionDiscoveryNote") }}</p>
       </section>
+      <AboutPage v-else-if="layout.settingsCategory === 'about'" />
       <section v-else-if="layout.settingsCategory !== 'shortcuts'" class="settings-card">
         <label v-for="row in rows" :key="`${row.scope}:${row.path}`" class="setting-row" :data-setting-path="row.path">
           <span><strong>{{ t(row.label) }}</strong><small>{{ rowHint(row) }}</small></span>
