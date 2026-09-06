@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, reactive, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
 import CustomModelForm from "./CustomModelForm.vue";
+import KeyboardShortcuts from "./KeyboardShortcuts.vue";
 import { desktop } from "../../api";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
@@ -29,6 +30,9 @@ const workspace = useWorkspaceStore();
 const session = useSessionStore();
 const { locale, t, te } = useI18n();
 const draft = ref<SettingsBundle>();
+const shortcutsPage = ref<InstanceType<typeof KeyboardShortcuts>>();
+function close() { shortcutsPage.value?.requestClose(); }
+defineExpose({ close });
 // The model catalog lives in the session store so every consumer (settings,
 // graph, branch context) reads one list; this page only reloads it.
 const models = computed(() => session.models);
@@ -87,6 +91,7 @@ function closeDetailsPanel() {
 const categories = computed(() => [
   ["general", t("settings.categories.general"), SlidersHorizontal],
   ["appearance", t("settings.categories.appearance"), Palette],
+  ["shortcuts", t("settings.categories.shortcuts"), Keyboard],
   ["models", t("settings.categories.models"), Box],
   ["sessions", t("settings.categories.sessions"), History],
   ["agent", t("settings.categories.agent"), Bot],
@@ -591,7 +596,7 @@ async function logout(provider: RuntimeProvider) {
 <template>
   <div class="settings-page" :class="{ 'has-details-panel': (layout.settingsCategory === 'extensions' && selectedExtension) || (layout.settingsCategory === 'models' && selectedProvider) }" v-if="draft">
     <aside>
-      <Button variant="ghost" class="justify-start" @click="layout.screen = 'workbench'">
+      <Button variant="ghost" class="justify-start" @click="close">
         <ArrowLeft :size="16" />{{ t("settings.back") }}
       </Button>
       <nav>
@@ -618,12 +623,14 @@ async function logout(provider: RuntimeProvider) {
           <p v-if="layout.settingsCategory === 'models'">{{ t("settings.modelsDescription") }}</p>
           <p v-else-if="layout.settingsCategory === 'skills'">{{ t("settings.skillsDescription", { n: skills.length }) }}</p>
           <p v-else-if="layout.settingsCategory === 'extensions'">{{ t("settings.extensionsDescription", { n: extensions.length }) }}</p>
+          <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
         </div>
-        <nav v-if="!['models', 'skills', 'extensions'].includes(layout.settingsCategory)">
+        <nav v-if="!['models', 'skills', 'extensions', 'shortcuts'].includes(layout.settingsCategory)">
           <Button :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.saveChanges") }}</Button>
         </nav>
       </header>
 
+      <KeyboardShortcuts ref="shortcutsPage" v-show="layout.settingsCategory === 'shortcuts'" />
       <div v-if="layout.settingsCategory === 'models'" class="model-workspace">
         <section class="model-overview" :aria-label="t('settings.modelOverview')">
           <div class="model-default-summary">
@@ -826,7 +833,7 @@ async function logout(provider: RuntimeProvider) {
         </div>
         <p class="extension-footnote"><Folder :size="14" aria-hidden="true" />{{ t("settings.extensionDiscoveryNote") }}</p>
       </section>
-      <section v-else class="settings-card">
+      <section v-else-if="layout.settingsCategory !== 'shortcuts'" class="settings-card">
         <label v-for="row in rows" :key="`${row.scope}:${row.path}`" class="setting-row" :data-setting-path="row.path">
           <span><strong>{{ t(row.label) }}</strong><small>{{ rowHint(row) }}</small></span>
           <input

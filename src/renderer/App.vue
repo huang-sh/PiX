@@ -26,6 +26,7 @@ import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
 import ImagePreview from "./components/ImagePreview.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
+import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
 import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
@@ -42,6 +43,9 @@ interface BootstrapData {
   layout: LayoutState;
   current?: SessionSnapshot;
 }
+
+const settingsPage = ref<InstanceType<typeof SettingsPage>>();
+function closeSettings() { settingsPage.value?.close(); }
 
 const session = useSessionStore();
 const workspace = useWorkspaceStore();
@@ -414,7 +418,7 @@ async function exportSession() {
 const commandHandlers = {
   settings: () => openSettings(),
   model: () => openSettings("models"),
-  tree: () => void (layout.screen = "workbench"),
+  tree: () => layout.screen === "settings" ? closeSettings() : undefined,
   thinking: () => openSettings("models"),
   "scoped-models": () => openSettings("models"),
   export: exportSession,
@@ -445,10 +449,7 @@ const commandHandlers = {
     workspace.openBrowser("https://github.com/earendil-works/pi/releases/tag/v0.84.4");
     await layout.openTool("browser");
   },
-  hotkeys: async () => {
-    workspace.utilityOutput = t("hotkeys.body");
-    await layout.openTool("output");
-  },
+  hotkeys: () => openSettings("shortcuts"),
   fork: async () => {
     const node = session.selectedNode;
     if (node) await session.control({ action: "fork", entryId: node.userEntryId });
@@ -523,20 +524,18 @@ function onEvent(event: DesktopEvent) {
 }
 
 function keydown(event: KeyboardEvent) {
-  const command = event.ctrlKey || event.metaKey;
-  if (command && event.altKey && event.key.toLowerCase() === "b") {
+  if (shortcutsBlocked(event)) return;
+  const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
+  if (action) {
     event.preventDefault();
-    void layout.toggle("content");
-  } else if (command && event.key.toLowerCase() === "b") {
-    event.preventDefault();
-    void layout.toggle("navigator");
-  } else if (command && (event.key.toLowerCase() === "k" || (event.shiftKey && event.key.toLowerCase() === "p"))) {
-    event.preventDefault();
-    layout.commandOpen = true;
-  } else if (command && event.key === "`") {
-    event.preventDefault();
-    void layout.openTool("terminal");
-  } else if (event.key === "Escape" && layout.screen === "settings") layout.screen = "workbench";
+    switch (action) {
+      case "commands": layout.commandOpen = true; break;
+      case "terminal": void layout.openTool("terminal"); break;
+      case "navigator": void layout.toggle("navigator"); break;
+      case "tools": void layout.toggle("content"); break;
+      case "settings": openSettings(); break;
+    }
+  } else if (event.key === "Escape" && layout.screen === "settings") closeSettings();
 }
 
 onMounted(() => {
@@ -579,7 +578,7 @@ onBeforeUnmount(() => {
       @disconnect-remote="disconnectRemote"
     />
     <div class="app-content">
-      <SettingsPage v-if="layout.screen === 'settings'" />
+      <SettingsPage v-if="layout.screen === 'settings'" ref="settingsPage" />
       <KeepAlive>
         <Workbench
           v-if="layout.hydrated && layout.screen === 'workbench'"

@@ -1,4 +1,5 @@
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { ShortcutOverrides } from "./shortcuts.js";
 
 export type PromptImage = ImageContent;
 
@@ -298,6 +299,7 @@ export interface PiSettings {
   [key: string]: unknown;
 }
 export interface AppSettings {
+  keyboardShortcuts?: ShortcutOverrides;
   language: "system" | "zh-CN" | "en";
   theme: "system" | "light" | "dark";
   density: "comfortable" | "compact";

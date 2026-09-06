@@ -5,6 +5,8 @@ import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useWorkspaceStore } from "../../stores/workspace";
+import { formatShortcut, shortcutBindings, type ShortcutId } from "../../../shared/shortcuts";
+import { isMac } from "../../keyboard-shortcuts";
 
 const emit = defineEmits<{ pickProject: []; connectRemote: []; disconnectRemote: [] }>();
 
@@ -12,6 +14,10 @@ const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
 const { t } = useI18n();
 const workspaceMenuOpen = ref(false);
+function shortcutTitle(label: string, id: ShortcutId) {
+  const keys = shortcutBindings(id, layout.settings?.app.keyboardShortcuts).map((binding) => formatShortcut(binding, isMac())).join(" / ");
+  return keys ? `${t(label)} (${keys})` : t(label);
+}
 
 function chooseLocal() {
   workspaceMenuOpen.value = false;
@@ -39,7 +45,7 @@ function disconnectRemote() {
         :class="!layout.layout.collapsed.navigator ? 'active' : ''"
         variant="ghost"
         size="icon"
-        :title="t('titlebar.toggleNavigator')"
+        :title="shortcutTitle('titlebar.toggleNavigator', 'navigator')"
         :aria-expanded="!layout.layout.collapsed.navigator"
         @click="layout.toggle('navigator')"
       >
@@ -121,7 +127,7 @@ function disconnectRemote() {
           :class="!layout.layout.collapsed.content ? 'active' : ''"
           variant="ghost"
           size="icon"
-          :title="t('titlebar.toggleTools')"
+          :title="shortcutTitle('titlebar.toggleTools', 'tools')"
           :aria-expanded="!layout.layout.collapsed.content"
           @click="layout.toggle('content')"
         >

@@ -39,6 +39,7 @@ import type {
   ShellResult,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
+import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
@@ -170,7 +171,13 @@ export class SettingsService {
           ? this.globalPath
           : this.projectPath;
     if (!p) throw new Error("Open a project first");
-    atomic(p, replace ? patch : merge(readJson(p), patch));
+    const next = replace ? { ...patch } : merge(readJson(p), patch);
+    if (scope === "app" && Object.hasOwn(patch, "keyboardShortcuts")) {
+      validateShortcutOverrides(patch.keyboardShortcuts);
+      // This map is a complete set of overrides: merging would resurrect reset bindings.
+      next.keyboardShortcuts = patch.keyboardShortcuts;
+    }
+    atomic(p, next);
     return this.bundle();
   }
   reset(scope: "app" | "global" | "project") {
