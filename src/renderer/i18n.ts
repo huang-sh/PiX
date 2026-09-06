@@ -90,6 +90,8 @@ export const messages = {
       waitingAssistant: "Waiting for an assistant response",
       agentRunning: "Pi is working…",
       continueFromTurn: "Continue from this turn",
+      branchUp: "Create branch above",
+      branchDown: "Create branch below",
       noAssistantResponse: "(no assistant response)",
     },
     draft: {
@@ -642,6 +644,8 @@ export const messages = {
       waitingAssistant: "等待助手回复",
       agentRunning: "Pi 正在处理…",
       continueFromTurn: "从此轮继续",
+      branchUp: "在上方创建分支",
+      branchDown: "在下方创建分支",
       noAssistantResponse: "（暂无助手回复）",
     },
     draft: {

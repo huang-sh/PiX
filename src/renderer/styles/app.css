@@ -299,7 +299,7 @@ kbd {
 }
 .graph-controls { position: absolute; right: 8px; bottom: 33px; z-index: 10; display: flex; gap: 2px; }
 .graph-controls button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
-.session-flow .vue-flow__minimap { right: auto; bottom: 5px; left: 5px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 12px rgba(28,36,48,.06); }
+.session-flow .vue-flow__minimap { right: auto; bottom: 5px; left: 5px; margin: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 12px rgba(28,36,48,.06); }
 .session-flow.booting { opacity: 0; pointer-events: none; }
 .vue-flow__node-prompt { width: 280px; border: 0; background: transparent; box-shadow: none; }
 .vue-flow__node-draft { width: 360px; border: 0; background: transparent; box-shadow: none; z-index: 12 !important; }
@@ -312,9 +312,9 @@ kbd {
   background: var(--surface);
   box-shadow: 0 2px 6px rgba(28,36,48,.04);
   text-align: left;
-  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
-.prompt-node:hover { border-color: var(--border-strong); box-shadow: 0 4px 12px rgba(28,36,48,.07); transform: translateY(-1px); }
+.prompt-node:hover { border-color: var(--border-strong); box-shadow: 0 4px 12px rgba(28,36,48,.07); }
 .prompt-node.active { border-color: color-mix(in srgb,var(--accent) 52%,var(--border)); }
 .prompt-node.running::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 3px; border-radius: 2px; background: var(--accent); }
 .prompt-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring), 0 4px 12px rgba(28,36,48,.06); }
@@ -355,9 +355,23 @@ kbd {
 .node-thinking-select { justify-content: flex-end; }
 .node-thinking-select > svg:first-child { margin: 0 3px 0 0; color: var(--muted); }
 .node-add { position: absolute; top: 50%; right: -16px; display: grid; place-items: center; width: 30px; height: 30px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); color: var(--accent-foreground); box-shadow: 0 5px 15px color-mix(in srgb,var(--accent) 24%,transparent); opacity: 0; transform: translateY(-50%) scale(.86); transition: opacity 140ms ease, transform 140ms ease, background 140ms ease; }
-.prompt-node:hover .node-add, .prompt-node.selected .node-add { opacity: 1; transform: translateY(-50%) scale(1); }
+.prompt-node:hover .node-add, .prompt-node.selected .node-add, .prompt-node:focus-within .node-add { opacity: 1; transform: translateY(-50%) scale(1); }
+.node-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .node-add:hover { background: var(--accent-strong); }
 .node-add[aria-disabled="true"] { cursor: not-allowed; background: var(--border-strong); color: var(--faint); box-shadow: none; }
+.node-branch-controls { position: absolute; top: 50%; right: -18px; width: 34px; height: 88px; transform: translateY(-50%); pointer-events: none; }
+.node-branch-controls::before { content: ""; position: absolute; inset: 29px 0; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 2px 8px rgba(28,36,48,.12); opacity: 0; transition: top 140ms ease, bottom 140ms ease, opacity 140ms ease; pointer-events: none; }
+.node-branch-controls.direction-up::before { top: 0; opacity: 1; }
+.node-branch-controls.direction-down::before { bottom: 0; opacity: 1; }
+.prompt-node:hover .node-branch-controls, .prompt-node.selected .node-branch-controls, .prompt-node:focus-within .node-branch-controls { pointer-events: auto; }
+.node-branch-controls .node-add { right: 2px; }
+.node-branch-arrow { position: absolute; left: 2px; display: grid; place-items: center; width: 30px; height: 27px; padding: 0; border: 0; background: none; color: var(--accent); opacity: 0; transition: opacity 120ms ease, background 120ms ease; }
+.node-branch-arrow[data-direction="up"] { top: 2px; border-radius: 15px 15px 5px 5px; }
+.node-branch-arrow[data-direction="down"] { bottom: 2px; border-radius: 5px 5px 15px 15px; }
+.node-branch-arrow.is-visible, .node-branch-arrow:focus-visible { opacity: 1; }
+.node-branch-arrow:hover { color: var(--accent-strong); background: color-mix(in srgb,var(--accent) 8%,var(--surface)); }
+.node-branch-arrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.node-branch-arrow[aria-disabled="true"] { color: var(--faint); background: none; cursor: not-allowed; }
 .node-hover-card { position: fixed; z-index: 220; width: min(440px, calc(100vw - 24px)); max-height: min(520px, calc(100vh - 24px)); overflow: auto; padding: 4px 15px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
 .node-hover-card > section { display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 9px; padding: 13px 0; }
 .node-hover-card > section + section { border-top: 1px solid var(--border); }
@@ -389,7 +403,7 @@ kbd {
 .prompt-composer .composer-submit { flex: none; width: 26px; height: 26px; padding: 0; }
 .vue-flow__handle { width: 8px; height: 8px; border: 2px solid var(--surface); background: var(--accent); }
 .vue-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.6; }
-.vue-flow__edge.active-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2.2; }
+.vue-flow__edge.running-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2.2; }
 .vue-flow__edge.draft-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 6 5; }
 /* Windows ships grab/grabbing/crosshair as solid black cursors, which vanish on the dark canvas; use two-tone SVG cursors (slate-blue core, white halo) instead. */
 .session-flow .vue-flow__pane.draggable, .session-flow .vue-flow__node.draggable, .session-flow .vue-flow__minimap.pannable, .session-flow .vue-flow__minimap-mask.pannable { cursor: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><g stroke='%23fff' stroke-width='5'><path d='M18 11.5V9a2 2 0 0 0-2-2a2 2 0 0 0-2 2v1.4 M14 10V8a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2 M10 9.9V9a2 2 0 0 0-2-2a2 2 0 0 0-2 2v5 M6 14a2 2 0 0 0-2-2a2 2 0 0 0-2 2 M18 11a2 2 0 1 1 4 0v3a8 8 0 0 1-8 8h-4a8 8 0 0 1-8-8 2 2 0 1 1 4 0'/></g><g stroke='%23526b91' stroke-width='2.6'><path d='M18 11.5V9a2 2 0 0 0-2-2a2 2 0 0 0-2 2v1.4 M14 10V8a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2 M10 9.9V9a2 2 0 0 0-2-2a2 2 0 0 0-2 2v5 M6 14a2 2 0 0 0-2-2a2 2 0 0 0-2 2 M18 11a2 2 0 1 1 4 0v3a8 8 0 0 1-8 8h-4a8 8 0 0 1-8-8 2 2 0 1 1 4 0'/></g></svg>") 13 15, grab; }

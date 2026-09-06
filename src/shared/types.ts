@@ -342,6 +342,7 @@ export interface SettingsBundle {
 }
 export interface LayoutState {
   version?: number;
+  branchOrders?: Record<string, Array<[string, number]>>;
   widths: { navigator: number; chat: number; content: number };
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, Brain, Check, Image, LoaderCircle, Plus, Sparkles, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, Sparkles, UserRound, Wrench } from "@lucide/vue";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -7,6 +7,7 @@ import type { CSSProperties } from "vue";
 import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
+import type { BranchDirection } from "../../graph-layout";
 
 interface NodeContent {
   user: string;
@@ -24,7 +25,7 @@ export interface PromptNodeData {
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
   content: () => NodeContent;
-  onCompose: () => void;
+  onCompose: (direction?: BranchDirection) => void;
 }
 
 const props = defineProps<{ id: string; data: PromptNodeData }>();
@@ -32,6 +33,7 @@ const { t } = useI18n();
 const root = ref<HTMLElement>();
 const preview = ref<HTMLElement>();
 const previewing = ref(false);
+const branchDirection = ref<BranchDirection>();
 const previewContent = ref<NodeContent>({ user: "", assistant: "" });
 const previewStyle = ref<CSSProperties>({ visibility: "hidden", left: "0px", top: "0px" });
 let openTimer: number | undefined;
@@ -95,10 +97,20 @@ function suppressPreview() {
   closePreview();
 }
 
-function compose() {
+function compose(direction: BranchDirection = "down") {
   suppressPreview();
   if (!props.data.runnable) return;
-  props.data.onCompose();
+  props.data.onCompose(direction);
+}
+
+function pointBranch(event: MouseEvent) {
+  const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  branchDirection.value = event.clientY < box.top + box.height / 2 ? "up" : "down";
+}
+
+function focusBranch(direction: BranchDirection, event: KeyboardEvent) {
+  branchDirection.value = direction;
+  (event.currentTarget as HTMLElement).parentElement?.querySelector<HTMLButtonElement>(`[data-direction="${direction}"]`)?.focus();
 }
 
 function providerName(value?: string) {
@@ -177,17 +189,32 @@ function relative(value: string) {
         <span>{{ data.node.footer?.thinkingLevel || "off" }}</span>
       </span>
     </footer>
+    <div class="node-branch-controls nodrag nowheel"
+      :class="branchDirection ? `direction-${branchDirection}` : ''"
+      @mouseenter="suppressPreview" @mousemove="pointBranch"
+      @mouseleave="branchDirection = undefined; showPreview()">
     <button
       type="button"
       class="node-add nodrag nowheel"
       :aria-disabled="!data.runnable"
-      :title="data.runnable ? t('graph.continueFromTurn') : t(data.blockedReason)"
+      :title="data.runnable ? undefined : t(data.blockedReason)"
       :aria-label="data.runnable ? t('graph.continueFromTurn') : t(data.blockedReason)"
       @mouseenter="suppressPreview"
-      @mouseleave="showPreview"
       @focus="suppressPreview"
-      @click.stop="compose"
+      @keydown.up.prevent.stop="focusBranch('up', $event)"
+      @keydown.down.prevent.stop="focusBranch('down', $event)"
+      @click.stop="compose()"
     ><Plus :size="15" /></button>
+    <button v-for="direction in (['up', 'down'] as const)" :key="direction"
+      type="button" class="node-branch-arrow" :data-direction="direction"
+      :class="{ 'is-visible': branchDirection === direction }"
+      :aria-disabled="!data.runnable"
+      :title="data.runnable ? undefined : t(data.blockedReason)"
+      :aria-label="t(direction === 'up' ? 'graph.branchUp' : 'graph.branchDown')"
+      @focus="branchDirection = direction; suppressPreview()" @blur="branchDirection = undefined"
+      @click.stop="compose(direction)"
+    ><ArrowUp v-if="direction === 'up'" :size="18" :stroke-width="3" /><ArrowDown v-else :size="18" :stroke-width="3" /></button>
+    </div>
   </article>
 
   <Teleport to="body">

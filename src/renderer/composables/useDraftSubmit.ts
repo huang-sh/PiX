@@ -13,6 +13,7 @@ export function useDraftSubmit() {
   const session = useSessionStore();
   const layout = useLayoutStore();
   const { t } = useI18n();
+  const submittedNodeId = ref<string>();
 
   async function submitDraft(
     parentId: string | null,
@@ -21,13 +22,14 @@ export function useDraftSubmit() {
     thinkingLevel?: string,
     images?: PromptImage[],
   ): Promise<boolean> {
+    submittedNodeId.value = undefined;
     submitted.value = session.current?.graph ? undefined : {
       parentId,
       knownNodeIds: new Set(session.current?.projection.nodes.map((node) => node.id)),
     };
     if (layout.layout.collapsed.chat) void layout.setCollapsed("chat", false);
     try {
-      await session.promptAt(parentId, text, model, thinkingLevel, images);
+      submittedNodeId.value = await session.promptAt(parentId, text, model, thinkingLevel, images);
       return true;
     } catch (error) {
       submitted.value = undefined;
@@ -57,5 +59,5 @@ export function useDraftSubmit() {
     submitted.value = undefined;
   }
 
-  return { submitDraft, acceptSubmittedNode, clearSubmittedDraft };
+  return { submitDraft, acceptSubmittedNode, clearSubmittedDraft, submittedNodeId };
 }

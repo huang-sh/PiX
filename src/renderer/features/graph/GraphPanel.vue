@@ -17,7 +17,7 @@ import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
 import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
-import { layoutGraph, reserveManualPositions } from "../../graph-layout";
+import { layoutGraph, reserveManualPositions, type BranchDirection } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
@@ -30,7 +30,7 @@ const emit = defineEmits<{ newSession: [] }>();
 const layout = useLayoutStore();
 const session = useSessionStore();
 const { t } = useI18n();
-const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft } = useDraftSubmit();
+const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft, submittedNodeId } = useDraftSubmit();
 type RenderNode = Node & { dimensions?: Dimensions; handleBounds?: FlowNode["handleBounds"] };
 const nodes = shallowRef<RenderNode[]>([]);
 const edges = shallowRef<Edge[]>([]);
@@ -39,6 +39,10 @@ const flow = shallowRef<VueFlowStore>();
 const dragged = new Map<string, { x: number; y: number }>();
 let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
+const branchOrder = new Map<string, number>();
+const sessionKey = computed(() => JSON.stringify([session.activeProjectId, session.current?.session.path, session.current?.session.id]));
+let orderSequence = 0;
+let draftOrder = 0;
 const emptyDraft = (): ComposerDraft => ({ text: "", images: [], busy: false, readingImages: false, error: "" });
 // Survives viewport unmounts, including attachment reads and failed submissions.
 const draftState = ref(emptyDraft());
@@ -61,6 +65,13 @@ function stablePrompt(data: PromptNodeData) {
 let layoutCache: { key: string; positions: Map<string, { x: number; y: number; width: number; height: number }> } | undefined;
 
 const projection = computed(() => session.current?.projection);
+function rememberBranchOrder(id: string, order: number, pendingId?: string) {
+  if (!pendingId && branchOrder.get(id) === order) return;
+  if (pendingId) branchOrder.delete(pendingId);
+  branchOrder.set(id, order);
+  (layout.layout.branchOrders ??= {})[sessionKey.value] = [...branchOrder];
+  void layout.save().catch(error => layout.showNotice(String(error), "error"));
+}
 const renderGraph = computed(() => {
   if (nodes.value.length < 500) return { nodes: nodes.value, edges: edges.value };
   if (!flow.value) return { nodes: nodes.value.filter(node => node.id === defaultFocusId()), edges: [] };
@@ -113,19 +124,36 @@ function rebuild() {
     edges.value = [];
     return;
   }
-  if (activeSession !== session.current?.session.path) {
+  if (activeSession !== sessionKey.value) {
     dragged.clear();
-    activeSession = session.current?.session.path;
+    branchOrder.clear();
+    orderSequence = 0;
+    const saved = layout.layout.branchOrders?.[sessionKey.value];
+    if (Array.isArray(saved)) for (const entry of saved) {
+      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] < 0) {
+        branchOrder.set(entry[0], entry[1]);
+        orderSequence = Math.max(orderSequence, -entry[1]);
+      }
+    }
+    draftOrder = 0;
+    activeSession = sessionKey.value;
     draftState.value = emptyDraft();
     draftParent.value = undefined;
     draftModel.value = undefined;
     draftThinking.value = undefined;
     clearSubmittedDraft();
   }
+  for (const run of session.current?.graph?.runs ?? []) {
+    const pendingId = `pending:${run.runId}`;
+    const order = branchOrder.get(pendingId);
+    if (run.nodeId && order !== undefined) {
+      rememberBranchOrder(run.nodeId, order, pendingId);
+    }
+  }
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
-  const layoutKey = value.nodes.map(n => `${n.id}/${n.parentId}/${n.depth}`).join(";");
+  const layoutKey = value.nodes.map(n => `${n.id}/${n.parentId}/${n.depth}/${branchOrder.get(n.id) ?? 0}`).join(";");
   if (layoutCache?.key !== layoutKey) {
-    const calculated = layoutGraph(value);
+    const calculated = layoutGraph(value, undefined, branchOrder);
     const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
     const removed = layoutCache && [...layoutCache.positions.keys()].some(id => !positions.has(id));
     // Only deletions invalidate moved manual slots to close gaps. Adding a
@@ -166,7 +194,7 @@ function rebuild() {
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
-      onCompose: () => compose(node.id),
+      onCompose: direction => compose(node.id, direction),
     }),
   }));
   const rootDraft = !placed.nodes.length;
@@ -253,14 +281,14 @@ function rebuild() {
       onSubmit: submitDraft,
     },
   } : undefined;
-  nodes.value = [...turns, ...(pendingTurn ? [pendingTurn] : []), ...(draft ? [draft] : [])];
-  edges.value = value.edges.map((edge) => ({
+  const nextNodes: RenderNode[] = [...turns, ...(pendingTurn ? [pendingTurn] : []), ...(draft ? [draft] : [])];
+  const nextEdges: Edge[] = value.edges.map((edge) => ({
     ...edge,
-    class: active.has(edge.source) && active.has(edge.target) ? "active-edge" : "",
+    class: "",
   }));
   if (pending && pendingParent)
-    edges.value.push({ id: `edge:${pending.message.entryId}`, source: pendingParent.id, target: pending.message.entryId, class: "draft-edge", animated: true });
-  if (parent && draft) edges.value.push({ id: `edge:${draftId}`, source: parent.id, target: draftId, class: "draft-edge", animated: true });
+    nextEdges.push({ id: `edge:${pending.message.entryId}`, source: pendingParent.id, target: pending.message.entryId, class: "draft-edge", animated: true });
+  if (parent && draft) nextEdges.push({ id: `edge:${draftId}`, source: parent.id, target: draftId, class: "draft-edge", animated: true });
   const pendingRows = new Map<string | null, number>();
   for (const run of session.current?.graph?.runs ?? []) {
     if (!run.pending || run.status !== "running") continue;
@@ -272,15 +300,31 @@ function rebuild() {
     const id = `pending:${run.runId}`;
     const node: GraphNode = { id, userEntryId: id, parentId, title: clipText(run.pending.text, 58), preview: "",
       timestamp: "", rawEntryIds: [], leafEntryId: id, toolCallCount: 0, hasError: false, depth: (anchor?.depth ?? -1) + 1 };
-    nodes.value.push({ id, type: "prompt", position: { x: anchor ? anchor.x + anchor.width + 92 : 48,
+    nextNodes.push({ id, type: "prompt", position: { x: anchor ? anchor.x + anchor.width + 92 : 48,
       y: (siblings.length ? Math.max(...siblings.map(n => n.y)) + 178 : anchor?.y ?? 48) + offset * 178 },
       data: { node, active: true, current: false, selected: session.focusedNode === id, running: true, runnable: false,
         blockedReason: "graph.blockedStreaming", content: () => ({ user: run.pending!.text, assistant: t("graph.agentRunning"), images: run.pending!.images }), onCompose: () => {} } });
-    if (parentId) edges.value.push({ id: `edge:${id}`, source: parentId, target: id, animated: true });
+    if (parentId) nextEdges.push({ id: `edge:${id}`, source: parentId, target: id, animated: true });
+  }
+  // Highlight paths to running turns, including submitted turns awaiting a node.
+  // Shared ancestors are visited once, even when multiple branches are running.
+  const parents = new Map<string, string | null>(nextNodes
+    .filter(node => node.type === "prompt").map(node => [node.id, node.data.node.parentId]));
+  const runningPath = new Set<string>();
+  for (const node of nextNodes) {
+    if (node.type !== "prompt" || !node.data.running) continue;
+    let id: string | null = node.id;
+    while (id && !runningPath.has(id)) {
+      runningPath.add(id);
+      id = parents.get(id) ?? null;
+    }
+  }
+  for (const edge of nextEdges) {
+    if (runningPath.has(edge.source) && runningPath.has(edge.target)) edge.class = "running-edge";
   }
   // Vue Flow treats zero-size, unmeasured nodes as visible everywhere. Supply
   // initial dimensions so opening a large graph never mounts all its cards.
-  for (const node of nodes.value) {
+  for (const node of nextNodes) {
     const existing = flow.value?.findNode(node.id);
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
@@ -292,21 +336,27 @@ function rebuild() {
       },
     });
   }
-  transientNodeIds = new Set(nodes.value.slice(turns.length).map(node => node.id));
-  layoutBranches(nodes.value);
+  transientNodeIds = new Set(nextNodes.slice(turns.length).map(node => node.id));
+  layoutBranches(nextNodes);
+  nodes.value = nextNodes;
+  edges.value = nextEdges;
   const ids = new Set(nodes.value.map(node => node.id));
   for (const id of promptCache.keys()) if (!ids.has(id)) promptCache.delete(id);
 }
 
 function layoutBranches(items: RenderNode[]) {
-  if (!transientNodeIds.size && !dragged.size) return false;
+  if (!transientNodeIds.size && !dragged.size && !branchOrder.size) return false;
   // Reserve space inside each branch; moving only the draft can cross other branches.
   const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
     ? { id: node.id, parentId: node.data.parentId, timestamp: "\uffff", depth: (depths.get(node.data.parentId) ?? -1) + 1 }
     : { ...node.data.node, timestamp: transientNodeIds.has(node.id) ? "\uffff" : node.data.node.timestamp });
-  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])));
+  const order = new Map(branchOrder);
+  if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
+  const pending = session.pendingPrompt;
+  if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order);
   reserveManualPositions(placed.nodes, dragged);
   let moved = false;
   for (let i = 0; i < visible.length; i++) {
@@ -330,8 +380,9 @@ async function select(id: string, openChat = false) {
   await center(id);
 }
 
-async function compose(id: string) {
+async function compose(id: string, direction?: BranchDirection) {
   if (draftParent.value !== id) draftState.value = emptyDraft();
+  draftOrder = direction === "up" ? -++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
   draftParent.value = id;
   draftModel.value = node?.footer?.model ?? session.current?.runtime.model ?? null;
@@ -350,9 +401,12 @@ function resetDraft() {
   draftParent.value = undefined;
   draftModel.value = undefined;
   draftThinking.value = undefined;
+  draftOrder = 0;
 }
 
 async function submitDraft(text: string, images?: PromptImage[]) {
+  const order = draftOrder;
+  const targetSession = sessionKey.value;
   const delivered = await runDraftSubmit(
     draftParent.value ?? null,
     text,
@@ -361,6 +415,8 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     images,
   );
   if (!delivered) return false;
+  if (targetSession !== sessionKey.value) return true;
+  if (submittedNodeId.value && order) rememberBranchOrder(submittedNodeId.value, order);
   if (session.current?.graph) {
     resetDraft(); rebuild();
     await center(session.focusedNode ?? undefined, true);
@@ -376,6 +432,7 @@ async function submitDraft(text: string, images?: PromptImage[]) {
 
 function acceptSubmittedNode() {
   const id = acceptSubmittedDraft();
+  if (id && draftOrder && activeSession === sessionKey.value) rememberBranchOrder(id, draftOrder);
   if (id) resetDraft();
   return id;
 }
@@ -500,10 +557,10 @@ function syncNodeDimensions(changes: NodeChange[]) {
 
 const pendingRuns = computed(() => JSON.stringify(session.current?.graph?.runs.filter(run => run.pending && run.status === "running") ?? []));
 watch(
-  () => [session.current?.session.path, session.current?.projection, session.focusedNode, session.models, draftParent.value, session.pendingPrompt, pendingRuns.value],
+  () => [sessionKey.value, session.current?.projection, session.focusedNode, session.models, draftParent.value, session.pendingPrompt, pendingRuns.value],
   () => {
     if (!session.current) booted.value = false;
-    const changedSession = activeSession !== session.current?.session.path;
+    const changedSession = activeSession !== sessionKey.value;
     const submittedNode = acceptSubmittedNode();
     rebuild();
     if (submittedNode) void center(submittedNode, true);

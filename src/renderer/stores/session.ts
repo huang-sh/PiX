@@ -279,7 +279,7 @@ export const useSessionStore = defineStore("session", {
           provider: model?.provider, modelId: model?.id, thinkingLevel, images });
         const run = result.graph?.runs.find(r => r.requestId === requestId);
         if (run) this.focusedNode = run.nodeId ?? `pending:${run.runId}`;
-        return;
+        return run ? run.nodeId ?? `pending:${run.runId}` : undefined;
       }
       const node = nodeId ? current.projection.nodes.find((item) => item.id === nodeId) : undefined;
       if (nodeId && !node) return;
@@ -293,6 +293,7 @@ export const useSessionStore = defineStore("session", {
       if (thinkingLevel && this.current?.runtime.thinkingLevel !== thinkingLevel)
         await this.control({ action: "setThinking", level: thinkingLevel });
       await this.prompt(text, nodeId, model, thinkingLevel, images);
+      return this.current?.projection.activeNodeId ?? undefined;
     },
     async create() {
       if (!useWorkspaceStore().project) {

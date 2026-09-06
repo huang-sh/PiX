@@ -1,4 +1,5 @@
 import type { GraphNode } from "../shared/types.js";
+export type BranchDirection = "up" | "down";
 export interface PositionedNode extends GraphNode {
   x: number;
   y: number;
@@ -93,7 +94,7 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, {
   }
 }
 
-export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new Map<string, { width: number; height: number }>()) {
+export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new Map<string, { width: number; height: number }>(), order = new Map<string, number>()) {
   const nw = 280,
     nh = 146,
     cg = 92,
@@ -107,7 +108,7 @@ export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new
     children.set(n.parentId, a);
   }
   for (const a of children.values())
-    a.sort((x, y) => x.timestamp.localeCompare(y.timestamp));
+    a.sort((x, y) => (order.get(x.id) ?? 0) - (order.get(y.id) ?? 0) || x.timestamp.localeCompare(y.timestamp));
   let next = 0;
   const row = new Map<string, number>();
   const roots = children.get(null) ?? [];

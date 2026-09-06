@@ -54,6 +54,6 @@ function navigate(event: PointerEvent) {
 </template>
 
 <style scoped>
-.graph-overview { position: absolute; right: 15px; bottom: 15px; z-index: 5; width: 200px; height: 140px;
+.graph-overview { position: absolute; right: 5px; bottom: 5px; z-index: 5; width: 200px; height: 140px;
   color: var(--accent); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; touch-action: none; }
 </style>

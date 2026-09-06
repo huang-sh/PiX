@@ -3,9 +3,11 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import GraphPanel from "../../src/renderer/features/graph/GraphPanel.vue";
 import { useSessionStore } from "../../src/renderer/stores/session";
+import { useLayoutStore } from "../../src/renderer/stores/layout";
+import { desktop } from "../../src/renderer/api";
 import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
-import type { SessionSnapshot } from "../../src/shared/types";
+import type { LayoutState, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
 
 vi.mock("../../src/renderer/lib/frame", () => ({
   nextFrame: async () => {}, whenVisible: async () => {}, whenTransitionsSettle: async () => {},
@@ -26,7 +28,7 @@ function setup() {
   } as SessionSnapshot;
   const wrapper = mount(GraphPanel, { global: { plugins: [pinia, i18n], stubs: { VueFlow: true } } });
   const graph = (wrapper.vm as any).$.setupState;
-  return { graph, session };
+  return { graph, session, wrapper };
 }
 
 function expectClear(graph: any, id: string) {
@@ -42,6 +44,93 @@ function expectClear(graph: any, id: string) {
 }
 
 describe("draft placement", () => {
+  it.each(["up", "down"])("places a draft %s of siblings and preserves that order after submitting", async direction => {
+    const { graph, session } = setup();
+    await graph.compose("turn:root", direction); await flushPromises();
+    const checkOrder = (id: string) => {
+      expectClear(graph, id);
+      const node = graph.nodes.find((item: any) => item.id === id);
+      const sibling = graph.nodes.find((item: any) => item.id === `turn:${direction === "up" ? "a" : "b"}`);
+      if (direction === "up") expect(node.position.y + node.dimensions.height + 28).toBeLessThanOrEqual(sibling.position.y);
+      else expect(node.position.y).toBeGreaterThanOrEqual(sibling.position.y + sibling.dimensions.height + 28);
+    };
+    checkOrder("draft:turn:root");
+    graph.syncNodeDimensions([{ type: "dimensions", id: "draft:turn:root", dimensions: { width: 360, height: 500 } }]);
+    checkOrder("draft:turn:root");
+    const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
+      const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "root", timestamp: "9", message: { role: "user", content: "new" } }];
+      session.current!.entries = entries;
+      session.current!.projection = projectSession(entries, "new");
+      return "turn:new";
+    });
+    try { await graph.submitDraft("new"); await flushPromises(); }
+    finally { promptAt.mockRestore(); }
+    checkOrder("turn:new");
+    graph.rebuild(); checkOrder("turn:new");
+    await graph.compose("turn:root", "down"); await flushPromises();
+    checkOrder("turn:new");
+    graph.cancelDraft(); await flushPromises();
+    checkOrder("turn:new");
+    const saved = session.current!;
+    session.applySnapshot({ ...saved, session: { ...saved.session, path: "other.jsonl" } }); await flushPromises();
+    session.applySnapshot(saved); await flushPromises();
+    checkOrder("turn:new");
+  });
+
+  it("restores saved upward order in a fresh view and keeps subsequent upward branches above it", async () => {
+    const { graph, session, wrapper } = setup();
+    const invoke = vi.spyOn(desktop, "invoke");
+    const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
+      const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "root", timestamp: "9", message: { role: "user", content: "new" } }];
+      session.current!.entries = entries;
+      session.current!.projection = projectSession(entries, "new");
+      return "turn:new";
+    });
+    let savedLayout: LayoutState;
+    try {
+      await graph.compose("turn:root", "up"); await graph.submitDraft("new"); await flushPromises();
+      const lastSave = invoke.mock.calls.filter(([route]) => route === "layout.save").at(-1)!;
+      savedLayout = structuredClone((lastSave[1] as { layout: LayoutState }).layout);
+      expect(Object.values(savedLayout.branchOrders!)).toContainEqual([["turn:new", -1]]);
+    } finally { promptAt.mockRestore(); invoke.mockRestore(); }
+    const savedSession = session.current!;
+    wrapper.unmount();
+    const fresh = createPinia(); setActivePinia(fresh);
+    useLayoutStore().hydrate({ app: { theme: "light", density: "comfortable" } } as SettingsBundle, savedLayout!);
+    useSessionStore().applySnapshot(savedSession);
+    const reopened = mount(GraphPanel, { global: { plugins: [fresh, i18n], stubs: { VueFlow: true } } });
+    const restored = (reopened.vm as any).$.setupState;
+    const y = (id: string) => restored.nodes.find((node: any) => node.id === id).position.y;
+    expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    await restored.compose("turn:root", "up"); await flushPromises();
+    expect(y("draft:turn:root")).toBeLessThan(y("turn:new"));
+    expectClear(restored, "draft:turn:root");
+  });
+
+  it("keeps an upward branch above siblings while pending and after its real node arrives", async () => {
+    const { graph, session } = setup();
+    await graph.compose("turn:root", "up");
+    const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
+      session.current!.graph!.runs = [{ branchId: "new", runId: "new", nodeId: null, status: "running", pending: { text: "new", parentNodeId: "turn:root" } }];
+      return "pending:new";
+    });
+    try { await graph.submitDraft("new"); await flushPromises(); }
+    finally { promptAt.mockRestore(); }
+    const y = (id: string) => graph.nodes.find((node: any) => node.id === id).position.y;
+    expect(y("pending:new")).toBeLessThan(y("turn:a"));
+    expectClear(graph, "pending:new");
+    const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "root", timestamp: "9", message: { role: "user", content: "new" } }];
+    session.current!.entries = entries;
+    session.current!.projection = projectSession(entries, "new");
+    session.current!.graph!.runs = [{ branchId: "new", runId: "new", nodeId: "turn:new", status: "idle" }];
+    await flushPromises();
+    expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    expectClear(graph, "turn:new");
+    const savedOrders = Object.values(useLayoutStore().layout.branchOrders!).flat();
+    expect(savedOrders).toContainEqual(["turn:new", -1]);
+    expect(savedOrders.some(([id]) => id === "pending:new")).toBe(false);
+  });
+
   it("keeps a continuation to the right of a manually moved parent before and after submitting", async () => {
     const { graph, session } = setup();
     const manual = { x: 1400, y: 800 };
