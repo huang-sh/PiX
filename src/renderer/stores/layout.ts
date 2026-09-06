@@ -4,6 +4,8 @@ import type { LayoutState, PanelId, SettingsBundle } from "../../shared/types";
 import { desktop } from "../api";
 import type { PromptImage } from "../../shared/types";
 import { imageDataUrl } from "../../shared/images";
+import { applyTheme } from "../theme";
+import type { ThemePreference } from "../../shared/theme";
 
 export type ContentSection =
   | "home"
@@ -31,6 +33,7 @@ export const useLayoutStore = defineStore("layout", {
     screen: "workbench" as "workbench" | "settings",
     settingsCategory: "general",
     settings: undefined as SettingsBundle | undefined,
+    themeSaving: false,
     layout: defaultLayout(),
     contentSection: "home" as ContentSection,
     contentTabs: [] as ContentTab[],
@@ -40,12 +43,36 @@ export const useLayoutStore = defineStore("layout", {
     notice: undefined as { level: string; message: string } | undefined,
   }),
   actions: {
+    applySettings(settings: SettingsBundle) {
+      this.settings = settings;
+      applyTheme(settings.app.theme);
+      document.documentElement.dataset.density = settings.app.density;
+    },
+    async setTheme(preference: ThemePreference) {
+      if (!this.settings || this.themeSaving) return;
+      const previous = this.settings.app.theme;
+      this.themeSaving = true;
+      this.settings.app.theme = preference;
+      applyTheme(preference);
+      try {
+        const saved = await desktop.invoke<SettingsBundle>("settings.update", {
+          scope: "app", patch: { theme: preference },
+        });
+        this.settings.app.theme = saved.app.theme;
+        applyTheme(saved.app.theme);
+      } catch (error) {
+        this.settings.app.theme = previous;
+        applyTheme(previous);
+        throw error;
+      } finally {
+        this.themeSaving = false;
+      }
+    },
     previewImage(image: PromptImage, alt: string) {
       this.imagePreview = { src: imageDataUrl(image), alt };
     },
     hydrate(settings: SettingsBundle, layout?: LayoutState) {
-      this.settings = settings;
-      // Callers may pass reactive store state; toRaw keeps structuredClone happy.
+      this.applySettings(settings);
       // Callers may pass reactive store state; toRaw keeps structuredClone happy.
       this.layout = structuredClone(toRaw(layout ?? defaultLayout()));
       // The chat panel opens on demand (node double-click, prompt submit) and is
@@ -63,8 +90,6 @@ export const useLayoutStore = defineStore("layout", {
       }
       if (!this.layout.composer) this.layout.composer = { open: false };
       if (!this.contentTabs.length) this.layout.collapsed.content = true;
-      document.documentElement.dataset.theme = settings.app.theme;
-      document.documentElement.dataset.density = settings.app.density;
       this.hydrated = true;
     },
     showNotice(message: string, level = "info") {

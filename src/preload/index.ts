@@ -6,6 +6,7 @@ import type {
 } from "../shared/types.js";
 
 const api: DesktopApi & { copy(text: string): Promise<void> } = {
+  initialTheme: ipcRenderer.sendSync("pix:initial-theme"),
   invoke<T>(route: DesktopRoute, input?: unknown) {
     return ipcRenderer.invoke("pix:invoke", route, input);
   },

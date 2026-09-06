@@ -8,10 +8,10 @@ const styles = cva(
   {
     variants: {
       variant: {
-        default: "bg-[var(--accent)] text-white hover:bg-[var(--accent-strong)]",
+        default: "bg-[var(--accent)] text-[var(--accent-foreground)] hover:bg-[var(--accent-strong)]",
         ghost: "text-[var(--muted)] hover:bg-[var(--muted-surface)] hover:text-[var(--text)]",
         outline: "border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--muted-surface)]",
-        danger: "bg-[var(--danger)] text-white",
+        danger: "bg-[var(--danger)] text-[var(--danger-foreground)]",
       },
       size: {
         default: "h-9 px-3",

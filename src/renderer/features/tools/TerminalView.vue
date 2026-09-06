@@ -6,6 +6,9 @@ import { useI18n } from "vue-i18n";
 import type { DesktopEvent, TerminalEvent, TerminalSession } from "../../../shared/types";
 import { desktop } from "../../api";
 
+import { activeTheme } from "../../theme";
+import { terminalTheme } from "./terminal-theme";
+
 const props = withDefaults(defineProps<{ active: boolean; projectKey: string; connected?: boolean }>(), { connected: true });
 const { t } = useI18n();
 const host = ref<HTMLElement>();
@@ -15,29 +18,9 @@ const terminal = new Terminal({
   fontSize: 14,
   lineHeight: 1.2,
   scrollback: 10_000,
-  theme: {
-    background: "#ffffff",
-    foreground: "#202124",
-    cursor: "#202124",
-    selectionBackground: "#cce8ff",
-    black: "#202124",
-    red: "#b3261e",
-    green: "#146c2e",
-    yellow: "#6b5700",
-    blue: "#0b57d0",
-    magenta: "#7b1fa2",
-    cyan: "#00696f",
-    white: "#5f6368",
-    brightBlack: "#5f6368",
-    brightRed: "#b3261e",
-    brightGreen: "#188038",
-    brightYellow: "#806000",
-    brightBlue: "#1a73e8",
-    brightMagenta: "#8e24aa",
-    brightCyan: "#007b83",
-    brightWhite: "#202124",
-  },
+  theme: terminalTheme(activeTheme.value),
 });
+watch(activeTheme, (theme) => { terminal.options.theme = terminalTheme(theme); });
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 terminal.options.disableStdin = true;

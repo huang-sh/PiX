@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronBinary } from "./lib/electron-binary.mjs";
@@ -930,10 +930,12 @@ try {
   await retry(async () => {
     const value = await cdp.evaluate(`({
       theme: document.documentElement.dataset.theme,
+      savingTheme: document.querySelector('[data-setting-path=theme] select')?.disabled,
       tuiTheme: Boolean(document.querySelector('[data-setting-path=tuiMode], [data-setting-path="terminal.showTerminalProgress"]')),
       advanced: Boolean(document.querySelector('[data-settings-category=advanced]'))
     })`);
-    if (value.theme !== themePreview.preview || value.tuiTheme || value.advanced)
+    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "settings.json"), "utf8"));
+    if (value.theme !== themePreview.preview || value.savingTheme || saved.theme !== themePreview.preview || value.tuiTheme || value.advanced)
       throw new Error(`GUI appearance settings are not effective: ${JSON.stringify(value)}`);
   });
   await cdp.evaluate(`(() => {
@@ -941,6 +943,12 @@ try {
     input.value = ${JSON.stringify(themePreview.original)};
     input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
+  await retry(async () => {
+    if (await cdp.evaluate("document.querySelector('[data-setting-path=theme] select').disabled"))
+      throw new Error("Theme restore is still saving");
+    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "settings.json"), "utf8"));
+    if (saved.theme !== themePreview.original) throw new Error("Theme restore was not persisted");
+  });
   for (const [category, setting] of [
     ['general', 'defaultProjectTrust'],
     ['appearance', 'theme'],

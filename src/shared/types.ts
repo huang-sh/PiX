@@ -1,5 +1,6 @@
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
+import type { ThemePreference } from "./theme.js";
 
 export type PromptImage = ImageContent;
 
@@ -301,7 +302,7 @@ export interface PiSettings {
 export interface AppSettings {
   keyboardShortcuts?: ShortcutOverrides;
   language: "system" | "zh-CN" | "en";
-  theme: "system" | "light" | "dark";
+  theme: ThemePreference;
   density: "comfortable" | "compact";
   lastProject?: string;
   recentProjects?: ProjectHistory[];
@@ -448,6 +449,7 @@ export interface DesktopEvent {
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";
 export interface DesktopApi {
+  initialTheme?: ThemePreference;
   invoke<T = unknown>(route: DesktopRoute, input?: unknown): Promise<T>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }

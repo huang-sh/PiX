@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import NodeRenderer from "markstream-vue";
+import { colorScheme } from "../theme";
 import { useI18n } from "vue-i18n";
 import { useLayoutStore } from "../stores/layout";
 import { useWorkspaceStore } from "../stores/workspace";
@@ -120,6 +121,7 @@ function decodePath(value: string): string {
 <template>
   <div class="agent-markdown" :data-streaming="streaming" @click="onContentClick">
     <NodeRenderer
+      :is-dark="colorScheme === 'dark'"
       :content="content"
       :custom-id="customId"
       mode="chat"

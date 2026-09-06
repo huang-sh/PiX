@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   shell,
   Tray,
 } from "electron";
@@ -13,10 +14,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
 import type { DesktopRoute } from "../shared/types.js";
+import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
 let tray: Tray | undefined;
 let isQuitting = false;
+let currentTheme: ThemePreference = "light";
 const zhUi = () => {
   const lang = controller.settings.bundle().app.language;
   return (
@@ -61,8 +64,20 @@ async function openExternal(url: string) {
     throw new Error(`External protocol is not allowed: ${target.protocol}`);
   await shell.openExternal(target.href);
 }
+function windowColors() {
+  currentTheme = normalizeTheme(controller.settings.bundle().app.theme);
+  return themeColors[resolveTheme(currentTheme, nativeTheme.shouldUseDarkColors)];
+}
+function syncWindowTheme() {
+  const colors = windowColors();
+  if (!win || win.isDestroyed()) return;
+  win.setBackgroundColor(colors.surface);
+  if (process.platform !== "darwin")
+    win.setTitleBarOverlay({ color: colors.background, symbolColor: colors.text });
+}
 async function create() {
   const darwin = process.platform === "darwin";
+  const colors = windowColors();
   Menu.setApplicationMenu(
     // macOS dispatches editing shortcuts (Cmd+C/V/X/A) through the
     // application menu, so a null menu would disable them entirely.
@@ -80,7 +95,8 @@ async function create() {
     minWidth: 1080,
     minHeight: 700,
     title: "PiX",
-    backgroundColor: "#f2f6f6",
+    backgroundColor: colors.surface,
+    show: false,
     frame: darwin,
     titleBarStyle: "hidden",
     // Windows/Linux draw overlay window controls into the page; the renderer
@@ -92,8 +108,8 @@ async function create() {
       ? { trafficLightPosition: { x: 14, y: 14 } }
       : {
           titleBarOverlay: {
-            color: "#eef2f1",
-            symbolColor: "#17201e",
+            color: colors.background,
+            symbolColor: colors.text,
             height: 40,
           },
         }),
@@ -109,6 +125,7 @@ async function create() {
       backgroundThrottling: false,
     },
   });
+  win.once("ready-to-show", () => win.show());
   win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
@@ -186,10 +203,17 @@ app.whenReady().then(async () => {
     },
   });
   controller.onEvent((e) => win?.webContents.send("pix:event", e));
+  nativeTheme.on("updated", syncWindowTheme);
+  // Preload needs the current preference before the first paint, including on reload.
+  // This one synchronous handshake reads memory only; all persistence stays async over IPC.
+  ipcMain.on("pix:initial-theme", (event) => { event.returnValue = currentTheme; });
   ipcMain.handle(
     "pix:invoke",
-    (_e: unknown, route: DesktopRoute, input: unknown) =>
-      controller.invoke(route, input),
+    async (_e: unknown, route: DesktopRoute, input: unknown) => {
+      const result = await controller.invoke(route, input);
+      if (route === "settings.update" || route === "settings.reset") syncWindowTheme();
+      return result;
+    },
   );
   ipcMain.handle("pix:copy", (_e: unknown, text: string) =>
     clipboard.writeText(text),

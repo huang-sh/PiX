@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
-import { computed, nextTick, reactive, ref, toRaw, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, reactive, ref, toRaw, watch } from "vue";
+import { normalizeTheme } from "../../../shared/theme";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
@@ -31,6 +32,9 @@ const workspace = useWorkspaceStore();
 const session = useSessionStore();
 const { locale, t, te } = useI18n();
 const draft = ref<SettingsBundle>();
+onBeforeUnmount(() => {
+  document.documentElement.dataset.density = layout.settings?.app.density ?? "comfortable";
+});
 const shortcutsPage = ref<InstanceType<typeof KeyboardShortcuts>>();
 function close() { shortcutsPage.value?.requestClose(); }
 defineExpose({ close });
@@ -109,6 +113,7 @@ function optionLabel(option: string) {
 }
 
 function rowHint(row: Row) {
+  if (row.scope === "app" && row.path === "theme") return t("settings.themeAutoSave");
   return row.description
     ? t(row.description)
     : t("settings.storedIn", { scope: t(`settings.scope.${row.scope}`) });
@@ -136,7 +141,7 @@ const rows = computed<Row[]>(() => {
       ];
     case "appearance":
       return [
-        { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark"] },
+        { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal"] },
         { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
       ];
     case "models":
@@ -416,6 +421,7 @@ function rootFor(row: Row): Record<string, unknown> | undefined {
 }
 
 function value(row: Row): unknown {
+  if (row.scope === "app" && row.path === "theme") return layout.settings?.app.theme;
   let current: unknown = rootFor(row);
   for (const key of row.path.split("."))
     current = current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined;
@@ -425,6 +431,13 @@ function value(row: Row): unknown {
 
 function setValue(row: Row, event: Event) {
   const target = event.target as HTMLInputElement | HTMLSelectElement;
+  if (row.scope === "app" && row.path === "theme") {
+    void layout.setTheme(normalizeTheme(target.value)).catch((error) => {
+      target.value = layout.settings!.app.theme;
+      layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+    });
+    return;
+  }
   let next: unknown = target instanceof HTMLInputElement && target.type === "checkbox"
     ? target.checked
     : target instanceof HTMLInputElement && target.type === "number"
@@ -443,8 +456,6 @@ function setValue(row: Row, event: Event) {
       current = current![key] as Record<string, unknown>;
     }
   });
-  if (row.scope === "app" && row.path === "theme")
-    document.documentElement.dataset.theme = String(next);
   if (row.scope === "app" && row.path === "density")
     document.documentElement.dataset.density = String(next);
 }
@@ -494,7 +505,7 @@ function setModelThinkingOverride(event: Event) {
 }
 
 async function save() {
-  if (!draft.value || saving.value) return;
+  if (!draft.value || saving.value || layout.themeSaving) return;
   saving.value = true;
   try {
     const scopes = new Set(rows.value.map((row) => row.scope));
@@ -507,9 +518,10 @@ async function save() {
       const patch = structuredClone(toRaw(
         scope === "app" ? draft.value.app : scope === "global" ? draft.value.piGlobal : draft.value.piProject,
       ));
+      if (scope === "app") patch.theme = layout.settings!.app.theme;
       settings = await desktop.invoke<SettingsBundle>("settings.update", { scope, patch, replace: true });
     }
-    layout.hydrate(settings, layout.layout);
+    layout.applySettings(settings);
     locale.value = settings.app.language === "system"
       ? navigator.language === "zh-CN" ? "zh-CN" : "en"
       : settings.app.language;
@@ -539,7 +551,7 @@ async function applyModel() {
       scope: "global",
       patch: { defaultProvider: model.provider, defaultModel: model.id },
     });
-    layout.hydrate(settings, layout.layout);
+    layout.applySettings(settings);
     layout.showNotice(t("settings.defaultModelSet", { model: `${model.provider}/${model.id}` }));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -628,7 +640,7 @@ async function logout(provider: RuntimeProvider) {
           <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
         </div>
         <nav v-if="!['models', 'skills', 'extensions', 'shortcuts', 'about'].includes(layout.settingsCategory)">
-          <Button :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.saveChanges") }}</Button>
+          <Button :disabled="saving || layout.themeSaving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.saveChanges") }}</Button>
         </nav>
       </header>
 
@@ -846,7 +858,7 @@ async function logout(provider: RuntimeProvider) {
             :checked="Boolean(value(row))"
             @change="setValue(row, $event)"
           />
-          <select v-else-if="row.type === 'select'" :value="String(value(row))" @change="setValue(row, $event)">
+          <select v-else-if="row.type === 'select'" :value="String(value(row))" :disabled="row.path === 'theme' && (layout.themeSaving || saving)" @change="setValue(row, $event)">
             <option v-for="option in row.options" :key="option" :value="option">{{ optionLabel(option) }}</option>
           </select>
           <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @input="setValue(row, $event)" />

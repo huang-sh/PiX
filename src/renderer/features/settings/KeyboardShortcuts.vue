@@ -107,7 +107,7 @@ async function save() {
     });
     saved.value = clone(settings.app.keyboardShortcuts);
     draft.value = clone(saved.value);
-    layout.settings = settings;
+    layout.applySettings(settings);
     layout.showNotice(t("settings.saved"));
     return true;
   } catch (reason) {

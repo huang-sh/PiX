@@ -101,7 +101,11 @@ export function validateRouteInput(
       };
     case "terminal.kill":
       return { id: str(v.id, "id") };
-    case "settings.update":
+    case "settings.update": {
+      const patch = obj(v.patch);
+      if (v.scope !== "project" && v.scope !== "global" && Object.hasOwn(patch, "theme") &&
+          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal")
+        throw new Error("theme must be light, dark, teal or system");
       return {
         scope:
           v.scope === "project"
@@ -109,9 +113,10 @@ export function validateRouteInput(
             : v.scope === "global"
               ? "global"
               : "app",
-        patch: obj(v.patch),
+        patch,
         replace: v.replace === true,
       };
+    }
     case "settings.reset":
       return {
         scope:

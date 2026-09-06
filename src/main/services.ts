@@ -40,6 +40,7 @@ import type {
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
+import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
@@ -130,7 +131,7 @@ export class SettingsService {
   bundle(): SettingsBundle {
     const defaults: AppSettings = {
       language: "system",
-      theme: "system",
+      theme: "light",
       density: "comfortable",
       confirmDestructiveActions: true,
       browserHome: "https://pi.dev",
@@ -143,6 +144,7 @@ export class SettingsService {
       defaults as unknown as Record<string, unknown>,
       readJson(this.appPath),
     ) as unknown as AppSettings;
+    app.theme = normalizeTheme(app.theme);
     const piGlobal = readJson<PiSettings>(this.globalPath),
       piProject = this.project && this.projectPath
         ? readJson<PiSettings>(this.projectPath)
