@@ -316,7 +316,7 @@ kbd {
 }
 .prompt-node:hover { border-color: var(--border-strong); box-shadow: 0 4px 12px rgba(28,36,48,.07); transform: translateY(-1px); }
 .prompt-node.active { border-color: color-mix(in srgb,var(--accent) 52%,var(--border)); }
-.prompt-node.active::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 3px; border-radius: 2px; background: var(--accent); }
+.prompt-node.running::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 3px; border-radius: 2px; background: var(--accent); }
 .prompt-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring), 0 4px 12px rgba(28,36,48,.06); }
 .draft-node > header { display: flex; align-items: center; justify-content: space-between; color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
 .draft-node > header span { display: flex; align-items: center; gap: 4px; color: var(--accent-strong); font-weight: 800; }

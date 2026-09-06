@@ -34,6 +34,16 @@ describe("PromptNode branch action", () => {
     });
     const add = wrapper.get(".node-add");
 
+    expect(wrapper.get(".prompt-node").classes()).not.toContain("running");
+    await wrapper.setProps({ data: { ...data, active: false, running: true } });
+    expect(wrapper.get(".prompt-node").classes()).toContain("running");
+    expect(wrapper.get(".prompt-node").classes()).not.toContain("active");
+    await wrapper.setProps({ data: { ...data, active: false, running: true, selected: false } });
+    expect(wrapper.get(".prompt-node").classes()).toContain("running");
+    expect(wrapper.get(".prompt-node").classes()).not.toContain("selected");
+    await wrapper.setProps({ data });
+    expect(wrapper.get(".prompt-node").classes()).not.toContain("running");
+
     expect(add.attributes("aria-disabled")).toBe("true");
     expect(add.attributes("title")).toBe("等待完成或先停止当前任务");
     expect(wrapper.get(".node-context-usage").text()).toContain("32%128K");

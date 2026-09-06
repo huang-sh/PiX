@@ -133,7 +133,7 @@ function relative(value: string) {
   <article
     ref="root"
     class="prompt-node"
-    :class="{ active: data.active, current: data.current, selected: data.selected }"
+    :class="{ active: data.active, current: data.current, running: data.running, selected: data.selected }"
     @mouseenter="showPreview"
     @mouseleave="hidePreview"
   >
