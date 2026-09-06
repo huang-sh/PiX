@@ -3,8 +3,9 @@ import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquar
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
-import type { BranchMessage, RuntimeModel } from "../../../shared/types";
+import type { BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
+import MessageImages from "../../components/MessageImages.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
@@ -69,8 +70,8 @@ function setComposerThinking(level: string, explicit: boolean) {
 
 // Same delivery path as the graph draft node: branch from the selected node,
 // navigate the tree, apply model/thinking, and let the graph center the new node.
-async function submitComposer(text: string) {
-  return submitDraft(session.selectedNode?.id ?? null, text, composerModelValue.value, composerThinkingValue.value);
+async function submitComposer(text: string, images?: PromptImage[]) {
+  return submitDraft(session.selectedNode?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
 }
 
 interface Turn {
@@ -208,7 +209,8 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
     <div ref="scroll" class="branch-messages" @scroll="updateScrollFollow">
       <section v-for="turn in turns" :key="turn.id" class="chat-turn">
         <article v-if="turn.user" class="branch-message user">
-          <p>{{ turn.user.text || t("common.empty") }}</p>
+          <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
+          <MessageImages :images="turn.user.images" />
         </article>
 
         <details v-if="turn.process.length || turn.final?.thinking" class="agent-process">

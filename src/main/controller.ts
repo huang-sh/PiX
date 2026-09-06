@@ -6,7 +6,7 @@ import type {
   DesktopRoute,
   ProjectGroup,
   ProjectInfo,
-  RuntimeModel,
+  BrokerModel,
   RuntimeState,
   SessionSnapshot,
   SessionSummary,
@@ -166,13 +166,14 @@ export class MainController {
     };
   }
   async syncModelBroker(client: WslHostClient) {
-    const models = await this.pi.control({ action: "getModels" }) as RuntimeModel[];
+    const models = await this.pi.control({ action: "getModels", broker: true }) as BrokerModel[];
     this.remoteBrokerModels = new Set(
       models.map((model) => `${model.provider}\0${model.id}`),
     );
     await client.request("agent.control", {
       action: "setBrokerProviders",
       providers: [...new Set(models.map((model) => model.provider))],
+      models,
     });
   }
   async attachModelBroker(client: WslHostClient) {
@@ -259,9 +260,9 @@ export class MainController {
     if (!this.wsl) throw new Error("Remote host is not connected");
     if (route === "agent.control") {
       const action = String(v.action);
-      if (action === "getProviders" || action === "getModels")
+      if (action === "getProviders" || action === "getModels" || action === "getCustomModels")
         return this.pi.control(v as unknown as AgentControl);
-      if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels") {
+      if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels" || action === "addCustomModel" || action === "updateCustomModel") {
         const result = await this.pi.control(v as unknown as AgentControl);
         await this.syncModelBroker(this.wsl);
         return result;

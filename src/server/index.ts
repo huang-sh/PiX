@@ -8,6 +8,7 @@ import { enrichLoginPath } from "./login-env.js";
 import {
   PIX_HOST_VERSION,
   PIX_REMOTE_PROTOCOL,
+  MAX_REMOTE_PAYLOAD,
   isProjectRoute,
   type ClientMessage,
   type HostMessage,
@@ -18,7 +19,6 @@ import { brokerOptions, BrokerModelStream } from "../main/model-broker.js";
 
 const PI_VERSION = "0.84.4";
 const READY_MARKER = "PIX_AGENT_HOST_READY ";
-const MAX_PAYLOAD = 16 * 1024 * 1024;
 
 function option(name: string) {
   const index = process.argv.indexOf(name);
@@ -74,7 +74,7 @@ async function serve() {
   const wss = new WebSocketServer({
     host: "127.0.0.1",
     port,
-    maxPayload: MAX_PAYLOAD,
+    maxPayload: MAX_REMOTE_PAYLOAD,
     verifyClient: ({ req }, done) => done(authorized(req.url, token), 401),
   });
   let sequence = 0;

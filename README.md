@@ -56,6 +56,14 @@ PiX 把会话组织成一张从左到右生长的图：
 - **内容工作区**：打开项目文件、查看 Git 更改、浏览网页。
 - 各面板均可折叠、恢复、调整大小；通过 SSH 或 WSL 连接远程 Linux 工作区时，体验与本地一致。
 
+## 自定义模型
+
+Graph node 和 chat panel 的输入框均支持选择、粘贴或拖入图片，并可预览、移除和只发送图片。需选择支持图片的模型；支持 PNG、JPEG、WebP、GIF，每次最多 8 张，单张 5 MB、合计 10 MB。图片随 Pi 会话保存，可在聊天记录和节点预览中查看。
+
+打开 **设置 → 模型 → 添加自定义模型**，填写服务商 ID、API 地址和模型 ID，选择 OpenAI Chat Completions / Responses、Anthropic Messages 或 Google Generative AI 协议。可配置上下文长度、最大输出、推理和图片输入能力。Ollama 等本地服务可勾选“此接口无需 API 密钥”。
+
+模型使用 [Pi SDK 的 models.json 格式](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md)，保存在 `~/.pi/agent/models.json`，密钥通过 Pi 保存到本机 `auth.json`。保存后立即刷新模型列表；未提供密钥的服务商可随后配置凭据。WSL/SSH 会话通过本机代理调用这些模型，无需复制密钥。高级兼容配置可编辑 `models.json` 后点击刷新。
+
 ## 下载
 
 PiX 内置 `@injaneity/pi-computer-use`、`@ff-labs/pi-fff` 和 `pi-web-access`，均通过 Pi 扩展机制加载。扩展及其运行依赖会随安装包一起分发，无需另行安装；如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本。网页搜索服务仍使用用户自己的配置与凭据。

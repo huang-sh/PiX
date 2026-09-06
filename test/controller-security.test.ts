@@ -149,11 +149,11 @@ test("remote OAuth login runs on the desktop and only syncs models", async () =>
   assert.deepEqual(result, { ok: true, status: { type: "oauth" } });
   assert.deepEqual(localCalls, [
     { action: "loginOAuth", provider: "openai-codex", method: "device-code" },
-    { action: "getModels" },
+    { action: "getModels", broker: true },
   ]);
   assert.deepEqual(remoteCalls, [{
     route: "agent.control",
-    input: { action: "setBrokerProviders", providers: [] },
+    input: { action: "setBrokerProviders", providers: [], models: [] },
   }]);
 });
 
@@ -170,9 +170,42 @@ test("remote model refresh uses the desktop catalog and resyncs the model broker
     return { ok: true };
   } } as any;
   await controller.invoke("agent.control", { action: "refreshModels" });
-  assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels" }]);
-  assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openai"] } }]);
+  assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels", broker: true }]);
+  assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openai"], models: [{ provider: "openai", id: "new-model" }] } }]);
   assert.ok(controller.remoteBrokerModels.has("openai\0new-model"));
+});
+
+test("adding a remote custom model saves credentials on the desktop only", async () => {
+  const controller = new MainController(root, denied);
+  const localCalls: unknown[] = [];
+  const remoteCalls: unknown[] = [];
+  const model = { provider: "local-llm", id: "custom-model", api: "openai-completions" };
+  controller.pi.control = async (input) => {
+    localCalls.push(input);
+    return input.action === "getModels" ? [model] : { ok: true };
+  };
+  controller.wsl = { request: async (_route: string, input: unknown) => {
+    remoteCalls.push(input);
+    return { ok: true };
+  } } as any;
+  const input = {
+    action: "addCustomModel", provider: model.provider, modelId: model.id,
+    api: model.api, baseUrl: "http://localhost:11434/v1", apiKey: "desktop-secret",
+    contextWindow: 128000, maxTokens: 16384,
+  };
+  await controller.invoke("agent.control", input);
+  assert.equal((localCalls[0] as typeof input).apiKey, input.apiKey);
+  assert.deepEqual(remoteCalls, [{ action: "setBrokerProviders", providers: [model.provider], models: [model] }]);
+  assert.ok(!JSON.stringify(remoteCalls).includes(input.apiKey));
+  localCalls.length = 0;
+  remoteCalls.length = 0;
+  await controller.invoke("agent.control", { ...input, action: "updateCustomModel", imageInput: true });
+  assert.equal((localCalls[0] as typeof input).action, "updateCustomModel");
+  assert.deepEqual(remoteCalls, [{ action: "setBrokerProviders", providers: [model.provider], models: [model] }]);
+  assert.ok(!JSON.stringify(remoteCalls).includes(input.apiKey));
+  remoteCalls.length = 0;
+  await controller.invoke("agent.control", { action: "getCustomModels" });
+  assert.deepEqual(remoteCalls, []);
 });
 
 test("WSL shell commands keep the local main-process approval boundary", async () => {

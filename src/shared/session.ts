@@ -8,6 +8,7 @@ import type {
   SessionSummary,
 } from "./types.js";
 import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
+import { isPromptImage } from "./images.js";
 const rec = (v: unknown): Record<string, unknown> | null =>
   v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
@@ -41,6 +42,10 @@ export function withoutToolLabels(value: string): string {
 }
 function msg(e: RawSessionEntry) {
   return rec(e.message);
+}
+function images(e: RawSessionEntry) {
+  const content = msg(e)?.content;
+  return Array.isArray(content) ? content.filter(isPromptImage) : [];
 }
 function role(e: RawSessionEntry) {
   return String(msg(e)?.role ?? e.role ?? "");
@@ -220,7 +225,8 @@ export function projectSession(
       id: `turn:${e.id}`,
       userEntryId: e.id,
       parentId: ((p) => (p ? `turn:${p}` : null))(nearest(e.id, byId, false)),
-      title: clip(text(e), 58) || "Untitled prompt",
+      title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
+      ...(images(e).length ? { imageCount: images(e).length } : {}),
       preview: clip(
         owned
           .filter((x) => role(x) === "assistant")
@@ -273,6 +279,7 @@ export function projectSession(
         turnId,
         role: r as "user" | "assistant",
         text: text(e),
+        ...(r === "user" && images(e).length ? { images: images(e) } : {}),
         thinking: r === "assistant" ? thinkingText(msg(e)?.content) : undefined,
         timestamp: e.timestamp,
         isError: r === "assistant" ? error(e) || undefined : undefined,

@@ -1,6 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia, type Pinia } from "pinia";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import GraphPanel from "../../src/renderer/features/graph/GraphPanel.vue";
 import { useSessionStore } from "../../src/renderer/stores/session";
 import { i18n } from "../../src/renderer/i18n";
@@ -125,7 +125,7 @@ describe("GraphPanel pending prompt", () => {
     setPendingPrompt(null);
     await flushPromises();
 
-    expect(wrapper.find(".draft-node").exists()).toBe(false);
+    expect(wrapper.get(".draft-node").isVisible()).toBe(false);
     const running = wrapper.find(`[data-id="${pendingEntryId}"] .prompt-node`);
     expect(running.exists()).toBe(true);
     expect(running.get("strong").text()).toBe("Next step please");
@@ -151,9 +151,33 @@ describe("GraphPanel pending prompt", () => {
     setPendingPrompt("turn-1");
     await flushPromises();
 
-    expect(wrapper.find(".draft-node").exists()).toBe(false);
+    expect(wrapper.get(".draft-node").isVisible()).toBe(false);
     expect(wrapper.find(`[data-id="${pendingEntryId}"] .prompt-node`).exists()).toBe(true);
     expect(wrapper.get(`[data-id="turn-1"] .node-add`).attributes("aria-disabled")).toBe("true");
+    wrapper.unmount();
+  });
+
+  it("sends graph images through the shared branch path and restores attachments on failure", async () => {
+    const pinia = setup(false);
+    const session = useSessionStore();
+    session.current!.runtime.model = { provider: "local", id: "vision", input: ["text", "image"] };
+    let rejectSend!: (error: Error) => void;
+    const submit = vi.spyOn(session, "promptAt").mockImplementation(async () => {
+      setPendingPrompt(null);
+      try { await new Promise<void>((_resolve, reject) => { rejectSend = reject; }); }
+      finally { session.pendingPrompt = undefined; }
+    });
+    const wrapper = await mountPanel(pinia);
+    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "graph.png", { type: "image/png" });
+    await wrapper.get(".draft-node textarea").trigger("paste", { clipboardData: { files: [file] } });
+    await vi.waitFor(() => expect(wrapper.findAll(".composer-images img")).toHaveLength(1));
+    await wrapper.get(".draft-node .composer-submit").trigger("click");
+    await vi.waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submit.mock.calls[0]?.[4]).toEqual([{ type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" }]);
+    expect(wrapper.get(".draft-node").isVisible()).toBe(false);
+    rejectSend(new Error("retry"));
+    await vi.waitFor(() => expect(wrapper.findAll(".composer-images img")).toHaveLength(1));
+    expect(wrapper.get(".draft-node").isVisible()).toBe(true);
     wrapper.unmount();
   });
 
@@ -162,13 +186,16 @@ describe("GraphPanel pending prompt", () => {
     const session = useSessionStore();
     const wrapper = await mountPanel(pinia);
 
+    await wrapper.get(".draft-node textarea").setValue("Keep this draft");
+
     setPendingPrompt(null);
     await flushPromises();
-    expect(wrapper.find(".draft-node").exists()).toBe(false);
+    expect(wrapper.get(".draft-node").isVisible()).toBe(false);
 
     session.pendingPrompt = undefined;
     await flushPromises();
     expect(wrapper.find(".draft-node").exists()).toBe(true);
+    expect(wrapper.get<HTMLTextAreaElement>(".draft-node textarea").element.value).toBe("Keep this draft");
     expect(wrapper.find(`[data-id="${pendingEntryId}"]`).exists()).toBe(false);
     wrapper.unmount();
   });

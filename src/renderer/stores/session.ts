@@ -6,6 +6,7 @@ import type {
   ProjectInfo,
   RuntimeCommand,
   RuntimeModel,
+  PromptImage,
   SessionSnapshot,
   SessionSummary,
 } from "../../shared/types";
@@ -186,9 +187,9 @@ export const useSessionStore = defineStore("session", {
     setUserThinking(level: string) {
       this.userThinking = level;
     },
-    async prompt(text: string, targetNodeId?: string | null, model?: RuntimeModel | null, thinkingLevel?: string) {
+    async prompt(text: string, targetNodeId?: string | null, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[]) {
       const value = text.trim();
-      if (!value) return;
+      if (!value && !images?.length) return;
       const target = targetNodeId === undefined
         ? this.current?.projection.activeNodeId ?? null
         : targetNodeId;
@@ -199,6 +200,7 @@ export const useSessionStore = defineStore("session", {
           turnId: id,
           role: "user",
           text: value,
+          ...(images?.length ? { images } : {}),
           timestamp: new Date().toISOString(),
         },
         knownEntryIds: this.current?.entries.map((entry) => entry.id) ?? [],
@@ -209,15 +211,15 @@ export const useSessionStore = defineStore("session", {
       this.pendingPrompt = pending;
       this.focusedNode = null;
       try {
-        await this.control({ action: "prompt", text: value });
+        await this.control({ action: "prompt", text: value, ...(images?.length ? { images } : {}) });
         this.focusedNode = this.current?.projection.activeNodeId ?? this.focusedNode;
       } finally {
         if (this.pendingPrompt?.message.entryId === id) this.pendingPrompt = undefined;
       }
     },
-    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string) {
+    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[]) {
       const current = this.current;
-      if (!current || !text.trim()) return;
+      if (!current || (!text.trim() && !images?.length)) return;
       const node = nodeId ? current.projection.nodes.find((item) => item.id === nodeId) : undefined;
       if (nodeId && !node) return;
       if (node && current.projection.activeNodeId !== nodeId) {
@@ -229,7 +231,7 @@ export const useSessionStore = defineStore("session", {
         await this.control({ action: "setModel", provider: model.provider, modelId: model.id });
       if (thinkingLevel && this.current?.runtime.thinkingLevel !== thinkingLevel)
         await this.control({ action: "setThinking", level: thinkingLevel });
-      await this.prompt(text, nodeId, model, thinkingLevel);
+      await this.prompt(text, nodeId, model, thinkingLevel, images);
     },
     async create() {
       if (!useWorkspaceStore().project) {

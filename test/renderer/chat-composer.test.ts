@@ -94,6 +94,26 @@ describe("chat panel composer", () => {
     panel.unmount();
   });
 
+  it("sends an image-only prompt from the chat panel and shows persisted images", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { panel, session } = await mountComposer(invoke);
+    session.models = [{ ...session.current!.runtime.model!, input: ["text", "image"] }];
+    await flushPromises();
+    invoke.mockClear();
+    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "paste.png", { type: "image/png" });
+    await panel.get(".prompt-composer textarea").trigger("paste", { clipboardData: { files: [file] } });
+    await vi.waitFor(() => expect(panel.findAll(".composer-images img")).toHaveLength(1));
+    await panel.get(".composer-submit").trigger("click");
+    await flushPromises();
+    const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
+    expect(promptCalls(invoke)).toContainEqual({ action: "prompt", text: "", images: [image] });
+    session.current = snapshot([{ ...first[0], message: { role: "user", content: [image] } }], "u1");
+    session.focusedNode = "turn:u1";
+    await flushPromises();
+    expect(panel.get(".branch-message.user .message-images img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+    panel.unmount();
+  });
+
   it("sends on Enter and reserves Shift+Enter for newlines", async () => {
     const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
     const { panel } = await mountComposer(invoke);

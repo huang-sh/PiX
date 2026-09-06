@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import WebSocket from "ws";
 import {
   PIX_REMOTE_PROTOCOL,
+  MAX_REMOTE_PAYLOAD,
   type HostHello,
   type HostMessage,
   type HostModelRequest,
@@ -285,7 +286,7 @@ export class WslHostClient {
           (accept, reject) => {
           const socket = new WebSocket(url, {
             handshakeTimeout: Math.min(2_000, timeoutMs),
-            maxPayload: 16 * 1024 * 1024,
+            maxPayload: MAX_REMOTE_PAYLOAD,
           });
           const timer = setTimeout(
             () => fail(new Error("Timed out waiting for remote host handshake")),

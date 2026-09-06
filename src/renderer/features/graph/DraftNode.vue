@@ -2,7 +2,7 @@
 import { X } from "@lucide/vue";
 import { Handle, Position } from "@vue-flow/core";
 import { useI18n } from "vue-i18n";
-import type { RuntimeModel } from "../../../shared/types";
+import type { PromptImage, RuntimeModel } from "../../../shared/types";
 import PromptComposer from "../../components/PromptComposer.vue";
 
 export interface DraftNodeData {
@@ -14,7 +14,7 @@ export interface DraftNodeData {
   onModel: (model: RuntimeModel) => void;
   onThinking: (level: string, explicit: boolean) => void;
   onCancel?: () => void;
-  onSubmit: (text: string) => Promise<boolean>;
+  onSubmit: (text: string, images?: PromptImage[]) => Promise<boolean>;
 }
 
 defineProps<{ id: string; data: DraftNodeData }>();

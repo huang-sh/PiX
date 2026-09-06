@@ -17,7 +17,7 @@ import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
-import type { GraphNode, RuntimeModel } from "../../../shared/types";
+import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import DraftNode, { type DraftNodeData } from "./DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "./PromptNode.vue";
 
@@ -60,6 +60,7 @@ function nodeContent(id: string) {
   );
   return {
     user: messages.find((message) => message.role === "user")?.text ?? node.title,
+    images: messages.find((message) => message.role === "user")?.images,
     assistant: [...messages].reverse().find((message) => message.role === "assistant")?.text ?? node.preview,
   };
 }
@@ -127,7 +128,8 @@ function rebuild() {
         id: pending.message.entryId,
         userEntryId: pending.message.entryId,
         parentId: pending.targetNodeId,
-        title: clipText(pending.message.text, 58) || "Untitled prompt",
+        title: clipText(pending.message.text, 58) || (pending.message.images?.length ? `🖼 × ${pending.message.images.length}` : "Untitled prompt"),
+        imageCount: pending.message.images?.length,
         preview: "",
         timestamp: pending.message.timestamp,
         rawEntryIds: [pending.message.entryId],
@@ -146,7 +148,7 @@ function rebuild() {
       running: true,
       runnable: false,
       blockedReason: "graph.blockedStreaming",
-      content: () => ({ user: pending.message.text, assistant: t("graph.agentRunning") }),
+      content: () => ({ user: pending.message.text, images: pending.message.images, assistant: t("graph.agentRunning") }),
       onCompose: () => {},
     },
   } : undefined;
@@ -157,9 +159,11 @@ function rebuild() {
   const thinkingLevel = draftThinking.value ?? inheritThinking(draftParent.value);
   const draftId = parent ? `draft:${parent.id}` : "draft:root";
   const siblings = parent ? children.get(parent.id) ?? [] : [];
-  const draft: Node<DraftNodeData> | undefined = (parent || rootDraft) && !pending ? {
+  const draft: Node<DraftNodeData> | undefined = (parent || rootDraft) ? {
     id: draftId,
     type: "draft",
+    // Keep the editor mounted while sending so failures retain text and images.
+    style: { visibility: pending ? "hidden" : "visible", pointerEvents: pending ? "none" : "auto" },
     position: parent
       ? { x: parent.x + parent.width + 92, y: siblings.length ? Math.max(...siblings.map((node) => node.y)) + 178 : parent.y }
       : { x: 48, y: 48 },
@@ -229,12 +233,13 @@ function resetDraft() {
   draftThinking.value = undefined;
 }
 
-async function submitDraft(text: string) {
+async function submitDraft(text: string, images?: PromptImage[]) {
   const delivered = await runDraftSubmit(
     draftParent.value ?? null,
     text,
     draftModel.value,
     draftThinking.value ?? inheritThinking(draftParent.value),
+    images,
   );
   if (!delivered) return false;
   const id = acceptSubmittedNode();

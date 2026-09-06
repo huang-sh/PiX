@@ -1,3 +1,22 @@
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+
+export type PromptImage = ImageContent;
+
+export const CUSTOM_MODEL_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
+export interface CustomModelInput {
+  provider: string;
+  modelId: string;
+  name?: string;
+  baseUrl: string;
+  api: typeof CUSTOM_MODEL_APIS[number];
+  apiKey?: string;
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+  imageInput: boolean;
+}
+export type BrokerModel = Pick<Model<Api>, "provider" | "id" | "name" | "api" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost">;
+
 export type PanelId = "navigator" | "chat" | "content";
 export type UtilityTab = "terminal" | "output" | "git" | "events";
 export interface ProjectInfo {
@@ -68,6 +87,7 @@ export interface GraphNode {
   toolCallCount: number;
   hasError: boolean;
   depth: number;
+  imageCount?: number;
   footer?: NodeFooterState;
 }
 export interface GraphEdge {
@@ -80,6 +100,7 @@ export interface BranchMessage {
   turnId: string;
   role: "user" | "assistant" | "tool" | "system";
   text: string;
+  images?: PromptImage[];
   thinking?: string;
   timestamp: string;
   toolName?: string;
@@ -122,6 +143,7 @@ export interface RuntimeModel {
   contextWindow?: number;
   reasoning?: boolean;
   thinkingLevels?: string[];
+  input?: ("text" | "image")[];
 }
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -332,13 +354,12 @@ export interface RuntimeExtension {
   commands: Array<{ name: string; description?: string }>;
 }
 export type AgentControl =
-  | { action: "prompt" | "steer" | "followUp"; text: string }
+  | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[] }
   | {
       action:
         | "abort"
         | "clearQueue"
         | "getState"
-        | "getModels"
         | "refreshModels"
         | "cycleModel"
         | "getThinkingLevels"
@@ -350,12 +371,14 @@ export type AgentControl =
         | "commands"
         | "getTools"
         | "getProviders"
+        | "getCustomModels"
         | "exportJsonl"
         | "newSession"
         | "clone"
         | "reload";
     }
   | { action: "getSkills"; reload?: boolean }
+  | { action: "getModels"; broker?: boolean }
   | { action: "getExtensions"; reload?: boolean }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }
   | { action: "setThinking"; level: string }
@@ -370,7 +393,8 @@ export type AgentControl =
   | { action: "exportHtml"; outputPath?: string }
   | { action: "setName"; name: string }
   | { action: "setTools"; names: string[] }
-  | { action: "setBrokerProviders"; providers: string[] }
+  | { action: "setBrokerProviders"; providers: string[]; models?: BrokerModel[] }
+  | ({ action: "addCustomModel" | "updateCustomModel" } & CustomModelInput)
   | { action: "loginApiKey"; provider: string; apiKey: string }
   | { action: "loginOAuth"; provider: string; method: "browser" | "device-code" }
   | { action: "logout"; provider: string }

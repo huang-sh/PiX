@@ -1,4 +1,6 @@
 import type { DesktopRoute } from "./types.js";
+import { CUSTOM_MODEL_APIS } from "./types.js";
+import { validatePromptImages } from "./images.js";
 const obj = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected object payload");
@@ -122,8 +124,10 @@ export function validateRouteInput(
       return { layout: obj(v.layout) };
     case "agent.control": {
       const action = str(v.action, "action")!;
-      if (["prompt", "steer", "followUp"].includes(action))
-        return { action, text: str(v.text, "text") };
+      if (["prompt", "steer", "followUp"].includes(action)) {
+        const images = v.images === undefined ? undefined : validatePromptImages(v.images);
+        return { action, text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}) };
+      }
       if (action === "setModel")
         return {
           action,
@@ -131,6 +135,27 @@ export function validateRouteInput(
           modelId: str(v.modelId, "modelId"),
           persist: v.persist === true,
         };
+      if (action === "addCustomModel" || action === "updateCustomModel") {
+        const provider = str(v.provider, "provider")!.trim();
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provider) || ["__proto__", "constructor", "prototype"].includes(provider))
+          throw new Error("Invalid provider ID");
+        const baseUrl = str(v.baseUrl, "baseUrl")!.trim();
+        const url = new URL(baseUrl);
+        if (!["https:", "http:"].includes(url.protocol) || url.username || url.password)
+          throw new Error("Model endpoint must be an HTTP(S) URL without embedded credentials");
+        if (!CUSTOM_MODEL_APIS.includes(v.api as typeof CUSTOM_MODEL_APIS[number]))
+          throw new Error("Unsupported model API");
+        return {
+          action, provider, baseUrl, api: v.api,
+          modelId: str(v.modelId, "modelId")!.trim(),
+          name: str(v.name, "name", true)?.trim(),
+          apiKey: str(v.apiKey, "apiKey", true)?.trim(),
+          contextWindow: integer(v.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
+          maxTokens: integer(v.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
+          reasoning: v.reasoning === true,
+          imageInput: v.imageInput === true,
+        };
+      }
       if (action === "setThinking")
         return { action, level: str(v.level, "level") };
       if (action === "setQueueMode")
@@ -184,6 +209,19 @@ export function validateRouteInput(
           providers: Array.isArray(v.providers)
             ? v.providers.map((x) => str(x, "provider"))
             : [],
+          ...(Array.isArray(v.models) ? { models: v.models.map((value) => {
+            const m = obj(value);
+            return {
+              provider: str(m.provider, "provider"), id: str(m.id, "id"),
+              name: str(m.name, "name"), api: str(m.api, "api"),
+              reasoning: m.reasoning === true,
+              thinkingLevelMap: m.thinkingLevelMap === undefined ? undefined : obj(m.thinkingLevelMap),
+              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"],
+              contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
+              maxTokens: integer(m.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
+              cost: obj(m.cost),
+            };
+          }) } : {}),
         };
       if (action === "setLabel")
         return {

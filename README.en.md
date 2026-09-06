@@ -56,6 +56,14 @@ Navigator | Session Graph | Branch Chat | Content Workspace
 - **Content Workspace** opens project files, Git changes, and web pages.
 - Every panel can be collapsed, restored, and resized; connect to a remote Linux workspace over SSH or WSL and it works just like local.
 
+## Custom models
+
+Both graph and chat composers support selecting, pasting and dropping images, with previews, removal and image-only prompts. Select an image-capable model. PNG, JPEG, WebP and GIF are supported, up to 8 images, 5 MB each and 10 MB total per prompt. Images remain in the Pi session and appear in chat history and node previews.
+
+Open **Settings → Models → Add custom model**, enter a provider ID, API base URL and model ID, then choose OpenAI Chat Completions / Responses, Anthropic Messages or Google Generative AI. Configure context size, output limits, reasoning and image input as needed. For local servers such as Ollama, select “This endpoint does not require an API key”.
+
+Models use [Pi SDK's models.json format](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md) in `~/.pi/agent/models.json`. Pi stores API keys in the local `auth.json`. Saving refreshes the model list immediately; providers without credentials can be configured afterward. WSL/SSH sessions call these models through the desktop broker without copying keys. Edit `models.json` and refresh for advanced compatibility settings.
+
 ## Download
 
 PiX includes `@injaneity/pi-computer-use`, `@ff-labs/pi-fff`, and `pi-web-access`, loaded through Pi's extension mechanism. The extensions and their runtime dependencies ship with the app. No separate install is needed; an npm copy you installed through Pi takes precedence. Web search services still use your own configuration and credentials.

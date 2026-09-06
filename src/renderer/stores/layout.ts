@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import { toRaw } from "vue";
 import type { LayoutState, PanelId, SettingsBundle } from "../../shared/types";
 import { desktop } from "../api";
+import type { PromptImage } from "../../shared/types";
+import { imageDataUrl } from "../../shared/images";
 
 export type ContentSection =
   | "home"
@@ -34,9 +36,13 @@ export const useLayoutStore = defineStore("layout", {
     contentTabs: [] as ContentTab[],
     commandOpen: false,
     commandQuery: "",
+    imagePreview: undefined as { src: string; alt: string } | undefined,
     notice: undefined as { level: string; message: string } | undefined,
   }),
   actions: {
+    previewImage(image: PromptImage, alt: string) {
+      this.imagePreview = { src: imageDataUrl(image), alt };
+    },
     hydrate(settings: SettingsBundle, layout?: LayoutState) {
       this.settings = settings;
       // Callers may pass reactive store state; toRaw keeps structuredClone happy.

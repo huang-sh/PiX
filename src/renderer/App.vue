@@ -23,6 +23,7 @@ import type { AppCommandName } from "../shared/commands";
 import { desktop } from "./api";
 import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
+import ImagePreview from "./components/ImagePreview.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
 import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
@@ -553,6 +554,7 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <CommandPalette @run="runCommand" />
+  <ImagePreview />
   <DialogRoot :open="renameOpen" @update:open="renameOpen = $event">
     <DialogPortal>
       <DialogOverlay class="dialog-overlay" />

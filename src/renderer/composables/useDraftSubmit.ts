@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
-import type { RuntimeModel } from "../../shared/types";
+import type { PromptImage, RuntimeModel } from "../../shared/types";
 import { useLayoutStore } from "../stores/layout";
 import { useSessionStore } from "../stores/session";
 
@@ -19,6 +19,7 @@ export function useDraftSubmit() {
     text: string,
     model?: RuntimeModel | null,
     thinkingLevel?: string,
+    images?: PromptImage[],
   ): Promise<boolean> {
     submitted.value = {
       parentId,
@@ -26,7 +27,7 @@ export function useDraftSubmit() {
     };
     if (layout.layout.collapsed.chat) void layout.setCollapsed("chat", false);
     try {
-      await session.promptAt(parentId, text, model, thinkingLevel);
+      await session.promptAt(parentId, text, model, thinkingLevel, images);
       return true;
     } catch (error) {
       submitted.value = undefined;

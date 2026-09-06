@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { AlertCircle, Brain, Check, LoaderCircle, Plus, Sparkles, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, Brain, Check, Image, LoaderCircle, Plus, Sparkles, UserRound, Wrench } from "@lucide/vue";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CSSProperties } from "vue";
-import type { GraphNode, RuntimeModel } from "../../../shared/types";
+import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
+import MessageImages from "../../components/MessageImages.vue";
 
 interface NodeContent {
   user: string;
+  images?: PromptImage[];
   assistant: string;
 }
 
@@ -141,6 +143,7 @@ function relative(value: string) {
       <span class="turn-role" :title="t('graph.you')" :aria-label="t('graph.you')"><UserRound :size="13" /></span>
       <strong>{{ data.node.title }}</strong>
       <aside class="node-meta">
+        <span v-if="data.node.imageCount" :title="t('draft.attachedImages', { n: data.node.imageCount })"><Image :size="11" />{{ data.node.imageCount }}</span>
         <span v-if="data.current" :title="t('graph.currentTurn')" :aria-label="t('graph.currentTurn')"><Check :size="11" /></span>
         <span v-if="data.node.hasError" class="node-error" :title="t('graph.responseError')" :aria-label="t('graph.responseError')"><AlertCircle :size="12" /></span>
         <span v-else-if="data.node.toolCallCount" :title="t('graph.toolCalls', { n: data.node.toolCallCount })"><Wrench :size="11" />{{ data.node.toolCallCount }}</span>
@@ -199,9 +202,11 @@ function relative(value: string) {
       <section>
         <UserRound :size="15" :aria-label="t('graph.you')" />
         <MarkdownRenderer
+          v-if="previewContent.user || !previewContent.images?.length"
           :content="previewContent.user || t('common.empty')"
           :custom-id="`${id}:hover:user`"
         />
+        <MessageImages :images="previewContent.images" />
       </section>
       <section>
         <Sparkles :size="15" aria-label="Pi" />

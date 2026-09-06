@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../src/shared/types";
+import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import SettingsPage from "../../src/renderer/features/settings/SettingsPage.vue";
 import { i18n } from "../../src/renderer/i18n";
@@ -58,6 +58,174 @@ describe("SettingsPage save", () => {
     expect(layout.notice?.level).toBe("info");
   });
 
+  it("adds a custom model and refreshes the shared picker catalog", async () => {
+    const available: RuntimeModel[] = [];
+    const providers: RuntimeProvider[] = [];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const v = payload as Record<string, unknown>;
+      if (v.action === "getModels") return [...available];
+      if (v.action === "getProviders") return [...providers];
+      if (v.action === "addCustomModel") {
+        expect(() => structuredClone(payload)).not.toThrow();
+        expect(v).toMatchObject({ provider: "local-llm", modelId: "custom-model", api: "openai-completions", apiKey: "pix-local", contextWindow: 64000, maxTokens: 16384 });
+        available.push({ provider: "local-llm", id: "custom-model", contextWindow: 64000 });
+        providers.push({ id: "local-llm", name: "local-llm", authTypes: ["api_key"], status: { type: "api_key" } });
+        return { ok: true };
+      }
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    await wrapper.get("[data-add-custom-model]").trigger("click");
+    await wrapper.get('[name="provider"]').setValue("local-llm");
+    await wrapper.get('[name="modelId"]').setValue("custom-model");
+    await wrapper.get('[name="baseUrl"]').setValue("http://localhost:11434/v1");
+    await wrapper.get('[name="contextWindow"]').setValue("64000");
+    await wrapper.get('[name="keyless"]').setValue(true);
+    expect(wrapper.find('[name="apiKey"]').exists()).toBe(false);
+    await wrapper.get("[data-custom-model-form]").trigger("submit");
+    await flushPromises();
+    expect(wrapper.find("[data-custom-model-form]").exists()).toBe(false);
+    expect(useSessionStore().models).toEqual(available);
+    expect(wrapper.find('[data-provider="local-llm"]').exists()).toBe(true);
+    expect(wrapper.get("#model-details-panel").text()).toContain("custom-model");
+    wrapper.unmount();
+  });
+
+  it("edits an unavailable custom model, preserves blank credentials and reloads saved settings", async () => {
+    let model: CustomModelInput = { provider: "custom", modelId: "vision", name: "Vision", baseUrl: "https://example.com/v1", api: "openai-completions", contextWindow: 64000, maxTokens: 4096, reasoning: false, imageInput: false };
+    let fail = true;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const v = payload as Record<string, unknown>;
+      if (v?.action === "getCustomModels") return [{ ...model }];
+      if (v?.action === "updateCustomModel") {
+        expect(() => structuredClone(payload)).not.toThrow();
+        expect(v).toMatchObject({ provider: "custom", modelId: "vision", apiKey: "", imageInput: true, reasoning: true, baseUrl: "https://new.example.com/v1", maxTokens: 8192 });
+        if (fail) throw new Error("Save failed");
+        const { action, apiKey, ...saved } = v;
+        model = saved as unknown as CustomModelInput;
+        return { ok: true };
+      }
+      return [];
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    await wrapper.get('[data-provider-configure="custom"]').trigger("click");
+    await wrapper.get('[data-edit-custom-model="custom/vision"]').trigger("click");
+    expect((wrapper.get('[name="baseUrl"]').element as HTMLInputElement).value).toBe(model.baseUrl);
+    expect(wrapper.get('[name="modelId"]').attributes("readonly")).toBeDefined();
+    expect((wrapper.get('[name="apiKey"]').element as HTMLInputElement).value).toBe("");
+    await wrapper.get('[name="baseUrl"]').setValue("https://new.example.com/v1");
+    await wrapper.get('[name="imageInput"]').setValue(true);
+    await wrapper.get('[name="reasoning"]').setValue(true);
+    await wrapper.get('[name="maxTokens"]').setValue(8192);
+    await wrapper.get("form[data-custom-model-form]").trigger("submit");
+    await flushPromises();
+    expect(wrapper.get('[data-custom-model-form] [role="alert"]').text()).toBe("Save failed");
+    fail = false;
+    await wrapper.get("form[data-custom-model-form]").trigger("submit");
+    await flushPromises();
+    expect(wrapper.find("[data-custom-model-form]").exists()).toBe(false);
+    await wrapper.get('[data-edit-custom-model="custom/vision"]').trigger("click");
+    expect((wrapper.get('[name="imageInput"]').element as HTMLInputElement).checked).toBe(true);
+    expect((wrapper.get('[name="maxTokens"]').element as HTMLInputElement).value).toBe("8192");
+    wrapper.unmount();
+  });
+
+  it("keeps provider management, default and cycling controls alongside custom model editing", async () => {
+    const custom: CustomModelInput = { provider: "custom", modelId: "vision", baseUrl: "https://example.com/v1", api: "openai-completions", contextWindow: 64000, maxTokens: 4096, reasoning: true, imageInput: true };
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const v = payload as Record<string, unknown>;
+      if (v.action === "getCustomModels") return [{ ...custom }];
+      if (v.action === "getModels") return [{ provider: "custom", id: "vision" }];
+      if (v.action === "getProviders") return [
+        { id: "custom", name: "Custom", authTypes: ["api_key"], status: { type: "api_key" } },
+        { id: "other", name: "Other", authTypes: ["oauth"] },
+      ];
+      if (v.action === "updateCustomModel") return { ok: true };
+      return [];
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    expect(wrapper.find('[data-custom-model-list]').exists()).toBe(false);
+    await wrapper.get('[data-provider-configure="custom"]').trigger("click");
+    expect(wrapper.find('[data-provider-api-key="custom"]').exists()).toBe(true);
+    expect(wrapper.find('.provider-remove').exists()).toBe(true);
+    expect(wrapper.find('[data-edit-custom-model="custom/vision"]').exists()).toBe(true);
+    await wrapper.get('[data-provider="custom"] .provider-model-toggle').trigger("click");
+    expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
+    expect(wrapper.find('[data-model="custom/vision"] .model-cycle').exists()).toBe(true);
+    await wrapper.get('[data-edit-custom-model="custom/vision"]').trigger("click");
+    expect(wrapper.find('[role="dialog"] [data-custom-model-form]').exists()).toBe(true);
+    await wrapper.get('[data-custom-model-form]').trigger("submit");
+    await flushPromises();
+    expect(wrapper.find('[data-custom-model-form]').exists()).toBe(false);
+    expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
+    expect(wrapper.find('[data-model="custom/vision"] .model-cycle').exists()).toBe(true);
+    expect(wrapper.find('[data-provider-configure="custom"]').exists()).toBe(true);
+    expect(wrapper.find('[data-provider="other"]').exists()).toBe(true);
+    expect((wrapper.get('[data-model-search]').element as HTMLInputElement).value).toBe("");
+    wrapper.unmount();
+  });
+
+  it("keeps provider management available when custom model loading fails", async () => {
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const v = payload as Record<string, unknown>;
+      if (v?.action === "getCustomModels") throw new Error("Invalid models.json");
+      if (v?.action === "getProviders") return [{ id: "custom", name: "Custom", authTypes: ["api_key"] }];
+      return [];
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("Invalid models.json");
+    await wrapper.get('[data-provider-configure="custom"]').trigger("click");
+    expect(wrapper.find('[data-provider-api-key="custom"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("retains custom model input and shows save errors", async () => {
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      if ((payload as { action?: string })?.action === "addCustomModel") throw new Error("Invalid model endpoint");
+      return [];
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    await wrapper.get("[data-add-custom-model]").trigger("click");
+    await wrapper.get('[name="provider"]').setValue("my-provider");
+    await wrapper.get("[data-custom-model-form]").trigger("submit");
+    await flushPromises();
+    expect(wrapper.get('[data-custom-model-form] [role="alert"]').text()).toContain("Invalid model endpoint");
+    expect((wrapper.get('[name="provider"]').element as HTMLInputElement).value).toBe("my-provider");
+    expect(wrapper.get('[type="submit"]').attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("keeps provider credentials hidden until configuration is requested", async () => {
     const models: RuntimeModel[] = [{ provider: "openai", id: "gpt-test" }];
     const providers: RuntimeProvider[] = [
@@ -99,7 +267,10 @@ describe("SettingsPage save", () => {
     ];
     const initial = { ...settings, effective: { defaultProvider: "openai", defaultModel: "gpt-base" } };
     vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
-      if (route === "agent.control") return (payload as { action: string }).action === "getModels" ? models : providers;
+      if (route === "agent.control") {
+        const action = (payload as { action: string }).action;
+        return action === "getCustomModels" ? [] : action === "getModels" ? models : providers;
+      }
       if (route === "settings.update") return { ...initial, effective: { ...initial.effective, ...(payload as UpdatePayload).patch } };
       return initial;
     });
@@ -173,6 +344,7 @@ describe("SettingsPage save", () => {
       if (route !== "agent.control") return settings;
       const action = (payload as { action: string }).action;
       if (action === "getModels") return [...available];
+      if (action === "getCustomModels") return [];
       if (action === "refreshModels") {
         await refresh;
         available.push({ provider: "openai", id: "new-model" });
@@ -198,6 +370,7 @@ describe("SettingsPage save", () => {
     finishRefresh();
     await flushPromises();
     expect(vi.mocked(desktop.invoke).mock.calls.slice(1)).toEqual([
+      ["agent.control", { action: "getCustomModels" }],
       ["agent.control", { action: "getModels" }], ["agent.control", { action: "getProviders" }],
     ]);
     expect(useSessionStore().models.map(model => model.id)).toContain("new-model");

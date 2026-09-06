@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { getSupportedThinkingLevels, type ModelsRefreshResult } from "@earendil-works/pi-ai";
 import {
   detectWindowsBash,
@@ -8,8 +9,11 @@ import {
   withDetectedBashShell,
 } from "./bash-resolution.js";
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
+import { addCustomModel, getCustomModels } from "./custom-models.js";
+import { validatePromptImages } from "../shared/images.js";
 import type {
   AgentControl,
+  BrokerModel,
   RawSessionEntry,
   RuntimeModel,
   RuntimeExtension,
@@ -34,6 +38,7 @@ export class PiRuntime {
   unsubscribe?: () => void;
   modelServices: any;
   brokerProviders = new Set<string>();
+  brokerModels: BrokerModel[] = [];
   modelBroker?: (model: any, context: any, options: any) => any;
   openExternal: (url: string) => Promise<void>;
   private closing = false;
@@ -86,16 +91,27 @@ export class PiRuntime {
     return [...new Set((await modelRuntime.getAvailable()).map((model: any) => String(model.provider)))];
   }
 
-  async configureBrokerProviders(providers: string[]) {
+  async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
     const modelRuntime = await this.modelRuntime();
     const next = new Set(providers);
     for (const provider of this.brokerProviders)
-      if (!next.has(provider)) await modelRuntime.removeRuntimeApiKey(provider);
+      if (!next.has(provider)) {
+        await modelRuntime.removeRuntimeApiKey(provider);
+        modelRuntime.unregisterProvider(provider);
+      }
     this.brokerProviders = next;
+    this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
 
   async applyModelBroker(modelRuntime: any) {
+    for (const provider of this.brokerProviders) {
+      const models = this.brokerModels.filter((model) => model.provider === provider);
+      if (models.length) modelRuntime.registerProvider(provider, {
+        baseUrl: "http://pix-desktop-broker.invalid",
+        models,
+      });
+    }
     for (const provider of this.brokerProviders)
       await modelRuntime.setRuntimeApiKey(provider, "pix-desktop-broker");
     if (!this.modelBroker) return;
@@ -230,6 +246,7 @@ export class PiRuntime {
             name: s.model.name,
             contextWindow: s.model.contextWindow,
             reasoning: Boolean(s.model.reasoning),
+            ...(s.model.input ? { input: s.model.input } : {}),
             thinkingLevels: s.getAvailableThinkingLevels?.() ?? getSupportedThinkingLevels(s.model),
           }
         : null,
@@ -289,6 +306,9 @@ export class PiRuntime {
     const modelAction = [
       "getModels",
       "refreshModels",
+      "addCustomModel",
+      "updateCustomModel",
+      "getCustomModels",
       "getProviders",
       "getSkills",
       "getExtensions",
@@ -301,6 +321,16 @@ export class PiRuntime {
       throw new Error("Open a project first");
     if (!s && input.action !== "newSession" && !modelAction)
       throw new Error("Open a session first");
+    // Broker updates can replace a model while the remote session still holds its old definition.
+    if (input.action === "prompt" && s?.model && this.brokerProviders.has(s.model.provider) && !s.isStreaming) {
+      const latest = s.modelRuntime.getModel(s.model.provider, s.model.id);
+      if (latest && !isDeepStrictEqual(latest, s.model)) await s.setModel(latest);
+    }
+    if ((input.action === "prompt" || input.action === "steer" || input.action === "followUp") && input.images?.length) {
+      input = { ...input, images: validatePromptImages(input.images) };
+      if (!s.model?.input?.includes("image"))
+        throw new Error("This model does not support image input. Choose a model that supports images or remove the attachments.");
+    }
     switch (input.action) {
       case "prompt": {
         // prompt() also resolves without a turn for handled extension
@@ -308,7 +338,7 @@ export class PiRuntime {
         // auth) — the footer may only be recorded when this call created one.
         const before = s.sessionManager.getEntries().length;
         try {
-          await s.prompt(input.text, { source: "interactive" });
+          await s.prompt(input.text, { source: "interactive", ...(input.images?.length ? { images: input.images } : {}) });
         } finally {
           const createdTurn = s.sessionManager
             .getEntries()
@@ -328,6 +358,7 @@ export class PiRuntime {
                     name: s.model.name,
                     contextWindow: s.model.contextWindow,
                     reasoning: Boolean(s.model.reasoning),
+                    ...(s.model.input ? { input: s.model.input } : {}),
                   }
                 : null,
               thinkingLevel: String(s.thinkingLevel ?? "off"),
@@ -336,10 +367,10 @@ export class PiRuntime {
         break;
       }
       case "steer":
-        await s.steer(input.text);
+        await s.steer(input.text, input.images);
         break;
       case "followUp":
-        await s.followUp(input.text);
+        await s.followUp(input.text, input.images);
         break;
       case "abort":
         await s.abort();
@@ -367,6 +398,11 @@ export class PiRuntime {
       }
       case "getModels": {
         const modelRuntime = await this.modelRuntime();
+        if (input.broker) return (await modelRuntime.getAvailable()).map((m: any): BrokerModel => ({
+          provider: m.provider, id: m.id, name: m.name, api: m.api,
+          reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
+          input: m.input, contextWindow: m.contextWindow, maxTokens: m.maxTokens, cost: m.cost,
+        }));
         return (await modelRuntime.getAvailable()).map(
           (m: any): RuntimeModel => ({
             provider: String(m.provider),
@@ -374,9 +410,43 @@ export class PiRuntime {
             name: m.name,
             contextWindow: m.contextWindow,
             reasoning: Boolean(m.reasoning),
+            ...(m.input ? { input: m.input } : {}),
             thinkingLevels: getSupportedThinkingLevels(m),
           }),
         );
+      }
+      case "getCustomModels": {
+        const pi = await this.pi();
+        return getCustomModels(join(this.agentDir(pi), "models.json"));
+      }
+      case "addCustomModel":
+      case "updateCustomModel": {
+        const update = input.action === "updateCustomModel";
+        if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
+        const pi = await this.pi();
+        const modelRuntime = await this.modelRuntime();
+        if (!update && modelRuntime.getModel(input.provider, input.modelId))
+          throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
+        if (!update && modelRuntime.getError()) throw new Error(modelRuntime.getError());
+        addCustomModel(join(this.agentDir(pi), "models.json"), input, update);
+        await modelRuntime.refresh({ allowNetwork: false });
+        if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
+        if (input.apiKey?.trim()) {
+          await modelRuntime.login(input.provider, "api_key", {
+            prompt: async (prompt: { type: string }) => {
+              if (prompt.type !== "secret") throw new Error("Model saved. Configure this provider's credentials using Pi /login.");
+              return input.apiKey!.trim();
+            },
+            notify: () => undefined,
+          }).catch((error: unknown) => {
+            throw new Error(`Model saved, but credential setup failed. Configure this provider in settings: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
+        if (update && s?.model?.provider === input.provider && s.model.id === input.modelId) {
+          await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
+          return this.snapshot();
+        }
+        return { ok: true };
       }
       case "setModel": {
         const m = s.modelRuntime.getModel(input.provider, input.modelId);
@@ -546,7 +616,7 @@ export class PiRuntime {
         return { ok: true, status };
       }
       case "setBrokerProviders":
-        await this.configureBrokerProviders(input.providers);
+        await this.configureBrokerProviders(input.providers, input.models);
         return { ok: true };
       case "logout":
         await (await this.modelRuntime()).logout(input.provider);
