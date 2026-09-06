@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 /**
  * Pi packages PiX bundles with the app so they work without `pi install`.
@@ -63,6 +63,8 @@ function userManagesPackage(
  *    hosts (server/dist/main), which npm-install the package as a dependency.
  */
 function resolveBuiltinPackage(moduleDir: string, name: string): string | undefined {
+  // Multiple Electron entries move shared runtime code into out/main/chunks.
+  if (basename(moduleDir) === "chunks") moduleDir = dirname(moduleDir);
   const segments = name.split("/");
   return [
     resolve(moduleDir, "..", "..", "..", "pi-builtin", "node_modules", ...segments),

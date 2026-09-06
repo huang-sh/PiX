@@ -128,7 +128,9 @@ test("bundled packages are discovered and user installs suppress only their own 
   try {
     for (const [modules, moduleDir] of [
       [join(root, "node_modules"), join(root, "out", "main")],
+      [join(root, "node_modules"), join(root, "out", "main", "chunks")],
       [join(root, "resources", "pi-builtin", "node_modules"), join(root, "resources", "app.asar", "out", "main")],
+      [join(root, "resources", "pi-builtin", "node_modules"), join(root, "resources", "app.asar", "out", "main", "chunks")],
     ] as const) {
       const computer = packageMarker(modules);
       const fff = packageMarker(modules, "@ff-labs/pi-fff");
