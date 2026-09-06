@@ -3,6 +3,9 @@ import { Focus, Map as MapIcon, Network } from "@lucide/vue";
 import {
   VueFlow,
   type Edge,
+  type Dimensions,
+  type GraphNode as FlowNode,
+  type NodeChange,
   type Node,
   type NodeMouseEvent,
   type VueFlowStore,
@@ -14,7 +17,7 @@ import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
 import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
-import { layoutGraph } from "../../graph-layout";
+import { layoutGraph, reserveManualPositions } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
@@ -28,10 +31,13 @@ const layout = useLayoutStore();
 const session = useSessionStore();
 const { t } = useI18n();
 const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft } = useDraftSubmit();
-const nodes = shallowRef<Node[]>([]);
+type RenderNode = Node & { dimensions?: Dimensions; handleBounds?: FlowNode["handleBounds"] };
+const nodes = shallowRef<RenderNode[]>([]);
 const edges = shallowRef<Edge[]>([]);
 const flow = shallowRef<VueFlowStore>();
-const dragged = new Set<string>();
+// Keep manual coordinates separate from temporary draft layout positions.
+const dragged = new Map<string, { x: number; y: number }>();
+let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
 const emptyDraft = (): ComposerDraft => ({ text: "", images: [], busy: false, readingImages: false, error: "" });
 // Survives viewport unmounts, including attachment reads and failed submissions.
@@ -116,13 +122,24 @@ function rebuild() {
     draftThinking.value = undefined;
     clearSubmittedDraft();
   }
-  const previous = new Map(nodes.value.map((node) => [node.id, node.position]));
+  const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   const layoutKey = value.nodes.map(n => `${n.id}/${n.parentId}/${n.depth}`).join(";");
   if (layoutCache?.key !== layoutKey) {
     const calculated = layoutGraph(value);
-    layoutCache = { key: layoutKey, positions: new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }])) };
+    const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
+    const removed = layoutCache && [...layoutCache.positions.keys()].some(id => !positions.has(id));
+    // Only deletions invalidate moved manual slots to close gaps. Adding a
+    // branch must preserve the user's coordinates even when its auto slots move.
+    for (const id of dragged.keys()) {
+      const before = layoutCache?.positions.get(id);
+      const after = positions.get(id);
+      if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
+    }
+    layoutCache = { key: layoutKey, positions };
   }
-  const placed = { nodes: value.nodes.map(node => ({ ...node, ...layoutCache!.positions.get(node.id)! })) };
+  const placed = { nodes: value.nodes.map(node => ({ ...node, ...layoutCache!.positions.get(node.id)!,
+    ...dragged.get(node.id),
+  })) };
   const active = new Set(value.activeBranchNodeIds);
   const children = new Map<string, typeof placed.nodes>();
   for (const node of placed.nodes) {
@@ -137,7 +154,7 @@ function rebuild() {
   const turns: Node<PromptNodeData>[] = placed.nodes.map((node) => ({
     id: node.id,
     type: "prompt",
-    position: dragged.has(node.id) ? previous.get(node.id) ?? { x: node.x, y: node.y } : { x: node.x, y: node.y },
+    position: { x: node.x, y: node.y },
     data: stablePrompt({
       node,
       active: active.has(node.id),
@@ -265,17 +282,40 @@ function rebuild() {
   // initial dimensions so opening a large graph never mounts all its cards.
   for (const node of nodes.value) {
     const existing = flow.value?.findNode(node.id);
+    const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : { width: node.type === "draft" ? 360 : 280, height: node.type === "draft" ? 280 : 146 },
-      handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : {
+        : previous?.dimensions ?? { width: node.type === "draft" ? 360 : 280, height: node.type === "draft" ? 280 : 146 },
+      handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
         source: [{ type: "source", nodeId: node.id, position: "right", x: 276, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
       },
     });
   }
+  transientNodeIds = new Set(nodes.value.slice(turns.length).map(node => node.id));
+  layoutBranches(nodes.value);
   const ids = new Set(nodes.value.map(node => node.id));
   for (const id of promptCache.keys()) if (!ids.has(id)) promptCache.delete(id);
+}
+
+function layoutBranches(items: RenderNode[]) {
+  if (!transientNodeIds.size && !dragged.size) return false;
+  // Reserve space inside each branch; moving only the draft can cross other branches.
+  const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
+  const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
+  const tree = visible.map(node => node.type === "draft"
+    ? { id: node.id, parentId: node.data.parentId, timestamp: "\uffff", depth: (depths.get(node.data.parentId) ?? -1) + 1 }
+    : { ...node.data.node, timestamp: transientNodeIds.has(node.id) ? "\uffff" : node.data.node.timestamp });
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])));
+  reserveManualPositions(placed.nodes, dragged);
+  let moved = false;
+  for (let i = 0; i < visible.length; i++) {
+    const node = visible[i]!, position = placed.nodes[i]!;
+    if (node.position.x === position.x && node.position.y === position.y) continue;
+    node.position = { x: position.x, y: position.y };
+    moved = true;
+  }
+  return moved;
 }
 
 async function select(id: string, openChat = false) {
@@ -431,13 +471,36 @@ async function ready(store: VueFlowStore) {
 }
 
 function rememberDrag(event: NodeMouseEvent) {
-  dragged.add(event.node.id);
+  dragged.set(event.node.id, { ...event.node.position });
   const node = nodes.value.find(node => node.id === event.node.id);
-  if (node) { node.position = { ...event.node.position }; nodes.value = [...nodes.value]; }
+  if (node) {
+    node.position = { ...event.node.position };
+    nodes.value = [...nodes.value];
+  }
 }
 
+function syncNodeDimensions(changes: NodeChange[]) {
+  let resized = false;
+  for (const change of changes) {
+    if (change.type !== "dimensions") continue;
+    const measured = flow.value?.findNode(change.id);
+    const node = nodes.value.find(node => node.id === change.id);
+    // Viewport filtering re-submits these nodes; keep it from restoring the
+    // estimated handles over Vue Flow's measured positions.
+    // Initial measurements can arrive before pane-ready gives us the store.
+    // The event carries the actual size even when findNode is unavailable.
+    if (node && change.dimensions) {
+      resized ||= node.dimensions?.width !== change.dimensions.width || node.dimensions?.height !== change.dimensions.height;
+      node.dimensions = change.dimensions;
+    }
+    if (node && measured) node.handleBounds = measured.handleBounds;
+  }
+  if (resized && layoutBranches(nodes.value)) nodes.value = [...nodes.value];
+}
+
+const pendingRuns = computed(() => JSON.stringify(session.current?.graph?.runs.filter(run => run.pending && run.status === "running") ?? []));
 watch(
-  () => [session.current?.session.path, session.current?.projection, session.focusedNode, session.models, draftParent.value, session.pendingPrompt],
+  () => [session.current?.session.path, session.current?.projection, session.focusedNode, session.models, draftParent.value, session.pendingPrompt, pendingRuns.value],
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== session.current?.session.path;
@@ -476,6 +539,7 @@ watch(
       @node-click="({ node }: NodeMouseEvent) => select(node.id)"
       @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
       @node-drag-stop="rememberDrag"
+      @nodes-change="syncNodeDimensions"
     >
       <template #node-prompt="props">
         <PromptNode v-bind="props" />
