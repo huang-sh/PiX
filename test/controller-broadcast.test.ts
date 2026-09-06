@@ -6,6 +6,8 @@ import { join, resolve } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MainController, type Platform } from "../src/main/controller.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
+import type { SessionUpdate } from "../src/shared/session-updates.js";
+import { projectSession } from "../src/shared/session.js";
 
 const root = resolve(process.cwd(), "test-workspace");
 const platform: Platform = {
@@ -21,6 +23,26 @@ const platform: Platform = {
   async openExternal() {},
   quit() {},
 };
+
+test("IPC subscribers get deltas and session.snapshot publishes a full resync without reopening", async () => {
+  const controller = new MainController(null, platform);
+  const before = { session: { path: "s" }, entries: [], projection: projectSession([], null), runtime: {},
+    graph: { id: "s", epoch: "e", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  const after = { ...before, graph: { ...before.graph!, revision: 2 } };
+  const events: SessionUpdate[] = [];
+  controller.onEvent(event => events.push(event.payload as SessionUpdate), true);
+  controller.pi.open = async () => { throw Error("resync must not reopen or abort a session"); };
+  controller.emit({ type: "sessions", payload: { current: before } });
+  controller.current = after;
+  controller.emit({ type: "sessions", payload: { current: after } });
+  assert.equal(events[0]?.current, before);
+  assert.equal(events[1]?.patch?.baseRevision, 1);
+  assert.equal(events[1]?.current, undefined);
+  assert.equal(await controller.invoke("session.snapshot"), after);
+  assert.equal(events[2]?.current, after);
+  assert.equal(events[2]?.resync, true);
+  controller.dispose();
+});
 
 test("agent control broadcasts snapshots written after the last agent event", async () => {
   const controller = new MainController(root, platform);
@@ -51,6 +73,27 @@ test("agent control actions without a projection response do not broadcast", asy
   await controller.invoke("agent.control", { action: "getModels" });
 
   assert.deepEqual(events, []);
+});
+
+test("child lifecycle events use the graph owner's fresh snapshot without duplicating it", () => {
+  const controller = new MainController(null, platform);
+  const snapshot = { session: { path: "session.jsonl" }, projection: { nodes: [] } } as unknown as SessionSnapshot;
+  let snapshots = 0;
+  controller.pi.snapshot = () => { snapshots++; return snapshot; };
+  const events: string[] = [];
+  controller.onEvent(event => events.push(event.type));
+  try {
+    for (const type of ["message_end", "entry_appended", "agent_settled", "session_info_changed", "compaction_start", "compaction_end"]) {
+      events.length = 0;
+      controller.pi.emit({ type: "agent", payload: { type, graphId: "graph", branchId: "child", runId: "run" } });
+      assert.equal(snapshots, 0, "raw child events must not publish stale worker state");
+      controller.pi.emit({ type: "sessions", payload: { current: snapshot } });
+      assert.deepEqual(events, ["agent", "sessions"]);
+      assert.equal(controller.current, snapshot);
+    }
+    controller.pi.emit({ type: "agent", payload: { type: "entry_appended", graphId: "graph", branchId: "main", runId: "run" } });
+    assert.equal(snapshots, 1, "main branch lifecycle still refreshes through the controller");
+  } finally { controller.dispose(); }
 });
 
 test("compaction lifecycle events refresh and broadcast the snapshot", async () => {

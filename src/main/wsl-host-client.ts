@@ -13,6 +13,7 @@ import {
 } from "../shared/remote-protocol.js";
 import type { DesktopEvent, WslDistribution } from "../shared/types.js";
 import { brokerEvent } from "./model-broker.js";
+import { sessionEventDecoder } from "../shared/session-updates.js";
 import {
   ensureSshHostInstalled,
   ensureWslHostInstalled,
@@ -44,6 +45,7 @@ const READY_MARKER = "PIX_AGENT_HOST_READY ";
 
 export class WslHostClient {
   private nextId = 0;
+  private decodeSessionEvent = sessionEventDecoder(() => this.request("session.snapshot"));
   private readonly pending = new Map<
     string,
     { resolve: (value: unknown) => void; reject: (error: Error) => void }
@@ -397,7 +399,8 @@ export class WslHostClient {
       return;
     }
     if (message.type === "event") {
-      this.listeners.forEach((listener) => listener(message.event));
+      const event = this.decodeSessionEvent(message.event);
+      if (event) this.listeners.forEach((listener) => listener(event));
       return;
     }
     if (message.type !== "response") return;

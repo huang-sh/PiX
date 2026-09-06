@@ -8,6 +8,7 @@ import {
 } from "reka-ui";
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { sessionEventDecoder } from "../shared/session-updates";
 import type {
   DesktopEvent,
   DirectoryListing,
@@ -490,7 +491,10 @@ async function runCommand(name: string) {
   }
 }
 
-function onEvent(event: DesktopEvent) {
+const decodeSessionEvent = sessionEventDecoder(() => desktop.invoke("session.snapshot"));
+function onEvent(wireEvent: DesktopEvent) {
+  const event = decodeSessionEvent(wireEvent);
+  if (!event) return;
   if (event.type === "remote.progress") {
     if (wslOpen.value && wslBusy.value) {
       const { stage } = event.payload as { stage: RemoteConnectStage };

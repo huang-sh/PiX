@@ -18,6 +18,7 @@ import { projectId } from "../shared/types.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
 import { projectSession } from "../shared/session.js";
+import { sessionEventEncoder } from "../shared/session-updates.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { WslHostClient } from "./wsl-host-client.js";
@@ -93,8 +94,12 @@ export class MainController {
         if (snapshot) this.current = snapshot;
       }
       this.emit(e as DesktopEvent);
-      const p = (e as DesktopEvent).payload as { type?: string };
+      const p = (e as DesktopEvent).payload as { type?: string; graphId?: string; branchId?: string };
+      // GraphRuntime publishes child snapshots after updating its worker. Taking
+      // one here would broadcast the old worker state, then the new state again.
+      const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
       if (
+        !childEvent &&
         [
           "message_end",
           "agent_settled",
@@ -113,9 +118,11 @@ export class MainController {
       }
     }, (url) => this.platform.openExternal(url));
   }
-  onEvent(f: (e: DesktopEvent) => void) {
-    this.listeners.add(f);
-    return () => this.listeners.delete(f);
+  onEvent(f: (e: DesktopEvent) => void, patches = false) {
+    const encode = patches ? sessionEventEncoder() : undefined;
+    const listener = encode ? (event: DesktopEvent) => f(encode(event)) : f;
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
   emit(e: DesktopEvent) {
     this.listeners.forEach((f) => f(e));
@@ -603,6 +610,14 @@ export class MainController {
           this.rememberProject(sessions);
           return sessions;
         });
+      case "session.snapshot": {
+        const current = this.pi.runtime ? this.pi.snapshot() : this.current;
+        if (current) {
+          this.current = current;
+          this.emit({ type: "sessions", payload: { current, resync: true } });
+        }
+        return current;
+      }
       case "session.open": {
         const p = this.files.managed(String(v.path));
         try {

@@ -202,7 +202,7 @@ app.whenReady().then(async () => {
       app.quit();
     },
   });
-  controller.onEvent((e) => win?.webContents.send("pix:event", e));
+  controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
   nativeTheme.on("updated", syncWindowTheme);
   // Preload needs the current preference before the first paint, including on reload.
   // This one synchronous handshake reads memory only; all persistence stays async over IPC.

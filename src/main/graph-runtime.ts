@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
 import { PiRuntime } from "./pi-runtime.js";
+import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, encodeSession, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, SessionSnapshot } from "../shared/types.js";
@@ -35,8 +36,7 @@ export class GraphRuntime extends PiRuntime {
   private rootRunId = "";
   private rootBefore = new Set<string>();
   private rootRequest?: PromptAt;
-  private deltaCache = new WeakMap<SessionSnapshot, RawSessionEntry[]>();
-  private aggregateCache?: { key: string; entries: RawSessionEntry[]; projection: SessionSnapshot["projection"] };
+  private snapshotCache = new GraphSnapshotCache();
 
   private exclusive<T>(job: () => Promise<T>): Promise<T> {
     const result = this.admission.then(job, job);
@@ -101,7 +101,7 @@ export class GraphRuntime extends PiRuntime {
       if (this.stopping) return;
       const value = event as { type: string; payload: { type?: string } };
       try { this.emit(event); } catch {}
-      if (["message_end", "agent_settled", "entry_appended", "compaction_end"].includes(value.payload?.type ?? "")) {
+      if (["message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
         const worker = this.workers.get(record.id);
         if (worker?.pi.runtime) {
           try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch {}
@@ -126,8 +126,8 @@ export class GraphRuntime extends PiRuntime {
     const main = this.runtime ? super.snapshot() : this.lastMain;
     if (!main || !this.graph) return main ?? super.snapshot();
     this.lastMain = main;
-    const entries = new Map(main.entries.map(e => [e.id, e]));
-    const owners = new Map<string, string>();
+    this.snapshotCache.update(this.graph, main, this.workers);
+    const entries = this.snapshotCache.entriesById;
     const runs: NonNullable<SessionSnapshot["graph"]>["runs"] = [];
     const mainNode = main.projection.nodes.find(n => n.id === main.projection.activeNodeId);
     const mainPending = Boolean(this.mainWork && (!mainNode || this.rootBefore.has(mainNode.userEntryId)));
@@ -143,18 +143,10 @@ export class GraphRuntime extends PiRuntime {
       const worker = this.workers.get(record.id);
       const snap = worker?.snapshot;
       if (!snap) continue;
-      let delta: RawSessionEntry[];
-      try {
-        delta = this.deltaCache.get(snap) ?? this.graph.delta(record, { header: {}, entries: snap.entries });
-        this.deltaCache.set(snap, delta);
-      }
-      catch (error) {
-        runs.push({ branchId: record.id, runId: record.runId, nodeId: null, status: "interrupted", error: String(error) });
+      const error = this.snapshotCache.error(record.id);
+      if (error) {
+        runs.push({ branchId: record.id, runId: record.runId, nodeId: null, status: "interrupted", error });
         continue;
-      }
-      for (const entry of delta) {
-        owners.set(entry.id, record.id);
-        if (!entries.has(entry.id)) entries.set(entry.id, entry);
       }
       const node = snap.projection.activeNodeId;
       const ownNode = node && !Object.hasOwn(record.inherited, node.slice(5))
@@ -167,43 +159,8 @@ export class GraphRuntime extends PiRuntime {
         status: running ? "running" : record.status === "interrupted" ? "interrupted" : "idle",
         error: record.error, runtime: snap.runtime });
     }
-    const key = `${main.session.path}:${main.entries.length}:${main.projection.leafId}:` + [...this.workers].map(([id, w]) => `${id}:${w.snapshot?.entries.length ?? 0}`).join(";");
-    if (this.aggregateCache?.key !== key) {
-      const values = [...entries.values()];
-      this.aggregateCache = { key, entries: values, projection: projectSession(values, main.projection.leafId) };
-      const sourceNodes = new Map<string, SessionSnapshot["projection"]["nodes"][number]>();
-      for (const record of this.graph.records.values())
-        for (const node of this.workers.get(record.id)?.snapshot?.projection.nodes ?? [])
-          if (owners.get(this.graph.canonical(record, node.userEntryId)) === record.id)
-            sourceNodes.set(this.graph.canonical(record, node.userEntryId), node);
-      this.aggregateCache.projection = { ...this.aggregateCache.projection, nodes: this.aggregateCache.projection.nodes.map(node => {
-        const branchId = owners.get(node.userEntryId) ?? "main";
-        const record = this.graph!.records.get(branchId);
-        const sourceNode = record && sourceNodes.get(node.userEntryId);
-        // Setup records for a new child can hang off an existing prompt. They must
-        // not move that ancestor's fork point into the child's private session.
-        const rawEntryIds = sourceNode && record ? sourceNode.rawEntryIds.map(id => this.graph!.canonical(record, id))
-          : node.rawEntryIds.filter(id => !owners.has(id));
-        const owned = rawEntryIds.map(id => entries.get(id)).filter((e): e is RawSessionEntry => !!e);
-        const calls = new Set<string>(), results = new Set<string>();
-        let hasAssistant = false;
-        for (const entry of owned) {
-          const message = entry.message as { role?: string; toolCallId?: string; content?: Array<{ type?: string; id?: string }> } | undefined;
-          if (message?.role === "assistant") {
-            hasAssistant = true;
-            if (Array.isArray(message.content)) for (const item of message.content) if (item.type === "toolCall" && item.id) calls.add(item.id);
-          }
-          if (message?.role === "toolResult" && message.toolCallId) results.add(message.toolCallId);
-        }
-        return { ...node, ...(sourceNode ? { footer: sourceNode.footer, preview: sourceNode.preview } : {}), rawEntryIds,
-          leafEntryId: rawEntryIds.at(-1) ?? node.userEntryId, branchId, running: false,
-          forkable: hasAssistant && [...calls].every(id => results.has(id)),
-        };
-      }) };
-    }
-    const projection = { ...this.aggregateCache.projection, nodes: this.aggregateCache.projection.nodes.map(node =>
-      active.has(node.id) ? { ...node, running: true, forkable: false } : node) };
-    return { ...main, entries: this.aggregateCache.entries, projection,
+    const { entries: values, projection } = this.snapshotCache.view(main, active);
+    return { ...main, entries: values, projection,
       graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, runs, storageError: this.storageError,
         recoveredInputs: this.graph.recoveredInputs } };
   }
@@ -434,7 +391,7 @@ export class GraphRuntime extends PiRuntime {
     await this.mainWork;
     this.mainWork = undefined;
     this.graph?.release();
-    this.graph = undefined; this.workers.clear(); this.lastMain = undefined; this.aggregateCache = undefined;
+    this.graph = undefined; this.workers.clear(); this.lastMain = undefined; this.snapshotCache = new GraphSnapshotCache();
     this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
   }
   override dispose() { void this.close().catch(() => {}); }

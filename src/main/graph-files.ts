@@ -71,6 +71,7 @@ export class GraphFiles {
   leafId: string | null = null;
   hasSavedLeaf = false;
   private locked = false;
+  private deltaEntries = new WeakMap<BranchRecord, WeakMap<RawSessionEntry, RawSessionEntry>>();
   readonly recoveryMessages: string[] = [];
   readonly recoveredInputs: Array<{ requestId: string; text: string; nodeId?: string | null; images?: PromptImage[] }> = [];
   constructor(readonly main: string) {
@@ -239,12 +240,16 @@ export class GraphFiles {
     return disk;
   }
   canonical(record: BranchRecord, id: string) { return Object.hasOwn(record.inherited, id) ? record.inherited[id]! : `${record.id}:${id}`; }
-  delta(record: BranchRecord, data: SessionData) {
+  delta(record: BranchRecord, data: SessionData, reuse = false) {
     const byId = new Map(data.entries.map(e => [e.id, e]));
     for (const entry of record.baseline)
       if (!samePersistedValue(entry, byId.get(entry.id))) throw new Error(`Branch baseline changed: ${record.id}`);
     const base = new Set(record.baseline.map(e => e.id));
+    let cached = reuse ? this.deltaEntries.get(record) : undefined;
+    if (reuse && !cached) { cached = new WeakMap(); this.deltaEntries.set(record, cached); }
     return data.entries.filter(e => !base.has(e.id)).map(entry => {
+      const previous = cached?.get(entry);
+      if (previous) return previous;
       const copy = structuredClone(entry);
       copy.id = this.canonical(record, entry.id);
       copy.parentId = entry.parentId === null ? record.forkEntryId || null : this.canonical(record, entry.parentId);
@@ -253,9 +258,12 @@ export class GraphFiles {
       // Session names and labels on copied history are session-wide SDK state.
       // Keep their provenance without overwriting the main session's metadata.
       if (copy.type === "session_info" || (copy.type === "label" && typeof entry.targetId === "string" && entry.targetId in record.inherited)) {
-        return { type: "custom", id: copy.id, parentId: copy.parentId, timestamp: copy.timestamp,
+        const metadata = { type: "custom", id: copy.id, parentId: copy.parentId, timestamp: copy.timestamp,
           customType: "pix.branch-metadata", data: copy } as RawSessionEntry;
+        cached?.set(entry, metadata);
+        return metadata;
       }
+      cached?.set(entry, copy);
       return copy;
     });
   }

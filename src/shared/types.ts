@@ -443,6 +443,7 @@ export type DesktopRoute =
   | "remote.directories"
   | "remote.openProject"
   | "session.list"
+  | "session.snapshot"
   | "session.open"
   | "session.import"
   | "session.rename"

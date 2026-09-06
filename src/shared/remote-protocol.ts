@@ -1,12 +1,13 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-export const PIX_REMOTE_PROTOCOL = 8;
+export const PIX_REMOTE_PROTOCOL = 9;
 export const PIX_HOST_VERSION = "0.0.6";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
 export const PROJECT_ROUTES = [
   "session.list",
+  "session.snapshot",
   "session.open",
   "session.rename",
   "session.delete",

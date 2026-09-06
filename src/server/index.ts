@@ -82,7 +82,7 @@ async function serve() {
   const stopEvents = controller.onEvent((event: DesktopEvent) => {
     const message: HostMessage = { type: "event", sequence: ++sequence, event };
     for (const client of wss.clients) send(client, message);
-  });
+  }, true);
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;

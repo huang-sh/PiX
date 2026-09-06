@@ -10,6 +10,9 @@ import { WslHostClient } from "../src/main/wsl-host-client.js";
 import { MainController } from "../src/main/controller.js";
 import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
+import type { SessionSnapshot } from "../src/shared/types.js";
+import { projectSession } from "../src/shared/session.js";
+import { sessionEventEncoder, type SessionUpdate } from "../src/shared/session-updates.js";
 
 class FakeChild extends EventEmitter {
   killed = false;
@@ -39,6 +42,27 @@ function transport(t: TestContext) {
   t.after(async () => { child.exitCode = 0; child.emit("exit", 0); await client.dispose(); });
   return { client, child, socket };
 }
+
+test("remote transport reconstructs session deltas and requests a checkpoint after a gap", async t => {
+  const { client, socket } = transport(t);
+  const received: SessionSnapshot[] = [];
+  client.onEvent(event => { const current = (event.payload as SessionUpdate).current; if (current) received.push(current); });
+  const encoder = sessionEventEncoder();
+  const snap = (revision: number) => ({ session: { path: "s" }, entries: [], projection: projectSession([], null), runtime: {},
+    graph: { id: "s", epoch: "e", revision, runs: [] } }) as unknown as SessionSnapshot;
+  const deliver = (revision: number, resync = false) => socket.emit("message", JSON.stringify({ type: "event", sequence: revision,
+    event: encoder({ type: "sessions", payload: { current: snap(revision), resync } }) }));
+  deliver(1); deliver(2);
+  assert.deepEqual(received.map(value => value.graph!.revision), [1, 2]);
+  encoder({ type: "sessions", payload: { current: snap(3) } });
+  deliver(4);
+  assert.equal(socket.sent.at(-1)?.route, "session.snapshot");
+  const request = socket.sent.at(-1)!;
+  deliver(5, true);
+  socket.emit("message", JSON.stringify({ type: "response", id: request.id, ok: true, result: snap(5) }));
+  deliver(6);
+  assert.deepEqual(received.map(value => value.graph!.revision), [1, 2, 5, 6]);
+});
 
 test("connection loss rejects requests, cancels model work and notifies once", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
