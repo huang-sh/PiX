@@ -21,22 +21,24 @@ export function layoutGraph(p: SessionProjection) {
     a.sort((x, y) => x.timestamp.localeCompare(y.timestamp));
   let next = 0;
   const row = new Map<string, number>();
-  const assign = (n: GraphNode, seen = new Set<string>()): number => {
-    if (seen.has(n.id)) return next++;
-    seen.add(n.id);
-    const c = children.get(n.id) ?? [];
-    if (!c.length) {
-      const r = next++;
-      row.set(n.id, r);
-      return r;
-    }
-    const rs = c.map((x) => assign(x, new Set(seen))),
-      r = (Math.min(...rs) + Math.max(...rs)) / 2;
-    row.set(n.id, r);
-    return r;
-  };
   const roots = children.get(null) ?? [];
-  roots.forEach((n) => assign(n));
+  const seen = new Set<string>();
+  const stack = [...roots].reverse().map((node) => ({ node, exit: false }));
+  while (stack.length) {
+    const { node, exit } = stack.pop()!;
+    if (exit) {
+      let min = Infinity, max = -Infinity;
+      for (const child of children.get(node.id) ?? []) {
+        const r = row.get(child.id);
+        if (r !== undefined) { min = Math.min(min, r); max = Math.max(max, r); }
+      }
+      row.set(node.id, min === Infinity ? next++ : (min + max) / 2);
+    } else if (!seen.has(node.id)) {
+      seen.add(node.id);
+      stack.push({ node, exit: true });
+      for (const child of [...(children.get(node.id) ?? [])].reverse()) stack.push({ node: child, exit: false });
+    }
+  }
   p.nodes.forEach((n) => {
     if (!row.has(n.id)) row.set(n.id, next++);
   });
@@ -47,12 +49,13 @@ export function layoutGraph(p: SessionProjection) {
     width: nw,
     height: nh,
   }));
+  const maxDepth = p.nodes.reduce((max, node) => Math.max(max, node.depth), 0);
   return {
     nodes,
     width:
       pad * 2 +
-      (Math.max(0, ...p.nodes.map((n) => n.depth)) + 1) * nw +
-      Math.max(0, ...p.nodes.map((n) => n.depth)) * cg,
+      (maxDepth + 1) * nw +
+      maxDepth * cg,
     height: Math.max(
       400,
       pad * 2 + Math.max(1, next) * nh + Math.max(0, next - 1) * rg,

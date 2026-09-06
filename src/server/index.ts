@@ -17,7 +17,7 @@ import {
 import type { DesktopEvent } from "../shared/types.js";
 import { brokerOptions, BrokerModelStream } from "../main/model-broker.js";
 
-const PI_VERSION = "0.84.4";
+const PI_VERSION = "0.85.0";
 const READY_MARKER = "PIX_AGENT_HOST_READY ";
 
 function option(name: string) {

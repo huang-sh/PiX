@@ -65,6 +65,11 @@ export const messages = {
       toggleTools: "Toggle tools",
     },
     graph: {
+      parallelRuns: "{n} running",
+      stopBranch: "Stop this run",
+      storageNotice: "Session storage notice",
+      recoveredInputs: "Recovered unfinished inputs",
+      recoveredInputsHint: "These requests may have partially run. Their saved inputs are retained; tools were not automatically replayed.",
       newSession: "Start",
       empty: "Start a new session or choose an existing one.",
       blockedStreaming: "Wait for the current task to finish or stop it first",
@@ -609,6 +614,11 @@ export const messages = {
       toggleTools: "切换工具面板",
     },
     graph: {
+      parallelRuns: "{n} 个任务运行中",
+      stopBranch: "停止此任务",
+      storageNotice: "会话存储提示",
+      recoveredInputs: "已恢复的未完成输入",
+      recoveredInputsHint: "这些请求可能已执行过部分操作。输入已保留，工具不会自动重复执行。",
       newSession: "开始",
       empty: "开始新会话，或选择一个已有会话。",
       blockedStreaming: "等待完成或先停止当前任务",

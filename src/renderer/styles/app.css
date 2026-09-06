@@ -404,6 +404,9 @@ kbd {
 .graph-footer { display: flex; justify-content: space-between; flex: 0 0 25px; padding: 5px 10px; border-top: 1px solid var(--border); color: var(--faint); font-size: 9px; }
 
 .branch-panel { background: var(--context); }
+.graph-storage-state { padding: 6px 16px; color: var(--faint); font-size: 11px; }
+.graph-storage-state small { display: block; overflow-wrap: anywhere; }
+.graph-storage-state button { margin-left: 8px; color: var(--accent); cursor: pointer; }
 .branch-panel .panel-header { background: var(--context); }
 .branch-title > span { display: flex; flex-direction: column; min-width: 0; }
 .branch-title small { max-width: 250px; overflow: hidden; color: var(--faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }

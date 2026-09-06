@@ -220,8 +220,18 @@ app.whenReady().then(async () => {
   );
   await create();
 });
-app.on("before-quit", () => {
+let sessionsClosed = false;
+let closingSessions = false;
+app.on("before-quit", (event) => {
   isQuitting = true;
+  if (!sessionsClosed && controller) {
+    event.preventDefault();
+    if (!closingSessions) {
+      closingSessions = true;
+      void controller.pi.close().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
+    }
+    return;
+  }
   tray?.destroy();
   tray = undefined;
   controller?.dispose();

@@ -19,6 +19,7 @@ import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
 import { projectSession } from "../shared/session.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { GraphRuntime } from "./graph-runtime.js";
 import { WslHostClient } from "./wsl-host-client.js";
 import { brokerOptions } from "./model-broker.js";
 import { listSshHosts } from "./ssh-host-installer.js";
@@ -85,11 +86,17 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files = new SessionFiles(path, dir);
-    this.pi = new PiRuntime(path, dir, (e) => {
+    this.pi = new GraphRuntime(path, dir, (e) => {
+      const pushed = e as DesktopEvent;
+      if (pushed.type === "sessions") {
+        const snapshot = (pushed.payload as { current?: SessionSnapshot })?.current;
+        if (snapshot) this.current = snapshot;
+      }
       this.emit(e as DesktopEvent);
       const p = (e as DesktopEvent).payload as { type?: string };
       if (
         [
+          "message_end",
           "agent_settled",
           "entry_appended",
           "session_info_changed",

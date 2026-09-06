@@ -21,7 +21,7 @@ export function useDraftSubmit() {
     thinkingLevel?: string,
     images?: PromptImage[],
   ): Promise<boolean> {
-    submitted.value = {
+    submitted.value = session.current?.graph ? undefined : {
       parentId,
       knownNodeIds: new Set(session.current?.projection.nodes.map((node) => node.id)),
     };

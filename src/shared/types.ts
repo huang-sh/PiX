@@ -91,6 +91,9 @@ export interface GraphNode {
   depth: number;
   imageCount?: number;
   footer?: NodeFooterState;
+  branchId?: string;
+  running?: boolean;
+  forkable?: boolean;
 }
 export interface GraphEdge {
   id: string;
@@ -177,6 +180,23 @@ export interface SessionSnapshot {
   entries: RawSessionEntry[];
   projection: SessionProjection;
   runtime: RuntimeState;
+  graph?: {
+    id: string;
+    revision: number;
+    epoch?: string;
+    runs: Array<{
+      branchId: string;
+      runId: string;
+      requestId?: string;
+      nodeId: string | null;
+      pending?: { text: string; parentNodeId: string | null; images?: PromptImage[] };
+      status: "running" | "idle" | "interrupted";
+      error?: string;
+      runtime?: RuntimeState;
+    }>;
+    storageError?: string;
+    recoveredInputs?: Array<{ requestId: string; text: string; nodeId?: string | null; images?: PromptImage[] }>;
+  };
 }
 export interface FileNode {
   name: string;
@@ -357,6 +377,8 @@ export interface RuntimeExtension {
   commands: Array<{ name: string; description?: string }>;
 }
 export type AgentControl =
+  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
+  | { action: "branchAbort"; branchId: string; runId: string }
   | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[] }
   | {
       action:

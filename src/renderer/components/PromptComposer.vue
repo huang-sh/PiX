@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import { getActivePinia } from "pinia";
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { THINKING_LEVELS, type PromptImage, type RuntimeModel } from "../../shared/types";
 import { IMAGE_MIME_TYPES, MAX_IMAGE_BYTES, MAX_PROMPT_IMAGES, imageDataUrl, validatePromptImages } from "../../shared/images";
@@ -20,7 +20,15 @@ import Button from "./ui/Button.vue";
 
 // Shared prompt editor used by the graph draft node and the chat panel composer,
 // so both input paths expose identical model/thinking controls and submit rules.
+export interface ComposerDraft {
+  text: string;
+  images: PromptImage[];
+  busy: boolean;
+  readingImages: boolean;
+  error: string;
+}
 const props = defineProps<{
+  draftState?: ComposerDraft;
   runnable: boolean;
   model: RuntimeModel | null;
   thinkingLevel: string;
@@ -38,13 +46,15 @@ const { t } = useI18n();
 // The composer is also mounted in isolated tests with no pinia installed; without
 // an active pinia keep the default Enter-to-send behavior instead of crashing.
 const layout = getActivePinia() ? useLayoutStore() : undefined;
-const draft = ref("");
-const busy = ref(false);
+const local = reactive<ComposerDraft>({ text: "", images: [], busy: false, readingImages: false, error: "" });
+const state = computed(() => props.draftState ?? local);
+const draft = computed({ get: () => state.value.text, set: value => { state.value.text = value; } });
+const busy = computed({ get: () => state.value.busy, set: value => { state.value.busy = value; } });
 const editor = ref<HTMLTextAreaElement>();
 const imagePicker = ref<HTMLInputElement>();
-const images = ref<PromptImage[]>([]);
-const readingImages = ref(false);
-const imageError = ref("");
+const images = computed({ get: () => state.value.images, set: value => { state.value.images = value; } });
+const readingImages = computed({ get: () => state.value.readingImages, set: value => { state.value.readingImages = value; } });
+const imageError = computed({ get: () => state.value.error, set: value => { state.value.error = value; } });
 const modelOptions = computed(() => {
   const selected = props.model;
   return selected && !props.models.some((item) => item.provider === selected.provider && item.id === selected.id)

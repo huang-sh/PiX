@@ -6,7 +6,7 @@ import { defineConfig } from "electron-vite";
 export default defineConfig({
   main: {
     build: {
-      rollupOptions: { input: resolve("src/main/index.ts") },
+      rollupOptions: { input: { index: resolve("src/main/index.ts"), "graph-export-worker": resolve("src/main/graph-export-worker.ts") } },
     },
   },
   preload: {

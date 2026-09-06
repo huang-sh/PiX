@@ -9,6 +9,29 @@ import type {
 } from "./types.js";
 import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { isPromptImage } from "./images.js";
+
+const entryIndexes = new WeakMap<RawSessionEntry[], Map<string, RawSessionEntry>>();
+export function sessionEntryIndex(entries: RawSessionEntry[]) {
+  let index = entryIndexes.get(entries);
+  if (!index || index.size !== entries.length) {
+    index = new Map(entries.map(entry => [entry.id, entry]));
+    entryIndexes.set(entries, index);
+  }
+  return index;
+}
+
+/** Project only the selected ancestry, rather than every sibling in the graph. */
+export function projectSessionBranch(entries: RawSessionEntry[], leafId: string | null) {
+  const index = sessionEntryIndex(entries);
+  const path: RawSessionEntry[] = [];
+  const seen = new Set<string>();
+  let entry = leafId ? index.get(leafId) : undefined;
+  while (entry && !seen.has(entry.id)) {
+    path.push(entry); seen.add(entry.id);
+    entry = entry.parentId ? index.get(entry.parentId) : undefined;
+  }
+  return projectSession(path.reverse(), leafId);
+}
 const rec = (v: unknown): Record<string, unknown> | null =>
   v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
@@ -149,21 +172,6 @@ const clip = (s: string, n: number) => {
   return c.length > n ? `${c.slice(0, n - 1)}…` : c;
 };
 export const clipText = clip;
-function nearest(
-  id: string | null,
-  byId: Map<string, RawSessionEntry>,
-  self = true,
-): string | null {
-  const seen = new Set<string>();
-  let e = id ? byId.get(id) : undefined;
-  if (!self && e) e = e.parentId ? byId.get(e.parentId) : undefined;
-  while (e && !seen.has(e.id)) {
-    seen.add(e.id);
-    if (e.type === "message" && role(e) === "user") return e.id;
-    e = e.parentId ? byId.get(e.parentId) : undefined;
-  }
-  return null;
-}
 function branchEntries(byId: Map<string, RawSessionEntry>, leaf: string | null) {
   const out: RawSessionEntry[] = [];
   const seen = new Set<string>();
@@ -177,13 +185,6 @@ function branchEntries(byId: Map<string, RawSessionEntry>, leaf: string | null) 
 }
 function branch(byId: Map<string, RawSessionEntry>, leaf: string | null) {
   return branchEntries(byId, leaf).map((e) => e.id);
-}
-// Settings in effect for a turn = last model/thinking change on its root chain,
-// mirroring how the runtime itself restores state for a leaf position.
-function chainSettings(byId: Map<string, RawSessionEntry>, leafId: string | null): SettingsState {
-  const state: SettingsState = { model: null, thinkingLevel: "off" };
-  for (const entry of branchEntries(byId, leafId)) applySettingEntry(entry, state);
-  return state;
 }
 export function projectSession(
   entries: RawSessionEntry[],
@@ -201,22 +202,44 @@ export function projectSession(
     }
   }
   const owners = new Map<string, string>();
+  const ownedEntries = new Map<string, RawSessionEntry[]>();
+  const contexts = new Map<string | null, { owner: string | null; depth: number; settings: SettingsState }>();
+  contexts.set(null, { owner: null, depth: -1, settings: { model: null, thinkingLevel: "off" } });
+  // Resolve each ancestor once, including records supplied out of file order.
+  const context = (id: string | null) => {
+    const path: RawSessionEntry[] = [];
+    const seen = new Set<string>();
+    let cursor = id;
+    while (cursor && !contexts.has(cursor) && !seen.has(cursor)) {
+      seen.add(cursor);
+      const entry = byId.get(cursor);
+      if (!entry) break;
+      path.push(entry);
+      cursor = entry.parentId;
+    }
+    let value = contexts.get(cursor) ?? contexts.get(null)!;
+    for (const entry of path.reverse()) {
+      const user = entry.type === "message" && role(entry) === "user";
+      const settings = { ...value.settings };
+      applySettingEntry(entry, settings);
+      value = { owner: user ? entry.id : value.owner, depth: value.depth + (user ? 1 : 0), settings };
+      contexts.set(entry.id, value);
+    }
+    return contexts.get(id) ?? contexts.get(null)!;
+  };
   for (const e of entries) {
-    const o = nearest(e.id, byId);
-    if (o) owners.set(e.id, o);
+    const o = context(e.id).owner;
+    if (!o) continue;
+    owners.set(e.id, o);
+    const group = ownedEntries.get(o) ?? [];
+    group.push(e);
+    ownedEntries.set(o, group);
   }
   const users = entries.filter(
     (e) => e.type === "message" && role(e) === "user",
   );
-  // Siblings share their parent chain, so resolve each distinct chain once.
-  const settingsCache = new Map<string | null, SettingsState>();
-  const inheritedSettings = (parentId: string | null): SettingsState => {
-    let base = settingsCache.get(parentId);
-    if (!base) settingsCache.set(parentId, (base = chainSettings(byId, parentId)));
-    return base;
-  };
   const nodes: GraphNode[] = users.map((e) => {
-    const owned = entries.filter((x) => owners.get(x.id) === e.id);
+    const owned = ownedEntries.get(e.id) ?? [];
     const leafEntryId = owned.at(-1)?.id ?? e.id;
     const finalAssistantReply = owned
       .filter((x) => x.type === "message" && role(x) === "assistant")
@@ -224,7 +247,7 @@ export function projectSession(
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
-      parentId: ((p) => (p ? `turn:${p}` : null))(nearest(e.id, byId, false)),
+      parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
       title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
       ...(images(e).length ? { imageCount: images(e).length } : {}),
       preview: clip(
@@ -240,18 +263,10 @@ export function projectSession(
       leafEntryId,
       toolCallCount: owned.reduce((n, x) => n + calls(x), 0),
       hasError: finalAssistantReply ? error(finalAssistantReply) : false,
-      depth: 0,
-      footer: footerState(owned, inheritedSettings(e.parentId)),
+      depth: context(e.id).depth,
+      footer: footerState(owned, context(e.parentId).settings),
     };
   });
-  const map = new Map(nodes.map((n) => [n.id, n]));
-  const depth = (n: GraphNode, seen = new Set<string>()): number => {
-    if (!n.parentId || seen.has(n.id)) return 0;
-    seen.add(n.id);
-    const p = map.get(n.parentId);
-    return p ? depth(p, seen) + 1 : 0;
-  };
-  nodes.forEach((n) => (n.depth = depth(n)));
   const edges: GraphEdge[] = nodes
     .filter((n) => n.parentId)
     .map((n) => ({

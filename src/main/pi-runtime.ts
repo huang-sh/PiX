@@ -24,7 +24,7 @@ import type {
   SessionSummary,
 } from "../shared/types.js";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
-import { projectSession } from "../shared/session.js";
+import { projectSession, summarizeSession } from "../shared/session.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
@@ -43,6 +43,9 @@ export class PiRuntime {
   openExternal: (url: string) => Promise<void>;
   private closing = false;
   private pendingControls = new Set<Promise<unknown>>();
+  private closeTask?: Promise<void>;
+  private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
+  eventScope?: { graphId: string; branchId: string; runId: string };
   constructor(
     cwd: string | null,
     dir: string | null,
@@ -62,6 +65,13 @@ export class PiRuntime {
   }
   async pi() {
     return (this.mod ??= await import("@earendil-works/pi-coding-agent"));
+  }
+  async exportSnapshotHtml(manager: any, outputPath: string): Promise<string> {
+    // Pi's standalone HTML exporter is not re-exported by its package entry.
+    // Keep this version-specific adapter here; no agent or extension is started.
+    const moduleUrl = new URL("./core/export-html/index.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const exporter = await import(moduleUrl.href);
+    return exporter.exportSessionToHtml(manager, undefined, { outputPath });
   }
   agentDir(pi: any) {
     return process.env.PIX_HOME
@@ -171,9 +181,29 @@ export class PiRuntime {
   }
   bind() {
     this.unsubscribe?.();
-    this.unsubscribe = this.runtime.session.subscribe((payload: unknown) =>
-      this.emit({ type: "agent", payload }),
-    );
+    this.unsubscribe = this.runtime.session.subscribe((payload: unknown) => {
+      // SDK emits message_end BEFORE persisting it. A UI listener must never
+      // throw into that call stack, or the message would not be saved.
+      try {
+        const event = structuredClone({ ...(payload as object), ...this.eventScope });
+        setImmediate(() => { try { this.emit({ type: "agent", payload: event }); } catch {} });
+      } catch {}
+    });
+  }
+  async waitForWrites() {
+    await this.runtime?.session.waitForIdle?.();
+    await Promise.allSettled([...this.pendingControls]);
+    if (this.runtime?.session.isBashRunning) throw new Error("Session bash is still running");
+  }
+  async openAt(path: string, leafId: string | null) {
+    const pi = await this.pi();
+    const manager = pi.SessionManager.open(path, this.dir, this.cwd);
+    if (leafId === null) manager.resetLeaf();
+    else manager.branch(leafId);
+    this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
+      cwd: this.cwd, agentDir: this.agentDir(pi), sessionManager: manager,
+    });
+    this.bind();
   }
   async list(): Promise<SessionSummary[]> {
     const pi = await this.pi(),
@@ -271,19 +301,17 @@ export class PiRuntime {
     const m = s.sessionManager,
       entries = m.getEntries() as RawSessionEntry[],
       leaf = m.getLeafId();
+    if (!this.projectionCache || this.projectionCache.manager !== m || this.projectionCache.count !== entries.length || this.projectionCache.leaf !== leaf)
+      this.projectionCache = { manager: m, count: entries.length, leaf, projection: projectSession(entries, leaf) };
     return {
       session: {
+        ...summarizeSession(s.sessionFile ?? "", m.getHeader?.() ?? null, entries, new Date().toISOString()),
         id: s.sessionId,
-        path: s.sessionFile ?? "",
         name: m.getSessionName?.(),
         cwd: m.getCwd(),
-        created: String(m.getHeader?.()?.timestamp ?? new Date().toISOString()),
-        modified: new Date().toISOString(),
-        messageCount: entries.filter((e) => e.type === "message").length,
-        firstMessage: "",
       },
       entries,
-      projection: projectSession(entries, leaf),
+      projection: this.projectionCache.projection,
       runtime: this.state(),
     };
   }
@@ -646,7 +674,10 @@ export class PiRuntime {
     }
     return this.snapshot();
   }
-  async close() {
+  close(): Promise<void> {
+    return this.closeTask ??= this.closeRuntime().finally(() => { this.closeTask = undefined; });
+  }
+  private async closeRuntime() {
     const runtime = this.runtime;
     if (!runtime) return;
     this.closing = true;

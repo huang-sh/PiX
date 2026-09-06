@@ -6,6 +6,18 @@ import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import type { AgentControl } from "../src/shared/types.js";
 
+test("a failing event consumer cannot throw into SDK message persistence", async () => {
+  let listener!: (event: unknown) => void;
+  let delivered = false;
+  const runtime = new PiRuntime(null, null, () => { delivered = true; throw new Error("UI failed"); }, async () => {});
+  runtime.runtime = { session: { subscribe: (handler: typeof listener) => { listener = handler; return () => {}; } } };
+  runtime.bind();
+  assert.doesNotThrow(() => listener({ type: "message_end", message: { role: "user", content: "saved" } }));
+  assert.equal(delivered, false, "listener is deferred until after SDK can persist");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(delivered, true);
+});
+
 test("records SDK context usage once after a prompt finishes", async () => {
   const appended: unknown[] = [];
   const entries: unknown[] = [];

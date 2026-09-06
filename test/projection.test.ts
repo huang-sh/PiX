@@ -1,7 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { entryAnchorForNode, projectSession } from "../src/shared/session.js";
+import { entryAnchorForNode, projectSession, projectSessionBranch } from "../src/shared/session.js";
 import type { RawSessionEntry } from "../src/shared/types.js";
+test("selected ancestry matches the full projection without including sibling turns", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "message", id: "root", parentId: null, timestamp: "0", message: { role: "user", content: "root" } },
+    ...Array.from({ length: 2000 }, (_, i) => ({ type: "message", id: `u${i}`, parentId: "root", timestamp: "1",
+      message: { role: "user", content: `sibling ${i}` } })),
+  ];
+  const branch = projectSessionBranch(entries, "u1999");
+  assert.equal(branch.nodes.length, 2);
+  assert.deepEqual(branch.messages, projectSession(entries, "u1999").messages);
+  assert.deepEqual(projectSessionBranch(entries, null).messages, []);
+});
 const e: RawSessionEntry[] = [
   {
     type: "message",

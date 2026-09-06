@@ -1,7 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { reactive } from "vue";
 import { describe, expect, it, vi } from "vitest";
-import PromptComposer from "../../src/renderer/components/PromptComposer.vue";
+import PromptComposer, { type ComposerDraft } from "../../src/renderer/components/PromptComposer.vue";
 import { i18n } from "../../src/renderer/i18n";
 import type { RuntimeModel } from "../../src/shared/types";
 
@@ -19,6 +20,30 @@ function setup(onSubmit = vi.fn().mockResolvedValue(true)) {
 }
 
 describe("image prompts", () => {
+  it("retains text, attachments and an in-flight failure across viewport unmounts", async () => {
+    const draftState = reactive<ComposerDraft>({ text: "", images: [], busy: false, readingImages: false, error: "" });
+    let reject!: (reason: Error) => void;
+    const onSubmit = vi.fn(() => new Promise<boolean>((_, fail) => { reject = fail; }));
+    const { wrapper } = setup(onSubmit);
+    await wrapper.setProps({ draftState });
+    await wrapper.get("textarea").setValue("keep this draft");
+    await wrapper.get("textarea").trigger("paste", { clipboardData: { files: [png()] } });
+    await vi.waitFor(() => expect(draftState.images).toHaveLength(1));
+    wrapper.unmount();
+    const next = mount(PromptComposer, { props: { draftState, model: vision, models: [vision], runnable: true,
+      thinkingLevel: "off", onModel: vi.fn(), onThinking: vi.fn(), onSubmit }, global: { plugins: [i18n] } });
+    expect(next.get<HTMLTextAreaElement>("textarea").element.value).toBe("keep this draft");
+    expect(next.findAll(".composer-images img")).toHaveLength(1);
+    await next.get(".composer-submit").trigger("click");
+    expect(draftState.busy).toBe(true);
+    next.unmount();
+    reject(new Error("offline while outside viewport"));
+    await flushPromises();
+    expect(draftState.text).toBe("keep this draft");
+    expect(draftState.images).toHaveLength(1);
+    expect(draftState.busy).toBe(false);
+    expect(draftState.error).toContain("offline");
+  });
   it("selects, previews and sends images without requiring text", async () => {
     const { wrapper, onSubmit } = setup();
     const picker = wrapper.get('input[type="file"]');

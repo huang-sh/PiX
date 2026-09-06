@@ -12,6 +12,8 @@ import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 
 const session = useSessionStore();
+const activity = computed(() => session.selectedActivity);
+const selectedRun = computed(() => session.selectedRun);
 const layout = useLayoutStore();
 const { submitDraft } = useDraftSubmit();
 const { t } = useI18n();
@@ -27,7 +29,9 @@ const composerModel = ref<RuntimeModel | null>();
 const composerThinking = ref<string>();
 
 const composerRunnable = computed(() =>
-  Boolean(session.current?.runtime.available && !session.current.runtime.isStreaming));
+  Boolean(session.current?.runtime.available && (session.current.graph
+    ? session.selectedNode?.forkable !== false && !session.focusedNode?.startsWith("pending:")
+    : !session.current.runtime.isStreaming)));
 const composerModelValue = computed(() => {
   if (composerModel.value !== undefined) return composerModel.value;
   return session.selectedNode?.footer?.model ?? session.current?.runtime.model ?? null;
@@ -68,8 +72,7 @@ function setComposerThinking(level: string, explicit: boolean) {
   }
 }
 
-// Same delivery path as the graph draft node: branch from the selected node,
-// navigate the tree, apply model/thinking, and let the graph center the new node.
+// The host admits the prompt and its model settings as one branch operation.
 async function submitComposer(text: string, images?: PromptImage[]) {
   return submitDraft(session.selectedNode?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
 }
@@ -83,8 +86,8 @@ interface Turn {
 }
 
 const showingActivity = computed(() => Boolean(
-  session.activity &&
-  (!session.selectedNode || session.selectedNode.id === session.current?.projection.activeNodeId),
+  activity.value &&
+  (session.current?.graph || !session.selectedNode || session.selectedNode.id === session.current?.projection.activeNodeId),
 ));
 
 const turns = computed<Turn[]>(() => {
@@ -178,7 +181,7 @@ watch(() => session.pendingPrompt?.message.entryId, (entryId) => {
 watch(
   () => [
     session.selectedMessages.length,
-    session.activity?.items
+    activity.value?.items
       .map((item) => `${item.text.length}:${item.thinking?.length ?? 0}:${item.status}`)
       .join(":"),
   ],
@@ -204,9 +207,25 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
           <small>{{ session.selectedNode?.title ?? t("branch.noNodeSelected") }}</small>
         </span>
       </span>
+      <button v-if="selectedRun?.status === 'running'" type="button" @click="session.control({ action: 'branchAbort', branchId: selectedRun.branchId, runId: selectedRun.runId })">{{ t('graph.stopBranch') }}</button>
     </header>
+    <div v-if="selectedRun?.error" class="graph-storage-state" role="status">
+      <small>{{ selectedRun.error }}</small>
+    </div>
+    <div v-if="session.current?.graph?.storageError" class="graph-storage-state" role="status">
+      {{ t('graph.storageNotice') }}
+      <small>{{ session.current.graph.storageError }}</small>
+    </div>
 
     <div ref="scroll" class="branch-messages" @scroll="updateScrollFollow">
+      <details v-if="session.current?.graph?.recoveredInputs?.length" class="graph-storage-state">
+        <summary>{{ t('graph.recoveredInputs') }}</summary>
+        <small>{{ t('graph.recoveredInputsHint') }}</small>
+        <article v-for="input in session.current.graph.recoveredInputs" :key="input.requestId" class="branch-message user">
+          <p>{{ input.text }}</p>
+          <MessageImages :images="input.images" />
+        </article>
+      </details>
       <section v-for="turn in turns" :key="turn.id" class="chat-turn">
         <article v-if="turn.user" class="branch-message user">
           <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
@@ -260,18 +279,18 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
       </section>
 
       <details
-        v-if="showingActivity && session.activity"
+        v-if="showingActivity && activity"
         class="agent-process live"
-        :open="session.activity.active"
+        :open="activity.active"
         @toggle="scrollLatest()"
       >
         <summary>
           <LoaderCircle :size="14" class="spin" />
-          {{ t("branch.working", { n: session.activity.pass }) }}
+          {{ t("branch.working", { n: activity.pass }) }}
           <ChevronRight class="disclosure" :size="13" />
         </summary>
         <div class="process-items">
-          <template v-for="item in session.activity.items" :key="item.id">
+          <template v-for="item in activity.items" :key="item.id">
             <details
               v-if="item.thinking"
               class="process-item process-thinking"
@@ -307,7 +326,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
               {{ errorText(item) }}
             </div>
           </template>
-          <div v-if="!session.activity.items.length" class="process-item waiting">
+          <div v-if="!activity.items.length" class="process-item waiting">
             {{ t("branch.waiting") }}
           </div>
         </div>

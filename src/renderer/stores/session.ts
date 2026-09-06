@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { markRaw } from "vue";
 import type {
   AgentActivity,
   BranchMessage,
@@ -12,7 +13,7 @@ import type {
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, projectSession } from "../../shared/session";
+import { entryAnchorForNode, projectSession, projectSessionBranch } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
 import { useLayoutStore } from "./layout";
@@ -41,9 +42,20 @@ export const useSessionStore = defineStore("session", {
     commands: [] as RuntimeCommand[],
     models: [] as RuntimeModel[],
     activity: undefined as AgentActivity | undefined,
+    branchActivities: {} as Record<string, { runId: string; activity?: AgentActivity }>,
     pendingPrompt: undefined as PendingPrompt | undefined,
   }),
   getters: {
+    selectedRun(state) {
+      const id = state.focusedNode ?? state.current?.projection.activeNodeId;
+      return state.current?.graph?.runs.find(run => run.nodeId === id || `pending:${run.runId}` === id);
+    },
+    selectedActivity(): AgentActivity | undefined {
+      if (!this.current?.graph) return this.activity;
+      const run = this.selectedRun;
+      const value = run && this.branchActivities[run.branchId];
+      return value && value.runId === run?.runId && run.status === "running" ? value.activity : undefined;
+    },
     filtered(state) {
       const query = state.query.toLowerCase();
       return state.sessions.filter(
@@ -85,7 +97,15 @@ export const useSessionStore = defineStore("session", {
       if (!current) return [];
       const id = state.focusedNode ?? current.projection.activeNodeId;
       const node = current.projection.nodes.find((item) => item.id === id);
-      const messages = node ? projectSession(current.entries, node.leafEntryId).messages : current.projection.messages;
+      const run = current.graph?.runs.find(r => `pending:${r.runId}` === id && r.pending);
+      if (run?.pending) {
+        const parent = current.projection.nodes.find(n => n.id === run.pending!.parentNodeId);
+        return [...(parent ? projectSessionBranch(current.entries, parent.leafEntryId).messages : []), {
+          entryId: `pending:${run.runId}`, turnId: `pending:${run.runId}`, role: "user", text: run.pending.text,
+          images: run.pending.images, timestamp: new Date().toISOString(),
+        }];
+      }
+      const messages = node ? projectSessionBranch(current.entries, node.leafEntryId).messages : current.projection.messages;
       return state.pendingPrompt?.targetNodeId === id
         ? [...messages, state.pendingPrompt.message]
         : messages;
@@ -103,6 +123,7 @@ export const useSessionStore = defineStore("session", {
       this.sessions = sessions;
       this.focusedNode = current?.projection.activeNodeId ?? null;
       this.activity = undefined;
+      this.branchActivities = {};
       this.pendingPrompt = undefined;
       this.current = undefined;
       this.syncProject();
@@ -120,14 +141,23 @@ export const useSessionStore = defineStore("session", {
       if (record) record.connected = false;
       if (this.activeProjectId !== id) return;
       this.activity = undefined;
+      this.branchActivities = {};
       if (this.current) this.current.runtime = {
         ...this.current.runtime, available: false, isStreaming: false,
         isCompacting: false, isRetrying: false,
       };
     },
     applySnapshot(snapshot: SessionSnapshot) {
+      const previousGraph = this.current?.graph;
+      if (previousGraph && snapshot.graph && previousGraph.id === snapshot.graph.id && previousGraph.epoch === snapshot.graph.epoch && previousGraph.revision > snapshot.graph.revision) return;
+      const graphChanged = this.current?.session.path !== snapshot.session.path;
+      if (graphChanged || previousGraph?.epoch !== snapshot.graph?.epoch) this.branchActivities = {};
       const pending = this.pendingPrompt;
       if (this.current?.session.path !== snapshot.session.path) this.userThinking = undefined;
+      // Session records/projections are immutable snapshots, replaced together.
+      // Deep proxies on every historical entry make large-tree navigation costly.
+      snapshot.entries = markRaw(snapshot.entries);
+      snapshot.projection = markRaw(snapshot.projection);
       this.current = snapshot;
       if (snapshot.session.path)
         this.sessions = [
@@ -140,11 +170,24 @@ export const useSessionStore = defineStore("session", {
         message.text === pending.message.text &&
         !pending.knownEntryIds.includes(message.entryId)
       )) this.pendingPrompt = undefined;
-      if (this.activity) this.focusedNode = snapshot.projection.activeNodeId;
+      if (snapshot.graph) {
+        const run = snapshot.graph.runs.find(r => this.focusedNode === `pending:${r.runId}`);
+        if (run?.nodeId) this.focusedNode = run.nodeId;
+      } else if (this.activity) this.focusedNode = snapshot.projection.activeNodeId;
       if (!snapshot.runtime.isStreaming && this.activity && !this.activity.active)
         this.activity = undefined;
     },
     onAgentEvent(event: unknown) {
+      const scoped = event as { graphId?: string; branchId?: string; runId?: string };
+      if (scoped.graphId && scoped.branchId && scoped.runId) {
+        if (scoped.graphId !== this.current?.graph?.id) return;
+        const known = this.current.graph.runs.find(r => r.branchId === scoped.branchId);
+        if (known && known.runId !== scoped.runId) return;
+        const old = this.branchActivities[scoped.branchId];
+        this.branchActivities[scoped.branchId] = { runId: scoped.runId,
+          activity: reduceAgentActivity(old?.runId === scoped.runId ? old.activity : undefined, event) };
+        return;
+      }
       this.activity = reduceAgentActivity(this.activity, event);
       if ((event as { type?: unknown } | null)?.type === "agent_start")
         this.focusedNode = null;
@@ -230,6 +273,14 @@ export const useSessionStore = defineStore("session", {
     async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[]) {
       const current = this.current;
       if (!current || (!text.trim() && !images?.length)) return;
+      if (current.graph) {
+        const requestId = crypto.randomUUID();
+        const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
+          provider: model?.provider, modelId: model?.id, thinkingLevel, images });
+        const run = result.graph?.runs.find(r => r.requestId === requestId);
+        if (run) this.focusedNode = run.nodeId ?? `pending:${run.runId}`;
+        return;
+      }
       const node = nodeId ? current.projection.nodes.find((item) => item.id === nodeId) : undefined;
       if (nodeId && !node) return;
       if (node && current.projection.activeNodeId !== nodeId) {
@@ -271,7 +322,7 @@ export const useSessionStore = defineStore("session", {
         { path, name },
       );
       this.sessions = result.sessions;
-      this.current = result.current ?? this.current;
+      if (result.current) this.applySnapshot(result.current);
       this.syncProject();
     },
     applyDeletion(path: string, sessions: SessionSummary[]) {

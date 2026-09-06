@@ -3,9 +3,10 @@ import { X } from "@lucide/vue";
 import { Handle, Position } from "@vue-flow/core";
 import { useI18n } from "vue-i18n";
 import type { PromptImage, RuntimeModel } from "../../../shared/types";
-import PromptComposer from "../../components/PromptComposer.vue";
+import PromptComposer, { type ComposerDraft } from "../../components/PromptComposer.vue";
 
 export interface DraftNodeData {
+  draftState?: ComposerDraft;
   parentId: string | null;
   runnable: boolean;
   model: RuntimeModel | null;
@@ -31,6 +32,7 @@ const { t } = useI18n();
       </button>
     </header>
     <PromptComposer
+      :draft-state="data.draftState"
       :runnable="data.runnable"
       :model="data.model"
       :thinking-level="data.thinkingLevel"

@@ -130,6 +130,16 @@ export function validateRouteInput(
       return { layout: obj(v.layout) };
     case "agent.control": {
       const action = str(v.action, "action")!;
+      if (action === "promptAt") {
+        const requestId = str(v.requestId, "requestId")!;
+        if (!/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new Error("Invalid request ID");
+        const images = v.images === undefined ? undefined : validatePromptImages(v.images);
+        return { action, requestId, nodeId: v.nodeId === null ? null : str(v.nodeId, "nodeId"),
+          text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
+          provider: str(v.provider, "provider", true), modelId: str(v.modelId, "modelId", true),
+          thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true) };
+      }
+      if (action === "branchAbort") return { action, branchId: str(v.branchId, "branchId"), runId: str(v.runId, "runId") };
       if (["prompt", "steer", "followUp"].includes(action)) {
         const images = v.images === undefined ? undefined : validatePromptImages(v.images);
         return { action, text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}) };
