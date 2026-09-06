@@ -254,6 +254,35 @@ describe("chat panel composer", () => {
     panel.unmount();
   });
 
+  it("inherits the target thinking level while allowing a local explicit override", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    const current = snapshot(first, "a1");
+    current.projection.nodes[0]!.footer = { model: current.runtime.model, thinkingLevel: "low" };
+    current.projection.nodes[1]!.footer = { model: current.runtime.model, thinkingLevel: "off" };
+    session.applySnapshot(current);
+    session.setUserThinking("high");
+    await flushPromises();
+    const thinking = () => panel.get('button[aria-label="Draft thinking level"]');
+    expect(thinking().text()).toContain("low");
+
+    await thinking().trigger("click");
+    await flushPromises();
+    (document.querySelector('[data-thinking-level="high"]') as HTMLElement).click();
+    await flushPromises();
+    expect(thinking().text()).toContain("high");
+    const promptAt = vi.spyOn(session, "promptAt").mockResolvedValue(undefined);
+    await panel.get(".prompt-composer textarea").setValue("local override");
+    await panel.get(".composer-submit").trigger("click");
+    await flushPromises();
+    expect(promptAt).toHaveBeenLastCalledWith("turn:u1", "local override", current.runtime.model, "high", undefined);
+
+    session.focusedNode = "turn:u2";
+    await flushPromises();
+    expect(thinking().text()).toContain("off");
+    panel.unmount();
+  });
+
   it("model-driven clamps show locally without polluting the sticky level", async () => {
     const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
     const { session, panel } = await mountComposer(invoke);

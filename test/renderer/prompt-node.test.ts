@@ -22,27 +22,34 @@ describe("PromptNode branch action", () => {
       } as GraphNode,
       active: true,
       current: true,
-      selected: true,
       runnable: false,
       blockedReason: "等待完成或先停止当前任务",
       content: () => ({ user: "Prompt", assistant: "Response" }),
       onCompose,
     };
     const wrapper = mount(PromptNode, {
-      props: { id: "turn:1", data },
+      props: { id: "turn:1", data, selected: true },
       global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
     });
     const add = wrapper.get(".node-add");
 
+    expect(wrapper.get(".prompt-node").classes()).toContain("selected");
     expect(wrapper.get(".prompt-node").classes()).not.toContain("running");
-    await wrapper.setProps({ data: { ...data, active: false, running: true } });
+    await wrapper.setProps({ data: { ...data, active: false, running: true, node: { ...data.node, preview: "Partial response" } } });
     expect(wrapper.get(".prompt-node").classes()).toContain("running");
     expect(wrapper.get(".prompt-node").classes()).not.toContain("active");
-    await wrapper.setProps({ data: { ...data, active: false, running: true, selected: false } });
+    expect(wrapper.find('.node-run-state').exists()).toBe(true);
+    expect(wrapper.get('.turn-copy p').text()).toBe('Partial response');
+    await wrapper.setProps({ selected: false });
     expect(wrapper.get(".prompt-node").classes()).toContain("running");
     expect(wrapper.get(".prompt-node").classes()).not.toContain("selected");
+    await wrapper.setProps({ data: { ...data, running: true, node: { ...data.node, preview: "" } } });
+    expect(wrapper.find('.node-run-state').exists()).toBe(true);
     await wrapper.setProps({ data });
+    expect(wrapper.find('.node-run-state').exists()).toBe(false);
     expect(wrapper.get(".prompt-node").classes()).not.toContain("running");
+    await wrapper.setProps({ selected: false });
+    expect(wrapper.get(".prompt-node").classes()).not.toContain("selected");
 
     expect(add.attributes("aria-disabled")).toBe("true");
     expect(add.attributes("title")).toBe("等待完成或先停止当前任务");

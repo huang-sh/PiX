@@ -32,6 +32,8 @@ export class GraphRuntime extends PiRuntime {
   private revision = 0;
   private epoch = randomUUID();
   private stopping = false;
+  private deleting = false;
+  private deletionRecovery?: { snapshot: SessionSnapshot; tools: string[] };
   private lastMain?: SessionSnapshot;
   private rootRunId = "";
   private rootBefore = new Set<string>();
@@ -44,7 +46,7 @@ export class GraphRuntime extends PiRuntime {
     return result;
   }
   private notify() {
-    if (!this.runtime && !this.lastMain) return;
+    if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
     try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch {}
   }
   private data(pi: PiRuntime): SessionData {
@@ -55,8 +57,10 @@ export class GraphRuntime extends PiRuntime {
     return this.exclusive(() => this.openInternal(path));
   }
   private async openInternal(path: string) {
-    if (this.graph?.main === path && this.runtime) return this.snapshot();
+    if (this.graph?.main === path && this.runtime && !this.deletionRecovery) return this.snapshot();
+    const recovery = this.deletionRecovery?.snapshot.session.path === path ? this.deletionRecovery : undefined;
     await this.closeInternal();
+    this.deletionRecovery = recovery;
     this.stopping = false;
     const graph = new GraphFiles(path);
     graph.acquire();
@@ -72,6 +76,7 @@ export class GraphRuntime extends PiRuntime {
         ? graph.leafId : data.entries.at(-1)?.id ?? null;
       this.graph = graph;
       await super.openAt(path, leaf);
+      if (recovery) this.runtime.session.setActiveToolsByName(recovery.tools);
       for (const record of graph.records.values()) {
         try {
           const data = graph.readBranch(record);
@@ -81,8 +86,13 @@ export class GraphRuntime extends PiRuntime {
         }
       }
       this.storageError = graph.recoveryMessages.join("; ") || undefined;
+      this.deletionRecovery = undefined;
       return this.snapshot();
-    } catch (error) { graph.release(); this.graph = undefined; throw error; }
+    } catch (error) {
+      await super.close().catch(() => {});
+      graph.release(); this.graph = undefined;
+      throw error;
+    }
   }
   override create(): Promise<SessionSnapshot> {
     return this.exclusive(async () => {
@@ -123,6 +133,10 @@ export class GraphRuntime extends PiRuntime {
       runtime: { ...super.state(), isStreaming: false, isCompacting: false, isRetrying: false } };
   }
   override snapshot(): SessionSnapshot {
+    if (this.deletionRecovery) {
+      const snapshot = this.deletionRecovery.snapshot;
+      return { ...snapshot, graph: { ...snapshot.graph!, revision: ++this.revision } };
+    }
     const main = this.runtime ? super.snapshot() : this.lastMain;
     if (!main || !this.graph) return main ?? super.snapshot();
     this.lastMain = main;
@@ -165,6 +179,10 @@ export class GraphRuntime extends PiRuntime {
         recoveredInputs: this.graph.recoveredInputs } };
   }
   override control(input: AgentControl): Promise<unknown> {
+    if (this.deleting) return Promise.reject(new Error("Node deletion is in progress"));
+    if (this.deletionRecovery && input.action !== "newSession")
+      return Promise.reject(new Error("Reopen this session to recover the failed node deletion"));
+    if (input.action === "deleteNode") return this.exclusive(() => this.deleteNode(input));
     if (input.action === "newSession") return this.create();
     if (this.stopping && this.runtime && !["abort", "branchAbort"].includes(input.action))
       return Promise.reject(new Error("Session is closing"));
@@ -222,6 +240,68 @@ export class GraphRuntime extends PiRuntime {
       void request.finally(() => this.accepted.delete(file)).catch(() => {});
       return request;
     } catch (error) { return Promise.reject(error); }
+  }
+  private async deleteNode(input: Extract<AgentControl, { action: "deleteNode" }>) {
+    const graph = this.graph;
+    if (!graph || !this.runtime || this.stopping || input.graphId !== graph.main)
+      throw new Error("Open the same writable graph before deleting a node");
+    const state = super.state();
+    if (this.mainWork || this.accepted.size || [...this.workers.values()].some(worker => worker.work)
+      || state.isStreaming || state.isCompacting || state.isRetrying || state.pendingMessageCount
+      || this.runtime.session.isBashRunning)
+      throw new Error("Stop running tasks before deleting a node");
+    const before = this.snapshot();
+    const node = before.projection.nodes.find(node => node.id === input.nodeId);
+    if (!node) throw new Error("Node no longer exists");
+    if (graph.recoveryMessages.length) throw new Error("Resolve the session storage errors before deleting a node");
+    this.deleting = true;
+    const manager = this.runtime.session.sessionManager;
+    const activeTools: string[] = this.runtime.session.getActiveToolNames();
+    let failure: unknown;
+    try {
+      // Dispose writers before rewriting their files. Shutdown extensions may append
+      // entries, so GraphFiles reads the final disk state after disposal.
+      await super.close();
+      for (const worker of this.workers.values()) await worker.pi.close();
+      try { graph.deleteNode(node.userEntryId, manager.getLeafId()); }
+      catch (error) {
+        if (existsSync(join(graph.dir, "delete-pending.json"))) graph.finishDeletion();
+        else failure = error;
+      }
+      graph.records.clear();
+      graph.recoveredInputs.length = 0;
+      graph.load();
+      this.workers.clear();
+      this.snapshotCache = new GraphSnapshotCache(); this.lastMain = undefined;
+      this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
+      await super.openAt(graph.main, failure ? manager.getLeafId() : graph.hasSavedLeaf ? graph.leafId : manager.getLeafId());
+      this.runtime.session.setActiveToolsByName(activeTools);
+      for (const record of graph.records.values()) {
+        const data = graph.readBranch(record);
+        this.workers.set(record.id, { pi: this.child(record), snapshot: this.fileSnapshot(record, data) });
+      }
+      if (!this.snapshot().projection.nodes.length && before.runtime.model) {
+        const model = this.runtime.session.modelRuntime.getModel(before.runtime.model.provider, before.runtime.model.id);
+        if (model) {
+          await this.runtime.session.setModel(model);
+          this.runtime.session.setThinkingLevel(before.runtime.thinkingLevel);
+          graph.saveLeaf(this.runtime.session.sessionManager.getLeafId());
+        }
+      }
+      this.notify();
+    } catch (error) {
+      // A partially committed journal must finish before any new session writes.
+      // Publish an explicitly unavailable snapshot instead of advertising a dead runtime.
+      await super.close().catch(() => {});
+      this.deletionRecovery = { tools: activeTools, snapshot: {
+        ...before, runtime: { ...before.runtime, available: false },
+        graph: { ...before.graph!, storageError: `Reopen this session to recover the failed node deletion: ${String(error)}` },
+      } };
+      this.notify();
+      throw error;
+    } finally { this.deleting = false; }
+    if (failure) throw failure;
+    return this.snapshot();
   }
   private async startAt(input: PromptAt) {
     if (!/^[a-zA-Z0-9-]{1,100}$/.test(input.requestId)) throw new Error("Invalid request ID");
@@ -392,6 +472,7 @@ export class GraphRuntime extends PiRuntime {
     this.mainWork = undefined;
     this.graph?.release();
     this.graph = undefined; this.workers.clear(); this.lastMain = undefined; this.snapshotCache = new GraphSnapshotCache();
+    this.deletionRecovery = undefined;
     this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
   }
   override dispose() { void this.close().catch(() => {}); }

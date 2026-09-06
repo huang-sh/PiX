@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import type { RawSessionEntry, PromptImage } from "../shared/types.js";
+import { projectSession } from "../shared/session.js";
 
 export interface SessionData { header: Record<string, unknown>; entries: RawSessionEntry[] }
 export interface BranchRecord {
@@ -123,6 +124,7 @@ export class GraphFiles {
     this.locked = false;
   }
   load() {
+    this.finishDeletion();
     const cursor = join(this.dir, "cursor.json");
     if (existsSync(cursor)) {
       try {
@@ -173,6 +175,150 @@ export class GraphFiles {
     this.saveJson(join(this.dir, "cursor.json"), { leafId });
     this.leafId = leafId;
     this.hasSavedLeaf = true;
+  }
+  /** Finish an interrupted deletion forwards; the journal contains only retained data. */
+  finishDeletion() {
+    const journal = join(this.dir, "delete-pending.json");
+    if (!existsSync(journal)) return;
+    const plan = JSON.parse(readFileSync(journal, "utf8")) as { writes: Record<string, string>; removes: string[] };
+    const allowed = (name: string) => name === "cursor.json" || name === "cursor.json.bak"
+      || /^[a-zA-Z0-9-]+\.jsonl(?:\.[a-zA-Z0-9.-]+)?$/.test(name)
+      || /^(?:request-|main-damaged-|main-legacy-)[a-zA-Z0-9.-]+$/.test(name);
+    // Validate every target before touching any file, including recovery after restart.
+    if (!plan.writes || !Array.isArray(plan.removes)
+      || Object.entries(plan.writes).some(([name, value]) => (name !== "main" && name !== "cursor.json"
+        && !/^[a-zA-Z0-9-]+\.jsonl(?:\.origin\.json|\.checkpoint)?$/.test(name)
+        && !/^request-[a-zA-Z0-9-]+\.json$/.test(name)) || typeof value !== "string")
+      || plan.removes.some(name => typeof name !== "string" || !allowed(name)))
+      throw new Error("Invalid node deletion journal");
+    for (const [name, value] of Object.entries(plan.writes)) {
+      if (plan.removes.includes(name)) throw new Error("Conflicting node deletion journal");
+      if (name === "main" || name.endsWith(".jsonl") || name.endsWith(".checkpoint")) parseStrict(value);
+      else {
+        const data = JSON.parse(value);
+        if (name === "cursor.json") {
+          if (data.leafId !== null && typeof data.leafId !== "string") throw new Error("Invalid deletion cursor");
+        } else if (/^request-[a-zA-Z0-9-]+\.json$/.test(name)) {
+          if (`request-${data.requestId}.json` !== name || !["settled", "cancelled"].includes(data.state))
+            throw new Error("Invalid deletion request receipt");
+        } else {
+          if (`${data.id}.jsonl.origin.json` !== name || !data.inherited || typeof data.request?.text !== "string")
+            throw new Error("Invalid deletion branch metadata");
+          parseStrict(encodeSession({ header: data.header, entries: data.baseline }));
+        }
+      }
+    }
+    for (const [name, value] of Object.entries(plan.writes))
+      durableWrite(name === "main" ? this.main : join(this.dir, name), value);
+    for (const name of plan.removes) rmSync(join(this.dir, name), { force: true });
+    rmSync(journal);
+  }
+  /** Permanently prune a user entry and descendants from every source and saved copy. */
+  deleteNode(userEntryId: string, leafId: string | null) {
+    const main = readStrict(this.main);
+    const sources = [...this.records.values()].map(record => ({ record, data: readStrict(this.path(record.id)) }));
+    const entries = new Map(main.entries.map(entry => [entry.id, entry]));
+    for (const { record, data } of sources)
+      for (const entry of this.delta(record, data)) entries.set(entry.id, entry);
+    const root = entries.get(userEntryId);
+    if (root?.type !== "message" || (root.message as { role?: string })?.role !== "user")
+      throw new Error("Node no longer exists");
+    const children = new Map<string, string[]>();
+    for (const entry of entries.values()) {
+      if (!entry.parentId) continue;
+      const siblings = children.get(entry.parentId) ?? [];
+      siblings.push(entry.id); children.set(entry.parentId, siblings);
+    }
+    const removed = new Set<string>();
+    const pending = [userEntryId];
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (removed.has(id)) continue;
+      removed.add(id);
+      for (const child of children.get(id) ?? []) pending.push(child);
+    }
+    // Metadata elsewhere can refer to an abandoned branch. Remove that metadata,
+    // retaining its children and their original message ancestry.
+    for (const entry of entries.values()) {
+      const ref = entry.type === "label" ? entry.targetId
+        : entry.type === "branch_summary" ? entry.fromId : undefined;
+      if (typeof ref === "string" && removed.has(ref)) removed.add(entry.id);
+      if (entry.type === "compaction" && !removed.has(entry.id) && removed.has(String(entry.firstKeptEntryId)))
+        throw new Error("A retained compaction depends on this node");
+    }
+    const ancestor = (id: string | null) => {
+      while (id && removed.has(id)) id = entries.get(id)?.parentId ?? null;
+      return id;
+    };
+    const prune = (list: RawSessionEntry[], canonical = (id: string) => id) => {
+      const local = new Map(list.map(entry => [entry.id, entry]));
+      return list.filter(entry => !removed.has(canonical(entry.id))).map(entry => {
+        let parentId = entry.parentId;
+        while (parentId && removed.has(canonical(parentId))) parentId = local.get(parentId)?.parentId ?? null;
+        return parentId === entry.parentId ? entry : { ...entry, parentId };
+      });
+    };
+    const writes: Record<string, string> = {};
+    const removes = new Set<string>();
+    const names = readdirSync(this.dir);
+    const mainChanged = main.entries.some(entry => removed.has(entry.id));
+    if (mainChanged) {
+      const next = encodeSession({ ...main, entries: prune(main.entries) });
+      parseStrict(next); writes.main = next;
+      for (const name of names)
+        if (/^main-(?:damaged|legacy)-/.test(name)) removes.add(name);
+    }
+    const affected = new Set<string>();
+    for (const { record, data } of sources) {
+      const canonical = (id: string) => this.canonical(record, id);
+      if (!removed.has(record.forkEntryId) && !data.entries.some(entry => removed.has(canonical(entry.id)))) continue;
+      affected.add(record.id);
+      const retained = prune(data.entries, canonical);
+      const hasTurns = retained.some(entry => !Object.hasOwn(record.inherited, entry.id)
+        && entry.type === "message" && (entry.message as { role?: string })?.role === "user");
+      for (const name of names) if (name.startsWith(`${record.id}.jsonl`)) removes.add(name);
+      if (!hasTurns) continue;
+      const next = encodeSession({ ...data, entries: retained });
+      parseStrict(next);
+      const keptIds = new Set(retained.map(entry => entry.id));
+      const updated: BranchRecord = { ...record, baseline: prune(record.baseline, canonical),
+        inherited: Object.fromEntries(Object.entries(record.inherited).filter(([id]) => keptIds.has(id))),
+        forkEntryId: ancestor(record.forkEntryId) ?? "", request: { text: "" }, requestId: "",
+        runId: randomUUID(), status: "idle", error: undefined };
+      for (const [name, value] of [
+        [basename(this.path(record.id)), next], [basename(this.checkpointPath(record.id)), next],
+        [basename(this.origin(record.id)), JSON.stringify(updated) + "\n"],
+      ]) { writes[name!] = value!; removes.delete(name!); }
+    }
+    const deletedInputs = new Set<string>();
+    for (const id of removed) {
+      const entry = entries.get(id)!;
+      if (entry.type !== "message" || (entry.message as { role?: string })?.role !== "user") continue;
+      const message = projectSession([entry], entry.id).messages[0]!;
+      let parent = entry.parentId ? entries.get(entry.parentId) : undefined;
+      while (parent && !(parent.type === "message" && (parent.message as { role?: string })?.role === "user"))
+        parent = parent.parentId ? entries.get(parent.parentId) : undefined;
+      deletedInputs.add(JSON.stringify([parent ? `turn:${parent.id}` : null, message.text, message.images ?? []]));
+    }
+    for (const name of names.filter(name => /^request-[a-zA-Z0-9-]+\.json$/.test(name))) {
+      const request = JSON.parse(readFileSync(join(this.dir, name), "utf8"));
+      const targetRemoved = removed.has(String(request.nodeId ?? "").replace(/^turn:/, ""));
+      const unfinished = request.state === "queued" || request.state === "prepared";
+      const deletedInput = request.state === "prepared"
+        && deletedInputs.has(JSON.stringify([request.nodeId ?? null, request.text, request.images ?? []]));
+      // Keep independent unfinished inputs, even when their source file was pruned.
+      if (targetRemoved || ((request.branchId ? affected.has(request.branchId) : mainChanged) && (!unfinished || deletedInput))) {
+        // Retain only the deduplication receipt, never deleted prompt text or images.
+        // Otherwise retrying an acknowledged request can execute its tools again.
+        writes[name] = JSON.stringify({ requestId: name.slice(8, -5), state: unfinished ? "cancelled" : "settled" }) + "\n";
+        for (const copy of names) if (copy.startsWith(`${name}.`)) removes.add(copy);
+      }
+    }
+    writes["cursor.json"] = JSON.stringify({ leafId: ancestor(leafId) }) + "\n";
+    removes.add("cursor.json.bak");
+    durableWrite(join(this.dir, "delete-pending.json"), JSON.stringify({ writes, removes: [...removes] }) + "\n");
+    this.finishDeletion();
+    return ancestor(leafId);
   }
   readMain(migrate: (entries: unknown[]) => SessionData) {
     const original = readFileSync(this.main, "utf8");

@@ -5,14 +5,14 @@ import {
   type Edge,
   type Dimensions,
   type GraphNode as FlowNode,
-  type NodeChange,
   type Node,
+  type NodeChange,
   type NodeMouseEvent,
   type VueFlowStore,
 } from "@vue-flow/core";
 import { MiniMap } from "@vue-flow/minimap";
 import GraphOverview from "./GraphOverview.vue";
-import { computed, markRaw, nextTick, ref, shallowRef, watch } from "vue";
+import { computed, markRaw, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
@@ -47,19 +47,21 @@ const emptyDraft = (): ComposerDraft => ({ text: "", images: [], busy: false, re
 // Survives viewport unmounts, including attachment reads and failed submissions.
 const draftState = ref(emptyDraft());
 const draftModel = ref<RuntimeModel | null>();
-// Draft-local thinking override for model-driven clamps only; explicit picks go
-// to session.userThinking so they outlive this draft.
+// Local picks and model-driven clamps override the inherited level for this draft.
 const draftThinking = ref<string>();
 let activeSession: string | undefined;
 const readableZoom = 0.9;
 const booted = ref(false);
-const promptCache = new Map<string, { key: string; data: PromptNodeData }>();
+const deleteError = ref("");
+const recoveringDeletion = ref(false);
+const deletionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
+const promptCache = new Map<string, PromptNodeData>();
 function stablePrompt(data: PromptNodeData) {
-  const key = JSON.stringify(data);
   const previous = promptCache.get(data.node.id);
-  if (previous?.key === key) return previous.data;
+  if (previous && (Object.keys(data) as Array<keyof PromptNodeData>).every(key =>
+    typeof data[key] === "function" || data[key] === previous[key])) return previous;
   const raw = markRaw(data);
-  promptCache.set(data.node.id, { key, data: raw });
+  promptCache.set(data.node.id, raw);
   return raw;
 }
 let layoutCache: { key: string; positions: Map<string, { x: number; y: number; width: number; height: number }> } | undefined;
@@ -91,12 +93,11 @@ const renderGraph = computed(() => {
   return { nodes: nodes.value.filter(node => included.has(node.id)), edges: visibleEdges };
 });
 
-// Default thinking for a draft: the user's last explicit pick wins over the
-// parent node's footer, which in turn wins over the live runtime level.
+// Continue with the parent's level; saved preferences only fill missing settings.
 function inheritThinking(parentId: string | null | undefined): string {
   const parent = parentId ? projection.value?.nodes.find((item) => item.id === parentId) : undefined;
-  return session.userThinking
-    ?? parent?.footer?.thinkingLevel
+  return parent?.footer?.thinkingLevel
+    ?? session.userThinking
     ?? session.current?.runtime.thinkingLevel
     ?? "off";
 }
@@ -136,13 +137,16 @@ function rebuild() {
       }
     }
     draftOrder = 0;
+    promptCache.clear();
     activeSession = sessionKey.value;
     draftState.value = emptyDraft();
     draftParent.value = undefined;
     draftModel.value = undefined;
     draftThinking.value = undefined;
     clearSubmittedDraft();
+    deleteError.value = "";
   }
+  if (draftParent.value && !value.nodes.some(node => node.id === draftParent.value)) resetDraft();
   for (const run of session.current?.graph?.runs ?? []) {
     const pendingId = `pending:${run.runId}`;
     const order = branchOrder.get(pendingId);
@@ -179,15 +183,14 @@ function rebuild() {
   // While a submitted prompt is being processed the runtime is busy even though
   // the streaming flag only lands with the next snapshot, so both gate composing.
   const busy = !session.current?.graph && Boolean(session.current?.runtime.isStreaming || session.pendingPrompt);
-  const turns: Node<PromptNodeData>[] = placed.nodes.map((node) => ({
+  const turns: Node<PromptNodeData>[] = placed.nodes.map((node, index) => ({
     id: node.id,
     type: "prompt",
     position: { x: node.x, y: node.y },
     data: stablePrompt({
-      node,
+      node: value.nodes[index]!,
       active: active.has(node.id),
       current: value.activeNodeId === node.id,
-      selected: session.focusedNode === node.id,
       runnable: Boolean(session.current?.runtime.available && !busy && node.forkable !== false),
       running: node.running,
       blockedReason: busy
@@ -195,6 +198,8 @@ function rebuild() {
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
       onCompose: direction => compose(node.id, direction),
+      onDelete: () => { void deleteNode(node.id); },
+      deleteBlockedReason: session.deleteBlockedReason,
     }),
   }));
   const rootDraft = !placed.nodes.length;
@@ -233,7 +238,6 @@ function rebuild() {
       } satisfies GraphNode,
       active: true,
       current: false,
-      selected: false,
       running: true,
       runnable: false,
       blockedReason: "graph.blockedStreaming",
@@ -269,12 +273,8 @@ function rebuild() {
         rebuild();
       },
       onThinking: (level: string, explicit: boolean) => {
-        if (explicit) {
-          session.setUserThinking(level);
-          draftThinking.value = undefined;
-        } else {
-          draftThinking.value = level;
-        }
+        if (explicit) session.setUserThinking(level);
+        draftThinking.value = level;
         rebuild();
       },
       onCancel: parent ? cancelDraft : undefined,
@@ -302,7 +302,7 @@ function rebuild() {
       timestamp: "", rawEntryIds: [], leafEntryId: id, toolCallCount: 0, hasError: false, depth: (anchor?.depth ?? -1) + 1 };
     nextNodes.push({ id, type: "prompt", position: { x: anchor ? anchor.x + anchor.width + 92 : 48,
       y: (siblings.length ? Math.max(...siblings.map(n => n.y)) + 178 : anchor?.y ?? 48) + offset * 178 },
-      data: { node, active: true, current: false, selected: session.focusedNode === id, running: true, runnable: false,
+      data: { node, active: true, current: false, running: true, runnable: false,
         blockedReason: "graph.blockedStreaming", content: () => ({ user: run.pending!.text, assistant: t("graph.agentRunning"), images: run.pending!.images }), onCompose: () => {} } });
     if (parentId) nextEdges.push({ id: `edge:${id}`, source: parentId, target: id, animated: true });
   }
@@ -338,8 +338,16 @@ function rebuild() {
   }
   transientNodeIds = new Set(nextNodes.slice(turns.length).map(node => node.id));
   layoutBranches(nextNodes);
-  nodes.value = nextNodes;
-  edges.value = nextEdges;
+  const stableNodes = nextNodes.map(node => {
+    const previous = previousNodes.get(node.id);
+    return previous && previous.type === node.type && previous.data === node.data
+      && previous.position.x === node.position.x && previous.position.y === node.position.y ? previous : node;
+  });
+  if (stableNodes.length !== nodes.value.length || stableNodes.some((node, i) => node !== nodes.value[i])) nodes.value = stableNodes;
+  if (nextEdges.length !== edges.value.length || nextEdges.some((edge, i) => {
+    const old = edges.value[i];
+    return !old || edge.id !== old.id || edge.source !== old.source || edge.target !== old.target || edge.class !== old.class || edge.animated !== old.animated;
+  })) edges.value = nextEdges;
   const ids = new Set(nodes.value.map(node => node.id));
   for (const id of promptCache.keys()) if (!ids.has(id)) promptCache.delete(id);
 }
@@ -368,8 +376,15 @@ function layoutBranches(items: RenderNode[]) {
   return moved;
 }
 
+let selectionRequest = 0;
+let centerRequest = 0;
+onBeforeUnmount(() => { selectionRequest++; centerRequest++; flow.value = undefined; });
+
 async function select(id: string, openChat = false) {
   if (id.startsWith("draft:") || (id.startsWith("pending:") && !session.current?.graph)) return;
+  const request = ++selectionRequest;
+  centerRequest++;
+  const current = session.current?.session.path;
   await session.selectNode(id);
   const openingChat = openChat && layout.layout.collapsed.chat;
   if (openingChat) {
@@ -377,7 +392,27 @@ async function select(id: string, openChat = false) {
     await nextTick();
     await whenTransitionsSettle(isPanelElement);
   }
-  await center(id);
+  if (request !== selectionRequest || current !== session.current?.session.path || session.focusedNode !== id) return;
+  if (!focusNodeVisible()) await center(id, false, false);
+}
+
+async function deleteNode(id: string) {
+  deleteError.value = "";
+  try {
+    await session.deleteNode(id);
+    rebuild();
+    await center(defaultFocusId());
+  } catch (error) { deleteError.value = String(error); }
+}
+
+async function recoverDeletion() {
+  const path = session.current?.session.path;
+  if (!path || recoveringDeletion.value) return;
+  recoveringDeletion.value = true;
+  deleteError.value = "";
+  try { await session.open(path); }
+  catch (error) { deleteError.value = String(error); }
+  finally { recoveringDeletion.value = false; }
 }
 
 async function compose(id: string, direction?: BranchDirection) {
@@ -447,12 +482,18 @@ function defaultFocusId() {
 const isPanelElement = (target: Element) => target.matches(".workbench-splitter > [data-panel]");
 
 async function center(id = defaultFocusId(), ensureReadable = false, animate = true) {
+  const request = ++centerRequest;
   if (!flow.value || !id) return;
   await nextTick();
   await nextFrame();
   if (ensureReadable) await whenTransitionsSettle(isPanelElement);
+  if (request !== centerRequest || !flow.value) return;
   const node = flow.value.findNode(id);
-  const position = node?.computedPosition ?? nodes.value.find(node => node.id === id)?.position;
+  const cached = nodes.value.find(node => node.id === id);
+  const position = node?.computedPosition ?? cached?.position;
+  // Large graphs remove offscreen nodes from Vue Flow. Retain their measured
+  // size when centering, rather than falling back to an inaccurate card estimate.
+  const size = node?.dimensions ?? cached?.dimensions;
   if (!position) return;
   const zoom = flow.value.getViewport().zoom;
   const viewport = flow.value.getViewport();
@@ -460,27 +501,39 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   const distant = Math.hypot(position.x * zoom + viewport.x - pane.width / 2,
     position.y * zoom + viewport.y - pane.height / 2) > Math.hypot(pane.width, pane.height) * 2;
   await flow.value.setCenter(
-    position.x + (node?.dimensions.width || (id.startsWith("draft:") ? 360 : 280)) / 2,
-    position.y + (node?.dimensions.height || (id.startsWith("draft:") ? 280 : 146)) / 2,
+    position.x + (size?.width || (id.startsWith("draft:") ? 360 : 280)) / 2,
+    position.y + (size?.height || (id.startsWith("draft:") ? 280 : 146)) / 2,
     // D3's zoom interpolation zooms far out between distant nodes, transiently
     // mounting thousands of cards. Jump directly across large branches.
     { zoom: ensureReadable ? Math.max(zoom, readableZoom) : zoom, duration: animate && !distant ? 280 : 0 },
   );
+  if (request !== centerRequest) return;
   if (id.startsWith("draft:"))
     document.querySelector<HTMLTextAreaElement>(".draft-node textarea")?.focus({ preventScroll: true });
+}
+
+function navigateMinimap({ position }: { position: { x: number; y: number } }) {
+  centerRequest++;
+  if (!flow.value) return;
+  // MiniMap emits graph coordinates, but pannable only wires dragging, not
+  // click-to-navigate. Jump without a zoom animation, as GraphOverview does.
+  void flow.value.setCenter(position.x, position.y, { zoom: flow.value.getViewport().zoom });
 }
 
 function focusNodeVisible() {
   const id = defaultFocusId();
   if (!id || !flow.value) return true;
   const node = flow.value.findNode(id);
-  if (!node || !node.dimensions.width || !node.dimensions.height) return true;
+  const cached = nodes.value.find(node => node.id === id);
+  const position = node?.computedPosition ?? cached?.position;
+  const size = node?.dimensions ?? cached?.dimensions;
+  if (!position || !size?.width || !size.height) return false;
   const viewport = flow.value.getViewport();
   const pane = flow.value.dimensions.value;
-  const left = node.computedPosition.x * viewport.zoom + viewport.x;
-  const top = node.computedPosition.y * viewport.zoom + viewport.y;
-  const right = left + node.dimensions.width * viewport.zoom;
-  const bottom = top + node.dimensions.height * viewport.zoom;
+  const left = position.x * viewport.zoom + viewport.x;
+  const top = position.y * viewport.zoom + viewport.y;
+  const right = left + size.width * viewport.zoom;
+  const bottom = top + size.height * viewport.zoom;
   const tolerance = 8;
   return left >= -tolerance && top >= -tolerance && right <= pane.width + tolerance && bottom <= pane.height + tolerance;
 }
@@ -557,7 +610,10 @@ function syncNodeDimensions(changes: NodeChange[]) {
 
 const pendingRuns = computed(() => JSON.stringify(session.current?.graph?.runs.filter(run => run.pending && run.status === "running") ?? []));
 watch(
-  () => [sessionKey.value, session.current?.projection, session.focusedNode, session.models, draftParent.value, session.pendingPrompt, pendingRuns.value],
+  [() => sessionKey.value, () => projection.value?.nodes, () => projection.value?.edges,
+    () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
+    () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
+    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns],
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
@@ -568,10 +624,17 @@ watch(
   },
   { immediate: true },
 );
+
 </script>
 
 <template>
   <main class="panel graph-panel">
+    <div v-if="deleteError || deletionNeedsRecovery" class="graph-delete-error" role="alert">
+      {{ t('graph.deleteFailed', { error: deleteError || session.current?.graph?.storageError }) }}
+      <Button v-if="deletionNeedsRecovery" data-action="node-delete-recover" variant="outline" :disabled="recoveringDeletion" @click="recoverDeletion">
+        {{ t('graph.reopenSession') }}
+      </Button>
+    </div>
     <div v-if="!session.current" class="graph-empty">
       <div aria-hidden="true"><Network :size="64" :stroke-width="1.6" /></div>
       <span>
@@ -592,6 +655,7 @@ watch(
       :pan-on-drag="true"
       :zoom-on-scroll="true"
       :only-render-visible-elements="true"
+      :delete-key-code="null"
       @pane-ready="ready"
       @node-click="({ node }: NodeMouseEvent) => select(node.id)"
       @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
@@ -599,7 +663,8 @@ watch(
       @nodes-change="syncNodeDimensions"
     >
       <template #node-prompt="props">
-        <PromptNode v-bind="props" />
+        <!-- Selection is presentation state; changing it must not call Vue Flow's setNodes. -->
+        <PromptNode v-bind="props" :selected="session.focusedNode === props.id" />
       </template>
       <template #node-draft="props">
         <DraftNode v-bind="props" />
@@ -611,6 +676,7 @@ watch(
         node-color="var(--accent)"
         mask-color="color-mix(in srgb, var(--surface) 72%, transparent)"
         :aria-label="t('graph.minimapLabel')"
+        @click="navigateMinimap"
       />
       <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" />
     </VueFlow>

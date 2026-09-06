@@ -64,6 +64,14 @@ export function reduceAgentActivity(
   const event = record(raw);
   if (!event) return activity;
   const type = event?.type;
+  const assistantEvent = ["message_start", "message_update", "message_end"].includes(String(type))
+    && record(event.message)?.role === "assistant";
+  const toolEvent = ["tool_execution_start", "tool_execution_update", "tool_execution_end"].includes(String(type));
+  // A view may miss the start while a reused branch's new run is being
+  // admitted. Cumulative progress must recover instead of being lost forever.
+  if (!activity && (assistantEvent || toolEvent)) {
+    activity = { startedAt: new Date().toISOString(), pass: 1, active: true, items: [], partial: true };
+  }
   if (type === "agent_start") {
     if (!activity || !activity.active) {
       return {
@@ -99,8 +107,10 @@ export function reduceAgentActivity(
     };
   }
   if ((type === "message_update" || type === "message_end") && role === "assistant") {
-    const id = activity.currentAssistantId;
-    if (!id) return activity;
+    if (!activity.currentAssistantId) {
+      activity = reduceAgentActivity(activity, { ...event, type: "message_start" })!;
+    }
+    const id = activity.currentAssistantId!;
     const failure = failureText(message);
     return {
       ...updateItem(activity, id, {
@@ -116,6 +126,9 @@ export function reduceAgentActivity(
   const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
   if (!toolCallId) return activity;
   const id = `tool:${toolCallId}`;
+  if (type !== "tool_execution_start" && toolEvent && !activity.items.some(item => item.id === id)) {
+    activity = reduceAgentActivity(activity, { ...event, type: "tool_execution_start" })!;
+  }
   if (type === "tool_execution_start") {
     return {
       ...activity,

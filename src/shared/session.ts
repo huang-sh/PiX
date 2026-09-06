@@ -20,18 +20,6 @@ export function sessionEntryIndex(entries: RawSessionEntry[]) {
   return index;
 }
 
-/** Project only the selected ancestry, rather than every sibling in the graph. */
-export function projectSessionBranch(entries: RawSessionEntry[], leafId: string | null) {
-  const index = sessionEntryIndex(entries);
-  const path: RawSessionEntry[] = [];
-  const seen = new Set<string>();
-  let entry = leafId ? index.get(leafId) : undefined;
-  while (entry && !seen.has(entry.id)) {
-    path.push(entry); seen.add(entry.id);
-    entry = entry.parentId ? index.get(entry.parentId) : undefined;
-  }
-  return projectSession(path.reverse(), leafId);
-}
 const rec = (v: unknown): Record<string, unknown> | null =>
   v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)

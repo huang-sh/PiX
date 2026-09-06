@@ -42,6 +42,28 @@ async function click(selector) {
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
 }
+async function checkEdgeAlignment() {
+  const errors = await evaluate(`(() => {
+    const edges = new Map(__pixTest.state().current.projection.edges.map(e => [e.id, e]));
+    const errors = [];
+    for (const element of document.querySelectorAll('.vue-flow__edge')) {
+      const edge = edges.get(element.dataset.id), path = element.querySelector('.vue-flow__edge-path');
+      if (!edge || !path) continue;
+      for (const [id, type, length] of [[edge.source, 'source', 0], [edge.target, 'target', path.getTotalLength()]]) {
+        const handle = document.querySelector('[data-id="' + CSS.escape(id) + '"] .vue-flow__handle.' + type);
+        if (!handle) continue;
+        const rect = handle.getBoundingClientRect();
+        const point = path.getPointAtLength(length).matrixTransform(path.getScreenCTM());
+        errors.push(Math.hypot(point.x - (type === 'source' ? rect.right : rect.left), point.y - rect.top - rect.height / 2));
+      }
+    }
+    return errors;
+  })()`);
+  assert.ok(errors.length, 'At least one mounted connection was measured');
+  const maxError = Math.max(...errors);
+  assert.ok(maxError < 1, `Edges must meet their handles after viewport updates (error: ${maxError}px)`);
+  return { endpoints: errors.length, maxError };
+}
 try {
   await send('Runtime.enable'); await send('Runtime.discardConsoleEntries'); errors.length = 0;
   const start = Date.now(); await send('Page.reload', { ignoreCache: true });
@@ -53,6 +75,7 @@ try {
   assert.ok(state.nodes >= 5001); assert.equal(state.sessions, 1);
   const initial = await evaluate(`({nodes:document.querySelectorAll('.vue-flow__node').length,edges:document.querySelectorAll('.vue-flow__edge').length})`);
   assert.ok(initial.nodes < 100 && initial.edges < 100);
+  const initialAlignment = await checkEdgeAlignment();
   await evaluate(`window.__treePerf={long:[],phases:[],peakNodes:0,frames:[],last:0};window.__treeObserver=new PerformanceObserver(l=>{__treePerf.long.push(...l.getEntries().map(e=>e.duration));__treePerf.phases.push(...l.getEntries().map(e=>({duration:e.duration,phase:window.__treePhase})));});__treeObserver.observe({type:'longtask'});window.__treeTick=()=>{__treePerf.peakNodes=Math.max(__treePerf.peakNodes,document.querySelectorAll('.vue-flow__node').length);let now=performance.now();if(__treePerf.last)__treePerf.frames.push(now-__treePerf.last);__treePerf.last=now;window.__treeRaf=requestAnimationFrame(__treeTick)};__treeTick();true`);
   await click('[data-id="turn:root"] .node-add');
   await until(`!!document.querySelector('.draft-node textarea')`);
@@ -71,10 +94,25 @@ try {
   await click('.graph-controls button:last-child');
   await until(`!!document.querySelector('[data-id="turn:root"] .node-add')`);
   await new Promise(resolve => setTimeout(resolve, 400));
+  const dragStart = await evaluate(`(()=>{const r=document.querySelector('[data-id="turn:root"] .turn-copy').getBoundingClientRect();return{x:r.x+20,y:r.y+12}})()`);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...dragStart });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  await checkEdgeAlignment();
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, ...dragStart });
+  const dragEnd = { x: dragStart.x - 60, y: dragStart.y + 30 };
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: dragStart.x - 10, y: dragStart.y + 5 });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, ...dragEnd });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...dragEnd });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const draggedPoint = await evaluate(`(()=>{const r=document.querySelector('[data-id="turn:root"] .turn-copy').getBoundingClientRect();return{x:r.x+20,y:r.y+12}})()`);
+  assert.ok(draggedPoint.x < dragStart.x - 30 && draggedPoint.y > dragStart.y + 10, 'The node actually moved with the drag');
+  const finalAlignment = await checkEdgeAlignment();
   const performance = await evaluate(`(()=>{cancelAnimationFrame(__treeRaf);__treeObserver.disconnect();let a=__treePerf.frames.sort((a,b)=>a-b);return{phases:__treePerf.phases,peakNodes:__treePerf.peakNodes,samples:a.length,frameP50:a[Math.floor(a.length*.5)],frameP95:a[Math.floor(a.length*.95)],frameMax:a.at(-1),longTasks:__treePerf.long,heapBytes:performance.memory?.usedJSHeapSize}})()`);
   const screenshot = await send('Page.captureScreenshot');
   writeFileSync(join(home, 'large-tree.png'), Buffer.from(screenshot.data, 'base64'));
-  const report = { ...state, reloadMs, initial, performance, errors, draftRetained: true };
+  const report = { ...state, reloadMs, initial, initialAlignment, finalAlignment, performance, errors, draftRetained: true };
   writeFileSync(join(home, 'large-tree-report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   assert.equal(errors.length, 0);

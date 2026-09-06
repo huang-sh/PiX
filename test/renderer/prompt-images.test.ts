@@ -77,11 +77,12 @@ describe("image prompts", () => {
     wrapper.unmount();
   });
 
-  it("rejects unsupported files and handles dropped images", async () => {
+  it("reports unresolvable documents and handles dropped images", async () => {
     const { wrapper } = setup();
-    await wrapper.trigger("drop", { dataTransfer: { files: [new File(["x"], "x.svg", { type: "image/svg+xml" })] } });
-    expect(wrapper.get("[role=alert]").text()).toContain("PNG");
+    await wrapper.trigger("drop", { dataTransfer: { files: [new File([new Uint8Array([0, 255])], "x.bin")] } });
+    await vi.waitFor(() => expect(wrapper.get("[role=alert]").text()).toContain(i18n.global.t("draft.filesPath")));
     expect(wrapper.find(".composer-images").exists()).toBe(false);
+    expect(wrapper.find(".composer-files").exists()).toBe(false);
     await wrapper.trigger("drop", { dataTransfer: { files: [png()] } });
     await vi.waitFor(() => expect(wrapper.findAll(".composer-images img")).toHaveLength(1));
     wrapper.unmount();

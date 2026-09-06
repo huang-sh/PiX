@@ -1,7 +1,8 @@
 // Run after: npx tsc -p tsconfig.test.json
 import { performance } from "node:perf_hooks";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { projectSession, projectSessionBranch } from "../out-test/src/shared/session.js";
+import { projectSession } from "../out-test/src/shared/session.js";
+import { createBranchMessageCache } from "../out-test/src/renderer/lib/session-view.js";
 import { layoutGraph } from "../out-test/src/renderer/graph-layout.js";
 
 function entries(turns) {
@@ -24,7 +25,9 @@ const wide = Array.from({ length: 10000 }, (_, i) => [
   { type: "message", id: `u${i}`, parentId: null, timestamp: "2026-01-01", message: { role: "user", content: "prompt" } },
   { type: "message", id: `a${i}`, parentId: `u${i}`, timestamp: "2026-01-01", message: { role: "assistant", content: [{ type: "text", text: "answer" }] } },
 ]).flat();
-const report = { selectedBranchIn10000Ms: median(() => projectSessionBranch(wide, "a9999")), node: process.version, results,
+const messageWindow = createBranchMessageCache();
+const report = { selectedWindowIn10000Ms: median(() => createBranchMessageCache()(wide, "a9999", 40)),
+  cachedWindowIn10000Ms: median(() => messageWindow(wide, "a9999", 40)), node: process.version, results,
   eightSessionsMs: median(() => sessions.forEach(data => projectSession(data, "a499"))),
   note: "Synthetic chain; five-sample medians after warmup. Excludes IPC, Vue/DOM, SDK startup and export IO." };
 mkdirSync(new URL("../artifacts/", import.meta.url), { recursive: true });

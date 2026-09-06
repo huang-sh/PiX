@@ -130,6 +130,8 @@ export function validateRouteInput(
       return { layout: obj(v.layout) };
     case "agent.control": {
       const action = str(v.action, "action")!;
+      if (action === "deleteNode")
+        return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId") };
       if (action === "promptAt") {
         const requestId = str(v.requestId, "requestId")!;
         if (!/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new Error("Invalid request ID");

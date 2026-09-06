@@ -13,6 +13,84 @@ function record(id: string, parent = "main", fork = "root"): BranchRecord {
   return { id, parentId: parent, forkEntryId: fork, requestId: id, request: { text: id }, inherited: { root: "root" },
     header: { ...header, id }, baseline: initial.entries, runId: id, status: "idle" };
 }
+
+test("permanent deletion prunes branch sources, checkpoints, requests and backups without changing siblings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-delete-files-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const aData = { header: a.header, entries: [...initial.entries, user("keep", "root"), user("DELETE_SECRET", "keep")] };
+    graph.create(a, aData); graph.save(a);
+    const b = record("B", "A", "A:DELETE_SECRET");
+    b.baseline = aData.entries; b.inherited = { root: "root", keep: "A:keep", DELETE_SECRET: "A:DELETE_SECRET" };
+    graph.create(b, { header: b.header, entries: [...aData.entries, user("child", "DELETE_SECRET")] });
+    const sibling = record("sibling");
+    graph.create(sibling, { header: sibling.header, entries: [...initial.entries, user("other", "root")] });
+    const siblingBefore = readFileSync(graph.path("sibling"), "utf8");
+    durableWrite(join(graph.dir, "request-removed.json"), JSON.stringify({ branchId: "A", text: "DELETE_SECRET", state: "settled" }));
+    durableWrite(join(graph.dir, "request-queued.json"), JSON.stringify({ requestId: "queued", branchId: "A", nodeId: "turn:A:keep", text: "still wanted", state: "queued" }));
+    durableWrite(join(graph.dir, "request-prepared.json"), JSON.stringify({ requestId: "prepared", branchId: "A", nodeId: "turn:A:keep", text: "unfinished", state: "prepared" }));
+    durableWrite(join(graph.dir, "request-deleted-input.json"), JSON.stringify({ requestId: "deleted-input", branchId: "A", nodeId: "turn:A:keep", text: "DELETE_SECRET", state: "prepared" }));
+    durableWrite(`${graph.path("A")}.recovered`, encodeSession(aData));
+    graph.deleteNode("A:DELETE_SECRET", "root");
+    graph.records.clear(); graph.load();
+    assert.equal(graph.records.has("B"), false);
+    assert.deepEqual(graph.candidate(initial).entries.map(e => e.id), ["root", "A:keep", "sibling:other"]);
+    assert.equal(readFileSync(graph.path("sibling"), "utf8"), siblingBefore);
+    for (const name of readdirSync(graph.dir)) assert.ok(!readFileSync(join(graph.dir, name), "utf8").includes("DELETE_SECRET"), name);
+    assert.equal(existsSync(join(graph.dir, "delete-pending.json")), false);
+    assert.deepEqual(JSON.parse(readFileSync(join(graph.dir, "request-removed.json"), "utf8")), { requestId: "removed", state: "settled" });
+    assert.deepEqual(JSON.parse(readFileSync(join(graph.dir, "request-deleted-input.json"), "utf8")), { requestId: "deleted-input", state: "cancelled" });
+    assert.deepEqual(graph.recoveredInputs.map(input => input.text).sort(), ["still wanted", "unfinished"].sort());
+    graph.deleteNode("root", "root");
+    graph.records.clear(); graph.load();
+    assert.equal(graph.records.size, 0);
+    assert.equal(graph.leafId, null);
+    assert.deepEqual(parseStrict(readFileSync(graph.main, "utf8")).entries, []);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an interrupted deletion finishes on load and rejects paths outside its graph", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-delete-recovery-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    graph.create(record("A"), { header, entries: [...initial.entries, user("child", "root")] });
+    const writes = { main: encodeSession({ header, entries: [] }), "cursor.json": '{"leafId":null}\n' };
+    const removes = readdirSync(graph.dir).filter(name => name.startsWith("A.jsonl"));
+    durableWrite(join(graph.dir, "delete-pending.json"), JSON.stringify({ writes, removes }));
+    graph.records.clear(); graph.load();
+    assert.deepEqual(parseStrict(readFileSync(graph.main, "utf8")).entries, []);
+    assert.equal(graph.records.size, 0);
+    assert.equal(graph.leafId, null);
+    durableWrite(join(graph.dir, "delete-pending.json"), JSON.stringify({ writes: { "../outside": "bad" }, removes: [] }));
+    assert.throws(() => graph.finishDeletion(), /Invalid node deletion journal/);
+    assert.equal(existsSync(join(dir, "outside")), false);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("deleting a main-tree fork removes dangling metadata while preserving the sibling conversation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-delete-metadata-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire();
+    const data: SessionData = { header, entries: [...initial.entries, user("remove", "root"),
+      { type: "label", id: "label", parentId: "root", timestamp: "now", targetId: "remove", label: "deleted label" },
+      { type: "branch_summary", id: "summary", parentId: "label", timestamp: "now", fromId: "remove", summary: "deleted summary" },
+      user("keep", "summary")] };
+    durableWrite(graph.main, encodeSession(data));
+    graph.deleteNode("remove", "keep");
+    const kept = parseStrict(readFileSync(graph.main, "utf8"));
+    assert.deepEqual(kept.entries.map(e => [e.id, e.parentId]), [["root", null], ["keep", "root"]]);
+    const brokenReference: SessionData = { header, entries: [...initial.entries, user("remove", "root"),
+      { type: "compaction", id: "compact", parentId: "root", timestamp: "now", firstKeptEntryId: "remove", summary: "context" }] };
+    const original = encodeSession(brokenReference);
+    durableWrite(graph.main, original);
+    assert.throws(() => graph.deleteNode("remove", "compact"), /retained compaction/);
+    assert.equal(readFileSync(graph.main, "utf8"), original);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
 test("strict validation rejects malformed lines, duplicates, orphans and broken compaction refs", () => {
   for (const raw of [encodeSession(initial) + "{broken\n", encodeSession({ header, entries: [user("x", "missing")] }),
     encodeSession({ header, entries: [user("root", null), user("root", null)] }),

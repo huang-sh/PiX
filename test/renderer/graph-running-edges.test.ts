@@ -39,7 +39,7 @@ it("follows all running branches, preserves shared paths, and clears highlightin
   expect(highlighted()).toEqual(["turn:a", "turn:b", "turn:trunk"]);
   const edges = graph.edges;
   session.focusedNode = "turn:old"; await flushPromises();
-  expect(graph.edges).toEqual(edges);
+  expect(graph.edges).toBe(edges);
   session.applySnapshot(snapshot(["turn:b"], 2)); await flushPromises();
   expect(highlighted()).toEqual(["turn:b", "turn:trunk"]);
   session.applySnapshot(snapshot([], 3)); await flushPromises();

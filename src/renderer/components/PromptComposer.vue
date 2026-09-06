@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Brain, Check, ChevronDown, ChevronRight, ImagePlus, Send, X } from "@lucide/vue";
+import { Brain, Check, ChevronDown, ChevronRight, FileText, Paperclip, Send, X } from "@lucide/vue";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -16,6 +16,7 @@ import { useI18n } from "vue-i18n";
 import { THINKING_LEVELS, type PromptImage, type RuntimeModel } from "../../shared/types";
 import { IMAGE_MIME_TYPES, MAX_IMAGE_BYTES, MAX_PROMPT_IMAGES, imageDataUrl, validatePromptImages } from "../../shared/images";
 import { useLayoutStore } from "../stores/layout";
+import { MAX_PROMPT_FILES, promptFilePath, type PromptFile } from "../lib/prompt-files";
 import Button from "./ui/Button.vue";
 
 // Shared prompt editor used by the graph draft node and the chat panel composer,
@@ -23,6 +24,7 @@ import Button from "./ui/Button.vue";
 export interface ComposerDraft {
   text: string;
   images: PromptImage[];
+  files?: PromptFile[];
   busy: boolean;
   readingImages: boolean;
   error: string;
@@ -53,6 +55,7 @@ const busy = computed({ get: () => state.value.busy, set: value => { state.value
 const editor = ref<HTMLTextAreaElement>();
 const imagePicker = ref<HTMLInputElement>();
 const images = computed({ get: () => state.value.images, set: value => { state.value.images = value; } });
+const files = computed({ get: () => state.value.files ?? [], set: value => { state.value.files = value; } });
 const readingImages = computed({ get: () => state.value.readingImages, set: value => { state.value.readingImages = value; } });
 const imageError = computed({ get: () => state.value.error, set: value => { state.value.error = value; } });
 const modelOptions = computed(() => {
@@ -70,9 +73,9 @@ const modelProviders = computed(() =>
 const selectedModel = computed(() => modelOptions.value.find((item) =>
   item.provider === props.model?.provider && item.id === props.model?.id) ?? props.model);
 const supportsImages = computed(() => selectedModel.value?.input?.includes("image") === true);
-const canAttach = computed(() => props.runnable && !busy.value && !readingImages.value && supportsImages.value);
+const canAttach = computed(() => props.runnable && !busy.value && !readingImages.value);
 const canSubmit = computed(() => props.runnable && !busy.value && !readingImages.value
-  && !!(draft.value.trim() || images.value.length) && (!images.value.length || supportsImages.value));
+  && !!(draft.value.trim() || images.value.length || files.value.length) && (!images.value.length || supportsImages.value));
 const thinkingLevels = computed(() => selectedModel.value?.thinkingLevels
   ?? (selectedModel.value?.reasoning === false ? ["off"] : [...THINKING_LEVELS]));
 
@@ -99,52 +102,65 @@ async function submit() {
   const text = draft.value.trim();
   if (!canSubmit.value) return;
   const attachments = images.value.map((image) => ({ ...image }));
+  const documents = files.value;
+  const prompt = [text, ...documents.map(file => `Attached file: ${file.path}`)].filter(Boolean).join("\n\n");
   draft.value = "";
   images.value = [];
+  files.value = [];
   busy.value = true;
   try {
     const delivered = attachments.length
-      ? await props.onSubmit(text, attachments)
-      : await props.onSubmit(text);
+      ? await props.onSubmit(prompt, attachments)
+      : await props.onSubmit(prompt);
     if (delivered) {
       imageError.value = "";
     } else {
       draft.value = text;
       images.value = attachments;
+      files.value = documents;
     }
   } catch (error) {
     draft.value = text;
     images.value = attachments;
+    files.value = documents;
     imageError.value = error instanceof Error ? error.message : String(error);
   } finally {
     busy.value = false;
   }
 }
 
-async function addImages(files: File[]) {
-  if (!files.length || busy.value || readingImages.value || !props.runnable) return;
+async function addFiles(selected: File[]) {
+  if (!selected.length || !canAttach.value) return;
+  // Keep async reads attached to the original draft if its node/session changes.
+  const target = state.value;
   imageError.value = "";
-  if (!supportsImages.value) {
-    imageError.value = t("draft.imagesUnsupported");
-    return;
-  }
-  readingImages.value = true;
+  const imageFiles = selected.filter(file => IMAGE_MIME_TYPES.includes(file.type));
+  const documents = selected.filter(file => !IMAGE_MIME_TYPES.includes(file.type));
   try {
-    if (images.value.length + files.length > MAX_PROMPT_IMAGES) throw new Error(t("draft.imagesLimit"));
-    if (files.some((file) => !IMAGE_MIME_TYPES.includes(file.type))) throw new Error(t("draft.imagesFormat"));
-    if (files.some((file) => file.size > MAX_IMAGE_BYTES)) throw new Error(t("draft.imagesSize"));
-    const added = await Promise.all(files.map((file) => new Promise<PromptImage>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve({ type: "image", mimeType: file.type, data: String(reader.result).split(",")[1] ?? "" });
-      reader.onerror = () => reject(new Error(t("draft.imagesReadError")));
-      reader.onabort = () => reject(new Error(t("draft.imagesReadError")));
-      reader.readAsDataURL(file);
-    })));
-    images.value = validatePromptImages([...images.value, ...added]);
+    if (imageFiles.length && !supportsImages.value) throw new Error(t("draft.imagesUnsupported"));
+    if (target.images.length + imageFiles.length > MAX_PROMPT_IMAGES) throw new Error(t("draft.imagesLimit"));
+    // Documents resolve to local paths synchronously; the agent reads them itself.
+    const added = documents.map(promptFilePath);
+    if ((target.files?.length ?? 0) + added.length > MAX_PROMPT_FILES) throw new Error(t("draft.filesLimit"));
+    if (imageFiles.some(file => file.size > MAX_IMAGE_BYTES)) throw new Error(t("draft.imagesSize"));
+    if (imageFiles.length) {
+      readingImages.value = true;
+      try {
+        const images = await Promise.all(imageFiles.map((file) => new Promise<PromptImage>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve({ type: "image", mimeType: file.type, data: String(reader.result).split(",")[1] ?? "" });
+          reader.onerror = () => reject(new Error(t("draft.imagesReadError")));
+          reader.onabort = () => reject(new Error(t("draft.imagesReadError")));
+          reader.readAsDataURL(file);
+        })));
+        target.images = validatePromptImages([...target.images, ...images]);
+      } finally { target.readingImages = false; }
+    }
+    target.files = [...target.files ?? [], ...added];
   } catch (error) {
-    imageError.value = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    target.error = message.startsWith("draft.") ? t(message) : message;
   } finally {
-    readingImages.value = false;
     if (imagePicker.value) imagePicker.value.value = "";
   }
 }
@@ -153,12 +169,12 @@ function pasteImages(event: ClipboardEvent) {
   const files = Array.from(event.clipboardData?.files ?? []);
   if (!files.length) return;
   event.preventDefault();
-  void addImages(files);
+  void addFiles(files);
 }
 
 function dropImages(event: DragEvent) {
   event.preventDefault();
-  void addImages(Array.from(event.dataTransfer?.files ?? []));
+  void addFiles(Array.from(event.dataTransfer?.files ?? []));
 }
 
 const enterToSend = computed(() => layout?.settings?.app.enterToSend !== false);
@@ -191,7 +207,13 @@ defineExpose({ focus: focusEditor });
 
 <template>
   <div class="prompt-composer" @paste="pasteImages" @dragover.prevent @drop.stop="dropImages">
-    <input ref="imagePicker" class="composer-image-picker" type="file" :accept="IMAGE_MIME_TYPES.join(',')" multiple :disabled="!canAttach" tabindex="-1" aria-hidden="true" @change="addImages(Array.from(($event.target as HTMLInputElement).files ?? []))" />
+    <input ref="imagePicker" class="composer-image-picker" type="file" multiple :disabled="!canAttach" tabindex="-1" aria-hidden="true" @change="addFiles(Array.from(($event.target as HTMLInputElement).files ?? []))" />
+    <div v-if="files.length" class="composer-files">
+      <div v-for="(file, index) in files" :key="index" class="composer-file" :title="file.path">
+        <FileText :size="14" /><span>{{ file.name }}</span>
+        <button type="button" :disabled="busy || readingImages" :aria-label="t('draft.removeFile', { name: file.name })" @click.stop="files = files.filter((_, i) => i !== index); imageError = ''"><X :size="12" /></button>
+      </div>
+    </div>
     <div v-if="images.length" class="composer-images">
       <figure v-for="(image, index) in images" :key="index">
         <button class="composer-image-open" type="button" :title="t('draft.previewImage', { n: index + 1 })" :aria-label="t('draft.previewImage', { n: index + 1 })" @click.stop="layout?.previewImage(image, t('draft.imageLabel', { n: index + 1 }))"><img :src="imageDataUrl(image)" :alt="t('draft.imageLabel', { n: index + 1 })" /></button>
@@ -199,7 +221,7 @@ defineExpose({ focus: focusEditor });
       </figure>
     </div>
     <p v-if="imageError || (images.length && !supportsImages)" class="composer-image-error" role="alert">{{ imageError || t('draft.imagesUnsupported') }}</p>
-    <p v-if="readingImages" class="composer-image-status" role="status">{{ t("draft.imagesReading") }}</p>
+    <p v-if="readingImages" class="composer-image-status" role="status">{{ t("draft.filesReading") }}</p>
     <textarea
       ref="editor"
       v-model="draft"
@@ -209,7 +231,7 @@ defineExpose({ focus: focusEditor });
     />
     <footer>
       <span v-if="busy">{{ t("draft.working") }}</span>
-      <button class="composer-attach" type="button" :disabled="!canAttach" :title="t(supportsImages ? 'draft.addImages' : 'draft.imagesUnsupported')" :aria-label="t('draft.addImages')" @click="imagePicker?.click()"><ImagePlus :size="16" /></button>
+      <button class="composer-attach" type="button" :disabled="!canAttach" :title="t('draft.addFiles')" :aria-label="t('draft.addFiles')" @click="imagePicker?.click()"><Paperclip :size="16" /></button>
       <div class="composer-settings">
       <DropdownMenuRoot :modal="false">
         <DropdownMenuTrigger as-child :disabled="!runnable || busy || !modelOptions.length">

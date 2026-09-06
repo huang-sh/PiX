@@ -20,6 +20,12 @@ const requests = [];
 const held = new Map();
 let child;
 const server = createServer(async (req, res) => {
+  if (req.method === 'POST' && req.url === '/shutdown') {
+    res.end('ok');
+    for (const finish of held.values()) finish();
+    child?.kill();
+    return;
+  }
   if (req.url === '/state') {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ home, cwd, requests, held: [...held.keys()] })); return;
@@ -37,13 +43,19 @@ const server = createServer(async (req, res) => {
   const emit = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 1, model: 'gui-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
   // Pi's read result contains optional undefined fields in memory. Exercise
   // real tool persistence before branching, rather than only plain text replies.
-  if (process.env.PIX_GUI_READ_TOOL === '1' && input.messages?.at(-1)?.role !== 'tool') {
+  const userIndex = input.messages?.findLastIndex(m => m.role === 'user') ?? -1;
+  const toolReplies = input.messages?.slice(userIndex + 1).filter(m => m.role === 'tool').length ?? 0;
+  if ((process.env.PIX_GUI_READ_TOOL === '1' && input.messages?.at(-1)?.role !== 'tool') ||
+      toolReplies < Number(process.env.PIX_GUI_TOOL_ROUNDS ?? 0)) {
+    emit({ role: 'assistant', content: `Inspecting workspace for ${text}. ` });
     emit({ role: 'assistant', tool_calls: [{ index: 0, id: `read-${id}`, type: 'function',
       function: { name: 'read', arguments: JSON.stringify({ path: '.pi/sessions/gui-parallel.jsonl' }) } }] });
     emit({}, 'tool_calls'); item.status = 'completed'; res.end('data: [DONE]\n\n'); return;
   }
-  emit({ role: 'assistant', content: `Output for ${text}. ` });
-  const timer = setInterval(() => emit({ content: 'Working. ' }), 3000);
+  emit({ role: 'assistant', content: `Output for ${text}. ` + 'Initial output. '.repeat(Math.ceil(Number(process.env.PIX_GUI_STREAM_PREFIX_BYTES ?? 0) / 16)) });
+  let chunks = 0;
+  const timer = setInterval(() => emit({ content: 'Working. '.repeat(Number(process.env.PIX_GUI_STREAM_REPEAT ?? 1)) +
+    (process.env.PIX_GUI_STREAM_LABEL === '1' ? ` [${text} ${++chunks}] ` : '') }), Number(process.env.PIX_GUI_STREAM_MS ?? 3000));
   const finish = () => {
     clearInterval(timer); held.delete(text); item.status = 'completed';
     emit({ content: `Finished ${text}.` }); emit({}, 'stop'); res.end('data: [DONE]\n\n');
@@ -85,11 +97,11 @@ if (branchCount && !existsSync(tree)) {
   for (let i = 0; i < branchCount; i++) {
     const id = `fixture-${i}`, branchHeader = { ...header, id, parentSession: sessionPath };
     const baseline = entries.slice(1), own = [];
-    for (let turn = 0; turn < 5; turn++) {
+    for (let turn = 0; turn < Number(process.env.PIX_GUI_TURNS ?? 5); turn++) {
       own.push({ ...entries[2], id: `u${turn}`, parentId: turn ? `a${turn - 1}` : 'answer',
         message: { ...entries[2].message, content: `Branch ${i} turn ${turn}` } });
       own.push({ ...entries[3], id: `a${turn}`, parentId: `u${turn}`,
-        message: { ...entries[3].message, content: [{ type: 'text', text: `Answer ${i}/${turn}` }] } });
+        message: { ...entries[3].message, content: [{ type: 'text', text: `Answer ${i}/${turn}` + ' Historical output.'.repeat(Math.ceil(Number(process.env.PIX_GUI_REPLY_BYTES ?? 0) / 19)) }] } });
     }
     const source = [branchHeader, ...baseline, ...own].map(e => JSON.stringify(e)).join('\n') + '\n';
     writeFileSync(join(tree, `${id}.jsonl`), source);
@@ -99,7 +111,7 @@ if (branchCount && !existsSync(tree)) {
       header: branchHeader, baseline, status: 'idle', runId: id }) + '\n');
   }
 }
-child = spawn(electronBinary(root), ['--no-sandbox', '--disable-gpu', `--user-data-dir=${join(home, 'electron')}`, '--remote-debugging-port=9827', root], {
+child = spawn(electronBinary(root), ['--no-sandbox', '--disable-gpu', `--user-data-dir=${join(home, 'electron')}`, `--remote-debugging-port=${process.env.PIX_GUI_DEBUG_PORT ?? 9827}`, root], {
   cwd: root, env: { ...process.env, PIX_HOME: home, PIX_PROJECT: cwd, PI_CODING_AGENT_DIR: agent, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }, windowsHide: true,
   stdio: ['ignore', 'ignore', 'pipe'],
 });

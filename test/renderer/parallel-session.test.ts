@@ -40,6 +40,26 @@ describe("parallel session state", () => {
     const restarted = snapshot(); restarted.graph!.epoch = "two"; store.applySnapshot(restarted);
     expect(store.current?.graph?.epoch).toBe("two");
   });
+  it("recovers current-run output when start events arrived before the new run snapshot", () => {
+    const store = useSessionStore(); store.applySnapshot(snapshot());
+    const scope = { graphId: "main.jsonl", branchId: "A", runId: "a2" };
+    // A reused branch can still have the previous run in the renderer when
+    // lifecycle events arrive. They must not overwrite that run's activity.
+    store.onAgentEvent({ ...scope, type: "agent_start" });
+    store.onAgentEvent({ ...scope, type: "message_start", message: { role: "assistant", content: [] } });
+    const next = snapshot(); next.graph!.revision = 2; next.graph!.runs[0]!.runId = "a2";
+    store.applySnapshot(next); store.focusedNode = "turn:B:user";
+    store.onAgentEvent({ ...scope, type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "A is still streaming" }] } });
+    store.focusedNode = "turn:A:user";
+    expect(store.selectedActivity?.items.at(-1)?.text).toBe("A is still streaming");
+    expect(store.selectedActivity?.active).toBe(true);
+    store.onAgentEvent({ ...scope, type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "A completed" }] } });
+    store.onAgentEvent({ ...scope, type: "agent_settled" });
+    expect(store.selectedActivity?.active).toBe(false);
+    expect(store.selectedActivity?.items.at(-1)?.text).toBe("A completed");
+    store.onAgentEvent({ ...scope, runId: "a1", type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "stale" }] } });
+    expect(store.selectedActivity?.items.at(-1)?.text).toBe("A completed");
+  });
   it("submits a scoped request without navigating or changing the active runtime", async () => {
     const store = useSessionStore(); store.applySnapshot(snapshot());
     vi.mocked(desktop.invoke).mockImplementation(async (_route, input: any) => {
@@ -52,6 +72,6 @@ describe("parallel session state", () => {
     expect(desktop.invoke).toHaveBeenCalledTimes(1);
     expect(desktop.invoke).toHaveBeenCalledWith("agent.control", expect.objectContaining({ action: "promptAt", nodeId: "turn:root", text: "C" }));
     expect(store.focusedNode).toBe("pending:c1");
-    expect(store.selectedMessages.at(-1)?.text).toBe("C");
+    expect(store.messageWindow(40).messages.at(-1)?.text).toBe("C");
   });
 });

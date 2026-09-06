@@ -13,11 +13,14 @@ import type {
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, projectSession, projectSessionBranch } from "../../shared/session";
+import { entryAnchorForNode, projectSession } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
 import { useLayoutStore } from "./layout";
 import { useWorkspaceStore } from "./workspace";
+import { createBranchMessageCache, reuseGraphProjection } from "../lib/session-view";
+
+const messageCaches = new WeakMap<object, ReturnType<typeof createBranchMessageCache>>();
 
 interface PendingPrompt {
   message: BranchMessage;
@@ -35,8 +38,7 @@ export const useSessionStore = defineStore("session", {
     activeProjectId: "",
     current: undefined as SessionSnapshot | undefined,
     focusedNode: null as string | null,
-    // Last thinking level the user picked explicitly in a composer; it stays in
-    // effect for later drafts until they pick again or the session changes.
+    // Last explicit pick, used when a draft has no parent thinking setting.
     userThinking: undefined as string | undefined,
     query: "",
     commands: [] as RuntimeCommand[],
@@ -44,8 +46,18 @@ export const useSessionStore = defineStore("session", {
     activity: undefined as AgentActivity | undefined,
     branchActivities: {} as Record<string, { runId: string; activity?: AgentActivity }>,
     pendingPrompt: undefined as PendingPrompt | undefined,
+    deletingNode: false,
   }),
   getters: {
+    deleteBlockedReason(state): string | undefined {
+      const current = state.current;
+      if (!current?.graph || !current.runtime.available) return "graph.blockedReadonly";
+      if (state.deletingNode) return "graph.deletingNode";
+      if (state.pendingPrompt || current.graph.runs.some(run => run.status === "running")
+        || current.runtime.isStreaming || current.runtime.isCompacting || current.runtime.isRetrying
+        || current.runtime.pendingMessageCount) return "graph.deleteBlockedRunning";
+      return undefined;
+    },
     selectedRun(state) {
       const id = state.focusedNode ?? state.current?.projection.activeNodeId;
       return state.current?.graph?.runs.find(run => run.nodeId === id || `pending:${run.runId}` === id);
@@ -92,24 +104,6 @@ export const useSessionStore = defineStore("session", {
       const id = state.focusedNode ?? state.current?.projection.activeNodeId;
       return state.current?.projection.nodes.find((node) => node.id === id);
     },
-    selectedMessages(state): BranchMessage[] {
-      const current = state.current;
-      if (!current) return [];
-      const id = state.focusedNode ?? current.projection.activeNodeId;
-      const node = current.projection.nodes.find((item) => item.id === id);
-      const run = current.graph?.runs.find(r => `pending:${r.runId}` === id && r.pending);
-      if (run?.pending) {
-        const parent = current.projection.nodes.find(n => n.id === run.pending!.parentNodeId);
-        return [...(parent ? projectSessionBranch(current.entries, parent.leafEntryId).messages : []), {
-          entryId: `pending:${run.runId}`, turnId: `pending:${run.runId}`, role: "user", text: run.pending.text,
-          images: run.pending.images, timestamp: new Date().toISOString(),
-        }];
-      }
-      const messages = node ? projectSessionBranch(current.entries, node.leafEntryId).messages : current.projection.messages;
-      return state.pendingPrompt?.targetNodeId === id
-        ? [...messages, state.pendingPrompt.message]
-        : messages;
-    },
   },
   actions: {
     hydrate(
@@ -148,10 +142,22 @@ export const useSessionStore = defineStore("session", {
       };
     },
     applySnapshot(snapshot: SessionSnapshot) {
+      const previousProjection = this.current?.projection;
       const previousGraph = this.current?.graph;
       if (previousGraph && snapshot.graph && previousGraph.id === snapshot.graph.id && previousGraph.epoch === snapshot.graph.epoch && previousGraph.revision > snapshot.graph.revision) return;
       const graphChanged = this.current?.session.path !== snapshot.session.path;
-      if (graphChanged || previousGraph?.epoch !== snapshot.graph?.epoch) this.branchActivities = {};
+      if (!graphChanged && this.focusedNode && previousProjection?.nodes.some(node => node.id === this.focusedNode)
+        && !snapshot.projection.nodes.some(node => node.id === this.focusedNode)) {
+        const previous = new Map(previousProjection.nodes.map(node => [node.id, node]));
+        const retained = new Set(snapshot.projection.nodes.map(node => node.id));
+        let next: string | null = this.focusedNode;
+        while (next && !retained.has(next)) next = previous.get(next)?.parentId ?? null;
+        this.focusedNode = next ?? snapshot.projection.nodes[0]?.id ?? null;
+      }
+      if (graphChanged || previousGraph?.epoch !== snapshot.graph?.epoch) {
+        this.branchActivities = {};
+        messageCaches.delete(this);
+      } else if (previousProjection) reuseGraphProjection(previousProjection, snapshot.projection);
       const pending = this.pendingPrompt;
       if (this.current?.session.path !== snapshot.session.path) this.userThinking = undefined;
       // Session records/projections are immutable snapshots, replaced together.
@@ -216,15 +222,16 @@ export const useSessionStore = defineStore("session", {
     },
     async open(path: string) {
       this.loading = true;
-      const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
-      this.applySnapshot(snapshot);
-      this.focusedNode = snapshot.projection.activeNodeId;
-      await Promise.all([
-        this.refresh(),
-        this.loadCommands(),
-        this.loadModels().catch(() => {}),
-      ]);
-      this.loading = false;
+      try {
+        const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
+        this.applySnapshot(snapshot);
+        this.focusedNode = snapshot.projection.activeNodeId;
+        await Promise.all([
+          this.refresh(),
+          this.loadCommands(),
+          this.loadModels().catch(() => {}),
+        ]);
+      } finally { this.loading = false; }
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
       const result = await desktop.invoke<T>("agent.control", input);
@@ -232,8 +239,36 @@ export const useSessionStore = defineStore("session", {
         this.applySnapshot(result as unknown as SessionSnapshot);
       return result;
     },
+    messageWindow(limit: number) {
+      const current = this.current;
+      if (!current) return { messages: [] as BranchMessage[], hasEarlier: false };
+      let cached = messageCaches.get(this);
+      if (!cached) { cached = createBranchMessageCache(); messageCaches.set(this, cached); }
+      const id = this.focusedNode ?? current.projection.activeNodeId;
+      const node = current.projection.nodes.find(item => item.id === id);
+      const run = current.graph?.runs.find(run => `pending:${run.runId}` === id && run.pending);
+      const pending = run?.pending;
+      const optimistic = this.pendingPrompt?.targetNodeId === id ? this.pendingPrompt.message : undefined;
+      const parent = pending ? current.projection.nodes.find(item => item.id === pending.parentNodeId) : node;
+      const history = cached(current.entries, parent?.leafEntryId ?? (pending ? null : current.projection.leafId),
+        Math.max(0, limit - (pending || optimistic ? 1 : 0)));
+      if (pending) return { ...history, messages: [...history.messages, {
+        entryId: `pending:${run!.runId}`, turnId: `pending:${run!.runId}`, role: "user" as const,
+        text: pending.text, images: pending.images, timestamp: "",
+      }] };
+      return optimistic ? { ...history, messages: [...history.messages, optimistic] } : history;
+    },
     async selectNode(id: string) {
       this.focusedNode = id;
+    },
+    async deleteNode(id: string) {
+      if (!this.current || this.deleteBlockedReason) return;
+      const graphId = this.current.graph!.id;
+      this.deletingNode = true;
+      try {
+        const snapshot = await desktop.invoke<SessionSnapshot>("agent.control", { action: "deleteNode", nodeId: id, graphId });
+        if (this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
+      } finally { this.deletingNode = false; }
     },
     // Only explicit thinking-menu picks may update the sticky level; model-driven
     // clamps stay local to the composer so they never pollute it.

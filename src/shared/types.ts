@@ -126,6 +126,8 @@ export interface AgentActivityItem {
   errorMessage?: string;
 }
 export interface AgentActivity {
+  /** The view joined mid-run; persisted history still contains its earlier output. */
+  partial?: boolean;
   startedAt: string;
   pass: number;
   active: boolean;
@@ -378,6 +380,7 @@ export interface RuntimeExtension {
   commands: Array<{ name: string; description?: string }>;
 }
 export type AgentControl =
+  | { action: "deleteNode"; nodeId: string; graphId: string }
   | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
   | { action: "branchAbort"; branchId: string; runId: string }
   | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[] }
@@ -476,4 +479,5 @@ export interface DesktopApi {
   initialTheme?: ThemePreference;
   invoke<T = unknown>(route: DesktopRoute, input?: unknown): Promise<T>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
+  filePath(file: File): string;
 }

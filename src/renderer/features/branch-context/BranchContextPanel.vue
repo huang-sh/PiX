@@ -7,25 +7,46 @@ import type { BranchMessage, PromptImage, RuntimeModel } from "../../../shared/t
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import BranchHistory, { type HistoryTurn as Turn } from "./BranchHistory.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 
 const session = useSessionStore();
-const activity = computed(() => session.selectedActivity);
 const selectedRun = computed(() => session.selectedRun);
 const layout = useLayoutStore();
+// Collapsed splitters keep children mounted. Do not parse/animate live Markdown
+// in a zero-width panel; the store still receives every branch's latest state.
+const activity = computed(() => layout.layout.collapsed.chat ? undefined : session.selectedActivity);
 const { submitDraft } = useDraftSubmit();
 const { t } = useI18n();
 const scroll = ref<HTMLElement>();
 const followingOutput = ref(true);
+const expandedProcesses = ref(new Set<string>());
+const visibleTurnCount = ref(40);
+const liveTextLimit = ref(32768);
+const expandedLiveTools = ref(new Set<string>());
 let resizeObserver: ResizeObserver | undefined;
+const readingPositions = new Map<string, { top: number; following: boolean; count: number; expanded: Set<string> }>();
+let readingScope = "";
+let viewVersion = 0;
+let restoringPosition = false;
+let scrollFrame: number | undefined;
+const history = computed(() => session.messageWindow(visibleTurnCount.value));
+const historyKey = computed(() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch,
+  session.focusedNode ?? session.current?.projection.activeNodeId]));
+const liveOutputClipped = computed(() => activity.value?.items.some(item => item.status === "running" &&
+  Math.max(item.text.length, item.thinking?.length ?? 0) > liveTextLimit.value));
+const liveText = (text: string) => text.length > liveTextLimit.value ? text.slice(-liveTextLimit.value) : text;
+watch(historyKey, () => { liveTextLimit.value = 32768; expandedLiveTools.value.clear(); });
+function toggleLiveTool(id: string, event: Event) {
+  if ((event.currentTarget as HTMLDetailsElement).open) expandedLiveTools.value.add(id);
+  else expandedLiveTools.value.delete(id);
+  scrollLatest();
+}
 
-// Composer overrides follow the same inheritance rules as the graph draft node:
-// model resets when the target changes, while an explicitly picked thinking level
-// persists in the session store for later drafts. The local thinking ref only
-// holds model-driven clamps, which must not pollute that user choice.
+// Like graph drafts, inherit the target's settings and keep overrides local.
 const composerModel = ref<RuntimeModel | null>();
 const composerThinking = ref<string>();
 
@@ -39,8 +60,8 @@ const composerModelValue = computed(() => {
 });
 const composerThinkingValue = computed(() =>
   composerThinking.value
-  ?? session.userThinking
   ?? session.selectedNode?.footer?.thinkingLevel
+  ?? session.userThinking
   ?? session.current?.runtime.thinkingLevel
   ?? "off");
 const composerPlaceholder = computed(() => !composerRunnable.value
@@ -52,7 +73,7 @@ const composerTarget = computed(() =>
     : t("branch.composerRoot"));
 
 watch(
-  () => [session.current?.session.path, session.selectedNode?.id],
+  [() => session.current?.session.path, () => session.selectedNode?.id],
   () => {
     composerModel.value = undefined;
     composerThinking.value = undefined;
@@ -65,12 +86,8 @@ function setComposerModel(model: RuntimeModel) {
 }
 
 function setComposerThinking(level: string, explicit: boolean) {
-  if (explicit) {
-    session.setUserThinking(level);
-    composerThinking.value = undefined;
-  } else {
-    composerThinking.value = level;
-  }
+  if (explicit) session.setUserThinking(level);
+  composerThinking.value = level;
 }
 
 // The host admits the prompt and its model settings as one branch operation.
@@ -78,25 +95,15 @@ async function submitComposer(text: string, images?: PromptImage[]) {
   return submitDraft(session.selectedNode?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
 }
 
-interface Turn {
-  id: string;
-  user?: BranchMessage;
-  process: BranchMessage[];
-  final?: BranchMessage;
-  error?: BranchMessage;
-}
-
 const showingActivity = computed(() => Boolean(
   activity.value &&
   (session.current?.graph || !session.selectedNode || session.selectedNode.id === session.current?.projection.activeNodeId),
 ));
+const replacingHistory = computed(() => showingActivity.value && !activity.value?.partial);
 
-const turns = computed<Turn[]>(() => {
+const turns = computed(() => {
   const grouped: Array<{ id: string; user?: BranchMessage; body: BranchMessage[] }> = [];
-  for (const original of session.selectedMessages) {
-    const message = original.role === "user"
-      ? original
-      : { ...original, text: withoutToolLabels(original.text) };
+  for (const message of history.value.messages) {
     if (message.role === "user") {
       grouped.push({ id: message.turnId, user: message, body: [] });
     } else {
@@ -105,8 +112,12 @@ const turns = computed<Turn[]>(() => {
       turn.body.push(message);
     }
   }
-  if (showingActivity.value && grouped.length) grouped.at(-1)!.body = [];
-  return grouped.map(({ id, user, body }) => {
+  if (replacingHistory.value && grouped.length) grouped.at(-1)!.body = [];
+  return grouped;
+});
+
+const visibleTurns = computed<Turn[]>(() =>
+  turns.value.slice(-visibleTurnCount.value).map(({ id, user, body }) => {
     const final = [...body].reverse().find(
       (message) => message.role === "assistant" && message.text,
     );
@@ -118,10 +129,33 @@ const turns = computed<Turn[]>(() => {
       user,
       final,
       error,
+      running: selectedRun.value?.status === "running" && id === selectedRun.value.nodeId,
       process: body.filter((message) => message !== final && message !== error),
     };
-  });
+  }),
+);
+
+// Only visible, expanded history needs normalization. Cache across live-output
+// renders; a changed history snapshot or disclosure state invalidates it.
+const processMessages = computed(() => {
+  const messages = new Map<string, BranchMessage[]>();
+  for (const turn of visibleTurns.value) {
+    if (!expandedProcesses.value.has(turn.id)) continue;
+    messages.set(turn.id, turn.process.map(message => ({ ...message, text: withoutToolLabels(message.text) })));
+  }
+  return messages;
 });
+
+async function showEarlierTurns() {
+  const version = viewVersion;
+  const root = scroll.value;
+  const height = root?.scrollHeight ?? 0;
+  const top = root?.scrollTop ?? 0;
+  followingOutput.value = false;
+  visibleTurnCount.value += 40;
+  await nextTick();
+  if (root && version === viewVersion) root.scrollTop = top + root.scrollHeight - height;
+}
 
 function duration(turn: Turn) {
   const start = new Date(turn.user?.timestamp ?? "").getTime();
@@ -152,26 +186,56 @@ function errorText(message: { errorMessage?: string }) {
 }
 
 function updateScrollFollow() {
+  // A user scroll between selection and DOM commit supersedes restoration.
+  if (restoringPosition) { viewVersion++; restoringPosition = false; }
   const root = scroll.value;
   if (root) followingOutput.value = root.scrollHeight - root.scrollTop - root.clientHeight < 48;
 }
 
-async function scrollLatest() {
-  await nextTick();
-  const root = scroll.value;
-  if (!root) return;
-  root
-    .querySelectorAll<HTMLElement>(
+function scrollLatest() {
+  if (restoringPosition || scrollFrame !== undefined) return;
+  const version = viewVersion;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = undefined;
+    const root = scroll.value;
+    if (!root || version !== viewVersion) return;
+    root.querySelectorAll<HTMLElement>(
       ".agent-process.live .process-items, .agent-process.live .process-tool[open] > pre",
-    )
-    .forEach((element) => (element.scrollTop = element.scrollHeight));
-  if (followingOutput.value) root.scrollTop = root.scrollHeight;
+    ).forEach(element => (element.scrollTop = element.scrollHeight));
+    if (followingOutput.value) root.scrollTop = root.scrollHeight;
+  });
 }
 
-watch(() => session.selectedNode?.id, () => {
-  followingOutput.value = true;
-  scrollLatest();
-});
+watch([() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch]),
+  () => session.focusedNode ?? session.current?.projection.activeNodeId], ([scope, id], previous) => {
+  const version = ++viewVersion;
+  if (scrollFrame !== undefined) { cancelAnimationFrame(scrollFrame); scrollFrame = undefined; }
+  if (readingScope !== scope) { readingPositions.clear(); readingScope = scope; }
+  else if (previous?.[1]) readingPositions.set(previous[1], {
+    top: scroll.value?.scrollTop ?? 0, following: followingOutput.value,
+    count: visibleTurnCount.value, expanded: new Set(expandedProcesses.value),
+  });
+  const saved = id ? readingPositions.get(id) : undefined;
+  if (id) readingPositions.delete(id);
+  if (readingPositions.size > 16) readingPositions.delete(readingPositions.keys().next().value!);
+  expandedProcesses.value = new Set(saved?.expanded);
+  visibleTurnCount.value = saved?.count ?? 40;
+  followingOutput.value = saved?.following ?? true;
+  restoringPosition = true;
+  void nextTick(() => {
+    if (version !== viewVersion) return;
+    const root = scroll.value;
+    if (root) root.scrollTop = followingOutput.value ? root.scrollHeight : saved?.top ?? 0;
+    restoringPosition = false;
+  });
+}, { immediate: true });
+
+function toggleProcess(id: string, event: Event, viewKey: string) {
+  if (viewKey !== historyKey.value) return;
+  const open = (event.currentTarget as HTMLDetailsElement).open;
+  if (open) expandedProcesses.value.add(id);
+  else expandedProcesses.value.delete(id);
+}
 
 watch(() => session.pendingPrompt?.message.entryId, (entryId) => {
   if (!entryId) return;
@@ -181,7 +245,7 @@ watch(() => session.pendingPrompt?.message.entryId, (entryId) => {
 
 watch(
   () => [
-    session.selectedMessages.length,
+    history.value.messages.length,
     activity.value?.items
       .map((item) => `${item.text.length}:${item.thinking?.length ?? 0}:${item.status}`)
       .join(":"),
@@ -195,7 +259,11 @@ onMounted(() => {
   resizeObserver.observe(scroll.value);
 });
 
-onBeforeUnmount(() => resizeObserver?.disconnect());
+onBeforeUnmount(() => {
+  viewVersion++;
+  resizeObserver?.disconnect();
+  if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
+});
 </script>
 
 <template>
@@ -228,64 +296,25 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
           <CopyButton :text="input.text" />
         </article>
       </details>
-      <section v-for="turn in turns" :key="turn.id" class="chat-turn">
-        <article v-if="turn.user" class="branch-message user">
-          <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
-          <MessageImages :images="turn.user.images" />
-          <CopyButton :text="turn.user.text" />
-        </article>
+      <button v-if="history.hasEarlier" type="button" class="load-earlier-turns" @click="showEarlierTurns">
+        {{ t('branch.loadEarlier') }}
+      </button>
+      <!-- Keep a few recently viewed histories mounted: switching back should
+           not parse and mount all their Markdown again. Inactive views receive
+           no live session updates; the cache is bounded independently of nodes. -->
+      <KeepAlive :key="readingScope" :max="4">
+        <BranchHistory :key="historyKey" :view-key="historyKey" :turns="visibleTurns"
+          :process-messages="processMessages" :expanded-processes="expandedProcesses"
+          :duration="duration" :error-text="errorText" @toggle="toggleProcess" />
+      </KeepAlive>
 
-        <details v-if="turn.process.length || turn.final?.thinking" class="agent-process">
-          <summary>
-            {{ t("branch.worked", { duration: duration(turn), n: turn.process.length + (turn.final?.thinking ? 1 : 0) }) }}
-            <ChevronRight class="disclosure" :size="13" />
-          </summary>
-          <div class="process-items">
-            <template v-for="message in turn.process" :key="message.entryId">
-              <details v-if="message.thinking" class="process-item process-thinking">
-                <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
-                <p>{{ message.thinking }}</p>
-              </details>
-              <details
-                v-if="message.role === 'tool'"
-                class="process-item process-tool"
-                :class="{ error: message.isError }"
-              >
-                <summary>
-                  <Terminal :size="13" />
-                  <strong>{{ message.toolName || t("branch.tool") }}</strong>
-                  <code v-if="message.toolInput" :title="message.toolInput">{{ message.toolInput }}</code>
-                </summary>
-                <pre>{{ message.text || t("common.noOutput") }}</pre>
-              </details>
-              <div v-else-if="message.text" class="process-item assistant">
-                <MarkdownRenderer :content="message.text" :custom-id="message.entryId" />
-                <CopyButton :text="message.text" />
-              </div>
-            </template>
-            <details v-if="turn.final?.thinking" class="process-item process-thinking">
-              <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
-              <p>{{ turn.final.thinking }}</p>
-            </details>
-          </div>
-        </details>
-
-        <article v-if="turn.error" class="branch-message assistant error-response">
-          <p class="error-message">{{ errorText(turn.error) }}</p>
-          <CopyButton :text="errorText(turn.error)" />
-        </article>
-
-        <article v-if="turn.final" class="branch-message assistant final-response">
-          <MarkdownRenderer
-            :content="turn.final.text || t('common.empty')"
-            :custom-id="turn.final.entryId"
-          />
-          <CopyButton :text="turn.final.text" />
-        </article>
-      </section>
+      <div v-if="selectedRun?.status === 'running' && !showingActivity" class="process-item waiting" role="status">
+        <LoaderCircle :size="14" class="spin" /> {{ t('branch.running') }}
+      </div>
 
       <details
         v-if="showingActivity && activity"
+        :key="historyKey"
         class="agent-process live"
         :open="activity.active"
         @toggle="scrollLatest()"
@@ -296,6 +325,9 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
           <ChevronRight class="disclosure" :size="13" />
         </summary>
         <div class="process-items">
+          <button v-if="liveOutputClipped" type="button" class="load-earlier-turns" @click="liveTextLimit *= 2">
+            {{ t('branch.liveOutputTail', { n: liveTextLimit }) }}
+          </button>
           <template v-for="item in activity.items" :key="item.id">
             <details
               v-if="item.thinking"
@@ -304,14 +336,14 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
               @toggle="scrollLatest()"
             >
               <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
-              <p>{{ item.thinking }}</p>
+              <p>{{ item.status === 'running' ? liveText(item.thinking) : item.thinking }}</p>
             </details>
             <details
               v-if="item.kind === 'tool'"
               class="process-item process-tool"
               :class="item.status"
               :open="item.status === 'running'"
-              @toggle="scrollLatest()"
+              @toggle="toggleLiveTool(item.id, $event)"
             >
               <summary>
                 <LoaderCircle v-if="item.status === 'running'" :size="13" class="spin" />
@@ -319,12 +351,12 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
                 <strong>{{ item.title }}</strong>
                 <code v-if="item.input" :title="item.input">{{ item.input }}</code>
               </summary>
-              <pre>{{ item.text || (item.status === "running" ? t("branch.running") : t("common.noOutput")) }}</pre>
+              <pre v-if="item.status === 'running' || expandedLiveTools.has(item.id)">{{ (item.status === 'running' ? liveText(item.text) : item.text) || (item.status === "running" ? t("branch.running") : t("common.noOutput")) }}</pre>
             </details>
-            <div v-else-if="withoutToolLabels(item.text)" class="process-item assistant">
+            <div v-else-if="item.text" class="process-item assistant">
               <MarkdownRenderer
-                :content="withoutToolLabels(item.text)"
-                :custom-id="item.id"
+                :content="item.status === 'running' ? liveText(item.text) : item.text"
+                :custom-id="`${historyKey}:${item.id}`"
                 :streaming="item.status === 'running'"
               />
               <CopyButton :text="item.text" />

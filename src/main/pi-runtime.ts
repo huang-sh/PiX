@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path";
+import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -181,14 +182,15 @@ export class PiRuntime {
   }
   bind() {
     this.unsubscribe?.();
-    this.unsubscribe = this.runtime.session.subscribe((payload: unknown) => {
+    const forwarder = agentEventForwarder(payload => this.emit({ type: "agent", payload }));
+    const unsubscribe = this.runtime.session.subscribe((payload: unknown) => {
       // SDK emits message_end BEFORE persisting it. A UI listener must never
       // throw into that call stack, or the message would not be saved.
       try {
-        const event = structuredClone({ ...(payload as object), ...this.eventScope });
-        setImmediate(() => { try { this.emit({ type: "agent", payload: event }); } catch {} });
+        forwarder.push({ ...(payload as object), ...this.eventScope });
       } catch {}
     });
+    this.unsubscribe = () => { unsubscribe(); forwarder.dispose(); };
   }
   async waitForWrites() {
     await this.runtime?.session.waitForIdle?.();

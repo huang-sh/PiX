@@ -70,7 +70,7 @@ describe("session stream focus", () => {
     // The model catalog is global state, not session state — deleting the
     // session must not clear it.
     expect(session.models).toEqual([{ provider: "test", id: "test" }]);
-    expect(session.selectedMessages).toEqual([]);
+    expect(session.messageWindow(40).messages).toEqual([]);
     expect(session.projects[0]?.sessions).toEqual([]);
 
     hydrate(session, snapshot(first, "a1"));
@@ -90,7 +90,7 @@ describe("session stream focus", () => {
     invoke.mockResolvedValue({ sessions: [current!.session] });
     await session.remove("other.jsonl", true);
     expect(session.current).toBe(current);
-    expect(session.selectedMessages).toHaveLength(2);
+    expect(session.messageWindow(40).messages).toHaveLength(2);
   });
 
   it("loads commands and models independently, keeping the catalog when discovery fails or the session goes away", async () => {
@@ -143,7 +143,7 @@ describe("session stream focus", () => {
     vi.spyOn(desktop, "invoke").mockReturnValue(response);
 
     const running = session.prompt("second");
-    expect(session.selectedMessages.at(-1)).toMatchObject({ role: "user", text: "second" });
+    expect(session.messageWindow(40).messages.at(-1)).toMatchObject({ role: "user", text: "second" });
 
     const continued = [
       ...first,
@@ -151,7 +151,7 @@ describe("session stream focus", () => {
     ] satisfies RawSessionEntry[];
     resolve(snapshot(continued, "u2"));
     await running;
-    expect(session.selectedMessages.filter((message) => message.text === "second")).toHaveLength(1);
+    expect(session.messageWindow(40).messages.filter((message) => message.text === "second")).toHaveLength(1);
   });
 
   it("removes the optimistic message when sending fails", async () => {
@@ -161,7 +161,7 @@ describe("session stream focus", () => {
 
     await expect(session.prompt("second")).rejects.toThrow("send failed");
     expect(session.pendingPrompt).toBeUndefined();
-    expect(session.selectedMessages.some((message) => message.text === "second")).toBe(false);
+    expect(session.messageWindow(40).messages.some((message) => message.text === "second")).toBe(false);
   });
 
   it("applies draft settings after branch navigation and before prompting", async () => {
@@ -204,9 +204,9 @@ describe("session stream focus", () => {
     vi.spyOn(desktop, "invoke").mockReturnValue(response);
 
     const running = session.prompt("second");
-    expect(session.selectedMessages.at(-1)?.text).toBe("second");
+    expect(session.messageWindow(40).messages.at(-1)?.text).toBe("second");
     await session.selectNode("turn:other");
-    expect(session.selectedMessages.some((message) => message.text === "second")).toBe(false);
+    expect(session.messageWindow(40).messages.some((message) => message.text === "second")).toBe(false);
 
     const continued = [
       ...first,

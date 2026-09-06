@@ -209,6 +209,33 @@ describe("draft placement", () => {
     expect(graph.nodes.some((node: any) => node.type === "draft")).toBe(false);
   });
 
+  it.each(["low", "off"])("inherits parent thinking %s over the saved preference and submits local overrides", async (level) => {
+    const { graph, session } = setup();
+    session.current!.projection.nodes.find(node => node.id === "turn:a")!.footer = { model: null, thinkingLevel: level };
+    session.current!.projection.nodes.find(node => node.id === "turn:b")!.footer = { model: null, thinkingLevel: "medium" };
+    session.current!.runtime.thinkingLevel = "high";
+    session.setUserThinking("high");
+    const promptAt = vi.spyOn(session, "promptAt").mockResolvedValue(undefined);
+    const draft = () => graph.nodes.find((node: any) => node.type === "draft").data;
+
+    await graph.compose("turn:a");
+    expect(draft().thinkingLevel).toBe(level);
+    await draft().onSubmit("inherited");
+    expect(promptAt).toHaveBeenLastCalledWith("turn:a", "inherited", null, level, undefined);
+
+    await graph.compose("turn:a");
+    draft().onThinking("high", true);
+    expect(draft().thinkingLevel).toBe("high");
+    await draft().onSubmit("override");
+    expect(promptAt).toHaveBeenLastCalledWith("turn:a", "override", null, "high", undefined);
+
+    await graph.compose("turn:b");
+    expect(draft().thinkingLevel).toBe("medium");
+    await graph.compose("turn:c");
+    expect(draft().thinkingLevel).toBe("high");
+    promptAt.mockRestore();
+  });
+
   it("keeps the draft after its own branch and reserves space before the next branch", async () => {
     const { graph } = setup();
     const original = graph.nodes.map((node: any) => ({ ...node.position }));

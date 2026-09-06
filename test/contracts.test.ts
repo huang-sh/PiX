@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { validateRouteInput } from "../src/shared/contracts.js";
+
+test("node deletion preserves its target across IPC and rejects missing identifiers", () => {
+  const input = { action: "deleteNode", nodeId: "turn:b", graphId: "D:\\project\\session.jsonl" };
+  assert.deepEqual(validateRouteInput("agent.control", input), input);
+  for (const field of ["nodeId", "graphId"])
+    for (const value of [undefined, null, "", " ", 123])
+      assert.throws(() => validateRouteInput("agent.control", { ...input, [field]: value }), new RegExp(field));
+});
 test("validates route inputs", () =>
   assert.deepEqual(validateRouteInput("workspace.read", { path: "src/a.ts" }), {
     path: "src/a.ts",

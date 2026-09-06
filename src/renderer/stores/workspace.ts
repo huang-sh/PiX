@@ -6,6 +6,7 @@ import type {
   GitStatus,
   ProjectInfo,
   ShellResult,
+  SessionSnapshot,
 } from "../../shared/types";
 import { desktop } from "../api";
 
@@ -175,9 +176,21 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
     record(event: DesktopEvent) {
       if (event.type === "terminal") return;
+      const payload = event.payload as { type?: string; branchId?: string; runId?: string; toolName?: string;
+        current?: SessionSnapshot; deletedPath?: string } | undefined;
+      // Progress is already displayed in activity. Diagnostics must not retain
+      // or stringify every cumulative token payload or the full session tree.
+      if (event.type === "agent" && ["message_update", "tool_execution_update"].includes(payload?.type ?? "")) return;
+      const detail = event.type === "agent"
+        ? { type: payload?.type, branchId: payload?.branchId, runId: payload?.runId, toolName: payload?.toolName }
+        : event.type === "sessions"
+          ? { path: payload?.current?.session.path, revision: payload?.current?.graph?.revision,
+              nodes: payload?.current?.projection.nodes.length, deletedPath: payload?.deletedPath }
+          : event.payload;
       this.events.unshift(
-        `${new Date().toLocaleTimeString()} ${event.type} ${JSON.stringify(event.payload)?.slice(0, 700)}`,
+        `${new Date().toLocaleTimeString()} ${event.type} ${JSON.stringify(detail)?.slice(0, 700)}`,
       );
+      if (this.events.length > 200) this.events.length = 200;
       if (event.type === "shell") {
         const payload = event.payload as { chunk?: string };
         if (payload.chunk) this.utilityOutput += payload.chunk;

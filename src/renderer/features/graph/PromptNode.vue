@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, Sparkles, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -19,16 +20,17 @@ export interface PromptNodeData {
   node: GraphNode;
   active: boolean;
   current: boolean;
-  selected: boolean;
   runnable: boolean;
   blockedReason: string;
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
   content: () => NodeContent;
   onCompose: (direction?: BranchDirection) => void;
+  onDelete?: () => void;
+  deleteBlockedReason?: string;
 }
 
-const props = defineProps<{ id: string; data: PromptNodeData }>();
+const props = defineProps<{ id: string; data: PromptNodeData; selected?: boolean }>();
 const { t } = useI18n();
 const root = ref<HTMLElement>();
 const preview = ref<HTMLElement>();
@@ -142,12 +144,16 @@ function relative(value: string) {
 </script>
 
 <template>
+  <ContextMenuRoot :modal="false" @update:open="suppressPreview">
+  <ContextMenuTrigger as-child>
   <article
     ref="root"
     class="prompt-node"
-    :class="{ active: data.active, current: data.current, running: data.running, selected: data.selected }"
+    :class="{ active: data.active, current: data.current, running: data.running, selected }"
     @mouseenter="showPreview"
     @mouseleave="hidePreview"
+    @pointerdown="suppressPreview"
+    @contextmenu.stop
   >
     <Handle v-if="data.node.parentId" type="target" :position="Position.Left" />
     <Handle type="source" :position="Position.Right" />
@@ -155,6 +161,7 @@ function relative(value: string) {
       <span class="turn-role" :title="t('graph.you')" :aria-label="t('graph.you')"><UserRound :size="13" /></span>
       <strong>{{ data.node.title }}</strong>
       <aside class="node-meta">
+        <span v-if="data.running" class="node-run-state" role="status" :title="t('graph.agentRunning')" :aria-label="t('graph.agentRunning')"><LoaderCircle :size="12" class="spin" /></span>
         <span v-if="data.node.imageCount" :title="t('draft.attachedImages', { n: data.node.imageCount })"><Image :size="11" />{{ data.node.imageCount }}</span>
         <span v-if="data.current" :title="t('graph.currentTurn')" :aria-label="t('graph.currentTurn')"><Check :size="11" /></span>
         <span v-if="data.node.hasError" class="node-error" :title="t('graph.responseError')" :aria-label="t('graph.responseError')"><AlertCircle :size="12" /></span>
@@ -163,7 +170,7 @@ function relative(value: string) {
       </aside>
       <span class="turn-role pi" title="Pi" aria-label="Pi"><Sparkles :size="13" /></span>
       <p :class="{ 'node-running': data.running }">
-        <template v-if="data.running && !data.node.preview"><LoaderCircle :size="12" class="spin" />{{ t("graph.agentRunning") }}</template>
+        <template v-if="data.running && !data.node.preview">{{ t("graph.agentRunning") }}</template>
         <template v-else>{{ data.node.preview || t("graph.waitingAssistant") }}</template>
       </p>
     </section>
@@ -216,6 +223,19 @@ function relative(value: string) {
     ><ArrowUp v-if="direction === 'up'" :size="18" :stroke-width="3" /><ArrowDown v-else :size="18" :stroke-width="3" /></button>
     </div>
   </article>
+  </ContextMenuTrigger>
+  <ContextMenuPortal>
+    <ContextMenuContent class="menu-content nodrag nowheel" :side-offset="4" @close-auto-focus.prevent>
+      <ContextMenuItem
+        class="menu-item danger"
+        data-action="node-delete"
+        :disabled="!data.onDelete || Boolean(data.deleteBlockedReason)"
+        :title="t(data.deleteBlockedReason || 'graph.deleteNodeHint')"
+        @select="data.onDelete?.()"
+      ><Trash2 :size="14" />{{ t('graph.deleteNode') }}</ContextMenuItem>
+    </ContextMenuContent>
+  </ContextMenuPortal>
+  </ContextMenuRoot>
 
   <Teleport to="body">
     <aside

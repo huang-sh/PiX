@@ -1,17 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { entryAnchorForNode, projectSession, projectSessionBranch } from "../src/shared/session.js";
+import { entryAnchorForNode, projectSession } from "../src/shared/session.js";
+import { createBranchMessageCache } from "../src/renderer/lib/session-view.js";
 import type { RawSessionEntry } from "../src/shared/types.js";
-test("selected ancestry matches the full projection without including sibling turns", () => {
+test("history window matches the selected ancestry without including sibling turns", () => {
   const entries: RawSessionEntry[] = [
     { type: "message", id: "root", parentId: null, timestamp: "0", message: { role: "user", content: "root" } },
     ...Array.from({ length: 2000 }, (_, i) => ({ type: "message", id: `u${i}`, parentId: "root", timestamp: "1",
       message: { role: "user", content: `sibling ${i}` } })),
   ];
-  const branch = projectSessionBranch(entries, "u1999");
-  assert.equal(branch.nodes.length, 2);
+  const window = createBranchMessageCache();
+  const branch = window(entries, "u1999", 40);
+  assert.equal(branch.messages.length, 2);
+  assert.equal(branch.hasEarlier, false);
   assert.deepEqual(branch.messages, projectSession(entries, "u1999").messages);
-  assert.deepEqual(projectSessionBranch(entries, null).messages, []);
+  assert.deepEqual(window(entries, null, 40), { messages: [], hasEarlier: false });
 });
 const e: RawSessionEntry[] = [
   {
