@@ -18,6 +18,7 @@ import type {
   SessionSummary,
   SettingsBundle,
   WslDistribution,
+  RemoteConnectStage,
 } from "../shared/types";
 import type { AppCommandName } from "../shared/commands";
 import { desktop } from "./api";
@@ -50,6 +51,9 @@ let unsubscribe: (() => void) | undefined;
 const wslOpen = ref(false);
 const wslBusy = ref(false);
 const wslError = ref("");
+const remoteStages = ref<RemoteConnectStage[]>([]);
+const remoteDisconnected = ref(false);
+let remoteUiAttempt = 0;
 const wslDistributions = ref<WslDistribution[]>([]);
 const wslNamesLoading = ref(false);
 const wslHomeCache = new Map<string, string>();
@@ -85,6 +89,12 @@ async function hydrate(data: BootstrapData, openFirst = false) {
   layout.hydrate(data.settings, data.layout);
   applyLanguage(data.settings);
   session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current);
+  remoteDisconnected.value = Boolean(data.project?.remote &&
+    !data.projects?.find((record) => record.id === session.activeProjectId)?.connected);
+  if (remoteDisconnected.value) {
+    session.loading = false;
+    return;
+  }
   await workspace.load();
   if (openFirst && !session.current && session.sessions[0])
     await session.open(session.sessions[0].path);
@@ -113,6 +123,7 @@ function openRemote() {
   wslOpen.value = true;
   wslBusy.value = false;
   wslError.value = "";
+  remoteStages.value = [];
   remoteBrowseRoot.value = "";
   remoteDirectories.value = [];
   sshLoading.value = true;
@@ -157,15 +168,13 @@ function probeWslHomes() {
 }
 
 async function connectSsh(input: { host: string; cwd: string; browse?: boolean }) {
-  if (!input.browse && input.cwd === remoteBrowseRoot.value) {
-    remoteBrowseRoot.value = "";
-    wslOpen.value = false;
-    return;
-  }
+  const attempt = ++remoteUiAttempt;
+  remoteStages.value = [];
   wslBusy.value = true;
   wslError.value = "";
   try {
     const data = await desktop.invoke<BootstrapData | { project: ProjectInfo }>("ssh.connect", input);
+    if (attempt !== remoteUiAttempt) return;
     if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
       await hydrate(data as BootstrapData);
@@ -174,29 +183,23 @@ async function connectSsh(input: { host: string; cwd: string; browse?: boolean }
       layout.showNotice(t("notice.connectedTo", { name: input.host }));
     }
   } catch (error) {
+    if (attempt !== remoteUiAttempt) return;
     remoteBrowseRoot.value = "";
     remoteDirectories.value = [];
     wslError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    wslBusy.value = false;
+    if (attempt === remoteUiAttempt) wslBusy.value = false;
   }
 }
 
 async function connectWsl(input: { distro: string; cwd: string; browse?: boolean }) {
-  if (!input.browse && input.cwd === remoteBrowseRoot.value) {
-    remoteBrowseRoot.value = "";
-    wslOpen.value = false;
-    return;
-  }
+  const attempt = ++remoteUiAttempt;
+  remoteStages.value = [];
   wslBusy.value = true;
   wslError.value = "";
   try {
-    if (!input.cwd) {
-      await probeWslHomes();
-      input = { ...input, cwd: wslHomeCache.get(input.distro) ?? "" };
-      if (!input.cwd) throw new Error(t("remote.wslHomeUnavailable"));
-    }
     const data = await desktop.invoke<BootstrapData | { project: ProjectInfo }>("wsl.connect", input);
+    if (attempt !== remoteUiAttempt) return;
     if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
       await hydrate(data as BootstrapData);
@@ -205,51 +208,63 @@ async function connectWsl(input: { distro: string; cwd: string; browse?: boolean
       layout.showNotice(t("notice.connectedTo", { name: input.distro }));
     }
   } catch (error) {
+    if (attempt !== remoteUiAttempt) return;
     remoteBrowseRoot.value = "";
     remoteDirectories.value = [];
     wslError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    wslBusy.value = false;
+    if (attempt === remoteUiAttempt) wslBusy.value = false;
   }
 }
 
 async function browseRemoteDirectory(path: string) {
+  const attempt = remoteUiAttempt;
   remoteDirectoryBusy.value = true;
   wslError.value = "";
   try {
-    const listing = await desktop.invoke<DirectoryListing>("workspace.directories", { path });
+    const listing = await desktop.invoke<DirectoryListing>("remote.directories", { path });
+    if (attempt !== remoteUiAttempt) return;
     remoteBrowseRoot.value = listing.path;
     remoteDirectories.value = listing.entries;
   } catch (error) {
+    if (attempt !== remoteUiAttempt) return;
     wslError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    remoteDirectoryBusy.value = false;
+    if (attempt === remoteUiAttempt) remoteDirectoryBusy.value = false;
   }
 }
 
 async function openRemoteDirectory(path: string) {
+  const attempt = remoteUiAttempt;
   wslBusy.value = true;
   wslError.value = "";
   try {
-    await hydrate(await desktop.invoke<BootstrapData>("remote.openProject", { path }));
+    const data = await desktop.invoke<BootstrapData>("remote.openProject", { path });
+    // The backend may have committed just before Cancel was received. Always
+    // hydrate a successful commit so the visible workspace matches routing.
+    await hydrate(data);
     remoteBrowseRoot.value = "";
     remoteDirectories.value = [];
     wslOpen.value = false;
     layout.showNotice(t("notice.opened", { path }));
   } catch (error) {
+    if (attempt !== remoteUiAttempt) return;
     wslError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    wslBusy.value = false;
+    if (attempt === remoteUiAttempt) wslBusy.value = false;
   }
 }
 
 async function resetRemoteConnection() {
+  ++remoteUiAttempt;
   wslBusy.value = true;
   wslError.value = "";
   try {
-    await hydrate(await desktop.invoke<BootstrapData>("remote.disconnect"));
+    await desktop.invoke("remote.cancel");
     remoteBrowseRoot.value = "";
     remoteDirectories.value = [];
+    remoteDirectoryBusy.value = false;
+    remoteStages.value = [];
   } catch (error) {
     wslError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -258,8 +273,8 @@ async function resetRemoteConnection() {
 }
 
 async function closeRemoteDialog() {
-  if (remoteBrowseRoot.value) await resetRemoteConnection();
   wslOpen.value = false;
+  await resetRemoteConnection();
 }
 
 async function disconnectRemote() {
@@ -272,7 +287,7 @@ async function disconnectRemote() {
 }
 
 async function activateProject(record: ProjectGroup) {
-  if (record.id === session.activeProjectId) return true;
+  if (record.id === session.activeProjectId && record.connected) return true;
   session.loading = true;
   try {
     const remote = record.project.remote;
@@ -290,13 +305,27 @@ async function activateProject(record: ProjectGroup) {
     await hydrate(data);
     return true;
   } catch (error) {
-    try {
-      await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap"));
-    } catch {}
+    // A failed remote preparation leaves the old workspace and session intact.
+    if (!record.project.remote) {
+      try { await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap")); }
+      catch {}
+    }
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     return false;
   } finally {
     session.loading = false;
+  }
+}
+
+async function reconnectRemote() {
+  const record = session.projects.find((item) => item.id === session.activeProjectId);
+  if (!record || session.loading) return;
+  const path = session.current?.session.path;
+  if (await activateProject(record)) {
+    if (path) {
+      try { await session.open(path); }
+      catch (error) { layout.showNotice(String(error), "error"); }
+    }
   }
 }
 
@@ -461,6 +490,24 @@ async function runCommand(name: string) {
 }
 
 function onEvent(event: DesktopEvent) {
+  if (event.type === "remote.progress") {
+    if (wslOpen.value && wslBusy.value) {
+      const { stage } = event.payload as { stage: RemoteConnectStage };
+      if (remoteStages.value.at(-1) !== stage) remoteStages.value.push(stage);
+    }
+    return;
+  }
+  if (event.type === "remote.connection") {
+    const payload = event.payload as { projectId: string; connected: boolean; message?: string };
+    if (!payload.connected) {
+      session.disconnected(payload.projectId);
+      if (payload.projectId === session.activeProjectId) {
+        remoteDisconnected.value = true;
+        layout.showNotice(t("remote.connectionLost"), "error");
+      }
+    }
+    return;
+  }
   workspace.record(event);
   if (event.type === "agent") {
     session.onAgentEvent(event.payload);
@@ -554,6 +601,12 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <CommandPalette @run="runCommand" />
+  <div v-if="remoteDisconnected" class="remote-disconnected" role="alert">
+    <span>{{ t("remote.connectionLost") }}</span>
+    <Button data-action="remote-reconnect" variant="outline" :disabled="session.loading" @click="reconnectRemote">
+      {{ session.loading ? t("remote.connecting") : t("remote.reconnect") }}
+    </Button>
+  </div>
   <ImagePreview />
   <DialogRoot :open="renameOpen" @update:open="renameOpen = $event">
     <DialogPortal>
@@ -595,6 +648,7 @@ onBeforeUnmount(() => {
     :directory-busy="remoteDirectoryBusy"
     :busy="wslBusy"
     :error="wslError"
+    :stages="remoteStages"
     @close="closeRemoteDialog"
     @back="resetRemoteConnection"
     @browse-directory="browseRemoteDirectory"

@@ -36,7 +36,7 @@ export function validateRouteInput(
     case "wsl.connect":
       return {
         distro: str(v.distro, "distro"),
-        cwd: str(v.cwd, "cwd"),
+        cwd: v.browse === true ? str(v.cwd, "cwd", true) ?? "" : str(v.cwd, "cwd"),
         ...(v.browse === true ? { browse: true } : {}),
       };
     case "ssh.connect":
@@ -46,6 +46,7 @@ export function validateRouteInput(
         ...(v.browse === true ? { browse: true } : {}),
       };
     case "remote.openProject":
+    case "remote.directories":
     case "workspace.directories":
     case "workspace.open":
       return { path: str(v.path, "path") };

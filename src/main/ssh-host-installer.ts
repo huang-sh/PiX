@@ -3,10 +3,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { RemoteConnectStage } from "../shared/types.js";
 import {
   PIX_HOST_VERSION,
   PIX_REMOTE_PROTOCOL,
 } from "../shared/remote-protocol.js";
+
+export interface RemoteConnectOptions {
+  signal?: AbortSignal;
+  onProgress?: (stage: RemoteConnectStage) => void;
+}
 
 export function validateSshHost(host: string) {
   if (!/^[a-z0-9_.@:-]+$/iu.test(host) || host.startsWith("-"))
@@ -56,11 +62,14 @@ function run(
   command: string,
   args: string[],
   timeoutMs = 120_000,
+  signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   return new Promise((accept, reject) => {
     const child = spawn(command, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
+      signal,
     });
     let stdout = "";
     let stderr = "";
@@ -80,7 +89,7 @@ function run(
       clearTimeout(timer);
       reject(error);
     });
-    child.once("exit", (code) => {
+    child.once("close", (code) => {
       clearTimeout(timer);
       if (code === 0) accept(stdout.trim());
       else reject(new Error(stderr.trim() || `${command} exited with ${code}`));
@@ -98,14 +107,41 @@ const sshArgs = (host: string, command: string) => [
   command,
 ];
 
-const ssh = (host: string, command: string, timeoutMs?: number) =>
-  run("ssh", sshArgs(host, command), timeoutMs);
-
-export async function ensureSshHostInstalled(hostInput: string, force = false) {
+export async function ensureSshHostInstalled(hostInput: string, force = false, options: RemoteConnectOptions = {}) {
   const host = validateSshHost(hostInput);
+  return ensureHostInstalled({
+    exec: (command, timeoutMs) => run("ssh", sshArgs(host, command), timeoutMs, options.signal),
+    upload: async (source, stage) => {
+      await run("scp", ["-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+        ...["dist", "bin", "package.json", "package-lock.json"].map((path) => resolve(source, path)),
+        `${host}:${stage}/`], 120_000, options.signal);
+    },
+  }, force, options);
+}
+
+export async function ensureWslHostInstalled(distro: string, force = false, options: RemoteConnectOptions = {}) {
+  if (!distro || distro.startsWith("-") || /[\r\n\0]/u.test(distro)) throw new Error("Select a WSL distribution");
+  const wsl = (args: string[], timeoutMs?: number) =>
+    run("wsl.exe", ["-d", distro, "--exec", ...args], timeoutMs, options.signal);
+  return ensureHostInstalled({
+    exec: (command, timeoutMs) => wsl(["sh", "-lc", command], timeoutMs),
+    upload: async (source, stage) => {
+      const linuxSource = await wsl(["wslpath", "-a", "-u", source]);
+      await wsl(["cp", "-R", ...["dist", "bin", "package.json", "package-lock.json"].map((path) => `${linuxSource}/${path}`), `${stage}/`]);
+    },
+  }, force, options);
+}
+
+async function ensureHostInstalled(transport: {
+  exec(command: string, timeoutMs?: number): Promise<string>;
+  upload(source: string, stage: string): Promise<void>;
+}, force: boolean, options: RemoteConnectOptions) {
+  const { signal, onProgress } = options;
+  const { exec } = transport;
+  signal?.throwIfAborted();
+  onProgress?.("checking");
   if (!force) try {
-    const output = await ssh(
-      host,
+    const output = await exec(
       'test -x "$HOME/.pix/server/current/bin/pix-agent-host" && "$HOME/.pix/server/current/bin/pix-agent-host" version',
       30_000,
     );
@@ -115,7 +151,12 @@ export async function ensureSshHostInstalled(hostInput: string, force = false) {
       version.protocol === PIX_REMOTE_PROTOCOL
     )
       return;
-  } catch {}
+  } catch (error) {
+    signal?.throwIfAborted();
+    // Authentication and network failures will not be fixed by installing a host.
+    if (/permission denied(?: \([^\r\n)]+\)|, please try again)|host key verification|could not resolve|connection (?:refused|timed out)|no route to host/iu.test(String(error)))
+      throw error;
+  }
 
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const source = [
@@ -127,6 +168,8 @@ export async function ensureSshHostInstalled(hostInput: string, force = false) {
   for (const path of [
     resolve(source, "dist"),
     resolve(source, "bin/pix-agent-host"),
+    resolve(source, "bin/install-host"),
+    resolve(source, "bin/check-runtime.mjs"),
     resolve(source, "package.json"),
     resolve(source, "package-lock.json"),
   ]) {
@@ -134,86 +177,30 @@ export async function ensureSshHostInstalled(hostInput: string, force = false) {
       throw new Error(`PiX server bundle is missing: ${path}`);
   }
 
-  const system = (
-    await ssh(host, 'printf "%s\\n" "$HOME"; uname -m', 30_000)
-  ).split(/\r?\n/u);
-  const home = system[0] ?? "";
-  const machine = system[1] ?? "";
-  const arch = machine === "x86_64" ? "x64" : machine === "aarch64" ? "arm64" : "";
-  if (!arch) throw new Error(`Unsupported SSH host architecture: ${machine}`);
-
-  const nodeVersion = process.versions.node;
+  const home = await exec('printf %s "$HOME"', 30_000);
+  if (!home.startsWith("/") || /[\r\n\0]/u.test(home)) throw new Error("Invalid remote home directory");
   const root = `${home}/.pix/server`;
-  const runtime = `${root}/runtime/node-v${nodeVersion}-linux-${arch}`;
-  const node = `${runtime}/bin/node`;
-  const npm = `${runtime}/lib/node_modules/npm/bin/npm-cli.js`;
   const target = `${root}/versions/${PIX_HOST_VERSION}-${Date.now()}`;
-  const stage = await ssh(
-    host,
+  const stage = await exec(
     `mkdir -p ${quote(root)} ${quote(`${root}/versions`)} && mktemp -d ${quote(`${root}/.install-XXXXXX`)}`,
   );
+  if (!stage.startsWith(`${root}/.install-`) || /[\r\n\0]/u.test(stage) || stage.slice(root.length + 1).includes("/"))
+    throw new Error("Invalid remote staging directory");
 
   try {
-    const hasNode =
-      (await ssh(
-        host,
-        `if test -x ${quote(node)}; then printf yes; else printf no; fi`,
-        30_000,
-      )) === "yes";
-    if (!hasNode) {
-      const installNode = `
-set -eu
-runtime=$1
-version=$2
-arch=$3
-parent=$(dirname "$runtime")
-mkdir -p "$parent"
-tmp=$(mktemp -d "$parent/.node-install-XXXXXX")
-trap 'rm -rf -- "$tmp"' EXIT
-file="node-v$version-linux-$arch.tar.xz"
-base="https://nodejs.org/dist/v$version"
-cache=$(dirname "$parent")/cache
-mkdir -p "$cache"
-curl -fsSL "$base/SHASUMS256.txt" -o "$cache/SHASUMS256.txt"
-if ! (cd "$cache" && grep "  $file$" SHASUMS256.txt | sha256sum -c - >/dev/null 2>&1); then
-  rm -f "$cache/$file"
-  curl -fL --retry 3 "$base/$file" -o "$cache/$file"
-fi
-(cd "$cache" && grep "  $file$" SHASUMS256.txt | sha256sum -c -)
-tar -xJf "$cache/$file" -C "$tmp"
-mv "$tmp/node-v$version-linux-$arch" "$runtime"
-`;
-      await ssh(
-        host,
-        `sh -lc ${quote(installNode)} sh ${quote(runtime)} ${quote(nodeVersion)} ${quote(arch)}`,
-        300_000,
-      );
-    }
-    await run("scp", ["-r", resolve(source, "dist"), `${host}:${stage}/dist`]);
-    await run("scp", [
-      resolve(source, "package.json"),
-      resolve(source, "package-lock.json"),
-      `${host}:${stage}/`,
-    ]);
-    await ssh(host, `mkdir -p ${quote(`${stage}/bin`)}`);
-    await run("scp", [
-      resolve(source, "bin/pix-agent-host"),
-      `${host}:${stage}/bin/pix-agent-host`,
-    ]);
-    await ssh(
-      host,
-      [
-        "set -eu",
-        `chmod 700 ${quote(`${stage}/bin/pix-agent-host`)}`,
-        `ln -s ${quote(runtime)} ${quote(`${stage}/node`)}`,
-        `PATH=${quote(`${runtime}/bin`)}:"$PATH" ${quote(node)} ${quote(npm)} ci --prefix ${quote(stage)} --omit=dev --no-audit --no-fund`,
-        `mv ${quote(stage)} ${quote(target)}`,
-        `ln -sfn ${quote(target)} ${quote(`${root}/current`)}`,
-      ].join("; "),
+    onProgress?.("upload");
+    await transport.upload(source, stage);
+    onProgress?.("install");
+    await exec(
+      `sh ${quote(`${stage}/bin/install-host`)} ${quote(root)} ${quote(stage)} ${quote(target)}`,
       300_000,
     );
   } catch (error) {
-    await ssh(host, `rm -rf -- ${quote(stage)}`).catch(() => undefined);
+    // A cancelled SSH command may still be winding down remotely. Leave its
+    // unique staging directory alone rather than racing it with a deletion.
+    // Preserve the stage on timeout too: a remote npm process may still own it.
+    if (!signal?.aborted && !/timed out/iu.test(String(error)))
+      await exec(`rm -rf -- ${quote(stage)}`, 5_000).catch(() => undefined);
     throw error;
   }
 }

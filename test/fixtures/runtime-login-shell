@@ -1,0 +1,4 @@
+#!/bin/sh
+# Reproduce profiles that leave background jobs holding stdout open.
+sleep 4 &
+printf 'Login greeting\nPIX_NODE_PATH=%s\n' "${PIX_TEST_LOGIN_NODE:-}"

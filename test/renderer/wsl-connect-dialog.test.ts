@@ -19,6 +19,17 @@ function mountDialog(overrides: Record<string, unknown> = {}) {
 }
 
 describe("remote connect wizard", () => {
+  it("shows actual connection stages and allows cancellation while busy", async () => {
+    const wrapper = mountDialog();
+    await wrapper.find('[data-action="remote-next"]').trigger("click");
+    await wrapper.find('[list="pix-ssh-hosts"]').setValue("alpha");
+    await wrapper.find('[data-action="wsl-submit"]').trigger("click");
+    await wrapper.setProps({ busy: true, stages: ["checking", "install"] });
+    expect(wrapper.find(".remote-stage-log").text()).toContain(i18n.global.t("remote.stages.install"));
+    expect(wrapper.find('[data-action="wsl-close"]').attributes("disabled")).toBeUndefined();
+    await wrapper.find('[data-action="remote-cancel"]').trigger("click");
+    expect(wrapper.emitted("close")).toHaveLength(1);
+  });
   it("advances from step 1 to step 2 and renders the ssh placeholder with a literal @", async () => {
     const wrapper = mountDialog();
     await wrapper.find('[data-action="remote-next"]').trigger("click");

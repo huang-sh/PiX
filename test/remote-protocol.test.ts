@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isProjectRoute } from "../src/shared/remote-protocol.js";
+import { readFileSync } from "node:fs";
+import { isProjectRoute, PIX_HOST_VERSION } from "../src/shared/remote-protocol.js";
+
+test("desktop, remote host and package locks share the product version", () => {
+  for (const path of ["package.json", "package-lock.json", "server/package.json", "server/package-lock.json"]) {
+    const manifest = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(manifest.version, PIX_HOST_VERSION, path);
+    if (manifest.packages) assert.equal(manifest.packages[""].version, PIX_HOST_VERSION, `${path} root package`);
+  }
+});
 
 test("remote host only accepts project-scoped routes", () => {
   assert.equal(isProjectRoute("workspace.read"), true);

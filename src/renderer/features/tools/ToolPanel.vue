@@ -30,12 +30,16 @@ import Button from "../../components/ui/Button.vue";
 import { desktop } from "../../api";
 import { useLayoutStore, type ContentTab } from "../../stores/layout";
 import { useWorkspaceStore, type WorkspaceTab } from "../../stores/workspace";
+import { useSessionStore } from "../../stores/session";
 import FileTree from "./FileTree.vue";
 import { filterFileTree } from "./file-tree";
 import TerminalView from "./TerminalView.vue";
 
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
+const session = useSessionStore();
+const terminalConnected = computed(() => !workspace.project?.remote ||
+  Boolean(session.projects.find((record) => record.id === session.activeProjectId)?.connected));
 const { t } = useI18n();
 
 // reka-ui 2.10.4 boots px-sized panels at their min size (initial layout runs
@@ -235,6 +239,7 @@ async function save(tab: WorkspaceTab) {
       v-show="layout.contentSection === 'terminal'"
       :active="layout.contentSection === 'terminal'"
       :project-key="terminalProjectKey"
+      :connected="terminalConnected"
     />
 
     <div v-if="layout.contentSection === 'home'" class="tool-home">

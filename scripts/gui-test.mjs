@@ -10,6 +10,14 @@ const allowEmpty = process.env.PIX_GUI_EMPTY === "1";
 const testHome = join(artifacts, allowEmpty ? "gui-home-empty" : "gui-home");
 const verifyWsl = process.argv.includes("--wsl");
 const verifySsh = process.argv.includes("--ssh");
+const sshTestArgs = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "stempdac.hpc4ai.unito.it"];
+const sshWorkspace = verifySsh
+  ? String(spawnSync("ssh", [...sshTestArgs, "mktemp -d /tmp/pix-ssh-gui-XXXXXX"], { encoding: "utf8", windowsHide: true }).stdout).trim()
+  : "";
+if (verifySsh && !/^\/tmp\/pix-ssh-gui-[A-Za-z0-9]+$/.test(sshWorkspace))
+  throw new Error("Could not create the isolated SSH GUI test workspace");
+if (sshWorkspace && spawnSync("ssh", [...sshTestArgs, `mkdir -p '${sshWorkspace}/sample'`], { windowsHide: true }).status !== 0)
+  throw new Error("Could not prepare the SSH GUI test directory");
 const wslWorkspace = verifyWsl
   ? String(
       spawnSync(
@@ -152,6 +160,16 @@ class Cdp {
 let cdp;
 let remoteSshResult;
 let imagePreview = false;
+let wslStoppedPid = 0;
+let wslLaunchDirectory = "";
+function signalWslTestHost(pid, signal) {
+  if (!Number.isInteger(pid) || pid < 1 || !/^\/tmp\/pix-wsl-gui-[A-Za-z0-9]+$/.test(wslWorkspace))
+    throw new Error("Invalid WSL fault-injection target");
+  const result = spawnSync("wsl.exe", ["--exec", "sh", "-lc",
+    String.raw`if test -r "/proc/$1/cmdline"; then args=$(tr '\000' ' ' < "/proc/$1/cmdline"); case "$args" in *"--cwd $2 "*) kill "-$3" "$1" ;; *) exit 2 ;; esac; fi`,
+    "sh", String(pid), wslLaunchDirectory, signal], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+  if (result.status !== 0) throw new Error(`WSL test signal failed (${result.status}): ${result.stderr}`);
+}
 try {
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -249,6 +267,9 @@ try {
       if (!(await cdp.evaluate("Boolean(document.querySelector('[data-wsl-path]'))")))
         throw new Error("Remote directory browser did not open");
     }, 45_000);
+    // The wizard starts the host at home, then changes its logical workspace.
+    // Its process argv still contains that original directory.
+    wslLaunchDirectory = await cdp.evaluate("window.__pixTest.state().remoteBrowseRoot");
     await cdp.evaluate(`(() => {
       const input = document.querySelector('[data-wsl-path]');
       input.value = ${JSON.stringify(wslWorkspace)};
@@ -259,6 +280,36 @@ try {
       if (!(await cdp.evaluate("window.__pixTest.state().project?.remote?.kind === 'wsl' && Boolean(document.querySelector('.project-row.active .project-connection.connected'))")))
         throw new Error("PiX did not switch to the WSL project");
     }, 45_000);
+    await cdp.evaluate("window.pix.invoke('settings.update', { scope: 'project', patch: { defaultProjectTrust: 'always' } })");
+    const pidResult = await cdp.evaluate("window.pix.invoke('shell.run', { command: 'printf %s \"$PPID\"' })");
+    wslStoppedPid = Number(pidResult.output.trim());
+    signalWslTestHost(wslStoppedPid, "STOP");
+    const faultStarted = Date.now();
+    await retry(async () => {
+      const value = await cdp.evaluate(`({
+        banner: Boolean(document.querySelector('[data-action=remote-reconnect]')),
+        connected: Boolean(document.querySelector('.project-row.active .project-connection.connected'))
+      })`);
+      if (!value.banner || value.connected) throw new Error(`WSL disconnect state is wrong: ${JSON.stringify(value)}`);
+    }, 40_000);
+    const faultMs = Date.now() - faultStarted;
+    const disconnectedShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, "remote-wsl-disconnected.png"), Buffer.from(disconnectedShot.data, "base64"));
+    signalWslTestHost(wslStoppedPid, "CONT");
+    wslStoppedPid = 0;
+    await cdp.evaluate("document.querySelector('[data-action=remote-reconnect]').click()");
+    await retry(async () => {
+      const value = await cdp.evaluate(`({
+        banner: Boolean(document.querySelector('[data-action=remote-reconnect]')),
+        connected: Boolean(document.querySelector('.project-row.active .project-connection.connected')),
+        loading: window.__pixTest.state().loading
+      })`);
+      if (value.banner || !value.connected || value.loading) throw new Error(`WSL GUI reconnect failed: ${JSON.stringify(value)}`);
+    }, 45_000);
+    const connectedShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, "remote-wsl-reconnected.png"), Buffer.from(connectedShot.data, "base64"));
+    writeFileSync(join(artifacts, "gui-wsl-remote.json"), JSON.stringify({ passed: true, faultMs, checks: ["wizard", "workspace", "disconnect-banner", "offline-indicator", "reconnect-button"] }, null, 2));
+    console.log(JSON.stringify({ wslGuiReconnect: true, faultMs }));
     await cdp.evaluate("document.querySelector('[data-action=workspace-picker]').click()");
     await retry(async () => {
       if (!(await cdp.evaluate("Boolean(document.querySelector('[data-action=disconnect-wsl]'))")))
@@ -269,6 +320,9 @@ try {
       if (!(await cdp.evaluate("!window.__pixTest.state().project?.remote && Boolean(document.querySelector('[data-action=workspace-picker]')) && Boolean(document.querySelector('.project-connection:not(.connected)'))")))
         throw new Error("PiX did not return to the local project");
     });
+    // Switching workspaces intentionally does not auto-open a session. Select
+    // the local fixture explicitly for the remaining non-remote GUI checks.
+    if (!allowEmpty) await cdp.evaluate("window.__pixTest.openSession(window.__pixTest.state().sessions[0].path)");
   } else if (verifySsh) {
     await cdp.evaluate("document.querySelector('[data-action=remote-next]').click()");
     await retry(async () => {
@@ -299,7 +353,7 @@ try {
     const browseStarted = Date.now();
     await cdp.evaluate(`(() => {
       const input = document.querySelector('[data-wsl-path]');
-      input.value = '/data20T';
+      input.value = ${JSON.stringify(sshWorkspace)};
       input.dispatchEvent(new Event('input', { bubbles: true }));
       [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Go').click();
     })()`);
@@ -308,8 +362,8 @@ try {
         path: window.__pixTest.state().remoteBrowseRoot,
         error: document.querySelector('.wsl-dialog-error')?.textContent
       })`);
-      if (value.path !== "/data20T" || value.error)
-        throw new Error(`SSH could not browse /data20T: ${JSON.stringify(value)}`);
+      if (value.path !== sshWorkspace || value.error)
+        throw new Error(`SSH could not browse the test workspace: ${JSON.stringify(value)}`);
     });
     remoteSshResult.browseMs = Date.now() - browseStarted;
     Object.assign(remoteSshResult, await cdp.evaluate(`({
@@ -326,7 +380,7 @@ try {
         dialog: Boolean(document.querySelector('[data-wsl-dialog]')),
         path: window.__pixTest.state().project?.path
       })`);
-      if (value.dialog || value.path !== "/data20T")
+      if (value.dialog || value.path !== sshWorkspace)
         throw new Error("SSH wizard did not close after opening the folder");
     });
     remoteSshResult.openMs = Date.now() - openStarted;
@@ -974,6 +1028,9 @@ try {
   console.log(JSON.stringify(result, null, 2));
   }
 } finally {
+  if (wslStoppedPid) {
+    try { signalWslTestHost(wslStoppedPid, "CONT"); } catch (error) { console.error(error); }
+  }
   await cdp?.close();
   if (process.platform === "win32" && child.pid)
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
@@ -988,6 +1045,8 @@ try {
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.unref();
+  if (sshWorkspace)
+    spawnSync("ssh", [...sshTestArgs, `test "$(readlink -f '${sshWorkspace}')" = '${sshWorkspace}' && rm -rf -- '${sshWorkspace}'`], { stdio: "ignore", windowsHide: true });
   if (wslWorkspace)
     spawnSync(
       "wsl.exe",

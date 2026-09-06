@@ -56,6 +56,14 @@ PiX 把会话组织成一张从左到右生长的图：
 - **内容工作区**：打开项目文件、查看 Git 更改、浏览网页。
 - 各面板均可折叠、恢复、调整大小；通过 SSH 或 WSL 连接远程 Linux 工作区时，体验与本地一致。
 
+## 远程 Node 环境
+
+SSH 和 WSL 共用安装流程：保留正常的已选 Node；首次安装优先使用 PATH 或交互登录环境（如 nvm）中的 Linux Node，最低版本为 22.19.0。安装依赖、启动服务、WebSocket 连接和真实终端检查全部通过后，才切换当前安装。
+
+找不到兼容环境时，才使用 PiX 固定版本的私有 Node；不再跟随桌面端 Node 的补丁版本重复下载。启动使用固定的可执行文件路径，Node 版本变化会重新检查；重新连接时可修复缺失或不兼容的环境。不会修改系统 Node，也不会自动删除旧安装或共享运行时。
+
+开发测试：`node --test scripts/remote-runtime.test.mjs`（Windows 默认使用 Ubuntu-24.04，可设置 `PIX_TEST_WSL_DISTRO`）。构建服务端后，`node scripts/runtime-live-test.mjs --ssh HOST` 或 `--wsl DISTRO` 在独立临时目录验证真实 Node 复用，不切换正式安装。
+
 ## 自定义模型
 
 Graph node 和 chat panel 的输入框均支持选择、粘贴或拖入图片，并可预览、移除和只发送图片。需选择支持图片的模型；支持 PNG、JPEG、WebP、GIF，每次最多 8 张，单张 5 MB、合计 10 MB。图片随 Pi 会话保存，可在聊天记录和节点预览中查看。

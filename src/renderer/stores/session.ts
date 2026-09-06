@@ -112,8 +112,18 @@ export const useSessionStore = defineStore("session", {
       const record = this.projects.find((item) => item.id === this.activeProjectId);
       if (record) {
         record.sessions = this.sessions;
-        record.connected = true;
+        if (!record.project.remote) record.connected = true;
       }
+    },
+    disconnected(id: string) {
+      const record = this.projects.find((item) => item.id === id);
+      if (record) record.connected = false;
+      if (this.activeProjectId !== id) return;
+      this.activity = undefined;
+      if (this.current) this.current.runtime = {
+        ...this.current.runtime, available: false, isStreaming: false,
+        isCompacting: false, isRetrying: false,
+      };
     },
     applySnapshot(snapshot: SessionSnapshot) {
       const pending = this.pendingPrompt;

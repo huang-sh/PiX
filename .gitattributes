@@ -1,0 +1,2 @@
+server/bin/* text eol=lf
+test/fixtures/runtime-* text eol=lf

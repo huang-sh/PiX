@@ -12,6 +12,7 @@ import type {
   SessionSummary,
   SettingsBundle,
   TerminalSession,
+  RemoteConnectStage,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
 import { validateRouteInput } from "../shared/contracts.js";
@@ -64,6 +65,10 @@ export class MainController {
   wsl?: WslHostClient;
   wslSettings?: SettingsBundle;
   stopWslEvents?: () => void;
+  private stopRemoteDisconnect?: () => void;
+  private remoteAttempt?: AbortController;
+  private pendingRemote?: { client: WslHostClient; project: ProjectInfo; abort: AbortController };
+  private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
   remoteBrokerModels = new Set<string>();
   listeners = new Set<(e: DesktopEvent) => void>();
   constructor(path: string | null, platform: Platform) {
@@ -110,8 +115,10 @@ export class MainController {
   }
   remoteEvent(event: DesktopEvent) {
     const current = (event.payload as { current?: SessionSnapshot } | null)?.current;
-    if (event.type === "sessions" && current?.session.path)
+    if (event.type === "sessions" && current?.session.path) {
+      this.current = current;
       this.rememberSnapshot(current);
+    }
     this.emit(event);
   }
   configure(path: string | null) {
@@ -147,6 +154,17 @@ export class MainController {
   }
   async wslBootstrap() {
     if (!this.wsl) throw new Error("Remote host is not connected");
+    if (!this.wsl.connected && this.wslSettings) {
+      const record = this.projectGroups().find((record) => record.id === projectId(this.project!));
+      return {
+        project: this.project,
+        sessions: record?.sessions ?? [],
+        projects: this.projectGroups(),
+        settings: this.mergedWslSettings(this.wslSettings),
+        layout: this.settings.layout(),
+        current: this.current ? { ...this.current, runtime: unavailable() } : undefined,
+      };
+    }
     const [sessions, settings] = await Promise.all([
       this.wsl.request("session.list"),
       this.wsl.request<SettingsBundle>("settings.get"),
@@ -167,7 +185,7 @@ export class MainController {
   }
   async syncModelBroker(client: WslHostClient) {
     const models = await this.pi.control({ action: "getModels", broker: true }) as BrokerModel[];
-    this.remoteBrokerModels = new Set(
+    const allowed = new Set(
       models.map((model) => `${model.provider}\0${model.id}`),
     );
     await client.request("agent.control", {
@@ -175,10 +193,12 @@ export class MainController {
       providers: [...new Set(models.map((model) => model.provider))],
       models,
     });
+    this.brokerModels.set(client, allowed);
+    if (client === this.wsl) this.remoteBrokerModels = allowed;
   }
   async attachModelBroker(client: WslHostClient) {
     client.setModelBroker(async (request, signal) => {
-      if (!this.remoteBrokerModels.has(`${request.provider}\0${request.modelId}`))
+      if (!this.brokerModels.get(client)?.has(`${request.provider}\0${request.modelId}`))
         throw new Error("The remote host requested a model that is not enabled locally");
       const runtime = await this.pi.modelRuntime();
       const model = runtime.getModel(request.provider, request.modelId);
@@ -191,8 +211,11 @@ export class MainController {
     await this.syncModelBroker(client);
   }
   async closeWsl() {
+    await this.cancelRemote();
     this.stopWslEvents?.();
     this.stopWslEvents = undefined;
+    this.stopRemoteDisconnect?.();
+    this.stopRemoteDisconnect = undefined;
     const client = this.wsl;
     this.wsl = undefined;
     this.wslSettings = undefined;
@@ -200,61 +223,112 @@ export class MainController {
     await client?.dispose();
   }
   async connectWsl(distro: string, cwd: string, browse = false) {
-    await this.closeWsl();
-    const client = await WslHostClient.installed({ distro, cwd });
-    this.wsl = client;
-    this.stopWslEvents = client.onEvent((event) => this.remoteEvent(event));
-    this.current = undefined;
-    this.project = {
-      name: posix.basename(cwd.replace(/\/+$/, "")) || cwd,
-      path: cwd,
-      remote: { kind: "wsl", distro },
-    };
-    if (browse) return { project: this.project };
-    try {
-      await this.attachModelBroker(client);
-      return await this.wslBootstrap();
-    } catch (error) {
-      await this.closeWsl();
-      throw error;
-    }
+    return this.connectRemote({ kind: "wsl", distro }, cwd, browse);
   }
   async connectSsh(host: string, cwd: string, browse = false) {
-    await this.closeWsl();
-    const client = await WslHostClient.connectSsh(host, cwd);
-    this.wsl = client;
-    this.stopWslEvents = client.onEvent((event) => this.remoteEvent(event));
-    this.current = undefined;
-    const remoteCwd = client.hello.cwd;
-    this.project = {
-      name: posix.basename(remoteCwd.replace(/\/+$/, "")) || remoteCwd,
-      path: remoteCwd,
-      remote: { kind: "ssh", host },
-    };
-    if (browse) return { project: this.project };
+    return this.connectRemote({ kind: "ssh", host }, cwd, browse);
+  }
+  async cancelRemote() {
+    const attempt = this.remoteAttempt;
+    const pending = this.pendingRemote;
+    this.remoteAttempt = undefined;
+    this.pendingRemote = undefined;
+    attempt?.abort(new Error("Remote connection cancelled"));
+    await pending?.client.dispose();
+    return { cancelled: true };
+  }
+  private async connectRemote(remote: NonNullable<ProjectInfo["remote"]>, cwd: string, browse: boolean) {
+    // Install the new attempt synchronously, so overlapping requests cannot
+    // finish out of order and replace a newer connection.
+    const cancelled = this.cancelRemote();
+    const abort = new AbortController();
+    this.remoteAttempt = abort;
+    let client: WslHostClient | undefined;
     try {
-      await this.attachModelBroker(client);
-      return await this.wslBootstrap();
+      await cancelled;
+      abort.signal.throwIfAborted();
+      const options = {
+        signal: abort.signal,
+        onProgress: (stage: RemoteConnectStage) => {
+          if (!abort.signal.aborted) this.emit({ type: "remote.progress", payload: { stage } });
+        },
+      };
+      client = remote.kind === "ssh"
+        ? await WslHostClient.connectSsh(remote.host, cwd, options)
+        : await WslHostClient.installed({ distro: remote.distro, cwd, ...options });
+      abort.signal.throwIfAborted();
+      const connectedClient = client;
+      abort.signal.addEventListener("abort", () => { void connectedClient.dispose(); }, { once: true });
+      const path = client.hello.cwd;
+      const candidate = { client, abort, project: {
+        name: posix.basename(path.replace(/\/+$/u, "")) || path,
+        path,
+        remote,
+      } };
+      this.pendingRemote = candidate;
+      if (browse) return { project: candidate.project };
+      return await this.commitRemote(candidate);
     } catch (error) {
-      await this.closeWsl();
+      await client?.dispose();
+      if (this.remoteAttempt === abort) {
+        this.remoteAttempt = undefined;
+        this.pendingRemote = undefined;
+      }
       throw error;
     }
   }
-  async openRemoteProject(path: string) {
-    const remote = this.project?.remote;
-    if (!this.wsl || !remote)
-      throw new Error("Remote host is not connected");
-    const selected = await this.wsl.request<{ path: string }>("workspace.open", {
-      path,
-    });
-    await this.attachModelBroker(this.wsl);
+  private async commitRemote(candidate: NonNullable<MainController["pendingRemote"]>) {
+    const { client, abort, project } = candidate;
+    abort.signal.throwIfAborted();
+    this.emit({ type: "remote.progress", payload: { stage: "loading" } });
+    await this.attachModelBroker(client);
+    const [sessions, settings] = await Promise.all([
+      client.request<SessionSummary[]>("session.list"),
+      client.request<SettingsBundle>("settings.get"),
+    ]);
+    abort.signal.throwIfAborted();
+    if (!client.connected) throw new Error("Remote host disconnected before the workspace was ready");
+    this.settings.rememberProject(project, sessions);
+    const old = this.wsl;
+    this.stopWslEvents?.();
+    this.stopRemoteDisconnect?.();
+    this.wsl = client;
+    this.wslSettings = settings;
+    this.remoteBrokerModels = this.brokerModels.get(client) ?? new Set();
+    this.project = project;
     this.current = undefined;
-    this.project = {
+    this.pendingRemote = undefined;
+    this.remoteAttempt = undefined;
+    this.stopWslEvents = client.onEvent((event) => this.remoteEvent(event));
+    this.stopRemoteDisconnect = client.onDisconnect((error) => {
+      if (this.wsl !== client) return;
+      if (this.current) this.current = { ...this.current, runtime: unavailable() };
+      this.emit({ type: "remote.connection", payload: {
+        projectId: projectId(project), connected: false, message: error.message,
+      } });
+    });
+    const projects = this.projectGroups();
+    await old?.dispose();
+    return {
+      project, sessions, projects,
+      settings: this.mergedWslSettings(settings),
+      layout: this.settings.layout(), current: undefined,
+    };
+  }
+  async openRemoteProject(path: string) {
+    const candidate = this.pendingRemote;
+    if (!candidate) {
+      const remote = this.project?.remote;
+      if (!remote) throw new Error("Remote host is not connected");
+      return this.connectRemote(remote, path, false);
+    }
+    candidate.abort.signal.throwIfAborted();
+    const selected = await candidate.client.request<{ path: string }>("workspace.open", { path });
+    candidate.project = { ...candidate.project,
       name: posix.basename(selected.path.replace(/\/+$/u, "")) || selected.path,
       path: selected.path,
-      remote,
     };
-    return this.wslBootstrap();
+    return this.commitRemote(candidate);
   }
   async invokeWsl(route: ProjectRoute, v: Record<string, unknown>) {
     if (!this.wsl) throw new Error("Remote host is not connected");
@@ -348,7 +422,7 @@ export class MainController {
     return this.settings.projectHistory().map((record) => ({
       ...record,
       connected: record.project.remote
-        ? Boolean(this.wsl && record.id === active)
+        ? Boolean(this.wsl?.connected && record.id === active)
         : record.id === active,
     }));
   }
@@ -405,6 +479,11 @@ export class MainController {
     if (route === "wsl.list") return WslHostClient.distributions();
     if (route === "wsl.names") return WslHostClient.names();
     if (route === "ssh.list") return listSshHosts();
+    if (route === "remote.cancel") return this.cancelRemote();
+    if (route === "remote.directories") {
+      if (!this.pendingRemote) throw new Error("Connect to a remote host first");
+      return this.pendingRemote.client.request("workspace.directories", v);
+    }
     if (route === "wsl.connect")
       return this.connectWsl(String(v.distro), String(v.cwd), Boolean(v.browse));
     if (route === "ssh.connect")

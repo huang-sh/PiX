@@ -83,10 +83,25 @@ async function serve() {
     const message: HostMessage = { type: "event", sequence: ++sequence, event };
     for (const client of wss.clients) send(client, message);
   });
-  const shutdown = () => {
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     stopEvents();
-    controller.dispose();
-    wss.close(() => process.exit(0));
+    const timeout = setTimeout(() => process.exit(1), 5_000);
+    timeout.unref();
+    try {
+      controller.shell.dispose();
+      // An interrupted first turn may exist only in memory until its error
+      // response is appended. Drain it before disposing or exiting.
+      await controller.pi.close();
+    } catch (error) {
+      process.stderr.write(`Remote shutdown failed: ${String(error)}\n`);
+      process.exitCode = 1;
+    } finally {
+      controller.dispose();
+      wss.close(() => { clearTimeout(timeout); process.exit(process.exitCode ?? 0); });
+    }
   };
 
   wss.on("connection", (socket) => {

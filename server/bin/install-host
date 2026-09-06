@@ -1,0 +1,93 @@
+#!/bin/sh
+# Shared by SSH and WSL. Everything is staged; current changes only after checks.
+set -eu
+root=$(readlink -f "$1")
+stage=$(readlink -f "$2")
+target=$3
+case "$stage" in "$root"/.install-*) ;; *) echo 'Invalid PiX staging directory' >&2; exit 2 ;; esac
+test "$(dirname "$stage")" = "$root"
+test "$(dirname "$target")" = "$root/versions"
+test ! -e "$target"
+cd "$stage"
+
+# Independent of the desktop's Node/Electron version; verified by PiX live tests.
+fallback_version=24.18.0
+case $(uname -m) in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) echo 'Unsupported architecture' >&2; exit 2 ;; esac
+runtime="$root/runtime/node-v$fallback_version-linux-$arch"
+checker="$stage/bin/check-runtime.mjs"
+selected=
+tried=''
+
+try_node() {
+  candidate=$1
+  test -n "$candidate" && test -x "$candidate" || return 1
+  node=$(timeout -k 2 10 "$candidate" "$checker" --probe 2>/dev/null) || return 1
+  case "$node" in /*) ;; *) return 1 ;; esac
+  case "$tried" in *"|$node|"*) return 1 ;; esac
+  tried="$tried|$node|"
+  npm=$(readlink -f "$(dirname "$node")/npm")
+  if ! test -f "$npm"; then
+    npm=$(command -v npm || true)
+    test -n "$npm" || return 1
+    npm=$(readlink -f "$npm")
+  fi
+  timeout -k 2 10 "$node" "$npm" --version >/dev/null 2>&1 || return 1
+  printf 'PiX: checking Node %s\n' "$node" >&2
+  if ! PATH="$(dirname "$node"):$PATH" "$node" "$npm" ci --prefix "$stage" --omit=dev --no-audit --no-fund; then
+    return 1
+  fi
+  if ! "$node" "$checker" --check; then
+    printf 'PiX: runtime check failed for %s; trying fallback\n' "$node" >&2
+    return 1
+  fi
+  selected=$node
+}
+
+# Keep an already-selected runtime stable across PiX upgrades.
+if ! try_node "$root/current/node/bin/node"; then
+  if ! try_node "$(command -v node || true)"; then
+    # nvm and environment modules are often initialized only in interactive shells.
+    # A profile may start background jobs which keep a pipe open after the shell
+    # exits. Capture to a file so those jobs cannot hang runtime discovery.
+    login_output=$(mktemp "$stage/.login-XXXXXX")
+    # A separate session also prevents WSL job control from suspending the shell.
+    setsid timeout -k 2 8 "${SHELL:-/bin/bash}" -ilc 'printf "PIX_NODE_PATH=%s\n" "$(command -v node)"' < /dev/null > "$login_output" 2>/dev/null || true
+    login_node=$(sed -n 's/^PIX_NODE_PATH=\(\/.*\)$/\1/p' "$login_output" | tail -n 1)
+    rm -f "$login_output"
+    if ! try_node "$login_node"; then
+      if ! timeout -k 2 10 "$runtime/bin/node" "$checker" --probe >/dev/null 2>&1; then
+        printf 'PiX: installing private Node %s\n' "$fallback_version" >&2
+        mkdir -p "$root/runtime" "$root/cache"
+        tmp=$(mktemp -d "$root/runtime/.node-install-XXXXXX")
+        trap 'rm -rf -- "$tmp"' EXIT
+        file="node-v$fallback_version-linux-$arch.tar.xz"
+        base="https://nodejs.org/dist/v$fallback_version"
+        curl -fsSL "$base/SHASUMS256.txt" -o "$tmp/SHASUMS256.txt"
+        if ! (cd "$root/cache" && grep "  $file$" "$tmp/SHASUMS256.txt" | sha256sum -c - >/dev/null 2>&1); then
+          curl -fL --retry 3 "$base/$file" -o "$tmp/$file"
+          (cd "$tmp" && grep "  $file$" SHASUMS256.txt | sha256sum -c -)
+          mv "$tmp/$file" "$root/cache/$file"
+        fi
+        tar -xJf "$root/cache/$file" -C "$tmp"
+        # Never overwrite a damaged runtime: an existing process may still own it.
+        # Another installer may also have completed a usable copy meanwhile.
+        if ! timeout -k 2 10 "$runtime/bin/node" "$checker" --probe >/dev/null 2>&1; then
+          if test -e "$runtime" || test -L "$runtime"; then runtime="$runtime-$(basename "$tmp")"; fi
+          mv -T "$tmp/node-v$fallback_version-linux-$arch" "$runtime"
+        fi
+        rm -rf -- "$tmp"
+        trap - EXIT
+      fi
+      try_node "$runtime/bin/node" || { echo 'No compatible PiX Node runtime; current installation unchanged' >&2; exit 1; }
+    fi
+  fi
+fi
+
+mkdir -p "$stage/node/bin"
+ln -s "$selected" "$stage/node/bin/node"
+chmod 700 "$stage/bin/pix-agent-host"
+mv "$stage" "$target"
+link="$root/.current-$(basename "$stage")"
+ln -s "$target" "$link"
+mv -Tf "$link" "$root/current"
+printf 'PiX: activated %s using %s\n' "$target" "$selected"

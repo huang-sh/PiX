@@ -414,6 +414,8 @@ export type DesktopRoute =
   | "ssh.list"
   | "ssh.connect"
   | "remote.disconnect"
+  | "remote.cancel"
+  | "remote.directories"
   | "remote.openProject"
   | "session.list"
   | "session.open"
@@ -439,9 +441,10 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection";
   payload: unknown;
 }
+export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";
 export interface DesktopApi {
   invoke<T = unknown>(route: DesktopRoute, input?: unknown): Promise<T>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;

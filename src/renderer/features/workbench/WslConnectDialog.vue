@@ -13,7 +13,7 @@ import {
   TerminalSquare,
   X,
 } from "@lucide/vue";
-import type { FileNode, WslDistribution } from "../../../shared/types";
+import type { FileNode, WslDistribution, RemoteConnectStage } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
 
 const props = defineProps<{
@@ -27,6 +27,7 @@ const props = defineProps<{
   directoryBusy: boolean;
   busy: boolean;
   error?: string;
+  stages?: RemoteConnectStage[];
 }>();
 const emit = defineEmits<{
   close: [];
@@ -155,7 +156,7 @@ function previous() {
 
 <template>
   <template v-if="open">
-    <div class="dialog-overlay remote-overlay" @click.self="step !== 3 && emit('close')" />
+    <div class="dialog-overlay remote-overlay" @click.self="emit('close')" />
     <form class="remote-dialog" data-wsl-dialog @submit.prevent>
       <aside class="remote-stepper">
         <div class="remote-stepper-title"><MonitorUp :size="18" /> {{ t("remote.sidebarTitle") }}</div>
@@ -176,7 +177,7 @@ function previous() {
             <h2>{{ title }}</h2>
             <p>{{ subtitle }}</p>
           </div>
-          <Button data-action="wsl-close" variant="ghost" size="icon" type="button" :title="t('common.close')" :disabled="step === 3" @click="emit('close')">
+          <Button data-action="wsl-close" variant="ghost" size="icon" type="button" :title="t('common.close')" @click="emit('close')">
             <X :size="18" />
           </Button>
         </header>
@@ -241,6 +242,11 @@ function previous() {
               <h3>{{ busy ? t('remote.preparing') : t('remote.finishing') }}</h3>
               <p>{{ t("remote.connectingDetail") }}</p>
               <div class="remote-progress"><i /></div>
+              <ol v-if="stages?.length" class="remote-stage-log" aria-label="Connection progress">
+                <li v-for="(stage, index) in stages" :key="index" :class="{ current: index === stages.length - 1 }">
+                  {{ t(`remote.stages.${stage}`) }}
+                </li>
+              </ol>
             </div>
 
             <div v-else class="remote-browser">
@@ -275,7 +281,7 @@ function previous() {
           <Button v-else-if="step !== 3" variant="outline" type="button" :disabled="busy" @click="previous">
             <ChevronLeft :size="15" /> {{ t("common.back") }}
           </Button>
-          <span v-else />
+          <Button v-else data-action="remote-cancel" variant="outline" type="button" @click="emit('close')">{{ t("common.cancel") }}</Button>
           <Button v-if="step === 1" data-action="remote-next" class="remote-primary" type="button" @click="step = 2">{{ t("common.next") }} <ChevronRight :size="15" /></Button>
           <Button v-else-if="step === 2" data-action="wsl-submit" class="remote-primary" type="button" :disabled="busy || (mode === 'ssh' ? !host.trim() : !distro)" @click="connect">
             {{ t("remote.connect") }} <ChevronRight :size="15" />

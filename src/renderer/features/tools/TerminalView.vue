@@ -6,7 +6,7 @@ import { useI18n } from "vue-i18n";
 import type { DesktopEvent, TerminalEvent, TerminalSession } from "../../../shared/types";
 import { desktop } from "../../api";
 
-const props = defineProps<{ active: boolean; projectKey: string }>();
+const props = withDefaults(defineProps<{ active: boolean; projectKey: string; connected?: boolean }>(), { connected: true });
 const { t } = useI18n();
 const host = ref<HTMLElement>();
 const terminal = new Terminal({
@@ -77,11 +77,11 @@ function fitTerminal() {
       id: sessionId,
       cols: terminal.cols,
       rows: terminal.rows,
-    });
+    }).catch(() => undefined);
 }
 
 async function start() {
-  if (sessionId || !props.active) return;
+  if (sessionId || !props.active || !props.connected) return;
   const token = ++generation;
   needsStart = false;
   terminal.options.disableStdin = true;
@@ -93,7 +93,7 @@ async function start() {
       rows: terminal.rows,
     });
     if (token !== generation) {
-      if (session.id) await desktop.invoke("terminal.kill", { id: session.id });
+      if (session.id) await desktop.invoke("terminal.kill", { id: session.id }).catch(() => undefined);
       return;
     }
     if (!session.id) {
@@ -119,6 +119,20 @@ async function stop() {
 }
 
 watch(
+  () => props.connected,
+  async (connected) => {
+    if (!connected) {
+      generation++;
+      sessionId = "";
+      earlyEvents.clear();
+      needsStart = true;
+      terminal.options.disableStdin = true;
+      terminal.writeln(`\r\n${t("remote.connectionLost")}`);
+    } else if (needsStart) await start();
+  },
+);
+
+watch(
   () => props.active,
   async (active) => {
     if (!active) return;
@@ -142,7 +156,7 @@ onMounted(async () => {
   terminal.open(host.value!);
   unsubscribe = desktop.onEvent(onEvent);
   terminal.onData((data) => {
-    if (sessionId) void desktop.invoke("terminal.write", { id: sessionId, data });
+    if (sessionId) void desktop.invoke("terminal.write", { id: sessionId, data }).catch(() => undefined);
   });
   resizeObserver = new ResizeObserver(fitTerminal);
   resizeObserver.observe(host.value!);

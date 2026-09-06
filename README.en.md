@@ -56,6 +56,14 @@ Navigator | Session Graph | Branch Chat | Content Workspace
 - **Content Workspace** opens project files, Git changes, and web pages.
 - Every panel can be collapsed, restored, and resized; connect to a remote Linux workspace over SSH or WSL and it works just like local.
 
+## Remote Node runtime
+
+SSH and WSL share one installer. A working selected Node stays in use; fresh installations prefer Linux Node from PATH or the interactive login environment (such as nvm), with a minimum version of 22.19.0. Dependencies, server startup, WebSocket connectivity and a real terminal must pass checks before the current installation changes.
+
+Only when no compatible runtime is available does PiX use its fixed-version private Node, independent of the desktop's Node patch version. Launches use a fixed executable path and recheck changed Node versions; reconnecting can repair a missing or incompatible runtime. System Node, older installations and shared runtimes are not modified or automatically removed.
+
+Developer checks: `node --test scripts/remote-runtime.test.mjs` (Windows defaults to Ubuntu-24.04; override with `PIX_TEST_WSL_DISTRO`). After building the server, run `node scripts/runtime-live-test.mjs --ssh HOST` or `--wsl DISTRO` to verify real Node reuse in an isolated temporary directory without switching the main installation.
+
 ## Custom models
 
 Both graph and chat composers support selecting, pasting and dropping images, with previews, removal and image-only prompts. Select an image-capable model. PNG, JPEG, WebP and GIF are supported, up to 8 images, 5 MB each and 10 MB total per prompt. Images remain in the Pi session and appear in chat history and node previews.

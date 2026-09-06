@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+case "${2:-}" in
+  --probe) readlink -f "$0" ;;
+  --version) printf '10.0.0\n' ;;
+  ci) touch .npm-installed ;;
+  --check)
+    test -e .npm-installed
+    test ! -e .reject-all
+    if test -f .reject-node; then test "$(cat .reject-node)" != "$(readlink -f "$0")"; fi
+    ;;
+  *) exit 1 ;;
+esac

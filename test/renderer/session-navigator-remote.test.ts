@@ -50,6 +50,12 @@ const groups: ProjectGroup[] = [
 ];
 
 describe("session navigator remote projects", () => {
+  it("keeps a disconnected project offline when cached sessions are synced", () => {
+    const session = useSessionStore();
+    session.disconnected(session.activeProjectId);
+    session.syncProject();
+    expect(session.projects.find((record) => record.id === session.activeProjectId)?.connected).toBe(false);
+  });
   beforeEach(() => {
     setActivePinia(createPinia());
     const session = useSessionStore();

@@ -1,5 +1,5 @@
 #!/bin/sh
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+"$ROOT/node/bin/node" "$ROOT/bin/check-runtime.mjs" --verify
 exec "$ROOT/node/bin/node" "$ROOT/dist/server/index.js" "$@"
-
