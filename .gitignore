@@ -6,6 +6,8 @@ out/
 out-test/
 server/dist/
 release/
+/.pix-installed-*/
+/PiX-Setup-*.exe
 
 # Test artifacts (screenshots, logs, reports)
 artifacts/
