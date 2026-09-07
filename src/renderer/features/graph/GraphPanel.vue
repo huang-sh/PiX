@@ -35,6 +35,16 @@ type RenderNode = Node & { dimensions?: Dimensions; handleBounds?: FlowNode["han
 const nodes = shallowRef<RenderNode[]>([]);
 const edges = shallowRef<Edge[]>([]);
 const flow = shallowRef<VueFlowStore>();
+// Vue Flow updates computedPosition in mounted node components only. Keep
+// offscreen nodes in sync too, so visibility checks and edges use the new layout.
+watch(nodes, items => {
+  for (const node of items) {
+    const rendered = flow.value?.findNode(node.id);
+    if (rendered && (rendered.computedPosition.x !== node.position.x || rendered.computedPosition.y !== node.position.y)) {
+      rendered.computedPosition = { ...rendered.computedPosition, ...node.position };
+    }
+  }
+}, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, { x: number; y: number }>();
 let transientNodeIds = new Set<string>();
