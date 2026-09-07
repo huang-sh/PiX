@@ -30,6 +30,9 @@ export const themeColors = {
     "accent-soft": "#eff6ff",
     "ring": "rgba(37, 99, 235, 0.14)",
     "danger": "#b54852",
+    // Standalone amber for agent-in-progress states; accents stay blue so a
+    // running node can contrast instead of reading as another accent shade.
+    "running": "#d97706",
     "shadow": "0 12px 36px rgba(28, 36, 48, 0.10), 0 2px 6px rgba(28, 36, 48, 0.04)",
     "accent-foreground": "#ffffff",
     "danger-foreground": "#ffffff"
@@ -53,6 +56,7 @@ export const themeColors = {
     "accent-soft": "#e5f4ee",
     "ring": "rgba(50, 157, 120, 0.24)",
     "danger": "#b54852",
+    "running": "#d97706",
     "shadow": "0 18px 55px rgba(21, 49, 41, 0.14)",
     "accent-foreground": "#ffffff",
     "danger-foreground": "#ffffff"
@@ -75,6 +79,7 @@ export const themeColors = {
     "accent-soft": "#202e43",
     "ring": "rgba(141,166,206,.2)",
     "danger": "#b54852",
+    "running": "#f59e0b",
     "shadow": "0 18px 58px rgba(0,0,0,.34)",
     "accent-foreground": "#172238",
     "danger-foreground": "#ffffff"

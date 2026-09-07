@@ -36,7 +36,7 @@ function setup() {
     name: "VueFlow", emits: ["paneReady"], setup(_, { emit }) { onMounted(() => emit("paneReady", store)); },
     template: '<div><slot /></div>',
   });
-  const MiniMap = defineComponent({ name: "MiniMap", emits: ["click"], template: '<div class="test-minimap" />' });
+  const MiniMap = defineComponent({ name: "MiniMap", emits: ["click"], props: ["nodeColor"], template: '<div class="test-minimap" />' });
   const wrapper = mount(GraphPanel, { global: { plugins: [pinia, i18n], stubs: { VueFlow, MiniMap } } });
   return { wrapper, layout, viewport, setCenter, findNode, MiniMap };
 }
@@ -55,6 +55,18 @@ describe("graph viewport controls", () => {
     await button.trigger("click"); await flushPromises();
     expect(layout.layout.minimap).toBe(false);
     expect(wrapper.find('.test-minimap').exists()).toBe(false);
+  });
+
+  it("colors running minimap nodes with the standalone running token, not an accent shade", async () => {
+    const { wrapper, MiniMap } = setup(); await flushPromises();
+    await wrapper.find('.graph-controls button[aria-pressed]').trigger("click");
+    await flushPromises();
+    const nodeColor = wrapper.findComponent(MiniMap).props("nodeColor") as (node: { type?: string; data?: unknown }) => string;
+    expect(nodeColor).toBeTypeOf("function");
+    expect(nodeColor({ type: "prompt", data: { running: true } })).toBe("var(--running)");
+    expect(nodeColor({ type: "prompt", data: { running: false } })).toBe("var(--accent)");
+    // Draft nodes never light up, even if their data someday grows a running flag.
+    expect(nodeColor({ type: "draft", data: { running: true } })).toBe("var(--accent)");
   });
 
   it("navigates to the minimap's graph coordinates without changing zoom or selection", async () => {

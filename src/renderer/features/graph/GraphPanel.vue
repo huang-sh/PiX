@@ -512,6 +512,18 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
     document.querySelector<HTMLTextAreaElement>(".draft-node textarea")?.focus({ preventScroll: true });
 }
 
+// The minimap colors nodes by the same running flag the pane cards use.
+// Only prompt nodes carry the flag, so gate on the node type: draft nodes
+// must never light up even if DraftNodeData grows a running field someday.
+// Amber --running contrasts with the blue/green accent nodes around it.
+function minimapNodeRunning(node: FlowNode) {
+  return node.type === "prompt" && (node.data as PromptNodeData | undefined)?.running === true;
+}
+
+function minimapNodeColor(node: FlowNode) {
+  return minimapNodeRunning(node) ? "var(--running)" : "var(--accent)";
+}
+
 function navigateMinimap({ position }: { position: { x: number; y: number } }) {
   centerRequest++;
   if (!flow.value) return;
@@ -673,7 +685,7 @@ watch(
         v-if="layout.layout.minimap && nodes.length < 500"
         pannable
         zoomable
-        node-color="var(--accent)"
+        :node-color="minimapNodeColor"
         mask-color="color-mix(in srgb, var(--surface) 72%, transparent)"
         :aria-label="t('graph.minimapLabel')"
         @click="navigateMinimap"
