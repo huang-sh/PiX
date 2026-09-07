@@ -1,6 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import BranchContextPanel from "../../src/renderer/features/branch-context/BranchContextPanel.vue";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useSessionStore } from "../../src/renderer/stores/session";
@@ -136,6 +136,76 @@ describe("BranchContextPanel streaming scroll", () => {
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
     expect(messages.scrollTop).toBe(1000);
+  });
+});
+
+describe("BranchContextPanel content-growth follow", () => {
+  // Typewriter/smooth-streaming markdown grows the DOM across several frames
+  // after each store event; only content-height observation (not store events)
+  // can keep the view pinned to the live output. Drive the observer directly.
+  class ResizeObserverStub {
+    static instances: ResizeObserverStub[] = [];
+    callback: ResizeObserverCallback;
+    targets = new Set<Element>();
+    constructor(callback: ResizeObserverCallback) {
+      this.callback = callback;
+      ResizeObserverStub.instances.push(this);
+    }
+    observe(target: Element) { this.targets.add(target); }
+    unobserve(target: Element) { this.targets.delete(target); }
+    disconnect() { this.targets.clear(); }
+  }
+
+  function grow(wrapper: ReturnType<typeof mount>) {
+    const inner = wrapper.get(".branch-messages-inner").element;
+    for (const observer of ResizeObserverStub.instances)
+      if (observer.targets.has(inner))
+        observer.callback([], observer as unknown as ResizeObserver);
+  }
+
+  async function settle() {
+    await flushPromises();
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  }
+
+  beforeEach(() => {
+    ResizeObserverStub.instances = [];
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function mountStreaming() {
+    const pinia = createPinia(); setActivePinia(pinia); useLayoutStore().layout.collapsed.chat = false;
+    const session = useSessionStore();
+    session.onAgentEvent({ type: "agent_start" });
+    session.onAgentEvent({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "stream" }] } });
+    const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true } } });
+    const messages = wrapper.get(".branch-messages").element as HTMLElement;
+    let height = 1000;
+    Object.defineProperties(messages, {
+      scrollHeight: { configurable: true, get: () => height },
+      clientHeight: { configurable: true, get: () => 500 },
+    });
+    return { wrapper, messages, growHeight: (value: number) => { height = value; } };
+  }
+
+  it("re-pins the bottom as streaming content grows the DOM", async () => {
+    const { wrapper, messages, growHeight } = await mountStreaming();
+    growHeight(1000); grow(wrapper); await settle();
+    expect(messages.scrollTop).toBe(1000); // pinned at the old bottom after mount
+    growHeight(1400); grow(wrapper); await settle();
+    expect(messages.scrollTop).toBe(1400); // followed the growth to the new bottom
+    wrapper.unmount();
+  });
+
+  it("stops following content growth after the user scrolls up", async () => {
+    const { wrapper, messages, growHeight } = await mountStreaming();
+    await settle();
+    messages.scrollTop = 100;
+    await wrapper.get(".branch-messages").trigger("scroll");
+    growHeight(1600); grow(wrapper); await settle();
+    expect(messages.scrollTop).toBe(100);
+    wrapper.unmount();
   });
 });
 

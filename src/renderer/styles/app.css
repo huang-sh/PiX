@@ -432,6 +432,9 @@ kbd {
 .branch-title small { max-width: 250px; overflow: hidden; color: var(--faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .branch-messages { flex: 1; min-height: 0; overflow: auto; padding: 18px 16px 96px; }
 .branch-messages:has(.agent-process.live[open]) { padding-bottom: max(96px, 32vh); }
+/* Content wrapper observed by ResizeObserver: typewriter/smooth-streaming growth
+   re-pins the bottom while following, keeping .branch-messages the scroll root. */
+.branch-messages-inner { display: block; }
 .chat-composer { flex: 0 0 auto; padding: 10px 14px 14px; background: linear-gradient(to top, var(--context) 82%, transparent); }
 .composer-collapsed {
   display: flex;

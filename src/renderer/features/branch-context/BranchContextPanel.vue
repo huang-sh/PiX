@@ -22,15 +22,18 @@ const activity = computed(() => layout.layout.collapsed.chat ? undefined : sessi
 const { submitDraft } = useDraftSubmit();
 const { t } = useI18n();
 const scroll = ref<HTMLElement>();
+const content = ref<HTMLElement>();
 const followingOutput = ref(true);
 const expandedProcesses = ref(new Set<string>());
 const visibleTurnCount = ref(40);
 const liveTextLimit = ref(32768);
 const expandedLiveTools = ref(new Set<string>());
 let resizeObserver: ResizeObserver | undefined;
+let contentObserver: ResizeObserver | undefined;
 const readingPositions = new Map<string, { top: number; following: boolean; count: number; expanded: Set<string> }>();
 let readingScope = "";
 let viewVersion = 0;
+let restoreTicket = 0;
 let restoringPosition = false;
 let scrollFrame: number | undefined;
 const history = computed(() => session.messageWindow(visibleTurnCount.value));
@@ -221,9 +224,17 @@ watch([() => JSON.stringify([session.current?.session.path, session.current?.gra
   expandedProcesses.value = new Set(saved?.expanded);
   visibleTurnCount.value = saved?.count ?? 40;
   followingOutput.value = saved?.following ?? true;
+  const ticket = ++restoreTicket;
   restoringPosition = true;
   void nextTick(() => {
-    if (version !== viewVersion) return;
+    // A user scroll (updateScrollFollow) or a newer selection superseded this
+    // restore; it must not move the scroll position. Only the newest ticket
+    // may clear the flag, so a superseded restore can never leave scrollLatest
+    // permanently disabled.
+    if (version !== viewVersion) {
+      if (ticket === restoreTicket) restoringPosition = false;
+      return;
+    }
     const root = scroll.value;
     if (root) root.scrollTop = followingOutput.value ? root.scrollHeight : saved?.top ?? 0;
     restoringPosition = false;
@@ -254,14 +265,21 @@ watch(
 );
 
 onMounted(() => {
-  if (typeof ResizeObserver === "undefined" || !scroll.value) return;
+  // Two observers: the container follows panel open/resize. The content
+  // wrapper is the streaming glue — typewriter and smooth-streaming markdown
+  // grow the DOM across several frames *after* each store event, so only
+  // observing content height keeps the view pinned to the live output.
+  if (typeof ResizeObserver === "undefined" || !scroll.value || !content.value) return;
   resizeObserver = new ResizeObserver(scrollLatest);
   resizeObserver.observe(scroll.value);
+  contentObserver = new ResizeObserver(scrollLatest);
+  contentObserver.observe(content.value);
 });
 
 onBeforeUnmount(() => {
   viewVersion++;
   resizeObserver?.disconnect();
+  contentObserver?.disconnect();
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
 });
 </script>
@@ -287,6 +305,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div ref="scroll" class="branch-messages" @scroll="updateScrollFollow">
+      <div ref="content" class="branch-messages-inner">
       <details v-if="session.current?.graph?.recoveredInputs?.length" class="graph-storage-state">
         <summary>{{ t('graph.recoveredInputs') }}</summary>
         <small>{{ t('graph.recoveredInputsHint') }}</small>
@@ -374,6 +393,7 @@ onBeforeUnmount(() => {
       <p v-if="!turns.length && !showingActivity" class="empty-copy">
         {{ t("branch.selectNode") }}
       </p>
+      </div>
     </div>
 
     <footer v-if="session.current" class="chat-composer">
