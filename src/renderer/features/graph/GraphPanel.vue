@@ -74,7 +74,9 @@ function stablePrompt(data: PromptNodeData) {
   promptCache.set(data.node.id, raw);
   return raw;
 }
-let layoutCache: { key: string; positions: Map<string, { x: number; y: number; width: number; height: number }> } | undefined;
+// Auto (pre-manual) positions from the last rebuild: measured-size based and
+// restricted to real nodes, so draft open/close never invalidates manual slots.
+let autoPositions: Map<string, { x: number; y: number; width: number; height: number }> | undefined;
 
 const projection = computed(() => session.current?.projection);
 function rememberBranchOrder(id: string, order: number, pendingId?: string) {
@@ -165,21 +167,22 @@ function rebuild() {
     }
   }
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
-  const layoutKey = value.nodes.map(n => `${n.id}/${n.parentId}/${n.depth}/${branchOrder.get(n.id) ?? 0}`).join(";");
-  if (layoutCache?.key !== layoutKey) {
-    const calculated = layoutGraph(value, undefined, branchOrder);
-    const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
-    const removed = layoutCache && [...layoutCache.positions.keys()].some(id => !positions.has(id));
-    // Only deletions invalidate moved manual slots to close gaps. Adding a
-    // branch must preserve the user's coordinates even when its auto slots move.
-    for (const id of dragged.keys()) {
-      const before = layoutCache?.positions.get(id);
-      const after = positions.get(id);
-      if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
-    }
-    layoutCache = { key: layoutKey, positions };
+  // Settled positions use the same measured card sizes the pane renders, so
+  // lanes track real heights instead of the fixed 280×146 estimate pitch.
+  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions.
+  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 280, height: 146 }]));
+  const calculated = layoutGraph(value, sizes, branchOrder);
+  const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
+  const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
+  // Only deletions invalidate moved manual slots to close gaps. Adding a
+  // branch must preserve the user's coordinates even when its auto slots move.
+  for (const id of dragged.keys()) {
+    const before = autoPositions?.get(id);
+    const after = positions.get(id);
+    if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
   }
-  const placed = { nodes: value.nodes.map(node => ({ ...node, ...layoutCache!.positions.get(node.id)!,
+  autoPositions = positions;
+  const placed = { nodes: value.nodes.map(node => ({ ...node, ...positions.get(node.id)!,
     ...dragged.get(node.id),
   })) };
   const active = new Set(value.activeBranchNodeIds);
@@ -363,8 +366,8 @@ function rebuild() {
 }
 
 function layoutBranches(items: RenderNode[]) {
-  if (!transientNodeIds.size && !dragged.size && !branchOrder.size) return false;
-  // Reserve space inside each branch; moving only the draft can cross other branches.
+  // Runs on every rebuild and resize so settled lanes follow measured card
+  // heights; transients reserve vertical space but never widen columns.
   const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
@@ -374,7 +377,7 @@ function layoutBranches(items: RenderNode[]) {
   if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
   const pending = session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
-  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order);
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
   reserveManualPositions(placed.nodes, dragged);
   let moved = false;
   for (let i = 0; i < visible.length; i++) {

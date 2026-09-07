@@ -94,7 +94,7 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, {
   }
 }
 
-export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new Map<string, { width: number; height: number }>(), order = new Map<string, number>()) {
+export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new Map<string, { width: number; height: number }>(), order = new Map<string, number>(), columnExclusions = new Set<string>()) {
   const nw = 280,
     nh = 146,
     cg = 92,
@@ -136,7 +136,11 @@ export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new
   });
   const maxDepth = p.nodes.reduce((max, node) => Math.max(max, node.depth), 0);
   const widths = new Map<number, number>();
-  for (const node of p.nodes) widths.set(node.depth, Math.max(widths.get(node.depth) ?? nw, size(node).width));
+  // Transient cards (draft, pending) reserve vertical space but never widen
+  // their column, so opening a draft cannot shift deeper cards sideways.
+  for (const node of p.nodes)
+    if (!columnExclusions.has(node.id))
+      widths.set(node.depth, Math.max(widths.get(node.depth) ?? nw, size(node).width));
   const columns = [pad];
   for (let depth = 0; depth < maxDepth; depth++) columns.push(columns[depth]! + (widths.get(depth) ?? nw) + cg);
   const nodes = p.nodes.map((n) => ({
