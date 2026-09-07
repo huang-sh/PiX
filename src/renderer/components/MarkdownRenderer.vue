@@ -4,6 +4,7 @@ import { colorScheme } from "../theme";
 import { useI18n } from "vue-i18n";
 import { useLayoutStore } from "../stores/layout";
 import { useWorkspaceStore } from "../stores/workspace";
+import { readCodeTypography } from "../lib/typography";
 
 withDefaults(defineProps<{
   content: string;
@@ -13,6 +14,7 @@ withDefaults(defineProps<{
   streaming: false,
 });
 
+const codeBlockOptions = readCodeTypography();
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
 const { t } = useI18n();
@@ -131,6 +133,7 @@ function decodePath(value: string): string {
       :fade="false"
       html-policy="safe"
       :render-code-blocks-as-pre="true"
+      :code-block-options="codeBlockOptions"
     />
   </div>
 </template>

@@ -70,7 +70,7 @@ async function save() {
 
 <style scoped>
 .custom-model-dialog { position: fixed; z-index: 151; top: 5vh; left: 50%; transform: translateX(-50%); width: min(680px, calc(100vw - 40px)); max-height: 90vh; overflow: auto; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 90px rgba(14,38,31,.26); }
-.custom-model-dialog h2 { margin: 0; font-size: 14px; }
+.custom-model-dialog h2 { margin: 0; font-size: var(--font-size-ui); }
 .custom-model-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
-.custom-model-note { padding: 14px 21px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.custom-model-note { padding: 14px 21px; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.6; }
 </style>

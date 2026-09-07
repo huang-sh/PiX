@@ -8,15 +8,17 @@ import { desktop } from "../../api";
 
 import { activeTheme } from "../../theme";
 import { terminalTheme } from "./terminal-theme";
+import { readCodeTypography } from "../../lib/typography";
 
 const props = withDefaults(defineProps<{ active: boolean; projectKey: string; connected?: boolean }>(), { connected: true });
 const { t } = useI18n();
 const host = ref<HTMLElement>();
 const terminal = new Terminal({
   cursorBlink: true,
-  fontFamily: "Consolas, 'Courier New', monospace",
+  // xterm draws on canvas: resolve the same font stack used by code and Markdown.
+  fontFamily: readCodeTypography().fontFamily,
   fontSize: 14,
-  lineHeight: 1.2,
+  lineHeight: 1.5,
   scrollback: 10_000,
   theme: terminalTheme(activeTheme.value),
 });

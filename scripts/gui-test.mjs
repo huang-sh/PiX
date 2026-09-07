@@ -540,6 +540,10 @@ try {
     if (!value.expanded || !value.linkedContext)
       throw new Error(`Graph selection did not reveal matching chat context: ${JSON.stringify(value)}`);
   });
+  // Selection keeps the viewport still when the node is already visible. Center
+  // explicitly before checking geometry; readable typography changes card height.
+  if (sessionState.current)
+    await cdp.evaluate("document.querySelector('.graph-controls button:last-child').click()");
   await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 350))");
   const graphNode = sessionState.current
     ? await retry(async () => {
@@ -571,7 +575,7 @@ try {
             })
           } : null;
         })()`);
-        if (!value?.selected || value.embeddedComposer || !value.addAction || !value.centered || !value.noOverlap || value.footer.height < 32 || value.footer.height > 36 || !value.footer.context || value.footer.controls !== 0)
+        if (!value?.selected || value.embeddedComposer || !value.addAction || !value.centered || !value.noOverlap || value.footer.height < 54 || value.footer.height > 60 || !value.footer.context || value.footer.controls !== 0)
           throw new Error(`Selected graph node is not stable and centered: ${JSON.stringify(value)}`);
         return value;
       })
@@ -644,15 +648,17 @@ try {
     await retry(async () => {
       const value = await cdp.evaluate(`(() => {
         const current = window.__pixTest.state().current;
-        const expected = current.projection.nodes.map((node) => node.footer?.thinkingLevel ?? "off");
-        const shown = [...document.querySelectorAll('.prompt-node .node-thinking-value')]
-          .map((element) => element.textContent.trim());
+        const expected = new Map(current.projection.nodes.map((node) => [node.id, node.footer?.thinkingLevel ?? "off"]));
+        // Vue Flow only mounts visible nodes; larger readable cards need not all
+        // fit onscreen while a draft is open. Compare each rendered node by ID.
+        const shown = [...document.querySelectorAll('.vue-flow__node-prompt')]
+          .map((element) => ({ id: element.dataset.id, level: element.querySelector('.node-thinking-value')?.textContent.trim() }));
         const selected = current.projection.nodes.find((node) => node.id === window.__pixTest.state().focusedNode)
           ?? current.projection.nodes.find((node) => node.id === current.projection.activeNodeId);
         const draft = document.querySelector('button[aria-label="Draft thinking level"]')?.textContent ?? "";
         return {
-          count: shown.length === expected.length,
-          mirrorsProjection: JSON.stringify([...shown].sort()) === JSON.stringify([...expected].sort()),
+          count: shown.length > 0 && shown.every(node => node.level !== undefined),
+          mirrorsProjection: shown.every(node => expected.has(node.id) && node.level === expected.get(node.id)),
           draftInherits: !selected || draft.includes(selected.footer?.thinkingLevel ?? "off"),
         };
       })()`);
