@@ -245,6 +245,8 @@ watch(() => layout.hydrated, async (hydrated) => {
         @keydown="resizeNavigatorWithKeyboard"
       />
     </div>
+    <!-- Render pixel widths directly: the splitter's rounded flex ratios and
+         handle space otherwise change right-panel widths when the group resizes. -->
     <SplitterGroup id="pix-workbench" direction="horizontal" class="workbench-splitter">
       <SplitterPanel id="primary-panels" :order="1">
         <SplitterGroup id="pix-primary" direction="horizontal" class="workbench-splitter">
@@ -256,6 +258,7 @@ watch(() => layout.hydrated, async (hydrated) => {
           <SplitterPanel
             id="chat-panel"
             ref="chatPanel"
+            :style="{ flexGrow: 0, flexBasis: `${layout.layout.collapsed.chat ? 0 : layout.layout.widths.chat}px` }"
             :inert="layout.layout.collapsed.chat"
             :order="3"
             collapsible
@@ -276,6 +279,7 @@ watch(() => layout.hydrated, async (hydrated) => {
       <SplitterPanel
         id="content-panel"
         ref="contentPanel"
+        :style="{ flexGrow: 0, flexBasis: `${layout.layout.collapsed.content ? 0 : layout.layout.widths.content}px` }"
         :inert="layout.layout.collapsed.content"
         :order="2"
         collapsible

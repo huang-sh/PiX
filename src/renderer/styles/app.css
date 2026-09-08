@@ -213,8 +213,8 @@ kbd {
 .workbench-splitter > [data-panel] {
   min-width: 0;
   overflow: hidden;
-  transition: flex-basis 340ms cubic-bezier(.22,1,.36,1),
-    flex-grow 340ms cubic-bezier(.22,1,.36,1), opacity 220ms ease;
+  /* Apply splitter size corrections immediately when the pinned navigator changes width. */
+  transition: opacity 220ms ease;
 }
 .workbench-splitter > [data-state="collapsed"] { opacity: 0; }
 .panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; }

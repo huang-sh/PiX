@@ -181,14 +181,42 @@ try {
   await until(pinned);
   await sleep(500);
   report.bothPinned = await checkWidths();
-  await click(button);
-  await until(`!(${expanded})`);
+  // Check the entire toggle, not just the settled widths: sizing transitions
+  // used to move the chat even though its final pixel width was unchanged.
+  report.pinnedToggleMotion = [];
+  for (const [contentOpen, opening] of [[true,false],[true,true],[false,false],[false,true]]) {
+    if (!contentOpen && !opening) {
+      await click('[data-action="tool-panel"]');
+      await sleep(500);
+    }
+    await evaluate(`(() => {
+      const rect = () => ['#chat-panel','#content-panel','.branch-messages-inner','.chat-composer'].map(selector => {
+        const r=document.querySelector(selector).getBoundingClientRect();
+        return {x:r.x,y:r.y,width:r.width,height:r.height};
+      });
+      window.navigatorMotion = {before:rect(),frames:[]};
+      const end=performance.now()+1200;
+      const sample=() => {
+        // Sample after rendering, so ResizeObserver can apply pixel sizes first.
+        setTimeout(() => window.navigatorMotion.frames.push(rect()),0);
+        if(performance.now()<end) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    })()`);
+    await click(button);
+    await until(opening ? expanded : `!(${expanded})`);
+    await sleep(800);
+    const motion = await evaluate('window.navigatorMotion');
+    const maxShift = Math.max(...motion.frames.flatMap(frame => frame.flatMap((rect,index) =>
+      Object.keys(rect).map(key => Math.abs(rect[key]-motion.before[index][key])))));
+    report.pinnedToggleMotion.push({contentOpen,opening,maxShift,frames:motion.frames.length});
+    assert.ok(motion.frames.length>0, 'toggle has rendered samples');
+    assert.equal(maxShift, 0, `pinned navigator ${opening?'expand':'collapse'} moves right panels by ${maxShift}px`);
+    assert.equal((await rightWidths()).chat,356);
+    if (contentOpen) await checkWidths();
+  }
+  await click('[data-action="tool-panel"]');
   await sleep(500);
-  await checkWidths();
-  await click(button);
-  await until(expanded);
-  await sleep(500);
-  await checkWidths();
   const resize = await point('.navigator-resize');
   await move(resize);
   await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,...resize});
@@ -207,6 +235,22 @@ try {
   await click('[data-action="tool-panel"]');
   await sleep(800);
   report.afterReload = await checkWidths();
+  // Native pixel rendering must still follow the splitter's drag callbacks.
+  for (const [panel, selector] of [['chat','.resize-handle:has(+ #chat-panel)'],['content','.resize-handle:has(+ #content-panel)']]) {
+    for (const delta of [-40,40]) {
+      const before = await rightWidths();
+      const handle = await point(selector);
+      await move(handle);
+      await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,...handle});
+      await send('Input.dispatchMouseEvent',{type:'mouseMoved',buttons:1,x:handle.x+delta,y:handle.y});
+      await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,clickCount:1,x:handle.x+delta,y:handle.y});
+      await sleep(300);
+      const after = await rightWidths();
+      assert.ok(Math.abs(after[panel]-before[panel]+delta)<2, `${panel} follows divider drag`);
+      assert.equal(after[panel],after.saved[panel], `${panel} renders the saved pixel width`);
+    }
+  }
+  report.afterRightPanelResize = await checkWidths();
   // Check overlay vs reserved-space layout in a normal and minimum-size window.
   report.modeGeometry = [];
   const geometry = () => evaluate(`(() => {
