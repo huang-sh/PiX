@@ -453,7 +453,7 @@ kbd {
 .branch-panel .panel-header { background: var(--context); }
 .branch-title > span { display: flex; flex-direction: column; min-width: 0; }
 .branch-title small { max-width: 250px; overflow: hidden; color: var(--faint); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
-.branch-messages { flex: 1; min-height: 0; overflow: auto; padding: 18px 16px 96px; }
+.branch-messages { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; padding: 18px 16px 96px; }
 .branch-messages:has(.agent-process.live[open]) { padding-bottom: max(96px, 32vh); }
 /* Content wrapper observed by ResizeObserver: typewriter/smooth-streaming growth
    re-pins the bottom while following, keeping .branch-messages the scroll root. */

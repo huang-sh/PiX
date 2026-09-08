@@ -1,4 +1,5 @@
 import type { DesktopEvent, SessionProjection, SessionSnapshot } from "./types.js";
+import { agentEventDecoder, agentEventEncoder } from "./agent-updates.js";
 
 interface ListPatch<T> {
   updated: T[];
@@ -91,7 +92,9 @@ export function applySessionPatch(before: SessionSnapshot | undefined, patch: Se
 /** One baseline per subscriber. Internal controller consumers can keep full snapshots. */
 export function sessionEventEncoder() {
   let previous: SessionSnapshot | undefined;
+  const encodeAgent = agentEventEncoder();
   return (event: DesktopEvent): DesktopEvent => {
+    event = encodeAgent(event);
     if (event.type !== "sessions") return event;
     const payload = event.payload as SessionUpdate;
     const current = payload.current;
@@ -104,8 +107,15 @@ export function sessionEventEncoder() {
 /** Wire baseline is independent of newer snapshots returned by concurrent RPCs. */
 export function sessionEventDecoder(resync: () => Promise<unknown>) {
   let previous: SessionSnapshot | undefined, requesting = false;
+  const requestResync = () => {
+    if (requesting) return;
+    requesting = true;
+    void resync().finally(() => { requesting = false; }).catch(() => {});
+  };
+  const decodeAgent = agentEventDecoder(requestResync);
   return (event: DesktopEvent): DesktopEvent | undefined => {
-    if (event.type !== "sessions") return event;
+    if (event.type !== "sessions") return decodeAgent(event);
+    decodeAgent(event);
     const payload = event.payload as SessionUpdate;
     if (!payload.patch) { previous = payload.current; return event; }
     const patch = payload.patch;
@@ -113,10 +123,7 @@ export function sessionEventDecoder(resync: () => Promise<unknown>) {
       && previous.graph.revision >= patch.graph.revision) return undefined;
     const current = applySessionPatch(previous, patch);
     if (!current) {
-      if (!requesting) {
-        requesting = true;
-        void resync().finally(() => { requesting = false; }).catch(() => {});
-      }
+      requestResync();
       return undefined;
     }
     previous = current;

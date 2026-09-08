@@ -207,6 +207,17 @@ describe("BranchContextPanel content-growth follow", () => {
     expect(messages.scrollTop).toBe(100);
     wrapper.unmount();
   });
+
+  it("keeps following when a programmatic scroll event arrives after more content", async () => {
+    const { wrapper, messages, growHeight } = await mountStreaming();
+    growHeight(1000); grow(wrapper); await settle();
+    expect(messages.scrollTop).toBe(1000);
+    growHeight(1400);
+    await wrapper.get(".branch-messages").trigger("scroll");
+    grow(wrapper); await settle();
+    expect(messages.scrollTop).toBe(1400);
+    wrapper.unmount();
+  });
 });
 
 describe("BranchContextPanel model failures", () => {

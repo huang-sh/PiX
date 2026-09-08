@@ -28,9 +28,9 @@ function settingsWith(openLinksInApp: boolean): SettingsBundle {
   };
 }
 
-async function mountWithLink(markdown: string) {
+async function mountWithLink(markdown: string, streaming = false) {
   const wrapper = mount(MarkdownRenderer, {
-    props: { content: markdown, customId: "assistant:1", streaming: false },
+    props: { content: markdown, customId: "assistant:1", streaming },
     // Attached so click events bubble past the wrapper root; the
     // defaultPrevented assertion listens on the document.
     attachTo: document.body,
@@ -57,8 +57,12 @@ describe("MarkdownRenderer", () => {
   });
 
   it("updates one safe Markdown surface from streaming to final", async () => {
-    const wrapper = await mountWithLink("# Res");
+    const wrapper = await mountWithLink("# Res", true);
     const surface = wrapper.get(".agent-markdown").element;
+    for (const content of ["# Result\n\n收到", "# Result\n\n收到多少", "# Result\n\n收到多少就显示多少"]) {
+      await wrapper.setProps({ content });
+      expect(wrapper.get("p").text()).toBe(content.split("\n\n")[1]);
+    }
     await wrapper.setProps({
       content: "# Result\n\n- **done**\n\n<script>window.unsafe = true</script>",
       streaming: false,

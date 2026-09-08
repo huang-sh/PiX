@@ -19,6 +19,7 @@ import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
 import { projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { WslHostClient } from "./wsl-host-client.js";
@@ -73,6 +74,8 @@ export class MainController {
   private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
   remoteBrokerModels = new Set<string>();
   listeners = new Set<(e: DesktopEvent) => void>();
+  private readonly liveProgress = new Map<string, DesktopEvent>();
+  private liveProgressSession?: string;
   constructor(path: string | null, platform: Platform) {
     path = path ? resolve(path) : null;
     this.localProjectPath = path;
@@ -125,6 +128,19 @@ export class MainController {
     return () => this.listeners.delete(listener);
   }
   emit(e: DesktopEvent) {
+    // Retain only active progress for reload/reconnect recovery, never token history.
+    pruneAgentProgress(e, this.liveProgress);
+    if (isAgentProgress(e)) this.liveProgress.set(agentProgressKey(e.payload as Record<string, unknown>), e);
+    if (e.type === "sessions") {
+      const current = (e.payload as { current?: SessionSnapshot }).current;
+      if (current) {
+        const key = JSON.stringify([current.session.path, current.graph?.epoch]);
+        if (this.liveProgressSession !== undefined && this.liveProgressSession !== key) this.liveProgress.clear();
+        this.liveProgressSession = key;
+      }
+    } else if (e.type === "remote.connection" && !(e.payload as { connected: boolean }).connected) {
+      this.liveProgress.clear();
+    }
     this.listeners.forEach((f) => f(e));
   }
   remoteEvent(event: DesktopEvent) {
@@ -136,6 +152,8 @@ export class MainController {
     this.emit(event);
   }
   configure(path: string | null) {
+    this.liveProgress.clear();
+    this.liveProgressSession = undefined;
     if (path) {
       path = resolve(path);
       if (!existsSync(path)) throw new Error("Project not found");
@@ -615,6 +633,7 @@ export class MainController {
         if (current) {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
+          for (const progress of this.liveProgress.values()) this.emit(progress);
         }
         return current;
       }
@@ -776,6 +795,7 @@ export class MainController {
     }
   }
   dispose() {
+    this.liveProgress.clear();
     void this.closeWsl();
     this.shell.dispose();
     this.pi.dispose();

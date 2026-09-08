@@ -100,6 +100,9 @@ async function hydrate(data: BootstrapData, openFirst = false) {
     session.loading = false;
     return;
   }
+  // Re-seed active streams after hydrate cleared local state, even if the model
+  // is currently paused and will not send another token for a while.
+  if (data.current) await desktop.invoke("session.snapshot");
   await workspace.load();
   if (openFirst && !session.current && session.sessions[0])
     await session.open(session.sessions[0].path);

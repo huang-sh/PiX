@@ -8,6 +8,8 @@ import { MainController, type Platform } from "../src/main/controller.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 import type { SessionUpdate } from "../src/shared/session-updates.js";
 import { projectSession } from "../src/shared/session.js";
+import { sessionEventDecoder } from "../src/shared/session-updates.js";
+import { agentMessageContent } from "../src/shared/agent-stream.js";
 
 const root = resolve(process.cwd(), "test-workspace");
 const platform: Platform = {
@@ -23,6 +25,37 @@ const platform: Platform = {
   async openExternal() {},
   quit() {},
 };
+
+test("resync replays current live progress for every branch even when no more tokens arrive", async () => {
+  const controller = new MainController(null, platform);
+  const current = { session: { path: "s" }, entries: [], projection: projectSession([], null), runtime: {},
+    graph: { id: "s", epoch: "e", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  controller.current = current;
+  controller.emit({ type: "sessions", payload: { current } });
+  const received: string[] = [];
+  const decode = sessionEventDecoder(async () => assert.fail("checkpoint should decode without another resync"));
+  controller.onEvent(event => {
+    const decoded = decode(JSON.parse(JSON.stringify(event)));
+    if (decoded?.type === "agent") received.push(agentMessageContent((decoded.payload as any).message, "text"));
+  }, true);
+  try {
+    for (const branchId of ["A", "B"]) controller.emit({ type: "agent", payload: {
+      type: "message_update", graphId: "s", branchId, runId: branchId + "1",
+      message: { role: "assistant", content: [{ type: "text", text: branchId + " latest" }] },
+    } });
+    received.length = 0;
+    await controller.invoke("session.snapshot");
+    assert.deepEqual(received, ["A latest", "B latest"]);
+    controller.emit({ type: "agent", payload: { type: "agent_settled", graphId: "s", branchId: "A", runId: "A1" } });
+    received.length = 0;
+    await controller.invoke("session.snapshot");
+    assert.deepEqual(received, ["B latest"]);
+    controller.current = { ...current, graph: { ...current.graph!, epoch: "restarted" } };
+    received.length = 0;
+    await controller.invoke("session.snapshot");
+    assert.deepEqual(received, []);
+  } finally { controller.dispose(); }
+});
 
 test("IPC subscribers get deltas and session.snapshot publishes a full resync without reopening", async () => {
   const controller = new MainController(null, platform);

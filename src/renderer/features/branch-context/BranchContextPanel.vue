@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Terminal } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
-import type { BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
+import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
@@ -16,9 +16,10 @@ import { useSessionStore } from "../../stores/session";
 const session = useSessionStore();
 const selectedRun = computed(() => session.selectedRun);
 const layout = useLayoutStore();
-// Collapsed splitters keep children mounted. Do not parse/animate live Markdown
-// in a zero-width panel; the store still receives every branch's latest state.
-const activity = computed(() => layout.layout.collapsed.chat ? undefined : session.selectedActivity);
+// Every branch's store updates immediately; only the visible view is frame-paced.
+const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.selectedActivity);
+const activity = shallowRef<AgentActivity>();
+let activityFrame: number | undefined;
 const { submitDraft } = useDraftSubmit();
 const { t } = useI18n();
 const scroll = ref<HTMLElement>();
@@ -36,9 +37,23 @@ let viewVersion = 0;
 let restoreTicket = 0;
 let restoringPosition = false;
 let scrollFrame: number | undefined;
+let lastScrollTop = 0;
 const history = computed(() => session.messageWindow(visibleTurnCount.value));
 const historyKey = computed(() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch,
   session.focusedNode ?? session.current?.projection.activeNodeId]));
+watch([latestActivity, historyKey, () => selectedRun.value?.runId], ([latest, key, run], previous) => {
+  const showLatest = () => {
+    if (activityFrame !== undefined) cancelAnimationFrame(activityFrame);
+    activityFrame = undefined;
+    activity.value = latestActivity.value;
+  };
+  // Selection/visibility/settlement must supersede any old branch's queued frame.
+  if (!latest || !activity.value || !latest.active || key !== previous?.[1] || run !== previous?.[2]) {
+    showLatest();
+  } else if (activityFrame === undefined) {
+    activityFrame = requestAnimationFrame(showLatest);
+  }
+}, { immediate: true, flush: "sync" });
 const liveOutputClipped = computed(() => activity.value?.items.some(item => item.status === "running" &&
   Math.max(item.text.length, item.thinking?.length ?? 0) > liveTextLimit.value));
 const liveText = (text: string) => text.length > liveTextLimit.value ? text.slice(-liveTextLimit.value) : text;
@@ -189,10 +204,12 @@ function errorText(message: { errorMessage?: string }) {
 }
 
 function updateScrollFollow() {
+  const root = scroll.value;
+  if (!root || root.scrollTop === lastScrollTop) return;
+  lastScrollTop = root.scrollTop;
   // A user scroll between selection and DOM commit supersedes restoration.
   if (restoringPosition) { viewVersion++; restoringPosition = false; }
-  const root = scroll.value;
-  if (root) followingOutput.value = root.scrollHeight - root.scrollTop - root.clientHeight < 48;
+  followingOutput.value = root.scrollHeight - root.scrollTop - root.clientHeight < 48;
 }
 
 function scrollLatest() {
@@ -205,7 +222,11 @@ function scrollLatest() {
     root.querySelectorAll<HTMLElement>(
       ".agent-process.live .process-items, .agent-process.live .process-tool[open] > pre",
     ).forEach(element => (element.scrollTop = element.scrollHeight));
-    if (followingOutput.value) root.scrollTop = root.scrollHeight;
+    if (followingOutput.value) {
+      root.scrollTop = root.scrollHeight;
+      // The scroll event can arrive after content has grown again.
+      lastScrollTop = root.scrollTop;
+    }
   });
 }
 
@@ -236,7 +257,10 @@ watch([() => JSON.stringify([session.current?.session.path, session.current?.gra
       return;
     }
     const root = scroll.value;
-    if (root) root.scrollTop = followingOutput.value ? root.scrollHeight : saved?.top ?? 0;
+    if (root) {
+      root.scrollTop = followingOutput.value ? root.scrollHeight : saved?.top ?? 0;
+      lastScrollTop = root.scrollTop;
+    }
     restoringPosition = false;
   });
 }, { immediate: true });
@@ -265,10 +289,7 @@ watch(
 );
 
 onMounted(() => {
-  // Two observers: the container follows panel open/resize. The content
-  // wrapper is the streaming glue — typewriter and smooth-streaming markdown
-  // grow the DOM across several frames *after* each store event, so only
-  // observing content height keeps the view pinned to the live output.
+  // Follow panel resizing and late content growth (images, Markdown layout).
   if (typeof ResizeObserver === "undefined" || !scroll.value || !content.value) return;
   resizeObserver = new ResizeObserver(scrollLatest);
   resizeObserver.observe(scroll.value);
@@ -281,6 +302,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   contentObserver?.disconnect();
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
+  if (activityFrame !== undefined) cancelAnimationFrame(activityFrame);
 });
 </script>
 

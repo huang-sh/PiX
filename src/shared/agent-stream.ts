@@ -6,7 +6,7 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
-function content(message: unknown, key: "text" | "thinking") {
+export function agentMessageContent(message: unknown, key: "text" | "thinking") {
   const parts = record(message)?.content;
   if (!Array.isArray(parts)) return "";
   const text = parts
@@ -16,7 +16,7 @@ function content(message: unknown, key: "text" | "thinking") {
   return key === "text" ? withoutToolLabels(text) : text;
 }
 
-function resultText(value: unknown): string {
+export function agentResultText(value: unknown): string {
   if (typeof value === "string") return value;
   const result = record(value);
   const parts = result?.content;
@@ -98,8 +98,8 @@ export function reduceAgentActivity(
       items: [...activity.items, {
         id,
         kind: "assistant",
-        text: content(message, "text"),
-        thinking: content(message, "thinking"),
+        text: agentMessageContent(message, "text"),
+        thinking: agentMessageContent(message, "thinking"),
         timestamp: new Date().toISOString(),
         status: "running",
         pass: activity.pass,
@@ -114,8 +114,8 @@ export function reduceAgentActivity(
     const failure = failureText(message);
     return {
       ...updateItem(activity, id, {
-        text: content(message, "text"),
-        thinking: content(message, "thinking"),
+        text: agentMessageContent(message, "text"),
+        thinking: agentMessageContent(message, "thinking"),
         status: type === "message_end" ? (failure === undefined ? "complete" : "error") : "running",
         ...(failure === undefined ? {} : { errorMessage: failure }),
       }),
@@ -146,13 +146,13 @@ export function reduceAgentActivity(
   }
   if (type === "tool_execution_update") {
     return updateItem(activity, id, {
-      text: resultText(event.partialResult),
+      text: agentResultText(event.partialResult),
       status: "running",
     });
   }
   if (type === "tool_execution_end") {
     return updateItem(activity, id, {
-      text: resultText(event.result),
+      text: agentResultText(event.result),
       status: event.isError === true ? "error" : "complete",
     });
   }

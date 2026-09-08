@@ -209,6 +209,8 @@ it("reuses expanded history during streaming and refreshes it when its content c
       session.onAgentEvent({ ...scope, type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "live".repeat(i + 2) }] } });
       await nextTick();
     }
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await nextTick();
     expect(session.messageWindow(40).messages).toBe(messages);
     expect(cleaned).toBe(1);
     expect(wrapper.findAll(".process-tool pre")).toHaveLength(1);
