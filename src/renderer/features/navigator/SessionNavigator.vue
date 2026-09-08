@@ -4,6 +4,8 @@ import {
   FolderOpen,
   FolderSync,
   MoreHorizontal,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Search,
@@ -115,6 +117,19 @@ async function revealSession(record: ProjectGroup, path: string) {
   <aside class="panel navigator-panel">
     <header class="panel-header">
       <strong>{{ t("nav.projects") }}</strong>
+      <Button
+        data-action="navigator-pin"
+        variant="ghost"
+        size="icon"
+        :class="layout.layout.navigatorPinned ? 'text-[var(--accent)]' : ''"
+        :title="t(layout.layout.navigatorPinned ? 'nav.unpinPanel' : 'nav.pinPanel')"
+        :aria-label="t('nav.pinPanel')"
+        :aria-pressed="layout.layout.navigatorPinned"
+        @click="layout.toggleNavigatorPinned()"
+      >
+        <PinOff v-if="layout.layout.navigatorPinned" :size="16" />
+        <Pin v-else :size="16" />
+      </Button>
     </header>
 
     <div class="navigator-actions">

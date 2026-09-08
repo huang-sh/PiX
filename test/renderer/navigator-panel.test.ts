@@ -19,21 +19,12 @@ describe("session panel controls", () => {
   let layout: ReturnType<typeof useLayoutStore>;
   const button = () => wrapper.get('[data-action="navigator-panel"]');
   const panel = () => wrapper.get("#navigator-panel");
+  const pin = () => wrapper.get('[data-action="navigator-pin"]');
   const clickEvent = async (detail: number, type = "click") => {
     button().element.dispatchEvent(new MouseEvent(type, { bubbles: true, detail }));
     await nextTick();
   };
-  const singleClick = async () => {
-    await clickEvent(1);
-    await vi.advanceTimersByTimeAsync(500);
-  };
-  const doubleClick = async () => {
-    await clickEvent(1);
-    await vi.advanceTimersByTimeAsync(100);
-    await clickEvent(2);
-    await clickEvent(2, "dblclick");
-    await vi.advanceTimersByTimeAsync(250);
-  };
+  const singleClick = () => clickEvent(1);
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -61,19 +52,18 @@ describe("session panel controls", () => {
     vi.useRealTimers();
   });
 
-  it("uses a single button and never changes pinning on a single click", async () => {
-    expect(wrapper.find('[data-action="navigator-pin"]').exists()).toBe(false);
+  it("toggles immediately and changes pinning only through the header pin button", async () => {
     await singleClick();
     expect(layout.layout.collapsed.navigator).toBe(false);
     expect(panel().classes()).toContain("floating");
     expect(layout.layout.navigatorPinned).toBe(false);
 
     const save = vi.spyOn(layout, "save");
-    await doubleClick();
+    await pin().trigger("click");
     expect(save).toHaveBeenCalledTimes(1);
     expect(layout.layout.navigatorPinned).toBe(true);
     expect(layout.layout.collapsed.navigator).toBe(false);
-    expect(button().attributes("aria-pressed")).toBe("true");
+    expect(pin().attributes("aria-pressed")).toBe("true");
     expect(panel().classes()).not.toContain("floating");
 
     await singleClick();
@@ -85,47 +75,27 @@ describe("session panel controls", () => {
     expect(layout.layout.collapsed.navigator).toBe(false);
     expect(layout.layout.navigatorPinned).toBe(true);
 
-    await doubleClick();
+    await pin().trigger("click");
     expect(layout.layout.navigatorPinned).toBe(false);
     expect(layout.layout.collapsed.navigator).toBe(false);
     await vi.advanceTimersByTimeAsync(1000);
     expect(layout.layout.collapsed.navigator).toBe(true);
   });
 
-  it("double-clicking a closed panel opens it in either new mode", async () => {
-    await doubleClick();
-    expect(layout.layout.navigatorPinned).toBe(true);
-    expect(layout.layout.collapsed.navigator).toBe(false);
-    await singleClick();
-    await doubleClick();
-    expect(layout.layout.navigatorPinned).toBe(false);
-    expect(layout.layout.collapsed.navigator).toBe(false);
-  });
-
-  it.each([350, 490])("does not collapse before the second click at %dms", async (interval) => {
-    await doubleClick();
+  it.each([false, true])("double clicks only toggle visibility when pinned=%s", async (pinned) => {
+    layout.layout.navigatorPinned = pinned;
     const save = vi.spyOn(layout, "save");
     await clickEvent(1);
-    await vi.advanceTimersByTimeAsync(interval);
     expect(layout.layout.collapsed.navigator).toBe(false);
-    expect(save).not.toHaveBeenCalled();
-    await clickEvent(2);
-    await clickEvent(2, "dblclick");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(layout.layout.collapsed.navigator).toBe(false);
-    expect(layout.layout.navigatorPinned).toBe(false);
     expect(save).toHaveBeenCalledTimes(1);
-  });
-
-  it("treats clicks beyond the shared gesture window as single clicks", async () => {
-    await doubleClick();
-    await singleClick();
-    expect(layout.layout.collapsed.navigator).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
     await clickEvent(2);
     await clickEvent(2, "dblclick");
+    expect(layout.layout.collapsed.navigator).toBe(true);
     await vi.advanceTimersByTimeAsync(500);
-    expect(layout.layout.collapsed.navigator).toBe(false);
-    expect(layout.layout.navigatorPinned).toBe(true);
+    expect(layout.layout.collapsed.navigator).toBe(true);
+    expect(layout.layout.navigatorPinned).toBe(pinned);
+    expect(save).toHaveBeenCalledTimes(2);
   });
 
   it("resumes auto-hide when an open menu is unmounted by a list update", async () => {
@@ -189,16 +159,17 @@ describe("session panel controls", () => {
     await wrapper.get(".graph-test").trigger("pointerdown");
     expect(layout.layout.collapsed.navigator).toBe(true);
     expect(layout.layout.navigatorPinned).toBe(false);
-    await doubleClick();
+    await singleClick();
+    await pin().trigger("click");
     await clickEvent(0);
     expect(layout.layout.collapsed.navigator).toBe(true);
     expect(layout.layout.navigatorPinned).toBe(true);
   });
 
-  it("cleans up pending single clicks and hide timers on unmount", async () => {
+  it("cleans up hide timers on unmount", async () => {
     await clickEvent(1);
     wrapper.unmount();
     await vi.advanceTimersByTimeAsync(5000);
-    expect(layout.layout.collapsed.navigator).toBe(true);
+    expect(layout.layout.collapsed.navigator).toBe(false);
   });
 });

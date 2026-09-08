@@ -63,8 +63,16 @@ async function click(selector, twice = false) {
   }
 }
 const button = '[data-action="navigator-panel"]';
+const pinButton = '[data-action="navigator-pin"]';
 const expanded = `document.querySelector('${button}').getAttribute('aria-expanded')==='true'`;
-const pinned = `document.querySelector('${button}').getAttribute('aria-pressed')==='true'`;
+const pinned = `document.querySelector('${pinButton}').getAttribute('aria-pressed')==='true'`;
+async function togglePin() {
+  if (!await evaluate(expanded)) await click(button);
+  await until(`document.querySelector('#navigator-panel').getBoundingClientRect().left===0 && ${expanded}`);
+  const before = await evaluate(pinned);
+  await click(pinButton);
+  await until(before ? `!(${pinned})` : pinned);
+}
 const rects = `(() => { const nav=document.querySelector('#navigator-panel').getBoundingClientRect();const graph=document.querySelector('#graph-panel').getBoundingClientRect();return {nav:nav.width,graphX:graph.x,graphWidth:graph.width}; })()`;
 const report = {};
 try {
@@ -120,7 +128,23 @@ try {
   await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
   await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
   await until(`getComputedStyle(document.querySelector('#navigator-panel')).display==='none'`);
-  await click(button, true);
+  // The new header control must support keyboard activation without auto-hiding under focus.
+  await click(button);
+  await until(`${expanded} && document.querySelector('#navigator-panel').getBoundingClientRect().left===0`);
+  await evaluate(`document.querySelector('${pinButton}').focus()`);
+  for (const expected of [true,false]) {
+    await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    assert.equal(await evaluate(pinned), expected, 'Space toggles the focused pin button');
+    assert.ok(await evaluate(expanded), 'pinning only changes mode');
+  }
+  await move({x:1100,y:500});
+  await sleep(2200);
+  assert.ok(await evaluate(`${expanded} && document.activeElement.matches('${pinButton}')`), 'keyboard focus protects the floating panel');
+  await evaluate(`document.querySelector('${button}').focus()`);
+  await until(`getComputedStyle(document.querySelector('#navigator-panel')).display==='none'`);
+  report.keyboardPin = 'passed';
+  await togglePin();
   await until(`${expanded} && ${pinned}`);
   await until(`document.querySelector('#navigator-panel').getBoundingClientRect().left===0`);
   await until(`Boolean(document.querySelector('#chat-panel .copy-button'))`);
@@ -183,18 +207,14 @@ try {
     return true;
   };
   report.pinnedBounds = await checkNavigatorBounds();
-  const p = await point(button);
-  await move(p);
-  await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...p});
-  await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...p});
-  await sleep(350);
-  report.slowDoubleBeforeSecond = await evaluate(`({expanded:${expanded},pinned:${pinned}})`);
-  assert.deepEqual(report.slowDoubleBeforeSecond, { expanded:true, pinned:true });
-  await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:2,...p});
-  await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:2,...p});
-  await until(`${expanded} && !(${pinned})`);
-  report.slowDoubleAfterSecond = await evaluate(`({expanded:${expanded},pinned:${pinned}})`);
-  assert.deepEqual(report.slowDoubleAfterSecond, { expanded:true, pinned:false });
+  await click(button);
+  report.immediateCollapse = await evaluate(`({expanded:${expanded},pinned:${pinned}})`);
+  assert.deepEqual(report.immediateCollapse, {expanded:false,pinned:true});
+  await click(button);
+  assert.ok(await evaluate(expanded), 'single click immediately expands');
+  await click(button,true);
+  assert.ok(await evaluate(`${expanded} && ${pinned}`), 'double click does not change pinning');
+  await togglePin();
   report.floatingBounds = await checkNavigatorBounds();
   // Both right-side panels must retain pixels when the navigator changes the available space.
   await click('[data-action="tool-panel"]');
@@ -210,7 +230,7 @@ try {
     return widths;
   };
   await checkWidths();
-  await click(button,true);
+  await togglePin();
   await until(pinned);
   await sleep(500);
   report.bothPinned = await checkWidths();
@@ -264,6 +284,7 @@ try {
   await send('Page.reload');
   await until(`window.__pixTest && !__pixTest.state().loading && document.querySelector('#navigator-panel')`);
   await until(`__pixTest.state().current && document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').panelsSettled`);
+  assert.ok(await evaluate(`${pinned} && ${expanded}`), 'reload restores the pinned panel');
   await click('[data-action="chat-panel"]');
   await click('[data-action="tool-panel"]');
   await sleep(800);
@@ -315,7 +336,7 @@ try {
         const shot=await send('Page.captureScreenshot',{format:'png'});
         writeFileSync(join(home,`mode-pinned-${viewport}.png`),Buffer.from(shot.data,'base64'));
       }
-      await click(button,true);
+      await togglePin();
       await until(`!(${pinned}) && ${expanded}`);
       await move(await point('.session-search input'));
       await sleep(500);
@@ -333,7 +354,7 @@ try {
       assert.ok(Math.abs(hidden.graph.width-floating.graph.width)<2,'floating open/close preserves graph width');
       assert.equal(await evaluate(`!!document.elementFromPoint(20,150)?.closest('#navigator-panel')`),false,'hidden navigator does not intercept graph');
       report.modeGeometry.push({viewport,width,fixed,floating,hiddenGraph:hidden.graph});
-      await click(button,true);
+      await togglePin();
       await until(`${pinned} && ${expanded}`);
       await sleep(500);
     }
@@ -342,7 +363,7 @@ try {
   await sleep(2200);
   assert.ok(await evaluate(expanded),'pinned navigator stays open without interaction');
   report.pinnedStaysOpen=true;
-  await click(button,true);
+  await togglePin();
   await until(`!(${pinned}) && ${expanded}`);
   await move(await point('.session-search input'));
   await sleep(2200);
@@ -364,7 +385,7 @@ try {
   await sleep(2500);
   report.afterMenuUnmount = await evaluate(`({expanded:${expanded},pinned:${pinned},focus:document.activeElement.tagName})`);
   assert.equal(report.afterMenuUnmount.expanded,false, 'removed menu releases auto-hide');
-  // Sample rendered frames through real button clicks, including the 500ms gesture window.
+  // Sample rendered frames through real button clicks.
   report.panelTransitions = [];
   for (const [panel, trigger, metric] of [
     ['navigator', button, 'opacity'],

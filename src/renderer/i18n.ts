@@ -36,6 +36,8 @@ export const messages = {
     },
     nav: {
       projects: "Projects",
+      pinPanel: "Pin session panel",
+      unpinPanel: "Unpin session panel (auto-hide)",
       newSession: "Start",
       settings: "Settings",
       searchSessions: "Search sessions",
@@ -58,8 +60,8 @@ export const messages = {
     },
     titlebar: {
       toggleNavigator: "Toggle navigator",
-      navigatorPinned: "Session panel · Pinned · Click to expand/collapse · Double-click to unpin",
-      navigatorAutoHide: "Session panel · Auto-hide · Click to expand/collapse · Double-click to pin",
+      navigatorPinned: "Session panel · Pinned · Click to expand/collapse",
+      navigatorAutoHide: "Session panel · Auto-hide · Click to expand/collapse",
       resizeNavigator: "Resize session panel",
       chooseWorkspace: "Choose workspace",
       closeMenu: "Close workspace menu",
@@ -615,6 +617,8 @@ export const messages = {
     },
     nav: {
       projects: "项目",
+      pinPanel: "固定会话面板",
+      unpinPanel: "取消固定会话面板（自动隐藏）",
       newSession: "开始",
       settings: "设置",
       searchSessions: "搜索会话",
@@ -637,8 +641,8 @@ export const messages = {
     },
     titlebar: {
       toggleNavigator: "切换导航器",
-      navigatorPinned: "会话面板 · 已固定 · 单击展开/收起 · 双击取消固定",
-      navigatorAutoHide: "会话面板 · 自动隐藏 · 单击展开/收起 · 双击固定",
+      navigatorPinned: "会话面板 · 已固定 · 点击展开/收起",
+      navigatorAutoHide: "会话面板 · 自动隐藏 · 点击展开/收起",
       resizeNavigator: "调整会话面板宽度",
       chooseWorkspace: "选择工作区",
       closeMenu: "关闭工作区菜单",
