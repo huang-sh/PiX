@@ -159,7 +159,7 @@ function controllerFixture(t: TestContext) {
     async pickProject() { return undefined; },
     async pickSession() { return undefined; },
     async confirm() { return true; },
-    async openExternal() {}, quit() {},
+    async openExternal() {}, showItemInFolder() {}, quit() {},
   });
   controller.settings.appPath = join(root, "app.json");
   controller.pi.control = async () => [];

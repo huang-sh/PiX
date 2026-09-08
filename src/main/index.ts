@@ -11,6 +11,7 @@ import {
   Tray,
 } from "electron";
 import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
 import type { DesktopRoute } from "../shared/types.js";
@@ -197,6 +198,10 @@ app.whenReady().then(async () => {
     },
     async openExternal(url) {
       await openExternal(url);
+    },
+    showItemInFolder(path) {
+      if (!existsSync(path)) throw new Error("Session file was not found or is inaccessible");
+      shell.showItemInFolder(path);
     },
     quit() {
       app.quit();

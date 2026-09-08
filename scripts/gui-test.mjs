@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronBinary } from "./lib/electron-binary.mjs";
@@ -7,7 +7,8 @@ import { electronBinary } from "./lib/electron-binary.mjs";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const artifacts = join(root, "artifacts");
 const allowEmpty = process.env.PIX_GUI_EMPTY === "1";
-const testHome = join(artifacts, allowEmpty ? "gui-home-empty" : "gui-home");
+const verifyHmr = process.argv.includes("--hmr");
+const testHome = join(artifacts, verifyHmr ? "gui-home-hmr" : allowEmpty ? "gui-home-empty" : "gui-home");
 const verifyWsl = process.argv.includes("--wsl");
 const verifySsh = process.argv.includes("--ssh");
 const sshTestArgs = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "stempdac.hpc4ai.unito.it"];
@@ -33,6 +34,24 @@ const electron = process.env.ELECTRON_BINARY ?? electronBinary(root);
 if (!existsSync(electron)) throw new Error("Electron binary not found");
 mkdirSync(artifacts, { recursive: true });
 mkdirSync(testHome, { recursive: true });
+let devServer;
+let localeFile;
+let localeSource;
+if (verifyHmr) {
+  cpSync(join(root, "src"), join(testHome, "src"), { recursive: true });
+  cpSync(join(root, "package.json"), join(testHome, "package.json"));
+  localeFile = join(testHome, "src/renderer/i18n.ts");
+  localeSource = readFileSync(localeFile, "utf8");
+  writeFileSync(localeFile, localeSource.replace(/^\s+(copyPath|copySessionId|revealSession):.*\r?\n/gm, ""));
+  const { createServer } = await import("vite");
+  const { default: vue } = await import("@vitejs/plugin-vue");
+  const { default: tailwindcss } = await import("@tailwindcss/vite");
+  devServer = await createServer({ configFile: false, root: join(testHome, "src/renderer"), publicDir: join(root, "resources"),
+    plugins: [vue({ template: { compilerOptions: { isCustomElement: tag => tag === "webview" } } }), tailwindcss()],
+    server: { host: "127.0.0.1", port: 0 },
+  });
+  await devServer.listen();
+}
 mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(
@@ -76,6 +95,7 @@ child.stderr.on("data", (chunk) => (stderr += String(chunk)));
 function testEnv() {
   return {
     ...process.env,
+    ...(devServer ? { ELECTRON_RENDERER_URL: devServer.resolvedUrls.local[0] } : {}),
     PIX_HOME: testHome,
     PIX_PROJECT: allowEmpty ? root : join(root, "test-workspace"),
     PI_OFFLINE: "1",
@@ -471,11 +491,61 @@ try {
       if (!(await cdp.evaluate("Boolean(document.querySelector('.session-item.active'))")))
         throw new Error("Active project session list did not expand");
     });
-    await cdp.evaluate("document.querySelector('.session-item.active + .session-menu').click()");
+    const sessionLayout = await cdp.evaluate(`(() => {
+      const row = document.querySelector('.session-item.active');
+      const title = row.querySelector('strong'), time = row.querySelector('small');
+      const originalTitle = title.textContent, originalWidth = row.style.width;
+      const checks = [];
+      try {
+        for (const width of [140, 350]) {
+          row.style.width = width + 'px';
+          for (const text of ['Short', '很长的 Session 标题 '.repeat(30)]) {
+            title.textContent = text;
+            const rowRect = row.getBoundingClientRect(), titleRect = title.getBoundingClientRect();
+            const timeRect = time.getBoundingClientRect(), spanRect = time.parentElement.getBoundingClientRect();
+            checks.push({ width, short: text === 'Short',
+              singleLine: rowRect.height <= 34,
+              rightAligned: Math.abs(timeRect.right - (spanRect.right - 8)) < 1,
+              noOverlap: titleRect.right + 7 <= timeRect.left,
+              timeVisible: time.scrollWidth <= time.clientWidth && timeRect.right <= rowRect.right,
+              ellipsis: text === 'Short' || (title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === 'ellipsis'),
+            });
+          }
+        }
+        return checks;
+      } finally {
+        title.textContent = originalTitle;
+        row.style.width = originalWidth;
+      }
+    })()`);
+    if (sessionLayout.some(check => !check.singleLine || !check.rightAligned || !check.noOverlap || !check.timeVisible || !check.ellipsis))
+      throw new Error(`Session row layout regression: ${JSON.stringify(sessionLayout)}`);
+    await cdp.evaluate("document.querySelector('.session-item.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 250 }))");
     await retry(async () => {
       if (!(await cdp.evaluate("Boolean(document.querySelector('[data-action=session-rename]'))")))
         throw new Error("Session menu did not open");
     });
+    if (verifyHmr) writeFileSync(localeFile, localeSource);
+    for (const [locale, expected] of [
+      ["en", ["Copy path", "Copy session ID", "Show in file manager"]],
+      ["zh-CN", ["复制路径", "复制会话 ID", "在资源管理器中显示"]],
+    ]) {
+      await cdp.evaluate(`document.querySelector('#app').__vue_app__.config.globalProperties.$i18n.locale = ${JSON.stringify(locale)}`);
+      await retry(async () => {
+        const labels = await cdp.evaluate(`['session-copy-path','session-copy-id','session-reveal'].map(action => document.querySelector('[data-action="'+action+'"]')?.textContent.trim())`);
+        if (JSON.stringify(labels) !== JSON.stringify(expected)) throw new Error(`Untranslated session menu: ${JSON.stringify(labels)}`);
+      });
+      const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
+      writeFileSync(join(artifacts, `session-menu-${locale}.png`), Buffer.from(shot.data, "base64"));
+    }
+    await cdp.evaluate(`document.querySelector('#app').__vue_app__.config.globalProperties.$i18n.locale = 'en'`);
+    if (verifyHmr) {
+      writeFileSync(localeFile, localeSource.replace('copyPath: "Copy path"', 'copyPath: "Copy full path"'));
+      await retry(async () => {
+        if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy full path")
+          throw new Error("A second locale hot update did not reach the mounted menu");
+      });
+    }
     await cdp.evaluate("document.querySelector('[data-action=session-rename]').click()");
     await retry(async () => {
       const value = await cdp.evaluate(`({
@@ -491,7 +561,7 @@ try {
         throw new Error("Session rename dialog did not close");
     });
     // Deleting must confirm through the in-app dialog, never the native OS prompt.
-    await cdp.evaluate("document.querySelector('.session-item.active + .session-menu').click()");
+    await cdp.evaluate("document.querySelector('.session-item.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 100, clientY: 250 }))");
     await retry(async () => {
       if (!(await cdp.evaluate("Boolean(document.querySelector('[data-action=session-delete]'))")))
         throw new Error("Session menu did not reopen for deletion");
@@ -1042,6 +1112,7 @@ try {
   console.log(JSON.stringify(result, null, 2));
   }
 } finally {
+  await devServer?.close();
   if (wslStoppedPid) {
     try { signalWslTestHost(wslStoppedPid, "CONT"); } catch (error) { console.error(error); }
   }

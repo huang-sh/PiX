@@ -23,6 +23,7 @@ const platform: Platform = {
     return false;
   },
   async openExternal() {},
+  showItemInFolder() {},
   quit() {},
 };
 

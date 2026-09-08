@@ -283,13 +283,12 @@ kbd {
 .project-row:hover .project-actions, .project-row:focus-within .project-actions { opacity: 1; }
 .project-row:hover .project-connection, .project-row:focus-within .project-connection { display: none; }
 .project-sessions { padding-left: 28px; }
-.session-row { display: grid; grid-template-columns: minmax(0,1fr) 30px; align-items: center; }
 .session-item {
   display: grid;
   grid-template-columns: minmax(0,1fr) 10px;
   align-items: center;
   width: 100%;
-  min-height: 45px;
+  min-height: 32px;
   margin: 1px 0;
   padding: 5px 7px 5px 11px;
   border-radius: 9px;
@@ -300,12 +299,9 @@ kbd {
 .session-item > i { width: 7px; height: 7px; border-radius: 50%; }
 .session-item > i.current { background: #5b7cfa; box-shadow: 0 0 0 3px rgba(91,124,250,.1); }
 .session-item > i.running { border: 2px solid var(--border-strong); border-top-color: var(--muted); background: transparent; animation: remote-spin .8s linear infinite; }
-.session-item > span { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
-.session-item strong, .session-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-item strong { font-size: var(--font-size-ui); }
-.session-item small { color: var(--faint); font-size: var(--font-size-caption); }
-.session-menu { opacity: 0; }
-.session-row:hover .session-menu, .session-row:focus-within .session-menu { opacity: 1; }
+.session-item > span { display: flex; align-items: baseline; min-width: 0; gap: 8px; padding-right: 8px; }
+.session-item strong { overflow: hidden; font-size: var(--font-size-ui); text-overflow: ellipsis; white-space: nowrap; }
+.session-item small { flex-shrink: 0; margin-left: auto; color: var(--faint); font-size: var(--font-size-caption); white-space: nowrap; }
 .show-more { min-height: 34px; padding: 0 11px; color: var(--faint); font-size: var(--font-size-small); text-align: left; }
 .show-more:hover { color: var(--muted); }
 .project-empty { margin: 4px 11px 10px; color: var(--faint); font-size: var(--font-size-caption); }

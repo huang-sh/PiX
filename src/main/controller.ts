@@ -38,6 +38,7 @@ export interface Platform {
   pickSession(): Promise<string | undefined>;
   confirm(message: string, detail?: string): Promise<boolean>;
   openExternal(url: string): Promise<void>;
+  showItemInFolder(path: string): void;
   quit(): void;
 }
 const unavailable = (): RuntimeState => ({
@@ -508,6 +509,23 @@ export class MainController {
   }
   async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
     const v = validateRouteInput(route, raw);
+    if (route === "app.revealSession") {
+      const record = this.projectGroups().find((record) => record.id === v.id);
+      const session = record?.sessions.find((session) => session.path === v.path);
+      if (!record || !session) throw new Error("Session is not in the project history");
+      const remote = record.project.remote;
+      if (remote?.kind === "ssh") throw new Error("SSH sessions cannot be shown in the local file manager");
+      let path = session.path;
+      if (remote?.kind === "wsl") {
+        if (process.platform !== "win32" || !remote.distro || /[\\/\x00]/.test(remote.distro) || !posix.isAbsolute(path) || /[\\\x00]/.test(path))
+          throw new Error("Invalid WSL session path");
+        path = `\\\\wsl.localhost\\${remote.distro}${posix.normalize(path).replaceAll("/", "\\")}`;
+      } else {
+        path = resolve(path);
+      }
+      this.platform.showItemInFolder(path);
+      return;
+    }
     if (route === "wsl.list") return WslHostClient.distributions();
     if (route === "wsl.names") return WslHostClient.names();
     if (route === "ssh.list") return listSshHosts();

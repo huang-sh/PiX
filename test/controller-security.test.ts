@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { MainController, type Platform } from "../src/main/controller.js";
+import type { ProjectGroup } from "../src/shared/types.js";
 
 const root = resolve(process.cwd(), "test-workspace");
 const denied: Platform = {
@@ -17,8 +18,36 @@ const denied: Platform = {
     return false;
   },
   async openExternal() {},
+  showItemInFolder() {},
   quit() {},
 };
+
+test("revealing a session uses its project history without opening the project", async () => {
+  const shown: string[] = [];
+  const controller = new MainController(root, { ...denied, showItemInFolder: path => { shown.push(path); } });
+  const session = controller.files.list()[0]!;
+  const record: ProjectGroup = { id: "other-project", project: { name: "other", path: root },
+    sessions: [session], lastOpened: session.modified, connected: false };
+  controller.projectGroups = () => [record];
+  const active = controller.project;
+  await controller.invoke("app.revealSession", { id: record.id, path: session.path });
+  assert.deepEqual(shown, [resolve(session.path)]);
+  assert.equal(controller.project, active);
+  await assert.rejects(controller.invoke("app.revealSession", { id: "unknown", path: session.path }), /project history/);
+  await assert.rejects(controller.invoke("app.revealSession", { id: record.id, path: "/unlisted" }), /project history/);
+  await assert.rejects(controller.invoke("app.revealSession", { id: record.id }), /path/);
+  record.project.remote = { kind: "ssh", host: "server" };
+  await assert.rejects(controller.invoke("app.revealSession", { id: record.id, path: session.path }), /SSH/);
+  assert.equal(shown.length, 1);
+  if (process.platform === "win32") {
+    record.project.remote = { kind: "wsl", distro: "Ubuntu" };
+    session.path = "/home/user/my project/session.jsonl";
+    await controller.invoke("app.revealSession", { id: record.id, path: session.path });
+    assert.equal(shown.at(-1), "\\\\wsl.localhost\\Ubuntu\\home\\user\\my project\\session.jsonl");
+    session.path = "/home/user/\\invalid";
+    await assert.rejects(controller.invoke("app.revealSession", { id: record.id, path: session.path }), /Invalid WSL/);
+  }
+});
 
 test("shell commands require main-process approval", async () => {
   const controller = new MainController(root, denied);

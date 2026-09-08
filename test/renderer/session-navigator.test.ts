@@ -1,10 +1,11 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ProjectGroup, SessionSummary } from "../../src/shared/types";
 import SessionNavigator from "../../src/renderer/features/navigator/SessionNavigator.vue";
 import { i18n } from "../../src/renderer/i18n";
 import { useSessionStore } from "../../src/renderer/stores/session";
+import { useLayoutStore } from "../../src/renderer/stores/layout";
 
 const summary = (id: string): SessionSummary => ({
   id,
@@ -18,6 +19,86 @@ const summary = (id: string): SessionSummary => ({
 });
 
 describe("session project navigator", () => {
+  it("opens rename and delete from the session context menu without opening the session", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const record: ProjectGroup = {
+      id: "local:/project",
+      project: { name: "project", path: "/project" },
+      sessions: [{ ...summary("session-title"), modified: new Date().toISOString() }],
+      lastOpened: new Date().toISOString(),
+      connected: true,
+    };
+    useSessionStore().projects = [record];
+    const wrapper = mount(SessionNavigator, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    try {
+      await wrapper.get(".project-main").trigger("click");
+      const row = wrapper.get(".session-item");
+      expect(row.get("strong").text()).toBe("session-title");
+      expect(row.get("small").text()).toBe(i18n.global.t("time.now"));
+      expect(wrapper.find(".session-menu").exists()).toBe(false);
+      expect(wrapper.get(".session-row").findAll("button")).toHaveLength(1);
+      for (const [action, event, args] of [
+        ["session-rename", "rename", [record, record.sessions[0]!.path, "session-title"]],
+        ["session-delete", "removeProjectSession", [record, record.sessions[0]!.path]],
+      ] as const) {
+        await row.trigger("contextmenu", { button: 2, clientX: 100, clientY: 100 });
+        await flushPromises();
+        expect(wrapper.emitted("openProjectSession")).toBeUndefined();
+        expect(wrapper.emitted("menuOpenChange")?.at(-1)).toEqual([true]);
+        const item = document.querySelector<HTMLElement>(`[data-action="${action}"]`);
+        expect(item).not.toBeNull();
+        item!.click();
+        await flushPromises();
+        expect(wrapper.emitted(event)?.[0]).toEqual(args);
+        expect(wrapper.emitted("menuOpenChange")?.at(-1)).toEqual([false]);
+      }
+      for (const [action, value] of [["session-copy-path", record.sessions[0]!.path], ["session-copy-id", "session-title"]]) {
+        await row.trigger("contextmenu", { button: 2 });
+        await flushPromises();
+        document.querySelector<HTMLElement>(`[data-action="${action}"]`)!.click();
+        await flushPromises();
+        expect(window.pix!.copy).toHaveBeenLastCalledWith(value);
+        expect(useLayoutStore().notice?.message).toBe(i18n.global.t("common.copied"));
+      }
+      await row.trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      document.querySelector<HTMLElement>('[data-action="session-reveal"]')!.click();
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenLastCalledWith("app.revealSession", { id: record.id, path: record.sessions[0]!.path });
+      expect(wrapper.emitted("openProjectSession")).toBeUndefined();
+      vi.mocked(window.pix!.copy!).mockRejectedValueOnce(new Error("clipboard unavailable"));
+      await row.trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      document.querySelector<HTMLElement>('[data-action="session-copy-id"]')!.click();
+      await flushPromises();
+      expect(useLayoutStore().notice).toEqual({ message: i18n.global.t("common.copyFailed"), level: "error" });
+      vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error("file not found"));
+      await row.trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      document.querySelector<HTMLElement>('[data-action="session-reveal"]')!.click();
+      await flushPromises();
+      expect(useLayoutStore().notice).toEqual({ message: i18n.global.t("nav.revealFailed"), level: "error" });
+      useSessionStore().projects[0]!.project.remote = { kind: "ssh", host: "server" };
+      await row.trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      expect(document.querySelector('[data-action="session-reveal"]')!.getAttribute("aria-disabled")).toBe("true");
+      document.querySelector<HTMLElement>('[data-action="session-copy-path"]')!.click();
+      await flushPromises();
+      expect(window.pix!.copy).toHaveBeenLastCalledWith(record.sessions[0]!.path);
+      await row.trigger("click");
+      expect(wrapper.emitted("openProjectSession")?.[0]).toEqual([record, record.sessions[0]!.path]);
+      await row.trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      useSessionStore().projects = [];
+      await flushPromises();
+      expect(document.querySelector("[data-navigator-menu]")).toBeNull();
+      expect(wrapper.emitted("menuOpenChange")?.at(-1)).toEqual([false]);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("groups sessions and creates a session for the selected project", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

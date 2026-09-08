@@ -12,6 +12,10 @@ import {
   Upload,
 } from "@lucide/vue";
 import {
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuPortal,
+  ContextMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuPortal,
@@ -23,6 +27,8 @@ import type { ProjectGroup } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
 import NavigatorMenu from "./NavigatorMenu.vue";
 import { useSessionStore } from "../../stores/session";
+import { useLayoutStore } from "../../stores/layout";
+import { desktop } from "../../api";
 
 const emit = defineEmits<{
   pickProject: [];
@@ -36,6 +42,7 @@ const emit = defineEmits<{
   menuOpenChange: [open: boolean];
 }>();
 const session = useSessionStore();
+const layout = useLayoutStore();
 const { t } = useI18n();
 const expanded = ref(new Set<string>());
 const collapsed = ref(new Set<string>());
@@ -82,6 +89,24 @@ function toggleProject(id: string) {
 function remoteLabel(record: ProjectGroup) {
   const remote = record.project.remote;
   return remote?.kind === "ssh" ? remote.host : remote?.distro;
+}
+
+async function copy(value: string) {
+  try {
+    if (window.pix?.copy) await window.pix.copy(value);
+    else await navigator.clipboard.writeText(value);
+    layout.showNotice(t("common.copied"));
+  } catch {
+    layout.showNotice(t("common.copyFailed"), "error");
+  }
+}
+
+async function revealSession(record: ProjectGroup, path: string) {
+  try {
+    await desktop.invoke("app.revealSession", { id: record.id, path });
+  } catch {
+    layout.showNotice(t("nav.revealFailed"), "error");
+  }
 }
 
 </script>
@@ -167,39 +192,52 @@ function remoteLabel(record: ProjectGroup) {
 
         <div v-if="!collapsed.has(record.id) || session.query" class="project-sessions">
           <div v-for="item in visible(record)" :key="item.path" class="session-row">
-            <button
-              type="button"
-              class="session-item"
-              :class="{ active: record.id === session.activeProjectId && session.current?.session.path === item.path }"
-              @click="emit('openProjectSession', record, item.path)"
-            >
-              <span>
-                <strong>{{ item.name || item.firstMessage || item.id }}</strong>
-                <small>{{ t("nav.messages", { n: item.messageCount, time: relative(item.modified) }) }}</small>
-              </span>
-              <i
-                :class="{
-                  running: record.id === session.activeProjectId && session.current?.session.path === item.path && session.activity?.active,
-                  current: record.id === session.activeProjectId && session.current?.session.path === item.path,
-                }"
-              />
-            </button>
-            <NavigatorMenu @open-change="emit('menuOpenChange', $event)">
-              <DropdownMenuTrigger as-child>
-                <Button variant="ghost" size="icon" class="session-menu" @click.stop>
-                  <MoreHorizontal :size="15" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuPortal>
-                <DropdownMenuContent data-navigator-menu class="menu-content" :side-offset="5">
-                  <DropdownMenuItem data-action="session-rename" class="menu-item" @select="emit('rename', record, item.path, item.name ?? '')">
+            <NavigatorMenu context @open-change="emit('menuOpenChange', $event)">
+              <ContextMenuTrigger as-child>
+                <button
+                  type="button"
+                  class="session-item"
+                  :class="{ active: record.id === session.activeProjectId && session.current?.session.path === item.path }"
+                  :title="item.name || item.firstMessage || item.id"
+                  @click="emit('openProjectSession', record, item.path)"
+                >
+                  <span>
+                    <strong>{{ item.name || item.firstMessage || item.id }}</strong>
+                    <small>{{ relative(item.modified) }}</small>
+                  </span>
+                  <i
+                    :class="{
+                      running: record.id === session.activeProjectId && session.current?.session.path === item.path && session.activity?.active,
+                      current: record.id === session.activeProjectId && session.current?.session.path === item.path,
+                    }"
+                  />
+                </button>
+              </ContextMenuTrigger>
+              <ContextMenuPortal>
+                <ContextMenuContent data-navigator-menu class="menu-content" :side-offset="5">
+                  <ContextMenuItem data-action="session-copy-path" class="menu-item" @select="copy(item.path)">
+                    {{ t("nav.copyPath") }}
+                  </ContextMenuItem>
+                  <ContextMenuItem data-action="session-copy-id" class="menu-item" @select="copy(item.id)">
+                    {{ t("nav.copySessionId") }}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    data-action="session-reveal"
+                    class="menu-item"
+                    :disabled="record.project.remote?.kind === 'ssh'"
+                    :title="record.project.remote?.kind === 'ssh' ? t('nav.revealRemoteUnavailable') : undefined"
+                    @select="revealSession(record, item.path)"
+                  >
+                    {{ t("nav.revealSession") }}
+                  </ContextMenuItem>
+                  <ContextMenuItem data-action="session-rename" class="menu-item" @select="emit('rename', record, item.path, item.name ?? '')">
                     {{ t("common.rename") }}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem data-action="session-delete" class="menu-item danger" @select="emit('removeProjectSession', record, item.path)">
+                  </ContextMenuItem>
+                  <ContextMenuItem data-action="session-delete" class="menu-item danger" @select="emit('removeProjectSession', record, item.path)">
                     {{ t("common.delete") }}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenuPortal>
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenuPortal>
             </NavigatorMenu>
           </div>
           <button

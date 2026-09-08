@@ -438,6 +438,7 @@ export type DesktopRoute =
   | "app.openProject"
   | "app.forgetProject"
   | "app.openExternal"
+  | "app.revealSession"
   | "app.quit"
   | "wsl.list"
   | "wsl.names"

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { DropdownMenuRoot } from "reka-ui";
+import { ContextMenuRoot, DropdownMenuRoot } from "reka-ui";
 import { onBeforeUnmount, ref } from "vue";
 
+defineProps<{ context?: boolean }>();
 const emit = defineEmits<{ openChange: [open: boolean] }>();
 const open = ref(false);
 function changed(value: boolean) {
@@ -14,5 +15,5 @@ onBeforeUnmount(() => { if (open.value) emit("openChange", false); });
 </script>
 
 <template>
-  <DropdownMenuRoot :open="open" @update:open="changed"><slot /></DropdownMenuRoot>
+  <component :is="context ? ContextMenuRoot : DropdownMenuRoot" :open="open" @update:open="changed"><slot /></component>
 </template>

@@ -39,6 +39,11 @@ export const messages = {
       newSession: "Start",
       settings: "Settings",
       searchSessions: "Search sessions",
+      copyPath: "Copy path",
+      copySessionId: "Copy session ID",
+      revealSession: "Show in file manager",
+      revealRemoteUnavailable: "SSH session files cannot be shown in the local file manager",
+      revealFailed: "Could not show the session file. Check that the file is accessible.",
       importSession: "Import session",
       refreshSessions: "Refresh sessions",
       connected: "Connected",
@@ -47,7 +52,6 @@ export const messages = {
       openProject: "Open project",
       removeFromList: "Remove from list",
       newSessionInProject: "New session in this project",
-      messages: "{n} messages · {time}",
       showMore: "Show more",
       noSessions: "No sessions yet",
       noProjects: "No projects yet",
@@ -614,6 +618,11 @@ export const messages = {
       newSession: "开始",
       settings: "设置",
       searchSessions: "搜索会话",
+      copyPath: "复制路径",
+      copySessionId: "复制会话 ID",
+      revealSession: "在资源管理器中显示",
+      revealRemoteUnavailable: "SSH 会话文件无法在本机资源管理器中显示",
+      revealFailed: "无法显示会话文件，请检查文件是否可以访问。",
       importSession: "导入会话",
       refreshSessions: "刷新会话",
       connected: "已连接",
@@ -622,7 +631,6 @@ export const messages = {
       openProject: "打开项目",
       removeFromList: "从列表移除",
       newSessionInProject: "在此项目中新建会话",
-      messages: "{n} 条消息 · {time}",
       showMore: "显示更多",
       noSessions: "暂无会话",
       noProjects: "暂无项目",
@@ -1154,9 +1162,20 @@ export const messages = {
   },
 };
 
-export const i18n = createI18n({
+const create = () => createI18n({
   legacy: false,
   locale: navigator.language === "zh-CN" ? "zh-CN" : "en",
   fallbackLocale: "en",
   messages,
 });
+
+// Keep the plugin already installed on the app when translations hot-update.
+export const i18n: ReturnType<typeof create> = import.meta.hot?.data?.i18n ?? create();
+if (import.meta.hot?.data) {
+  import.meta.hot.data.i18n = i18n;
+  import.meta.hot.accept((updated) => {
+    if (!updated) return;
+    for (const locale of ["en", "zh-CN"] as const)
+      i18n.global.setLocaleMessage(locale, updated.messages[locale]);
+  });
+}
