@@ -11,7 +11,7 @@
 ---
 
 <p align="center">
-  <img src="pix-session-tree.png" alt="PiX session graph with branches growing left to right">
+  <img src="assets/images/pix-session-tree.png" alt="PiX session graph with branches growing left to right">
 </p>
 
 A PiX session is not a line — it is a graph that keeps growing: every conversation turn is a node, and any node can sprout a new branch at any time.

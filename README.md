@@ -11,7 +11,7 @@
 ---
 
 <p align="center">
-  <img src="pix-session-tree.png" alt="PiX 会话图：从左到右生长的分支结构">
+  <img src="assets/images/pix-session-tree.png" alt="PiX 会话图：从左到右生长的分支结构">
 </p>
 
 PiX 的会话不是一条线，而是一张会生长的图：每一轮对话都是图上的一个节点，任何一个节点都可以随时长出新分支。
