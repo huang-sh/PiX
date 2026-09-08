@@ -11,7 +11,7 @@ const home = mkdtempSync(join(root, 'artifacts', 'navigator-ui-'));
 mkdirSync(join(home, '.pix'), { recursive: true });
 mkdirSync(join(home, 'project'));
 mkdirSync(join(home, 'project', '.pi'));
-cpSync(join(root, 'test-workspace', '.pi', 'sessions'), join(home, 'project', '.pi', 'sessions'), { recursive: true });
+cpSync(join(root, 'test', 'workspace', '.pi', 'sessions'), join(home, 'project', '.pi', 'sessions'), { recursive: true });
 writeFileSync(join(home, '.pix', 'settings.json'), JSON.stringify({ language: 'zh-CN', closeToTray: false, openLastSessionOnStartup: true }));
 const port = 10000 + Math.floor(Math.random() * 1000);
 const child = spawn(electronBinary(root), ['--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`, `--user-data-dir=${join(home, 'electron')}`, root], {

@@ -51,7 +51,7 @@ const args = [
 ];
 const child = spawn(electron, args, {
   cwd: root,
-  env: { ...process.env, PIX_HOME: testHome, PIX_PROJECT: join(root, "test-workspace") },
+  env: { ...process.env, PIX_HOME: testHome, PIX_PROJECT: join(root, "test", "workspace") },
   windowsHide: true,
 });
 let stderr = "";

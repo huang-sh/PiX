@@ -18,7 +18,7 @@ import {
   WorkspaceService,
 } from "../src/main/services.js";
 import { projectId } from "../src/shared/types.js";
-const root = resolve(process.cwd(), "test-workspace");
+const root = resolve(process.cwd(), "test", "workspace");
 test("workspace reads real files and blocks traversal", () => {
   const w = new WorkspaceService(root);
   const tree = w.tree();

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseSessionJsonl, projectSession } from "../src/shared/session.js";
-const dir = resolve(process.cwd(), "test-workspace", ".pi", "sessions"),
+const dir = resolve(process.cwd(), "test", "workspace", ".pi", "sessions"),
   files = readdirSync(dir).filter((x: string) => x.endsWith(".jsonl"));
 test("both required session IDs are installed", () => {
   assert.equal(files.length, 2);

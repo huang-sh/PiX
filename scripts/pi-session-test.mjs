@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url)),
-  workspace = join(root, "test-workspace"),
+  workspace = join(root, "test", "workspace"),
   fixtureDir = join(workspace, ".pi", "sessions"),
   dir = mkdtempSync(join(tmpdir(), "pix-pi-"));
 process.on("exit", () => rmSync(dir, { recursive: true, force: true }));

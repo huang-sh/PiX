@@ -12,9 +12,9 @@ release/
 # Test artifacts (screenshots, logs, reports)
 artifacts/
 
-# Pi agent session data (test-workspace/.pi/settings.json is a tracked fixture)
+# Pi agent session data (test/workspace/.pi/settings.json is a tracked fixture)
 /.pi/
-test-workspace/.pi/sessions/
+test/workspace/.pi/sessions/
 
 # Logs
 *.log

@@ -44,7 +44,7 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # npm test expects the test-workspace git fixture (baseline commit plus
+      # npm test expects the test/workspace git fixture (baseline commit plus
       # pending changes), which is not part of the repository.
       - name: Install test fixtures
         run: npm run fixtures

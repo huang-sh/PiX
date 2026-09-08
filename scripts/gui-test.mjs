@@ -97,7 +97,7 @@ function testEnv() {
     ...process.env,
     ...(devServer ? { ELECTRON_RENDERER_URL: devServer.resolvedUrls.local[0] } : {}),
     PIX_HOME: testHome,
-    PIX_PROJECT: allowEmpty ? root : join(root, "test-workspace"),
+    PIX_PROJECT: allowEmpty ? root : join(root, "test", "workspace"),
     PI_OFFLINE: "1",
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
   };

@@ -39,7 +39,7 @@ const runWsl = (...args) =>
 const cwd = await runWsl("mktemp", "-d", "/tmp/pix-wsl-test-XXXXXX");
 const localHome = mkdtempSync(join(tmpdir(), "pix-wsl-controller-"));
 process.env.PIX_HOME = localHome;
-const localProject = fileURLToPath(new URL("../test-workspace", import.meta.url));
+const localProject = fileURLToPath(new URL("../test/workspace", import.meta.url));
 const platform = {
   async pickProject() {},
   async pickSession() {},

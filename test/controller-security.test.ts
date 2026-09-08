@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { MainController, type Platform } from "../src/main/controller.js";
 import type { ProjectGroup } from "../src/shared/types.js";
 
-const root = resolve(process.cwd(), "test-workspace");
+const root = resolve(process.cwd(), "test", "workspace");
 const denied: Platform = {
   async pickProject() {
     return undefined;

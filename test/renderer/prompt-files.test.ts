@@ -32,24 +32,24 @@ describe("document attachments", () => {
     const picker = wrapper.get('input[type="file"]');
     expect(picker.attributes("accept")).toBeUndefined();
     Object.defineProperty(picker.element, "files", { configurable: true, value: [
-      localFile("example.ts", "D:/dev/PiX/test-workspace/src/example.ts"),
+      localFile("example.ts", "D:/dev/PiX/test/workspace/src/example.ts"),
       localFile("说明.txt", "D:/docs/说明.txt"),
     ] });
     await picker.trigger("change");
     // Paths resolve synchronously; no reading spinner is involved.
     expect(draftState.files).toEqual([
-      { name: "example.ts", path: "D:/dev/PiX/test-workspace/src/example.ts" },
+      { name: "example.ts", path: "D:/dev/PiX/test/workspace/src/example.ts" },
       { name: "说明.txt", path: "D:/docs/说明.txt" },
     ]);
     expect(wrapper.findAll(".composer-file")).toHaveLength(2);
-    expect(wrapper.get(".composer-file").attributes("title")).toBe("D:/dev/PiX/test-workspace/src/example.ts");
+    expect(wrapper.get(".composer-file").attributes("title")).toBe("D:/dev/PiX/test/workspace/src/example.ts");
     wrapper.unmount();
     wrapper = mountComposer(onSubmit, draftState);
     expect(wrapper.findAll(".composer-file")).toHaveLength(2);
     await wrapper.get("textarea").setValue("Review these");
     await wrapper.get(".composer-submit").trigger("click");
     await flushPromises();
-    expect(onSubmit).toHaveBeenCalledWith('Review these\n\nAttached file: D:/dev/PiX/test-workspace/src/example.ts\n\nAttached file: D:/docs/说明.txt');
+    expect(onSubmit).toHaveBeenCalledWith('Review these\n\nAttached file: D:/dev/PiX/test/workspace/src/example.ts\n\nAttached file: D:/docs/说明.txt');
     // The first submission failed, so text and files are restored to the draft.
     expect(draftState.files).toHaveLength(2);
     expect(draftState.text).toBe("Review these");

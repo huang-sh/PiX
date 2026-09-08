@@ -1,7 +1,7 @@
 // GUI verification for the openLinksInApp feature: a real (CDP-trusted) click
 // on a chat markdown link must open the URL in the built-in Browser tool
 // instead of the OS browser. Runs against an isolated throwaway project so it
-// never disturbs the shared test-workspace fixtures (session lists sort by
+// never disturbs the shared test/workspace fixtures (session lists sort by
 // file mtime, so dropping a session there would hijack gui-test.mjs).
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";

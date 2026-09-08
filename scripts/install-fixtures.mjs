@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url)),
-  workspace = join(root, "test-workspace"),
+  workspace = join(root, "test", "workspace"),
   dest = join(workspace, ".pi", "sessions");
 mkdirSync(dest, { recursive: true });
 const ids = [
@@ -233,7 +233,7 @@ function generated(id, index) {
 function candidates(id) {
   const roots = [
     "/mnt/data",
-    join(root, "fixtures"),
+    join(root, "test", "fixtures"),
     "/mnt/data/PiX-input-sessions",
   ];
   const all = [];

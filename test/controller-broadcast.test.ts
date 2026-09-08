@@ -11,7 +11,7 @@ import { projectSession } from "../src/shared/session.js";
 import { sessionEventDecoder } from "../src/shared/session-updates.js";
 import { agentMessageContent } from "../src/shared/agent-stream.js";
 
-const root = resolve(process.cwd(), "test-workspace");
+const root = resolve(process.cwd(), "test", "workspace");
 const platform: Platform = {
   async pickProject() {
     return undefined;

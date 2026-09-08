@@ -29,7 +29,7 @@ const args = [
 const env = {
   ...process.env,
   PIX_HOME: testHome,
-  PIX_PROJECT: join(root, "test-workspace"),
+  PIX_PROJECT: join(root, "test", "workspace"),
   PI_OFFLINE: "1",
   ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
 };

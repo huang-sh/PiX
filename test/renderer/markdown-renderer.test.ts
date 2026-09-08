@@ -7,7 +7,7 @@ import MarkdownRenderer from "../../src/renderer/components/MarkdownRenderer.vue
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
 
-const project = { name: "demo", path: "D:\\dev\\PiX\\test-workspace" } as ProjectInfo;
+const project = { name: "demo", path: "D:\\dev\\PiX\\test\\workspace" } as ProjectInfo;
 const macProject = { name: "demo", path: "/Users/foo/project" } as ProjectInfo;
 
 function settingsWith(openLinksInApp: boolean): SettingsBundle {
@@ -148,7 +148,7 @@ describe("MarkdownRenderer", () => {
     useLayoutStore().settings = settingsWith(true);
     useWorkspaceStore().project = project;
     const wrapper = await mountWithLink(
-      "see [notes](file:///D:/dev/PiX/test-workspace/docs/notes.md)",
+      "see [notes](file:///D:/dev/PiX/test/workspace/docs/notes.md)",
     );
 
     await wrapper.get("a").trigger("click");
@@ -163,7 +163,7 @@ describe("MarkdownRenderer", () => {
     useLayoutStore().settings = settingsWith(true);
     useWorkspaceStore().project = project;
     const wrapper = await mountWithLink(
-      "see [example](D:/dev/PiX/test-workspace/src/example.ts)",
+      "see [example](D:/dev/PiX/test/workspace/src/example.ts)",
     );
 
     expect(await clickFirstLink(wrapper)).toBe(true);
@@ -178,7 +178,7 @@ describe("MarkdownRenderer", () => {
     useLayoutStore().settings = settingsWith(true);
     useWorkspaceStore().project = project;
     const wrapper = await mountWithLink(
-      "see [example](D:\\dev\\PiX\\test-workspace\\src\\example.ts)",
+      "see [example](D:\\dev\\PiX\\test\\workspace\\src\\example.ts)",
     );
 
     expect(await clickFirstLink(wrapper)).toBe(true);
