@@ -16,6 +16,13 @@ artifacts/
 /.pi/
 test/workspace/.pi/sessions/
 
+# Workspace fixture dirt: install-fixtures.mjs intentionally leaves
+# src/example.ts modified and src/new-file.ts untracked in the nested repo.
+# example.ts is script-generated for the same reason (gitignore cannot hide
+# changes to a tracked file).
+test/workspace/src/example.ts
+test/workspace/src/new-file.ts
+
 # Logs
 *.log
 

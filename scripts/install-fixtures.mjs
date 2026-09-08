@@ -298,6 +298,15 @@ writeFileSync(
   join(root, "artifacts", "session-manifest.json"),
   JSON.stringify(manifest, null, 2) + "\n",
 );
+// src/example.ts lives only in the nested git baseline (the outer repo ignores
+// it), so a fresh clone needs it on disk before the baseline commit below.
+if (!existsSync(join(workspace, "src", "example.ts"))) {
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  writeFileSync(
+    join(workspace, "src", "example.ts"),
+    'export const greeting = "Hello from the PiX workspace";\n',
+  );
+}
 const git = (args) =>
   spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
 if (!existsSync(join(workspace, ".git"))) {
