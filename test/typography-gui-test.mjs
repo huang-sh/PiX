@@ -142,13 +142,45 @@ try {
           host.replaceChildren(editor);
           result.gutter = { size: parseFloat(getComputedStyle(editor.firstChild).fontSize), line: getComputedStyle(editor.firstChild).lineHeight, width: editor.firstChild.getBoundingClientRect().width };
           result.editor = { size: parseFloat(getComputedStyle(editor.lastChild).fontSize), line: getComputedStyle(editor.lastChild).lineHeight, family: getComputedStyle(editor.lastChild).fontFamily };
+          const sameRow = (parent, selectors) => {
+            const boxes = selectors.map(selector => parent.querySelector(selector).getBoundingClientRect());
+            const centers = boxes.map(box => box.top + box.height / 2);
+            return boxes.every(box => box.width > 0 && box.height > 0)
+              && Math.max(...centers) - Math.min(...centers) <= 1
+              && boxes.every((box, index) => !index || box.left >= boxes[index - 1].right - 1);
+          };
+          const node = document.querySelector('.prompt-node').cloneNode(true);
+          host.replaceChildren(node);
+          node.querySelector('.node-context-usage b').textContent = '2%';
+          node.querySelector('.node-context-usage em').textContent = '1M';
+          node.querySelector('.node-thinking-value span').textContent = 'high';
+          result.nodeRows = ['Zai / GLM-5.3', 'Anthropic / Claude Sonnet with a very long model name'].map(model => {
+            node.querySelector('.node-model-value span').textContent = model;
+            return { model, sameRow: sameRow(node, ['.node-context-usage', '.node-model-value', '.node-thinking-value']) };
+          });
           result.narrow = [];
-          for (const width of [320, 356, 480]) {
-            host.style.width = width + 'px';
-            const composer = document.querySelector('.chat-composer').cloneNode(true);
-            host.replaceChildren(composer);
-            const box = composer.getBoundingClientRect();
-            result.narrow.push({ width, fits: [...composer.querySelectorAll('textarea, button')].every(el => { const r = el.getBoundingClientRect(); return r.left >= box.left - 1 && r.right <= box.right + 1; }) });
+          for (const variant of ['chat-composer', 'draft-node']) {
+            for (const width of [310, 320, 356, 360, 480]) {
+              for (const working of ['', 'Pi is working…', 'Pi 正在处理…']) {
+                host.style.width = width + 'px';
+                const composer = document.createElement('div');
+                composer.className = variant;
+                composer.style.width = '100%';
+                composer.append(document.querySelector('.chat-composer .prompt-composer').cloneNode(true));
+                host.replaceChildren(composer);
+                if (working) {
+                  const status = document.createElement('span');
+                  status.textContent = working;
+                  composer.querySelector('.prompt-composer > footer').prepend(status);
+                }
+                composer.querySelector('.node-model-select > span').textContent = 'Anthropic / Claude Sonnet with a very long model name';
+                composer.querySelector('.node-thinking-select > span').textContent = 'xhigh';
+                const box = composer.getBoundingClientRect();
+                result.narrow.push({ variant, width, working,
+                  sameRow: sameRow(composer, ['.composer-attach', '.node-model-select', '.node-thinking-select', '.composer-submit']),
+                  fits: [...composer.querySelectorAll('textarea, button')].every(el => { const r = el.getBoundingClientRect(); return r.left >= box.left - 1 && r.right <= box.right + 1; }) });
+              }
+            }
           }
         } finally { host.remove(); }
         return result;
@@ -178,6 +210,8 @@ try {
       assert.equal(measurements.gutter.line, measurements.editor.line, "line numbers must align");
       assert.equal(measurements.editor.size, 13);
       assert.ok(measurements.gutter.width >= 52);
+      assert.ok(measurements.nodeRows.every(item => item.sameRow), 'node context, model and thinking must share one row without overlap');
+      assert.ok(measurements.narrow.every(item => item.sameRow), 'composer attachment, model, thinking and send must share one row without overlap');
       assert.ok(measurements.narrow.every(item => item.fits), "narrow composer controls must fit");
     }
     const screenshot = await send("Page.captureScreenshot", { format: "png" });
@@ -201,12 +235,22 @@ try {
   }
   throw error;
 } finally {
+  if (socket?.readyState === WebSocket.OPEN && child.exitCode === null) {
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    await evaluate("setTimeout(() => window.pix.invoke('app.quit'), 50)").catch(() => {});
+    let timer;
+    await Promise.race([exited, new Promise(resolve => { timer = setTimeout(resolve, 5000); })]);
+    clearTimeout(timer);
+  }
   socket?.close();
   for (const request of pending.values()) request.reject(new Error("Test ended"));
   pending.clear();
   if (child.exitCode === null) {
     const exited = new Promise(resolve => child.once("exit", resolve));
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    if (process.platform === "win32") {
+      const killed = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, encoding: 'utf8', timeout: 5000 });
+      if (killed.status !== 0) throw new Error(killed.error?.message || killed.stderr || 'Failed to stop test Electron');
+    }
     else child.kill("SIGTERM");
     await exited;
   }

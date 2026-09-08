@@ -364,7 +364,7 @@ kbd {
 .turn-copy strong { display: -webkit-box; overflow: hidden; font-size: var(--font-size-ui); line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .turn-copy p { display: -webkit-box; grid-column: 2 / 4; min-height: 34px; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .turn-copy p.node-running { display: flex; align-items: center; gap: 5px; color: var(--accent-strong); }
-.node-footer { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 0 8px; min-height: 56px; margin: 7px -8px -8px; padding: 5px 2px 0; border-top: 1px solid var(--border); color: var(--faint); }
+.node-footer { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 4px; min-height: 30px; margin: 7px -8px -8px; padding: 5px 2px 0; border-top: 1px solid var(--border); color: var(--faint); }
 .node-context-usage { display: flex; align-items: center; gap: 3px; min-width: 0; height: 25px; padding: 0 3px; white-space: nowrap; }
 .node-context-usage i { --usage: 0deg; position: relative; flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--accent) var(--usage), var(--border) 0); }
 .node-context-usage i::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--surface); }
@@ -372,8 +372,7 @@ kbd {
 .node-context-usage em { overflow: hidden; font-size: var(--font-size-caption); font-style: normal; text-overflow: ellipsis; }
 .node-footer-value { display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; color: var(--muted); font-size: var(--font-size-caption); font-weight: 600; text-transform: capitalize; }
 .node-footer-value > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node-model-value { grid-column: 1 / -1; grid-row: 2; justify-self: start; max-width: 100%; }
-.node-thinking-value { grid-column: 2; grid-row: 1; justify-content: flex-end; }
+.node-thinking-value { justify-content: flex-end; }
 .node-thinking-value > svg { flex: 0 0 auto; margin-right: 3px; }
 .node-footer-select { position: relative; display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; border: 1px solid transparent; border-radius: 6px; transition: border-color 120ms ease, background 120ms ease, opacity 120ms ease; }
 .node-footer-select:hover, .node-footer-select:focus-within { border-color: var(--border); background: var(--surface-subtle); }
@@ -387,7 +386,7 @@ kbd {
 .node-model-provider > svg { margin-left: auto; color: var(--faint); }
 .node-model-option > :first-child { flex: 0 0 12px; width: 12px; color: var(--accent); }
 .node-model-option > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node-thinking-select { justify-content: flex-end; }
+.node-thinking-select { flex: none; justify-content: flex-end; }
 .node-thinking-select > svg:first-child { margin: 0 3px 0 0; color: var(--muted); }
 .node-add { position: absolute; top: 50%; right: -16px; display: grid; place-items: center; width: 30px; height: 30px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); color: var(--accent-foreground); box-shadow: 0 5px 15px color-mix(in srgb,var(--accent) 24%,transparent); opacity: 0; transform: translateY(-50%) scale(.86); transition: opacity 140ms ease, transform 140ms ease, background 140ms ease; }
 .prompt-node:hover .node-add, .prompt-node.selected .node-add, .prompt-node:focus-within .node-add { opacity: 1; transform: translateY(-50%) scale(1); }
@@ -439,7 +438,7 @@ kbd {
 .composer-attach:disabled { opacity: .4; cursor: not-allowed; }
 .composer-image-error, .composer-image-status { margin: 4px 0; font-size: var(--font-size-small); line-height: 1.5; color: var(--danger); }
 .composer-image-status { color: var(--muted); }
-.prompt-composer > footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 30px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border); }
+.prompt-composer > footer { display: flex; align-items: center; gap: 4px; min-height: 30px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border); }
 .prompt-composer > footer > span { color: var(--faint); font-size: var(--font-size-caption); white-space: nowrap; }
 .composer-settings { display: flex; align-items: center; gap: 2px; min-width: 0; height: 26px; margin-left: auto; }
 .prompt-composer .composer-submit, .composer-collapsed-stop {
