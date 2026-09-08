@@ -1,10 +1,52 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import type { AgentControl } from "../src/shared/types.js";
+
+test("extension commands deliver notifications and errors before and after reload", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-slash-"));
+  assert.equal(dirname(home), tmpdir());
+  const events: any[] = [];
+  const runtime = new PiRuntime(home, join(home, "sessions"), event => events.push(event), async () => {});
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({
+    cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+      (pi: any) => {
+        let started = false;
+        pi.on("session_start", () => { started = true; });
+        pi.registerCommand("notify-test", { handler: (_args: string, ctx: any) => {
+          assert.equal(started, true);
+          ctx.ui.notify("command result\nsecond line", "warning");
+        } });
+        pi.registerCommand("fail-test", { handler: () => { throw new Error("command failure"); } });
+        pi.registerCommand("dialog-test", { handler: (_args: string, ctx: any) => ctx.ui.select("Choose", ["one"]) });
+      },
+    ] },
+  });
+  try {
+    await runtime.create();
+    for (const reload of [false, true]) {
+      if (reload) await runtime.control({ action: "reload" });
+      events.length = 0;
+      await runtime.control({ action: "prompt", text: "/notify-test" });
+      await runtime.control({ action: "prompt", text: "/fail-test" });
+      await runtime.control({ action: "prompt", text: "/dialog-test" });
+      const notices = events.filter(event => event.type === "notice");
+      assert.equal(notices.length, 3);
+      assert.deepEqual(notices[0].payload, { message: "command result\nsecond line", level: "warning", source: "extension" });
+      assert.match(notices[1].payload.message, /command failure/);
+      assert.equal(notices[1].payload.level, "error");
+      assert.match(notices[2].payload.message, /Pi terminal dialog/);
+    }
+  } finally {
+    await runtime.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("a failing event consumer cannot throw into SDK message persistence", async () => {
   let listener!: (event: unknown) => void;
@@ -352,7 +394,9 @@ test("factory loads bundled packages as additional extension paths", async () =>
       servicesOptions = options;
       return {};
     },
-    createAgentSessionFromServices: async () => ({}),
+    createAgentSessionFromServices: async () => ({ session: {
+      bindExtensions: async () => {}, extensionRunner: { getUIContext: () => ({}) },
+    } }),
   };
   const create = () =>
     runtime.factory(fakePi)({ cwd: "/project", sessionManager: {}, sessionStartEvent: undefined });

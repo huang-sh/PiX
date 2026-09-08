@@ -12,6 +12,7 @@ import {
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
 import { validatePromptImages } from "../shared/images.js";
+import { collectAgentCommands } from "../shared/commands.js";
 import type {
   AgentControl,
   BrokerModel,
@@ -172,6 +173,25 @@ export class PiRuntime {
         services,
         sessionManager,
         sessionStartEvent,
+      });
+      const notify = (message: string, level = "info") =>
+        this.emit({ type: "notice", payload: { message, level, source: "extension" } });
+      const unsupported = async () => {
+        throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
+      };
+      await created.session.bindExtensions({
+        mode: "rpc",
+        uiContext: {
+          ...created.session.extensionRunner.getUIContext(),
+          notify,
+          select: unsupported,
+          confirm: unsupported,
+          input: unsupported,
+          editor: unsupported,
+          custom: unsupported,
+        },
+        onError: (error: { extensionPath: string; error: string }) =>
+          notify(`${error.extensionPath}: ${error.error}`, "error"),
       });
       return {
         ...created,
@@ -533,11 +553,7 @@ export class PiRuntime {
         s.setSessionName(input.name);
         break;
       case "commands":
-        return (s.getCommands?.() ?? []).map((c: any) => ({
-          name: c.name,
-          description: c.description,
-          source: c.source,
-        }));
+        return collectAgentCommands(s);
       case "getTools":
         return { active: s.getActiveToolNames(), all: s.getAllTools() };
       case "setTools":

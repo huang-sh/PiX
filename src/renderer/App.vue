@@ -6,7 +6,7 @@ import {
   DialogRoot,
   DialogTitle,
 } from "reka-ui";
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { sessionEventDecoder } from "../shared/session-updates";
 import type {
@@ -21,10 +21,10 @@ import type {
   WslDistribution,
   RemoteConnectStage,
 } from "../shared/types";
-import type { AppCommandName } from "../shared/commands";
 import { desktop } from "./api";
 import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
+import { createRunCommand, runCommandKey } from "./features/commands/runCommand";
 import ImagePreview from "./components/ImagePreview.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
@@ -72,6 +72,9 @@ const renameOpen = ref(false);
 const renamePath = ref("");
 const renameName = ref("");
 const renameInput = ref<HTMLInputElement>();
+const compactOpen = ref(false);
+const compactInstructions = ref("");
+const compactBusy = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
 
@@ -407,92 +410,31 @@ async function submitRename() {
   }
 }
 
-type CommandHandler = () => void | Promise<void>;
-
-function openSettings(category?: string) {
-  if (category) layout.settingsCategory = category;
-  layout.screen = "settings";
-}
-
-async function exportSession() {
-  const result = await session.control<{ path?: string }>({ action: "exportHtml" });
-  if (result.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
-}
-
-const commandHandlers = {
-  settings: () => openSettings(),
-  model: () => openSettings("models"),
-  tree: () => layout.screen === "settings" ? closeSettings() : undefined,
-  thinking: () => openSettings("models"),
-  "scoped-models": () => openSettings("models"),
-  export: exportSession,
-  import: () => session.importSession(),
-  share: exportSession,
-  copy: async () => {
-    const text = [...(session.current?.projection.messages ?? [])]
-      .reverse()
-      .find((message) => message.role === "assistant")?.text;
-    if (!text) return;
-    if (window.pix?.copy) await window.pix.copy(text);
-    else await navigator.clipboard.writeText(text);
-    layout.showNotice(t("notice.copiedLast"));
-  },
-  name: async () => {
-    const current = session.current;
-    if (current) await requestRename(current.session.path, current.session.name ?? "");
-  },
-  session: async () => {
-    workspace.utilityOutput = JSON.stringify(
-      await session.control({ action: "stats" }),
-      null,
-      2,
-    );
-    await layout.openTool("output");
-  },
-  changelog: async () => {
-    workspace.openBrowser("https://github.com/earendil-works/pi/releases/tag/v0.84.4");
-    await layout.openTool("browser");
-  },
-  hotkeys: () => openSettings("shortcuts"),
-  fork: async () => {
-    const node = session.selectedNode;
-    if (node) await session.control({ action: "fork", entryId: node.userEntryId });
-  },
-  clone: async () => {
-    await session.control({ action: "clone" });
-    await session.refresh();
-  },
-  trust: () => openSettings("general"),
-  login: () => openSettings("models"),
-  logout: () => openSettings("models"),
-  new: () => session.create(),
-  compact: async () => {
-    await session.control({
-      action: "compact",
-      instructions: window.prompt(t("compactPrompt"), "") || undefined,
-    });
-  },
-  resume: () => layout.setCollapsed("navigator", false),
-  reload: async () => {
-    await session.control({ action: "reload" });
-  },
-  quit: async () => {
-    await desktop.invoke("app.quit");
-  },
-  terminal: () => layout.openTool("terminal"),
-  files: () => layout.openTool("files"),
-  browser: () => layout.openTool("browser"),
-} satisfies Record<AppCommandName, CommandHandler>;
-
-async function runCommand(name: string) {
+async function submitCompact() {
+  if (compactBusy.value) return;
+  compactBusy.value = true;
   try {
-    if (Object.hasOwn(commandHandlers, name))
-      await commandHandlers[name as AppCommandName]();
-    else await session.control({ action: "prompt", text: `/${name}` });
+    await session.control({ action: "compact", instructions: compactInstructions.value.trim() || undefined });
+    compactOpen.value = false;
+    layout.showNotice(t("notice.contextCompacted"));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
-  }
+  } finally { compactBusy.value = false; }
 }
+
+const { runCommand, openSettings } = createRunCommand({ requestRename, closeSettings,
+  requestCompact: () => { compactInstructions.value = ""; compactOpen.value = true; },
+});
+provide(runCommandKey, runCommand);
+
+// The runtime flips available some time after the session opens (or reconnects);
+// loadCommands at open-time races that transition and would stick empty.
+watch(
+  () => session.current?.runtime.available,
+  (available, was) => {
+    if (available && !was) void session.loadCommands();
+  },
+);
 
 const decodeSessionEvent = sessionEventDecoder(() => desktop.invoke("session.snapshot"));
 function onEvent(wireEvent: DesktopEvent) {
@@ -556,6 +498,7 @@ onMounted(() => {
         welcome: !workspace.project,
         sessions: session.sessions,
         current: session.current,
+        commands: session.commands,
         focusedNode: session.focusedNode,
         layout: layout.layout,
         contentSection: layout.contentSection,
@@ -624,6 +567,21 @@ onBeforeUnmount(() => {
           <footer>
             <Button data-action="rename-cancel" type="button" variant="ghost" @click="renameOpen = false">{{ t("common.cancel") }}</Button>
             <Button type="submit" :disabled="!renameName.trim()">{{ t("renameDialog.rename") }}</Button>
+          </footer>
+        </form>
+      </DialogContent>
+    </DialogPortal>
+  </DialogRoot>
+  <DialogRoot :open="compactOpen" @update:open="compactOpen = $event">
+    <DialogPortal>
+      <DialogOverlay class="dialog-overlay" />
+      <DialogContent class="rename-dialog" data-compact-dialog>
+        <DialogTitle>{{ t("command.compact") }}</DialogTitle>
+        <form @submit.prevent="submitCompact">
+          <input v-model="compactInstructions" :placeholder="t('compactPrompt')" :aria-label="t('compactPrompt')" :disabled="compactBusy" />
+          <footer>
+            <Button type="button" variant="ghost" :disabled="compactBusy" @click="compactOpen = false">{{ t("common.cancel") }}</Button>
+            <Button type="submit" :disabled="compactBusy">{{ t(compactBusy ? "draft.working" : "command.compact") }}</Button>
           </footer>
         </form>
       </DialogContent>

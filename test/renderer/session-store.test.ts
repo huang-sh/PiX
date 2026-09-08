@@ -117,6 +117,23 @@ describe("session stream focus", () => {
     expect(session.models).toEqual([{ provider: "deepseek", id: "deepseek-chat" }]);
   });
 
+  it("ignores command discovery from a previously selected session", async () => {
+    const session = useSessionStore();
+    const current = snapshot(first, "a1");
+    current.runtime.available = true;
+    hydrate(session, current);
+    let resolveOld!: (value: any) => void;
+    vi.spyOn(desktop, "invoke")
+      .mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }))
+      .mockResolvedValue([{ name: "new-command", source: "extension" }] as never);
+    const oldLoad = session.loadCommands();
+    hydrate(session, { ...current, session: { ...current.session, path: "new.jsonl" } });
+    await session.loadCommands();
+    resolveOld([{ name: "old-command", source: "extension" }]);
+    await oldLoad;
+    expect(session.commands.map(command => command.name)).toEqual(["new-command"]);
+  });
+
   it("follows the new active node when a continued run starts", () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));

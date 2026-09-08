@@ -130,6 +130,8 @@ export const messages = {
       working: "Pi is working…",
       sendHint: "Enter to send · Shift+Enter for newline",
       sendHintCtrl: "Ctrl/Cmd ↵ to send",
+      slashMenuLabel: "Slash commands",
+      slashEmpty: "No matching commands",
     },
     branch: {
       title: "Branch context",
@@ -219,6 +221,9 @@ export const messages = {
       disconnectedRemote: "Disconnected from remote",
       exportedTo: "Exported to {path}",
       copiedLast: "Copied last Pi response",
+      noAssistantMessage: "No assistant response to copy",
+      resourcesReloaded: "Pi resources reloaded",
+      contextCompacted: "Context compacted",
       openProjectFirst: "Open a project to start a session.",
     },
     renameDialog: {
@@ -700,6 +705,8 @@ export const messages = {
       working: "Pi 正在处理…",
       sendHint: "Enter 发送 · Shift+Enter 换行",
       sendHintCtrl: "Ctrl/Cmd ↵ 发送",
+      slashMenuLabel: "斜杠命令",
+      slashEmpty: "没有匹配的命令",
     },
     branch: {
       title: "分支上下文",
@@ -789,6 +796,9 @@ export const messages = {
       disconnectedRemote: "已断开远程连接",
       exportedTo: "已导出到 {path}",
       copiedLast: "已复制 Pi 的最近回复",
+      noAssistantMessage: "暂无可复制的助手回复",
+      resourcesReloaded: "已重新加载 Pi 资源",
+      contextCompacted: "已压缩上下文",
       openProjectFirst: "请先打开一个项目再创建会话。",
     },
     renameDialog: {

@@ -195,6 +195,11 @@ export const useWorkspaceStore = defineStore("workspace", {
         const payload = event.payload as { chunk?: string };
         if (payload.chunk) this.utilityOutput += payload.chunk;
       }
+      if (event.type === "notice") {
+        const payload = event.payload as { source?: string; message?: string };
+        if (payload.source === "extension" && payload.message)
+          this.utilityOutput += `${payload.message}\n`;
+      }
     },
   },
 });

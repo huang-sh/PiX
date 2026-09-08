@@ -42,6 +42,7 @@ export const useSessionStore = defineStore("session", {
     userThinking: undefined as string | undefined,
     query: "",
     commands: [] as RuntimeCommand[],
+    commandRequest: 0,
     models: [] as RuntimeModel[],
     activity: undefined as AgentActivity | undefined,
     branchActivities: {} as Record<string, { runId: string; activity?: AgentActivity }>,
@@ -120,6 +121,8 @@ export const useSessionStore = defineStore("session", {
       this.branchActivities = {};
       this.pendingPrompt = undefined;
       this.current = undefined;
+      this.commands = [];
+      this.commandRequest++;
       this.syncProject();
       if (current) this.applySnapshot(current);
     },
@@ -179,6 +182,9 @@ export const useSessionStore = defineStore("session", {
       if (snapshot.graph) {
         const run = snapshot.graph.runs.find(r => this.focusedNode === `pending:${r.runId}`);
         if (run?.nodeId) this.focusedNode = run.nodeId;
+        else if (run && run.status !== "running")
+          this.focusedNode = previousGraph?.runs.find(r => r.runId === run.runId)?.pending?.parentNodeId
+            ?? snapshot.projection.activeNodeId;
       } else if (this.activity) this.focusedNode = snapshot.projection.activeNodeId;
       if (!snapshot.runtime.isStreaming && this.activity && !this.activity.active)
         this.activity = undefined;
@@ -204,11 +210,18 @@ export const useSessionStore = defineStore("session", {
     },
     // Commands are session-scoped: no usable session means none to offer.
     async loadCommands() {
+      const request = ++this.commandRequest;
+      const path = this.current?.session.path;
+      this.commands = [];
       if (!this.current?.runtime.available) {
-        this.commands = [];
         return;
       }
-      this.commands = await desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
+      const commands = await this.fetchCommands();
+      if (request === this.commandRequest && path === this.current?.session.path && this.current?.runtime.available)
+        this.commands = commands;
+    },
+    async fetchCommands(): Promise<RuntimeCommand[]> {
+      return desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
     },
     // Single source of truth for the model catalog: every path that can change
     // it (bootstrap, settings open, login/logout, catalog refresh, session
@@ -313,8 +326,9 @@ export const useSessionStore = defineStore("session", {
         const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
           provider: model?.provider, modelId: model?.id, thinkingLevel, images });
         const run = result.graph?.runs.find(r => r.requestId === requestId);
-        if (run) this.focusedNode = run.nodeId ?? `pending:${run.runId}`;
-        return run ? run.nodeId ?? `pending:${run.runId}` : undefined;
+        const focus = run?.nodeId ?? (run?.status === "running" ? `pending:${run.runId}` : nodeId);
+        if (run) this.focusedNode = focus;
+        return focus ?? undefined;
       }
       const node = nodeId ? current.projection.nodes.find((item) => item.id === nodeId) : undefined;
       if (nodeId && !node) return;
@@ -340,7 +354,7 @@ export const useSessionStore = defineStore("session", {
       }
       this.applySnapshot(await this.control<SessionSnapshot>({ action: "newSession" }));
       this.focusedNode = this.current?.projection.activeNodeId ?? null;
-      await this.refresh();
+      await Promise.all([this.refresh(), this.loadCommands()]);
     },
     async importSession() {
       const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(

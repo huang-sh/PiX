@@ -398,6 +398,9 @@ export class GraphRuntime extends PiRuntime {
     }
   }
   private async configurePrompt(pi: PiRuntime, input: PromptAt) {
+    // Extension commands run before model validation in Pi; status/config
+    // commands must also work when a restored model is unavailable.
+    if (input.text.startsWith("/") && pi.runtime.session.extensionRunner.getCommand(input.text.slice(1).split(" ")[0])) return;
     if (input.provider && input.modelId) await PiRuntime.prototype.control.call(pi, { action: "setModel", provider: input.provider, modelId: input.modelId });
     if (input.thinkingLevel) await PiRuntime.prototype.control.call(pi, { action: "setThinking", level: input.thinkingLevel });
   }

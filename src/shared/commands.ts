@@ -30,3 +30,31 @@ export const APP_COMMANDS = [
 ] as const satisfies readonly RuntimeCommand[];
 
 export type AppCommandName = (typeof APP_COMMANDS)[number]["name"];
+
+// Subset of the agent session surface collectAgentCommands needs. The pi
+// SDK's AgentSession exposes these as public members; typing them loosely
+// keeps this pure helper testable against stand-ins.
+export interface AgentCommandSource {
+  promptTemplates?: ReadonlyArray<{ name: string; description?: string; argumentHint?: string }>;
+  resourceLoader?: { getSkills?: () => { skills?: ReadonlyArray<{ name: string; description?: string }> } };
+  extensionRunner?: { getRegisteredCommands?: () => ReadonlyArray<{ invocationName: string; description?: string }> };
+  getCommands?: () => ReadonlyArray<RuntimeCommand>;
+}
+
+// Mirrors the pi RPC get_commands assembly (extension commands, then prompt
+// templates, then skills as "skill:<name>"), so the GUI slash menu and the
+// command palette list exactly what the TUI would autocomplete. A native
+// getCommands() (added in later SDK versions) wins when present.
+export function collectAgentCommands(agent: AgentCommandSource): RuntimeCommand[] {
+  const native = agent.getCommands?.() ?? [];
+  if (native.length) return native.map((command) => ({ ...command }));
+
+  const commands: RuntimeCommand[] = [];
+  for (const command of agent.extensionRunner?.getRegisteredCommands?.() ?? [])
+    commands.push({ name: command.invocationName, description: command.description, source: "extension" });
+  for (const template of agent.promptTemplates ?? [])
+    commands.push({ name: template.name, description: template.description, source: "prompt", argumentHint: template.argumentHint });
+  for (const skill of agent.resourceLoader?.getSkills?.()?.skills ?? [])
+    commands.push({ name: `skill:${skill.name}`, description: skill.description, source: "skill" });
+  return commands;
+}

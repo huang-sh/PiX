@@ -21,7 +21,7 @@ const { t, te } = useI18n();
 const search = ref<HTMLInputElement>();
 const commands = computed(() => {
   const map = new Map<string, RuntimeCommand>();
-  [...APP_COMMANDS, ...session.commands].forEach((command) => map.set(command.name, command));
+  [...session.commands, ...APP_COMMANDS].forEach((command) => map.set(command.name, command));
   const query = layout.commandQuery.toLowerCase();
   return [...map.values()]
     .filter((command) =>

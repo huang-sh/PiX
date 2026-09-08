@@ -60,6 +60,19 @@ describe("parallel session state", () => {
     store.onAgentEvent({ ...scope, runId: "a1", type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "stale" }] } });
     expect(store.selectedActivity?.items.at(-1)?.text).toBe("A completed");
   });
+  it("restores the parent selection when a command settles without creating a turn", () => {
+    const store = useSessionStore();
+    const pending = snapshot();
+    pending.graph!.runs.push({ branchId: "C", runId: "c1", nodeId: null, status: "running",
+      pending: { text: "/status", parentNodeId: "turn:root" } });
+    store.applySnapshot(pending);
+    store.focusedNode = "pending:c1";
+    const settled = snapshot(); settled.graph!.revision = 2;
+    settled.graph!.runs.push({ branchId: "C", runId: "c1", nodeId: null, status: "idle" });
+    store.applySnapshot(settled);
+    expect(store.focusedNode).toBe("turn:root");
+  });
+
   it("submits a scoped request without navigating or changing the active runtime", async () => {
     const store = useSessionStore(); store.applySnapshot(snapshot());
     vi.mocked(desktop.invoke).mockImplementation(async (_route, input: any) => {

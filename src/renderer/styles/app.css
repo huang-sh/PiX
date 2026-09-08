@@ -695,6 +695,14 @@ kbd {
 .menu-item[data-highlighted] { background: var(--muted-surface); }
 .menu-item.danger { color: var(--danger); }
 .menu-item[data-disabled] { opacity: 0.45; cursor: not-allowed; }
+.slash-menu { z-index: 140; display: flex; flex-direction: column; width: min(clamp(240px, var(--reka-popover-trigger-width), 460px), var(--reka-popover-content-available-width)); max-height: min(280px, var(--reka-popover-content-available-height)); padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); animation: menu-in 130ms ease-out; }
+.slash-menu-scroll { display: flex; flex-direction: column; min-height: 0; gap: 1px; overflow: auto; }
+.slash-item { flex-shrink: 0; justify-content: flex-start; gap: 8px; }
+.slash-name { color: var(--text); white-space: nowrap; }
+.slash-desc { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
+.slash-hint { color: var(--faint); font-size: var(--font-size-caption); white-space: nowrap; }
+.slash-badge { padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px; color: var(--faint); font-size: var(--font-size-caption); text-transform: uppercase; white-space: nowrap; }
+.slash-empty { padding: 8px 9px; margin: 0; color: var(--faint); font-size: var(--font-size-small); }
 .graph-delete-error { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 5; padding: 10px; color: var(--danger); background: var(--surface); border: 1px solid var(--danger); border-radius: 8px; font-size: var(--font-size-ui); overflow-wrap: anywhere; }
 .tool-menu-content { min-width: 230px; }
 .tool-menu-item { min-height: 40px; }
@@ -1090,6 +1098,7 @@ kbd {
 
 .toast { position: fixed; right: 14px; bottom: 14px; z-index: 180; max-width: 500px; min-height: 39px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
 .toast.error { border-color: var(--danger); }
+.toast { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow-y: auto; }
 .remote-disconnected { position: fixed; top: 48px; left: 50%; transform: translateX(-50%); z-index: 180; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 32px); padding: 8px 12px; border: 1px solid var(--danger); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); font-size: var(--font-size-ui); }
 .remote-stage-log { margin: 16px 0 0; padding-left: 20px; text-align: left; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.8; }
 .remote-stage-log .current { color: var(--text); font-weight: 600; }

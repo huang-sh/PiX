@@ -11,13 +11,18 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import { getActivePinia } from "pinia";
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { THINKING_LEVELS, type PromptImage, type RuntimeModel } from "../../shared/types";
+import { APP_COMMANDS } from "../../shared/commands";
+import { THINKING_LEVELS, type PromptImage, type RuntimeCommand, type RuntimeModel } from "../../shared/types";
 import { IMAGE_MIME_TYPES, MAX_IMAGE_BYTES, MAX_PROMPT_IMAGES, imageDataUrl, validatePromptImages } from "../../shared/images";
-import { useLayoutStore } from "../stores/layout";
+import { useRunCommand } from "../features/commands/runCommand";
+import { createImeGuard, describeCommand, filterSlashCommands, matchSlashTrigger } from "../lib/slash";
 import { MAX_PROMPT_FILES, promptFilePath, type PromptFile } from "../lib/prompt-files";
+import { useLayoutStore } from "../stores/layout";
+import { useSessionStore } from "../stores/session";
 import Button from "./ui/Button.vue";
+import SlashMenu from "./SlashMenu.vue";
 
 // Shared prompt editor used by the graph draft node and the chat panel composer,
 // so both input paths expose identical model/thinking controls and submit rules.
@@ -44,10 +49,15 @@ const props = defineProps<{
   onSubmit: (text: string, images?: PromptImage[]) => Promise<boolean>;
 }>();
 
-const { t } = useI18n();
+const { t, te } = useI18n();
 // The composer is also mounted in isolated tests with no pinia installed; without
 // an active pinia keep the default Enter-to-send behavior instead of crashing.
 const layout = getActivePinia() ? useLayoutStore() : undefined;
+const sessionStore = getActivePinia() ? useSessionStore() : undefined;
+// Optional: hosts without a dispatcher (isolated test mounts) only see the
+// agent-side commands, whose selection never dispatches client-side.
+const runCommand = useRunCommand();
+const ime = createImeGuard();
 const local = reactive<ComposerDraft>({ text: "", images: [], busy: false, readingImages: false, error: "" });
 const state = computed(() => props.draftState ?? local);
 const draft = computed({ get: () => state.value.text, set: value => { state.value.text = value; } });
@@ -101,6 +111,12 @@ function selectModel(model: RuntimeModel) {
 async function submit() {
   const text = draft.value.trim();
   if (!canSubmit.value) return;
+  const command = slashCommands.value.find(command => `/${command.name}` === text
+    && (command.source === "builtin" || command.source === "app"));
+  if (command && !images.value.length && !files.value.length) {
+    await selectSlash(command);
+    return;
+  }
   const attachments = images.value.map((image) => ({ ...image }));
   const documents = files.value;
   const prompt = [text, ...documents.map(file => `Attached file: ${file.path}`)].filter(Boolean).join("\n\n");
@@ -180,10 +196,109 @@ function dropImages(event: DragEvent) {
 const enterToSend = computed(() => layout?.settings?.app.enterToSend !== false);
 const sendHint = computed(() => t(enterToSend.value ? "draft.sendHint" : "draft.sendHintCtrl"));
 
+// --- Slash command menu ----------------------------------------------------
+// The menu rides the whole draft: open while the text is a single pending
+// "/query", closed by any whitespace, Escape, or an outside pointer press.
+const slashQuery = ref<string | null>(null);
+const slashActive = ref(0);
+const slashCommands = computed<RuntimeCommand[]>(() => {
+  const map = new Map<string, RuntimeCommand>();
+  // Keep builtins visible first; the unfiltered menu scrolls through every source.
+  for (const command of [...APP_COMMANDS, ...(sessionStore?.commands ?? [])]) {
+    if (!runCommand && command.source !== "extension" && command.source !== "prompt" && command.source !== "skill") continue;
+    if (map.has(command.name)) continue;
+    map.set(command.name, command);
+  }
+  return [...map.values()];
+});
+const slashItems = computed(() =>
+  slashQuery.value === null ? [] : filterSlashCommands(slashCommands.value, slashQuery.value));
+const slashActiveDescendant = computed(() =>
+  slashQuery.value !== null && slashItems.value.length ? `slash-option-${slashActive.value}` : undefined);
+const describeSlash = (command: RuntimeCommand) => describeCommand(command, t, te);
+
+watch(slashItems, () => {
+  slashActive.value = 0;
+});
+watch(draft, (text) => {
+  const query = matchSlashTrigger(text);
+  if (query === null) {
+    closeSlash();
+    return;
+  }
+  slashQuery.value = query;
+});
+
+function closeSlash() {
+  slashQuery.value = null;
+}
+
+function moveSlash(delta: number) {
+  const count = slashItems.value.length;
+  if (!count) return;
+  slashActive.value = (slashActive.value + delta + count) % count;
+}
+
+async function selectSlash(command: RuntimeCommand) {
+  closeSlash();
+  if (command.source === "builtin" || command.source === "app") {
+    // Builtins are client-side actions and never reach the model.
+    draft.value = "";
+    await runCommand?.(command.name);
+    return;
+  }
+  // Dynamic commands expand server-side at prompt time — keep the token as
+  // text so arguments can be appended before submitting.
+  const text = `/${command.name} `;
+  draft.value = text;
+  await nextTick();
+  editor.value?.setSelectionRange(text.length, text.length);
+  editor.value?.focus();
+}
+
+// Capture-phase outside dismissal, scoped to skip presses inside the menu.
+function onDocPointerDown(event: PointerEvent) {
+  if ((event.target as Element | null)?.closest?.(".slash-menu")) return;
+  closeSlash();
+}
+watch(slashQuery, (query) => {
+  if (query !== null) document.addEventListener("pointerdown", onDocPointerDown, true);
+  else document.removeEventListener("pointerdown", onDocPointerDown, true);
+});
+onBeforeUnmount(() => document.removeEventListener("pointerdown", onDocPointerDown, true));
+
 function onKeydown(event: KeyboardEvent) {
+  // Any key confirming or just after an IME composition must keep its default
+  // behavior — for Enter that inserts text, for arrows it navigates candidates.
+  if (ime.isGuarded(event)) return;
+  if (slashQuery.value !== null) {
+    const ctrl = event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+    if (event.key === "Escape") {
+      closeSlash();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === "ArrowUp" || (ctrl && event.key === "p")) {
+      moveSlash(-1);
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowDown" || (ctrl && event.key === "n")) {
+      moveSlash(1);
+      event.preventDefault();
+      return;
+    }
+    const plainEnter = event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+    if ((plainEnter || event.key === "Tab") && slashItems.value.length) {
+      selectSlash(slashItems.value[slashActive.value]!);
+      event.preventDefault();
+      return;
+    }
+    // With no matches Enter falls through and submits the literal "/foo"
+    // text — unknown commands reach the model, matching the Pi TUI.
+  }
   if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
-  // Enter confirming an IME composition (e.g. pinyin) must insert text, not send the draft.
-  if (event.isComposing || event.keyCode === 229) return;
   if (!enterToSend.value && !event.ctrlKey && !event.metaKey) return;
   event.preventDefault();
   void submit();
@@ -227,7 +342,23 @@ defineExpose({ focus: focusEditor });
       v-model="draft"
       :disabled="!runnable || busy"
       :placeholder="placeholder ?? t('draft.placeholder')"
+      aria-haspopup="listbox"
+      aria-controls="slash-menu-listbox"
+      :aria-expanded="slashQuery !== null"
+      :aria-activedescendant="slashActiveDescendant"
       @keydown="onKeydown"
+      @compositionend="ime.onCompositionEnd"
+      @blur="closeSlash"
+    />
+    <SlashMenu
+      :commands="slashItems"
+      :active-index="slashActive"
+      :anchor="slashQuery !== null ? editor ?? null : null"
+      :describe="describeSlash"
+      :label="t('draft.slashMenuLabel')"
+      :empty-label="t('draft.slashEmpty')"
+      @select="selectSlash(slashItems[$event]!)"
+      @hover="slashActive = $event"
     />
     <footer>
       <span v-if="busy">{{ t("draft.working") }}</span>

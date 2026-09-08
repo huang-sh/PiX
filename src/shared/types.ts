@@ -362,6 +362,7 @@ export interface RuntimeCommand {
   name: string;
   description?: string;
   source: "builtin" | "extension" | "prompt" | "skill" | "app";
+  argumentHint?: string;
 }
 export interface RuntimeSkill {
   name: string;
