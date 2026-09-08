@@ -1,6 +1,6 @@
 // Smoke test for a packaged PiX build (release/win-unpacked/PiX.exe, the
 // portable exe, or release/mac*/PiX.app on macOS). Drives the packaged app
-// over the Chrome DevTools protocol like scripts/gui-test.mjs, so the asar
+// over the Chrome DevTools protocol like test/gui-test.mjs, so the asar
 // layout, preload, IPC, and the node-pty native binary are all exercised in
 // their packaged form.
 import { spawn, spawnSync } from "node:child_process";
@@ -27,7 +27,7 @@ const bundledChecks = existsSync(join(resources, "app.asar"));
 if (bundledChecks) {
   for (const name of ["fff", "web"]) {
     const result = spawnSync(target, [
-      join(root, "scripts", `builtin-${name}-smoke-test.mjs`),
+      join(root, "test", `builtin-${name}-smoke-test.mjs`),
       join(resources, "pi-builtin", "node_modules"),
       join(resources, "app.asar", "node_modules"),
     ], {

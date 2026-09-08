@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bundlePiPackage } from "./bundle-pi-package.mjs";
+import { bundlePiPackage } from "../scripts/bundle-pi-package.mjs";
 
 test("bundles runtime dependencies with nested versions, excluding peers and dev packages", () => {
   const root = mkdtempSync(join(tmpdir(), "pix-bundle-"));

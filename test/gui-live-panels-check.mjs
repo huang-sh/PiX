@@ -1,5 +1,5 @@
 // Start gui-parallel-fixture.mjs with 8 branches and PIX_GUI_STREAM_LABEL=1.
-// Run: node scripts/gui-live-panels-check.mjs <debug-port> [--resume]
+// Run: node test/gui-live-panels-check.mjs <debug-port> [--resume]
 // PIX_GUI_SOAK_MS adds sustained output checks. All panel operations use mouse input.
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

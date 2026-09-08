@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { bundlePiPackage } from "./bundle-pi-package.mjs";
+import { bundlePiPackage } from "../scripts/bundle-pi-package.mjs";
 
 const appDir = fileURLToPath(new URL("..", import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "pix-web-smoke-"));

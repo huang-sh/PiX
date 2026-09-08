@@ -1,4 +1,4 @@
-// Start scripts/gui-parallel-fixture.mjs, then run this check. Use
+// Start test/gui-parallel-fixture.mjs, then run this check. Use
 // PIX_GUI_NATIVE_BRANCHES=12 for MiniMap or PIX_GUI_BRANCHES=100 for GraphOverview.
 // Only real mouse input changes the UI; __pixTest is read-only.
 import assert from 'node:assert/strict';

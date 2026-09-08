@@ -1,5 +1,5 @@
 // Run gui-parallel-fixture.mjs with 8 branches, 100 turns, and a 100ms stream
-// interval, then: node scripts/gui-branch-switch-check.mjs <debug-port>
+// interval, then: node test/gui-branch-switch-check.mjs <debug-port>
 // SDK runs are started through the app API; measured selections use real clicks.
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

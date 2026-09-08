@@ -13,7 +13,7 @@ import WebSocket from 'ws';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const debugPort = 9861;
 const home = join(root, 'artifacts', `gui-parallel-stop-${randomUUID()}`);
-const fixture = spawn(process.execPath, [join(root, 'scripts', 'gui-parallel-fixture.mjs'), home], {
+const fixture = spawn(process.execPath, [join(root, 'test', 'gui-parallel-fixture.mjs'), home], {
   env: { ...process.env, PIX_GUI_DEBUG_PORT: String(debugPort), PIX_GUI_BRANCHES: '0' },
   stdio: ['ignore', 'pipe', 'inherit'],
   windowsHide: true,

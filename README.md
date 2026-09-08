@@ -62,7 +62,7 @@ SSH 和 WSL 共用安装流程：保留正常的已选 Node；首次安装优先
 
 找不到兼容环境时，才使用 PiX 固定版本的私有 Node；不再跟随桌面端 Node 的补丁版本重复下载。启动使用固定的可执行文件路径，Node 版本变化会重新检查；重新连接时可修复缺失或不兼容的环境。不会修改系统 Node，也不会自动删除旧安装或共享运行时。
 
-开发测试：`node --test scripts/remote-runtime.test.mjs`（Windows 默认使用 Ubuntu-24.04，可设置 `PIX_TEST_WSL_DISTRO`）。构建服务端后，`node scripts/runtime-live-test.mjs --ssh HOST` 或 `--wsl DISTRO` 在独立临时目录验证真实 Node 复用，不切换正式安装。
+开发测试：`node --test test/remote-runtime.test.mjs`（Windows 默认使用 Ubuntu-24.04，可设置 `PIX_TEST_WSL_DISTRO`）。构建服务端后，`node test/runtime-live-test.mjs --ssh HOST` 或 `--wsl DISTRO` 在独立临时目录验证真实 Node 复用，不切换正式安装。
 
 ## 自定义模型
 

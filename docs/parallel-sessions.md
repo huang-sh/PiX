@@ -41,6 +41,6 @@ JSONL 可作为独立 Pi tree 导入。HTML 复用 Pi 的 HTML 导出器，不�
 
 `test/graph-runtime.test.ts` 使用真实 Pi SDK 和本地模型，覆盖并行、嵌套分叉、空闲分支复用、独立停止、请求去重、运行中 JSONL/HTML 导出、无自动合并和重启稳定 ID。`test/graph-files.test.ts` 覆盖所有权锁、缺失依赖、损坏来源和元数据恢复。
 
-编译测试后运行 `node scripts/graph-benchmark.mjs` 可获得投影/布局基准。使用 `PIX_GUI_BRANCHES=1000 node scripts/gui-parallel-fixture.mjs` 启动隔离的真实 Electron 测试环境：1000 个实际子 session，每个 5 回合，共 5001 个节点，所有模型调用仅连接本地测试服务。
+编译测试后运行 `node scripts/graph-benchmark.mjs` 可获得投影/布局基准。使用 `PIX_GUI_BRANCHES=1000 node test/gui-parallel-fixture.mjs` 启动隔离的真实 Electron 测试环境：1000 个实际子 session，每个 5 回合，共 5001 个节点，所有模型调用仅连接本地测试服务。
 
-启动上述窗口后运行 `node scripts/gui-tree-check.mjs`。它通过真实鼠标和键盘验证视口裁剪、跨分支定位、缩略图、缩放和草稿卸载后的保留，将截图和性能报告写入隔离测试目录。2026-09-06 Windows 本机实测：初始 5 个节点/11 条连线，交互期间最多 6 个节点，帧间隔 P95 16 ms，无超过 50 ms 的主线程长任务。测试覆盖 5001 个节点，不是对所有硬件和任意规模的保证；报告中的 reloadMs 是渲染器重载时间，不含首次打开源文件的成本。
+启动上述窗口后运行 `node test/gui-tree-check.mjs`。它通过真实鼠标和键盘验证视口裁剪、跨分支定位、缩略图、缩放和草稿卸载后的保留，将截图和性能报告写入隔离测试目录。2026-09-06 Windows 本机实测：初始 5 个节点/11 条连线，交互期间最多 6 个节点，帧间隔 P95 16 ms，无超过 50 ms 的主线程长任务。测试覆盖 5001 个节点，不是对所有硬件和任意规模的保证；报告中的 reloadMs 是渲染器重载时间，不含首次打开源文件的成本。

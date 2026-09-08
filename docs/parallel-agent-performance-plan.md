@@ -60,7 +60,7 @@
 
 135 项前端测试、事件转发/SDK runtime/图运行/广播相关测试、类型检查通过。广播测试使用隔离 PIX_HOME，避免读写用户认证存储。Pi SDK 包和默认工具均未修改。已有运行窗口须重启才能加载新构建。
 
-复现此场景时，在下方 fixture 环境变量基础上设置 PIX_GUI_STREAM_MS=20、PIX_GUI_STREAM_REPEAT=20、PIX_GUI_STREAM_LABEL=1、PIX_GUI_TOOL_ROUNDS=3、PIX_GUI_STREAM_PREFIX_BYTES=524288；另一个终端设置 PIX_GUI_SOAK_MS=60000，再执行 node scripts/gui-live-panels-check.mjs 对应调试端口。
+复现此场景时，在下方 fixture 环境变量基础上设置 PIX_GUI_STREAM_MS=20、PIX_GUI_STREAM_REPEAT=20、PIX_GUI_STREAM_LABEL=1、PIX_GUI_TOOL_ROUNDS=3、PIX_GUI_STREAM_PREFIX_BYTES=524288；另一个终端设置 PIX_GUI_SOAK_MS=60000，再执行 node test/gui-live-panels-check.mjs 对应调试端口。
 
 ### 2026-09-06 GUI 复测
 
@@ -90,10 +90,10 @@ GUI 另发现离屏节点回到中心偏移约 12px：初始尺寸事件可能�
     $env:PIX_GUI_REPLY_BYTES='2048'
     $env:PIX_GUI_STREAM_MS='100'
     $env:PIX_GUI_DEBUG_PORT='9837'
-    node scripts/gui-parallel-fixture.mjs
+    node test/gui-parallel-fixture.mjs
 
 另一个终端执行：
 
-    node scripts/gui-branch-switch-check.mjs 9837
+    node test/gui-branch-switch-check.mjs 9837
 
 仅连接该隔离实例的调试端口。测试使用本地模型，不调用外部模型服务；完成后关闭测试实例。

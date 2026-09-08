@@ -62,7 +62,7 @@ SSH and WSL share one installer. A working selected Node stays in use; fresh ins
 
 Only when no compatible runtime is available does PiX use its fixed-version private Node, independent of the desktop's Node patch version. Launches use a fixed executable path and recheck changed Node versions; reconnecting can repair a missing or incompatible runtime. System Node, older installations and shared runtimes are not modified or automatically removed.
 
-Developer checks: `node --test scripts/remote-runtime.test.mjs` (Windows defaults to Ubuntu-24.04; override with `PIX_TEST_WSL_DISTRO`). After building the server, run `node scripts/runtime-live-test.mjs --ssh HOST` or `--wsl DISTRO` to verify real Node reuse in an isolated temporary directory without switching the main installation.
+Developer checks: `node --test test/remote-runtime.test.mjs` (Windows defaults to Ubuntu-24.04; override with `PIX_TEST_WSL_DISTRO`). After building the server, run `node test/runtime-live-test.mjs --ssh HOST` or `--wsl DISTRO` to verify real Node reuse in an isolated temporary directory without switching the main installation.
 
 ## Custom models
 
