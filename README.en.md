@@ -43,19 +43,6 @@ Switching branches never means re-setting up context — context is part of the 
 - Select any node on the graph and the active branch changes; the chat panel and branch context panel align to that node.
 - The **branch context panel** follows the selected node and shows how that turn went: thinking, tool calls, duration, and step count — and you can reply to the selected node right from there.
 
-## Workbench
-
-```text
-Navigator | Session Graph | Branch Chat | Content Workspace
-          |---------- resizable Utility Dock ----------|
-```
-
-- **Navigator** lists your real Pi sessions with search, rename, and import.
-- **Session Graph** is the primary panel: the whole session laid out left to right, active branch highlighted, with a minimap.
-- **Branch Chat** shows only the active branch.
-- **Content Workspace** opens project files, Git changes, and web pages.
-- Every panel can be collapsed, restored, and resized; connect to a remote Linux workspace over SSH or WSL and it works just like local.
-
 ## Remote Node runtime
 
 SSH and WSL share one installer. A working selected Node stays in use; fresh installations prefer Linux Node from PATH or the interactive login environment (such as nvm), with a minimum version of 22.19.0. Dependencies, server startup, WebSocket connectivity and a real terminal must pass checks before the current installation changes.
@@ -63,14 +50,6 @@ SSH and WSL share one installer. A working selected Node stays in use; fresh ins
 Only when no compatible runtime is available does PiX use its fixed-version private Node, independent of the desktop's Node patch version. Launches use a fixed executable path and recheck changed Node versions; reconnecting can repair a missing or incompatible runtime. System Node, older installations and shared runtimes are not modified or automatically removed.
 
 Developer checks: `node --test test/remote-runtime.test.mjs` (Windows defaults to Ubuntu-24.04; override with `PIX_TEST_WSL_DISTRO`). After building the server, run `node test/runtime-live-test.mjs --ssh HOST` or `--wsl DISTRO` to verify real Node reuse in an isolated temporary directory without switching the main installation.
-
-## Custom models
-
-Both graph and chat composers support selecting, pasting and dropping images, with previews, removal and image-only prompts. Select an image-capable model. PNG, JPEG, WebP and GIF are supported, up to 8 images, 5 MB each and 10 MB total per prompt. Images remain in the Pi session and appear in chat history and node previews.
-
-Open **Settings → Models → Add custom model**, enter a provider ID, API base URL and model ID, then choose OpenAI Chat Completions / Responses, Anthropic Messages or Google Generative AI. Configure context size, output limits, reasoning and image input as needed. For local servers such as Ollama, select “This endpoint does not require an API key”.
-
-Models use [Pi SDK's models.json format](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md) in `~/.pi/agent/models.json`. Pi stores API keys in the local `auth.json`. Saving refreshes the model list immediately; providers without credentials can be configured afterward. WSL/SSH sessions call these models through the desktop broker without copying keys. Edit `models.json` and refresh for advanced compatibility settings.
 
 ## Download
 
