@@ -54,6 +54,9 @@ export const messages = {
     },
     titlebar: {
       toggleNavigator: "Toggle navigator",
+      navigatorPinned: "Session panel · Pinned · Click to expand/collapse · Double-click to unpin",
+      navigatorAutoHide: "Session panel · Auto-hide · Click to expand/collapse · Double-click to pin",
+      resizeNavigator: "Resize session panel",
       chooseWorkspace: "Choose workspace",
       closeMenu: "Close workspace menu",
       noWorkspace: "No workspace open",
@@ -621,6 +624,9 @@ export const messages = {
     },
     titlebar: {
       toggleNavigator: "切换导航器",
+      navigatorPinned: "会话面板 · 已固定 · 单击展开/收起 · 双击取消固定",
+      navigatorAutoHide: "会话面板 · 自动隐藏 · 单击展开/收起 · 双击固定",
+      resizeNavigator: "调整会话面板宽度",
       chooseWorkspace: "选择工作区",
       closeMenu: "关闭工作区菜单",
       noWorkspace: "未打开工作区",

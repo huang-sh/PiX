@@ -15,13 +15,13 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuPortal,
-  DropdownMenuRoot,
   DropdownMenuTrigger,
 } from "reka-ui";
 import { useI18n } from "vue-i18n";
 import { ref, watch } from "vue";
 import type { ProjectGroup } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
+import NavigatorMenu from "./NavigatorMenu.vue";
 import { useSessionStore } from "../../stores/session";
 
 const emit = defineEmits<{
@@ -33,6 +33,7 @@ const emit = defineEmits<{
   removeProjectSession: [record: ProjectGroup, path: string];
   forgetProject: [record: ProjectGroup];
   settings: [];
+  menuOpenChange: [open: boolean];
 }>();
 const session = useSessionStore();
 const { t } = useI18n();
@@ -131,14 +132,14 @@ function remoteLabel(record: ProjectGroup) {
             :title="record.connected ? t('nav.connected') : t('nav.disconnected')"
           />
           <div class="project-actions">
-            <DropdownMenuRoot>
+            <NavigatorMenu @open-change="emit('menuOpenChange', $event)">
               <DropdownMenuTrigger as-child>
                 <Button variant="ghost" size="icon" :title="t('nav.projectActions')">
                   <MoreHorizontal :size="15" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuPortal>
-                <DropdownMenuContent class="menu-content" :side-offset="5">
+                <DropdownMenuContent data-navigator-menu class="menu-content" :side-offset="5">
                   <DropdownMenuItem class="menu-item" @select="emit('activateProject', record)">
                     {{ t("nav.openProject") }}
                   </DropdownMenuItem>
@@ -151,7 +152,7 @@ function remoteLabel(record: ProjectGroup) {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenuPortal>
-            </DropdownMenuRoot>
+            </NavigatorMenu>
             <Button
               data-action="create-project-session"
               variant="ghost"
@@ -183,14 +184,14 @@ function remoteLabel(record: ProjectGroup) {
                 }"
               />
             </button>
-            <DropdownMenuRoot>
+            <NavigatorMenu @open-change="emit('menuOpenChange', $event)">
               <DropdownMenuTrigger as-child>
                 <Button variant="ghost" size="icon" class="session-menu" @click.stop>
                   <MoreHorizontal :size="15" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuPortal>
-                <DropdownMenuContent class="menu-content" :side-offset="5">
+                <DropdownMenuContent data-navigator-menu class="menu-content" :side-offset="5">
                   <DropdownMenuItem data-action="session-rename" class="menu-item" @select="emit('rename', record, item.path, item.name ?? '')">
                     {{ t("common.rename") }}
                   </DropdownMenuItem>
@@ -199,7 +200,7 @@ function remoteLabel(record: ProjectGroup) {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenuPortal>
-            </DropdownMenuRoot>
+            </NavigatorMenu>
           </div>
           <button
             v-if="!session.query && !expanded.has(record.id) && record.sessions.length > previewCount"

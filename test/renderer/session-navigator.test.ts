@@ -44,6 +44,8 @@ describe("session project navigator", () => {
     session.activeProjectId = local.id;
     const wrapper = mount(SessionNavigator, { global: { plugins: [pinia, i18n] } });
 
+    expect(wrapper.find("[data-action=navigator-pin]").exists()).toBe(false);
+
     // Session lists start collapsed; search still surfaces matching sessions.
     expect(wrapper.findAll(".project-group")).toHaveLength(2);
     expect(wrapper.findAll(".session-row")).toHaveLength(0);

@@ -1,0 +1,299 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import WebSocket from 'ws';
+import { electronBinary } from './lib/electron-binary.mjs';
+
+const root = process.cwd();
+const home = mkdtempSync(join(root, 'artifacts', 'navigator-ui-'));
+mkdirSync(join(home, '.pix'), { recursive: true });
+mkdirSync(join(home, 'project'));
+mkdirSync(join(home, 'project', '.pi'));
+cpSync(join(root, 'test-workspace', '.pi', 'sessions'), join(home, 'project', '.pi', 'sessions'), { recursive: true });
+writeFileSync(join(home, '.pix', 'settings.json'), JSON.stringify({ language: 'zh-CN', closeToTray: false, openLastSessionOnStartup: true }));
+const port = 10000 + Math.floor(Math.random() * 1000);
+const child = spawn(electronBinary(root), ['--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`, `--user-data-dir=${join(home, 'electron')}`, root], {
+  cwd: root, windowsHide: true,
+  env: { ...process.env, PIX_HOME: home, PIX_PROJECT: join(home, 'project'), PI_OFFLINE: '1', ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' },
+  stdio: ['ignore', 'ignore', 'pipe'],
+});
+let stderr = '';
+child.stderr.on('data', data => stderr += data);
+child.on('exit', (code) => console.log('Test Electron exited:', code, stderr.slice(-2000)));
+let socket;
+let sequence = 0;
+const pending = new Map();
+const errors = [];
+async function retry(fn, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  let error;
+  do {
+    try { return await fn(); } catch (e) { error = e; }
+    await sleep(50);
+  } while (Date.now() < deadline);
+  throw error;
+}
+function send(method, params = {}) {
+  return new Promise((resolve, reject) => {
+    const id = ++sequence;
+    const timer = setTimeout(() => { pending.delete(id); reject(Error(`CDP timeout: ${method}`)); }, 15000);
+    pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
+    socket.send(JSON.stringify({ id, method, params }));
+  });
+}
+async function evaluate(expression) {
+  const result = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
+  return result.result.value;
+}
+const until = expression => retry(async () => assert.ok(await evaluate(expression), expression));
+async function point(selector) {
+  return evaluate(`(() => { const e=document.querySelector(${JSON.stringify(selector)}); const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+}
+async function move(p) { await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...p }); }
+async function click(selector, twice = false) {
+  const p = await point(selector);
+  await move(p);
+  for (let count = 1; count <= (twice ? 2 : 1); count++) {
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: count, ...p });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: count, ...p });
+    if (twice && count === 1) await sleep(80);
+  }
+}
+const button = '[data-action="navigator-panel"]';
+const expanded = `document.querySelector('${button}').getAttribute('aria-expanded')==='true'`;
+const pinned = `document.querySelector('${button}').getAttribute('aria-pressed')==='true'`;
+const rects = `(() => { const nav=document.querySelector('#navigator-panel').getBoundingClientRect();const graph=document.querySelector('#graph-panel').getBoundingClientRect();return {nav:nav.width,graphX:graph.x,graphWidth:graph.width}; })()`;
+const report = {};
+try {
+  const page = await retry(async () => {
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const page = targets.find(page => page.type === 'page');
+    assert.ok(page); return page;
+  });
+  socket = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise(resolve => socket.once('open', resolve));
+  socket.on('message', data => {
+    const message = JSON.parse(data);
+    if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails);
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id);
+    message.error ? request.reject(message.error) : request.resolve(message.result);
+  });
+  await send('Runtime.enable');
+  await until(`window.__pixTest && !__pixTest.state().loading && document.querySelector('#navigator-panel')`);
+  await until(`__pixTest.state().current && document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').panelsSettled`);
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await until(`!(${expanded})`);
+  await click(button, true);
+  await until(`${expanded} && ${pinned}`);
+  await until(`Boolean(document.querySelector('#chat-panel .copy-button'))`);
+  // Exercise the real trigger with the outer clip guard disabled: collapsed
+  // chat copy-status spans used to escape to .shell, and Tab reached their
+  // invisible buttons, scrolling the navigator about 31px off the left edge.
+  await evaluate(`(() => {
+    const style = document.createElement('style');
+    style.id = 'legacy-overflow';
+    style.textContent = '.shell,.app-content{overflow:hidden!important}';
+    document.head.append(style);
+    document.querySelector('.graph-controls button:last-child').focus();
+  })()`);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+  report.collapsedPanelFocus = await evaluate(`(() => {
+    const shell = document.querySelector('.shell');
+    const status = document.querySelector('#chat-panel .copy-button .sr-only');
+    return { hiddenFocus: !!document.activeElement.closest('#chat-panel,#content-panel'),
+      overflow: shell.scrollWidth-shell.clientWidth, scroll: shell.scrollLeft,
+      navLeft: document.querySelector('#navigator-panel').getBoundingClientRect().left,
+      statusContained: status.offsetParent === status.parentElement };
+  })()`);
+  assert.deepEqual(report.collapsedPanelFocus, {hiddenFocus:false,overflow:0,scroll:0,navLeft:0,statusContained:true});
+  await evaluate(`document.querySelector('#chat-panel .copy-button').focus()`);
+  assert.equal(await evaluate(`!!document.activeElement.closest('#chat-panel')`), false, 'collapsed panel also blocks programmatic focus');
+  await evaluate(`document.querySelector('#legacy-overflow').remove()`);
+  await click('[data-action="chat-panel"]');
+  await until(`document.querySelector('#chat-panel').getBoundingClientRect().width>100`);
+  await evaluate(`document.querySelector('#chat-panel .copy-button').focus({preventScroll:true})`);
+  assert.equal(await evaluate(`!!document.activeElement.closest('#chat-panel')`), true, 'expanded panel regains focusability');
+  await sleep(500);
+  report.pinnedChat = await evaluate(`({nav:document.querySelector('#navigator-panel').getBoundingClientRect().width,chat:document.querySelector('#chat-panel').getBoundingClientRect().width,stored:__pixTest.state().layout.widths.chat})`);
+  assert.ok(Math.abs(report.pinnedChat.chat - 356) < 2, 'pinning preserves the saved 356px chat width');
+  assert.equal(report.pinnedChat.stored, 356);
+  // Focus/scrollIntoView on overflowing content must never pan the workbench
+  // itself. Only the navigator's project list is a scrolling surface.
+  const checkNavigatorBounds = async () => {
+    await move(await point('.session-search input'));
+    for (const selector of ['.shell', '.app-content']) {
+      await evaluate(`(() => {
+        const parent = document.querySelector(${JSON.stringify(selector)});
+        const probe = document.createElement('button');
+        probe.dataset.boundaryProbe = '';
+        probe.style.cssText = 'position:absolute;left:calc(100% + 40px);top:80px;width:20px;height:20px';
+        parent.append(probe);
+        probe.focus();
+        probe.scrollIntoView({block:'nearest',inline:'nearest'});
+      })()`);
+      const bounds = await evaluate(`(() => {
+        const nav = document.querySelector('#navigator-panel').getBoundingClientRect();
+        const header = document.querySelector('.navigator-panel .panel-header').getBoundingClientRect();
+        const shell = document.querySelector('.shell');
+        const content = document.querySelector('.app-content');
+        return {navLeft:nav.left, headerLeft:header.left, shellScroll:shell.scrollLeft, contentScroll:content.scrollLeft};
+      })()`);
+      assert.deepEqual(bounds, {navLeft:0,headerLeft:0,shellScroll:0,contentScroll:0}, `${selector}: ${JSON.stringify(bounds)}`);
+      await evaluate(`document.querySelector('[data-boundary-probe]').remove()`);
+    }
+    return true;
+  };
+  report.pinnedBounds = await checkNavigatorBounds();
+  const p = await point(button);
+  await move(p);
+  await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...p});
+  await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...p});
+  await sleep(350);
+  report.slowDoubleBeforeSecond = await evaluate(`({expanded:${expanded},pinned:${pinned}})`);
+  assert.deepEqual(report.slowDoubleBeforeSecond, { expanded:true, pinned:true });
+  await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:2,...p});
+  await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:2,...p});
+  await until(`${expanded} && !(${pinned})`);
+  report.slowDoubleAfterSecond = await evaluate(`({expanded:${expanded},pinned:${pinned}})`);
+  assert.deepEqual(report.slowDoubleAfterSecond, { expanded:true, pinned:false });
+  report.floatingBounds = await checkNavigatorBounds();
+  // Both right-side panels must retain pixels when the navigator changes the available space.
+  await click('[data-action="tool-panel"]');
+  await until(`document.querySelector('#content-panel').getBoundingClientRect().width>100`);
+  await sleep(500);
+  const rightWidths = () => evaluate(`({chat:document.querySelector('#chat-panel').getBoundingClientRect().width,content:document.querySelector('#content-panel').getBoundingClientRect().width,saved:__pixTest.state().layout.widths})`);
+  const checkWidths = async () => {
+    const widths = await rightWidths();
+    assert.ok(Math.abs(widths.chat-356)<2, JSON.stringify(widths));
+    assert.ok(Math.abs(widths.content-320)<2, JSON.stringify(widths));
+    assert.equal(widths.saved.chat,356);
+    assert.equal(widths.saved.content,320);
+    return widths;
+  };
+  await checkWidths();
+  await click(button,true);
+  await until(pinned);
+  await sleep(500);
+  report.bothPinned = await checkWidths();
+  await click(button);
+  await until(`!(${expanded})`);
+  await sleep(500);
+  await checkWidths();
+  await click(button);
+  await until(expanded);
+  await sleep(500);
+  await checkWidths();
+  const resize = await point('.navigator-resize');
+  await move(resize);
+  await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,...resize});
+  await send('Input.dispatchMouseEvent',{type:'mouseMoved',buttons:1,x:resize.x+80,y:resize.y});
+  await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,clickCount:1,x:resize.x+80,y:resize.y});
+  await until(`__pixTest.state().layout.widths.navigator>320`);
+  await sleep(500);
+  report.afterResize = await checkWidths();
+  report.resizedBounds = await checkNavigatorBounds();
+  const screenshot = await send('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(join(home, 'navigator-boundary.png'), Buffer.from(screenshot.data, 'base64'));
+  await send('Page.reload');
+  await until(`window.__pixTest && !__pixTest.state().loading && document.querySelector('#navigator-panel')`);
+  await until(`__pixTest.state().current && document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').panelsSettled`);
+  await click('[data-action="chat-panel"]');
+  await click('[data-action="tool-panel"]');
+  await sleep(800);
+  report.afterReload = await checkWidths();
+  // Check overlay vs reserved-space layout in a normal and minimum-size window.
+  report.modeGeometry = [];
+  const geometry = () => evaluate(`(() => {
+    const rect = selector => {const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width};};
+    const nav=rect('#navigator-panel'), graph=rect('#graph-panel');
+    const header=rect('.navigator-panel .panel-header'), search=rect('.session-search'), footer=rect('.navigator-footer');
+    return {nav,graph,header,search,footer,viewport:innerWidth,height:innerHeight,
+      chat:rect('#chat-panel'),content:rect('#content-panel'),
+      navOnTop:!!document.elementFromPoint(20,header.bottom+20)?.closest('#navigator-panel')};
+  })()`);
+  for (const viewport of [1280,1080]) {
+    await send('Emulation.setDeviceMetricsOverride', {width:viewport,height:800,deviceScaleFactor:1,mobile:false});
+    await sleep(500);
+    for (const width of [210,420]) {
+      const previousWidth=await evaluate(`document.querySelector('#navigator-panel').getBoundingClientRect().width`);
+      await evaluate(`document.querySelector('.navigator-resize').focus()`);
+      const key=width<previousWidth?'ArrowLeft':'ArrowRight';
+      for(let step=0;step<Math.ceil(Math.abs(width-previousWidth)/10);step++) {
+        await send('Input.dispatchKeyEvent',{type:'keyDown',key,code:key,windowsVirtualKeyCode:key==='ArrowLeft'?37:39});
+        await send('Input.dispatchKeyEvent',{type:'keyUp',key,code:key,windowsVirtualKeyCode:key==='ArrowLeft'?37:39});
+      }
+      await sleep(500);
+      const fixed=await geometry();
+      assert.ok(Math.abs(fixed.nav.width-width)<1,'navigator reaches requested width');
+      assert.ok(Math.abs(fixed.graph.x-fixed.nav.right)<2, 'pinned graph starts after navigator');
+      assert.ok(fixed.navOnTop && fixed.nav.x===0 && fixed.search.x>=0 && fixed.footer.bottom<=fixed.height+1, JSON.stringify(fixed));
+      if(width===420) {
+        const shot=await send('Page.captureScreenshot',{format:'png'});
+        writeFileSync(join(home,`mode-pinned-${viewport}.png`),Buffer.from(shot.data,'base64'));
+      }
+      await click(button,true);
+      await until(`!(${pinned}) && ${expanded}`);
+      await move(await point('.session-search input'));
+      await sleep(500);
+      const floating=await geometry();
+      assert.equal(floating.graph.x,0,'floating navigator does not shift graph');
+      assert.ok(floating.navOnTop && floating.nav.x===0 && floating.search.right<=floating.nav.right && floating.footer.bottom<=floating.height+1,JSON.stringify(floating));
+      if(width===420) {
+        const shot=await send('Page.captureScreenshot',{format:'png'});
+        writeFileSync(join(home,`mode-floating-${viewport}.png`),Buffer.from(shot.data,'base64'));
+      }
+      await click(button);
+      await until(`!(${expanded})`);
+      await sleep(500);
+      const hidden=await geometry();
+      assert.ok(Math.abs(hidden.graph.width-floating.graph.width)<2,'floating open/close preserves graph width');
+      assert.equal(await evaluate(`!!document.elementFromPoint(20,150)?.closest('#navigator-panel')`),false,'hidden navigator does not intercept graph');
+      report.modeGeometry.push({viewport,width,fixed,floating,hiddenGraph:hidden.graph});
+      await click(button,true);
+      await until(`${pinned} && ${expanded}`);
+      await sleep(500);
+    }
+  }
+  await move({x:900,y:80});
+  await sleep(2200);
+  assert.ok(await evaluate(expanded),'pinned navigator stays open without interaction');
+  report.pinnedStaysOpen=true;
+  await click(button,true);
+  await until(`!(${pinned}) && ${expanded}`);
+  await move(await point('.session-search input'));
+  await sleep(2200);
+  assert.ok(await evaluate(expanded),'hovering floating navigator keeps it open');
+  await move({x:900,y:80});
+  await until(`!(${expanded})`);
+  report.floatingAutoHides=true;
+  await click(button);
+  await until(expanded);
+  await move(await point('.session-search input'));
+  await until(`${expanded} && !(${pinned})`);
+  await click('.project-actions button');
+  await until(`!!document.querySelector('[data-navigator-menu]')`);
+  await evaluate(`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session').projects=[]`);
+  await until(`!document.querySelector('[data-navigator-menu]')`);
+  await evaluate(`document.activeElement?.blur()`);
+  await move({x:1100,y:500});
+  await sleep(2500);
+  report.afterMenuUnmount = await evaluate(`({expanded:${expanded},pinned:${pinned},focus:document.activeElement.tagName})`);
+  assert.equal(report.afterMenuUnmount.expanded,false, 'removed menu releases auto-hide');
+  assert.equal(errors.length,0);
+  report.result = 'passed';
+  console.log(JSON.stringify({home,...report},null,2));
+} catch(error) {
+  if(socket?.readyState === WebSocket.OPEN) console.log('Failure state', await evaluate(`({state:window.__pixTest?.state(),rects:${rects}})`).catch(String));
+  console.error(stderr.slice(-1500));
+  throw error;
+} finally {
+  writeFileSync(join(home,'report.json'),JSON.stringify({...report,errors},null,2));
+  socket?.close();
+  child.kill();
+}

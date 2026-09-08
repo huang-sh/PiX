@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ChevronDown, Folder, MessageSquare, MonitorUp, PanelLeft, PanelRight, Unplug } from "@lucide/vue";
-import { ref } from "vue";
+import { ChevronDown, Folder, MessageSquare, MonitorUp, PanelLeft, PanelRight, Pin, Unplug } from "@lucide/vue";
+import { onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { useLayoutStore } from "../../stores/layout";
@@ -14,6 +14,28 @@ const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
 const { t } = useI18n();
 const workspaceMenuOpen = ref(false);
+let navigatorClickTimer: ReturnType<typeof setTimeout> | undefined;
+function cancelNavigatorClick() {
+  clearTimeout(navigatorClickTimer);
+  navigatorClickTimer = undefined;
+}
+function clickNavigator(event: MouseEvent) {
+  if (event.detail === 0) {
+    cancelNavigatorClick();
+    void layout.toggle("navigator");
+  } else if (navigatorClickTimer) {
+    cancelNavigatorClick();
+    void layout.toggleNavigatorPinned();
+  } else {
+    // One application gesture window, independent of the OS dblclick event.
+    // Two completed clicks within 500ms pin; slower clicks remain single clicks.
+    navigatorClickTimer = setTimeout(() => {
+      navigatorClickTimer = undefined;
+      void layout.toggle("navigator");
+    }, 500);
+  }
+}
+onBeforeUnmount(cancelNavigatorClick);
 function shortcutTitle(label: string, id: ShortcutId) {
   const keys = shortcutBindings(id, layout.settings?.app.keyboardShortcuts).map((binding) => formatShortcut(binding, isMac())).join(" / ");
   return keys ? `${t(label)} (${keys})` : t(label);
@@ -42,14 +64,19 @@ function disconnectRemote() {
       <Button
         v-if="layout.screen === 'workbench'"
         data-action="navigator-panel"
-        :class="!layout.layout.collapsed.navigator ? 'active' : ''"
+        :class="`navigator-toggle${layout.layout.collapsed.navigator ? '' : ' active'}${layout.layout.navigatorPinned ? ' pinned' : ''}`"
         variant="ghost"
         size="icon"
-        :title="shortcutTitle('titlebar.toggleNavigator', 'navigator')"
+        :title="shortcutTitle(layout.layout.navigatorPinned ? 'titlebar.navigatorPinned' : 'titlebar.navigatorAutoHide', 'navigator')"
+        :aria-label="t('titlebar.toggleNavigator')"
+        :aria-pressed="!!layout.layout.navigatorPinned"
         :aria-expanded="!layout.layout.collapsed.navigator"
-        @click="layout.toggle('navigator')"
+        aria-controls="navigator-panel"
+        @click="clickNavigator"
+        @dblclick.prevent
       >
         <PanelLeft :size="17" />
+        <Pin v-if="layout.layout.navigatorPinned" class="navigator-pin-badge" :size="10" aria-hidden="true" />
       </Button>
       <span class="app-titlebar-brand"><img src="/icon.png" alt="" /></span>
     </div>

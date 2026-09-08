@@ -77,7 +77,8 @@ const atomic = (p: string, v: unknown) => {
   renameSync(t, p);
 };
 export const DEFAULT_LAYOUT: LayoutState = {
-  version: 3,
+  version: 4,
+  navigatorPinned: false,
   widths: { navigator: 248, chat: 356, content: 320 },
   collapsed: { navigator: false, chat: true, content: true },
   minimap: false,

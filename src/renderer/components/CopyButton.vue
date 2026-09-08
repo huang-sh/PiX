@@ -39,7 +39,8 @@ onBeforeUnmount(() => clearTimeout(reset));
 </template>
 
 <style scoped>
-.copy-button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 6px; color: var(--muted); vertical-align: middle; }
+/* Keep the absolutely positioned live status inside this button, including in collapsed panels. */
+.copy-button { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 6px; color: var(--muted); vertical-align: middle; }
 .copy-button:hover:not(:disabled) { background: var(--muted-surface); color: var(--text); }
 .copy-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .copy-button:disabled { opacity: .4; cursor: not-allowed; }

@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
+import { toRaw } from "vue";
 import type { LayoutState, SettingsBundle } from "../../src/shared/types";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 
@@ -26,13 +27,43 @@ describe("layout store", () => {
     await layout.openTool("files");
 
     expect(layout.layout.collapsed).toEqual({
-      navigator: false,
+      navigator: true,
       chat: false,
       content: false,
     });
     expect(layout.contentSection).toBe("files");
     expect(layout.contentTabs).toEqual(["files"]);
     expect("graph" in layout.layout.collapsed).toBe(false);
+  });
+
+  it("defaults the session navigator to auto-hide and persists its pinned mode", async () => {
+    const layout = useLayoutStore();
+    expect(layout.layout.navigatorPinned).toBe(false);
+
+    await layout.toggleNavigatorPinned();
+    expect(layout.layout.navigatorPinned).toBe(true);
+    expect(layout.layout.collapsed.navigator).toBe(false);
+    await layout.toggle("navigator");
+    expect(layout.layout.navigatorPinned).toBe(true);
+    expect(layout.layout.collapsed.navigator).toBe(true);
+    await layout.toggleNavigatorPinned();
+    expect(layout.layout.navigatorPinned).toBe(false);
+    expect(layout.layout.collapsed.navigator).toBe(false);
+  });
+
+  it("restores fixed open/closed states and widths, but starts auto-hide closed", () => {
+    const layout = useLayoutStore();
+    for (const pinned of [true, false]) {
+      for (const collapsed of [true, false]) {
+        const saved = structuredClone({ ...toRaw(layout.layout), navigatorPinned: pinned,
+          widths: { navigator: 312, chat: 356, content: 320 },
+          collapsed: { navigator: collapsed, chat: true, content: true } });
+        layout.hydrate(settings, saved);
+        expect(layout.layout.navigatorPinned).toBe(pinned);
+        expect(layout.layout.collapsed.navigator).toBe(pinned ? collapsed : true);
+        expect(layout.layout.widths.navigator).toBe(312);
+      }
+    }
   });
 
   it("starts with the tool panel closed when no tabs exist", () => {
@@ -77,7 +108,7 @@ describe("layout store", () => {
       utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
     } as LayoutState);
 
-    expect(layout.layout.version).toBe(3);
+    expect(layout.layout.version).toBe(4);
     expect(layout.layout.widths).toEqual({ navigator: 248, chat: 356, content: 320 });
     expect(layout.layout.collapsed.chat).toBe(true);
   });

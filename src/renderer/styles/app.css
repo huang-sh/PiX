@@ -69,7 +69,8 @@ kbd {
 }
 
 .app-frame { display: grid; grid-template-rows: 40px minmax(0, 1fr); width: 100%; height: 100%; }
-.app-content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+/* These layout frames must never scroll when focus reveals overflowing content. */
+.app-content { position: relative; min-width: 0; min-height: 0; overflow: clip; }
 .app-titlebar {
   position: relative;
   z-index: 100;
@@ -87,6 +88,9 @@ kbd {
 .app-titlebar-left { justify-content: flex-start; }
 .app-titlebar-right { justify-content: flex-end; }
 .app-titlebar-side > button.active { background: var(--muted-surface); color: var(--text); }
+.navigator-toggle { position: relative; }
+.app-titlebar-side > button.navigator-toggle.pinned { color: var(--accent); }
+.navigator-pin-badge { position: absolute; right: 1px; bottom: 1px; background: var(--surface); border-radius: 2px; }
 .app-titlebar-brand { display: flex; align-items: center; gap: 8px; margin-left: 3px; }
 .app-titlebar-brand img {
   width: 25px;
@@ -200,7 +204,11 @@ kbd {
 .platform-darwin .window-controls-spacer.left { width: 78px; }
 
 .shell, .workbench-splitter { width: 100%; height: 100%; }
-.shell { position: relative; overflow: hidden; background: var(--surface); }
+.shell { display: flex; position: relative; overflow: clip; background: var(--surface); }
+.shell > .workbench-splitter { flex: 1; min-width: 0; }
+.navigator-container { position: relative; flex: 0 0 auto; height: 100%; max-width: 100%; border-right: 1px solid var(--border); }
+.navigator-container.floating { position: absolute; inset: 0 auto 0 0; z-index: 30; box-shadow: 8px 0 24px #0002; }
+.navigator-container > .navigator-resize { position: absolute; top: 0; right: -1px; bottom: 0; width: 1px; touch-action: none; }
 .workbench-splitter { display: flex; }
 .workbench-splitter > [data-panel] {
   min-width: 0;

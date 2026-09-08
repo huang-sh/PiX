@@ -345,6 +345,8 @@ export interface SettingsBundle {
 export interface LayoutState {
   version?: number;
   branchOrders?: Record<string, Array<[string, number]>>;
+  /** Keep the projects and sessions navigator open instead of auto-hiding it. */
+  navigatorPinned?: boolean;
   widths: { navigator: number; chat: number; content: number };
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;

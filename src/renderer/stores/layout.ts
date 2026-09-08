@@ -18,9 +18,10 @@ export type ContentSection =
 export type ContentTab = Exclude<ContentSection, "home">;
 
 const defaultLayout = (): LayoutState => ({
-  version: 3,
+  version: 4,
+  navigatorPinned: false,
   widths: { navigator: 248, chat: 356, content: 320 },
-  collapsed: { navigator: false, chat: true, content: true },
+  collapsed: { navigator: true, chat: true, content: true },
   minimap: false,
   composer: { open: false },
   utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
@@ -84,8 +85,12 @@ export const useLayoutStore = defineStore("layout", {
           this.layout.widths.navigator = defaults.widths.navigator;
           this.layout.widths.chat = defaults.widths.chat;
         }
-        this.layout.version = 3;
         this.layout.collapsed.chat = true;
+      }
+      if (typeof this.layout.navigatorPinned !== "boolean") this.layout.navigatorPinned = false;
+      if (!this.layout.navigatorPinned) this.layout.collapsed.navigator = true;
+      if ((this.layout.version ?? 0) < 4) {
+        this.layout.version = 4;
         void this.save();
       }
       if (!this.layout.composer) this.layout.composer = { open: false };
@@ -101,6 +106,11 @@ export const useLayoutStore = defineStore("layout", {
     },
     async toggle(panel: PanelId) {
       await this.setCollapsed(panel, !this.layout.collapsed[panel]);
+    },
+    async toggleNavigatorPinned() {
+      this.layout.navigatorPinned = !this.layout.navigatorPinned;
+      this.layout.collapsed.navigator = false;
+      await this.save();
     },
     async setWidth(panel: PanelId, width: number) {
       this.layout.widths[panel] = Math.round(width);

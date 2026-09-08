@@ -4,7 +4,8 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { PanelId } from "../../../shared/types";
 import type { ProjectGroup } from "../../../shared/types";
 import BranchContextPanel from "../branch-context/BranchContextPanel.vue";
@@ -28,43 +29,35 @@ const emit = defineEmits<{
 
 type PanelHandle = { collapse: () => void; expand: () => void; resize: (size: number) => void };
 const layout = useLayoutStore();
+const { t } = useI18n();
 const shell = ref<HTMLElement>();
-const navigatorPanel = ref<PanelHandle>();
+const navigatorElement = ref<HTMLElement>();
+const navigatorWidth = computed(() => Math.min(420, Math.max(210, layout.layout.widths.navigator)));
 const chatPanel = ref<PanelHandle>();
 const contentPanel = ref<PanelHandle>();
 const saveTimer = ref<ReturnType<typeof setTimeout>>();
+let navigatorHideTimer: ReturnType<typeof setTimeout> | undefined;
+let navigatorHovered = false;
+let navigatorMenus = 0;
+let navigatorDrag: { id: number; x: number; width: number } | undefined;
+let navigatorProtectedUntil = 0;
 let restoringLayout = true;
-
-// reka-ui 2.10.4 (latest) mis-handles px-sized panels: the initial layout is
-// computed before the group is measured, so px panels boot at their min size
-// (and programmatic resize is unreliable for them). Panels are therefore
-// declared in percent and converted to/from the persisted pixel widths here.
-// The inner group estimate only bootstraps the first render; drag events and
-// settle checks measure the real group afterwards.
-const innerEstimate = Math.max(
-  1,
-  window.innerWidth - (layout.layout.collapsed.content ? 0 : layout.layout.widths.content),
-);
-const pct = (px: number) => Math.min(80, Math.max(0, (px / innerEstimate) * 100));
-const groupWidth = (id: string) =>
-  document.querySelector(`[data-panel-group-id="${id}"]`)?.getBoundingClientRect().width ||
-  innerEstimate;
 
 function sync(panel: PanelId, handle?: PanelHandle) {
   if (!handle) return;
-  // expand() alone restores the panel's pre-collapse size, which starts as the
-  // persisted width (default-size) and tracks drags afterwards. Calling
-  // resize() here is redundant: reka-ui mis-computes the delta for the last
-  // panel of a group (chat, content), clamping them to min size or collapsing
-  // them outright.
   if (layout.layout.collapsed[panel]) handle.collapse();
-  else handle.expand();
+  else {
+    const width = layout.layout.widths[panel];
+    handle.expand();
+    // Pixel panels may initially measure before the parent has its final size.
+    handle.resize(width);
+  }
 }
 
 function resized(panel: PanelId, size: number) {
   if (restoringLayout) return;
   if (size <= 0) return;
-  const width = Math.round((size / 100) * groupWidth(panel === "content" ? "pix-workbench" : "pix-primary"));
+  const width = Math.round(size);
   if (width <= 0) return;
   layout.layout.widths[panel] = width;
   if (saveTimer.value) clearTimeout(saveTimer.value);
@@ -76,6 +69,70 @@ function panelState(panel: PanelId, collapsed: boolean) {
   if (layout.layout.collapsed[panel] === collapsed) return;
   layout.layout.collapsed[panel] = collapsed;
   void layout.save();
+}
+
+function cancelNavigatorHide() {
+  if (navigatorHideTimer) clearTimeout(navigatorHideTimer);
+  navigatorHideTimer = undefined;
+}
+
+function navigatorBusy() {
+  const focused = document.activeElement;
+  return navigatorHovered || navigatorMenus > 0 || !!navigatorDrag ||
+    !!(focused && navigatorElement.value?.contains(focused) &&
+      focused.matches('input, textarea, select, [contenteditable="true"], :focus-visible'));
+}
+
+function scheduleNavigatorHide() {
+  cancelNavigatorHide();
+  if (layout.layout.navigatorPinned || layout.layout.collapsed.navigator || navigatorBusy()) return;
+  navigatorHideTimer = setTimeout(() => {
+    if (!layout.layout.navigatorPinned && !navigatorBusy()) void layout.setCollapsed("navigator", true);
+  }, Math.max(1000, navigatorProtectedUntil - Date.now()));
+}
+
+function navigatorHover(inside: boolean) {
+  navigatorHovered = inside;
+  scheduleNavigatorHide();
+}
+
+function navigatorMenuChanged(open: boolean) {
+  navigatorMenus = Math.max(0, navigatorMenus + (open ? 1 : -1));
+  void nextTick(scheduleNavigatorHide);
+}
+
+function outsideNavigator(event: PointerEvent) {
+  if (layout.layout.navigatorPinned || layout.layout.collapsed.navigator || navigatorDrag) return;
+  const target = event.target;
+  if (!(target instanceof Element) || navigatorElement.value?.contains(target) ||
+    target.closest('[data-action="navigator-panel"], [data-navigator-menu], [role="dialog"]')) return;
+  cancelNavigatorHide();
+  void layout.setCollapsed("navigator", true);
+}
+
+function startNavigatorResize(event: PointerEvent) {
+  if (event.button !== 0) return;
+  navigatorDrag = { id: event.pointerId, x: event.clientX, width: navigatorWidth.value };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  cancelNavigatorHide();
+}
+
+function resizeNavigator(event: PointerEvent) {
+  if (!navigatorDrag || event.pointerId !== navigatorDrag.id) return;
+  layout.layout.widths.navigator = Math.min(420, Math.max(210, navigatorDrag.width + event.clientX - navigatorDrag.x));
+}
+
+function finishNavigatorResize() {
+  if (!navigatorDrag) return;
+  navigatorDrag = undefined;
+  void layout.save();
+  scheduleNavigatorHide();
+}
+
+function resizeNavigatorWithKeyboard(event: KeyboardEvent) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  void layout.setWidth("navigator", Math.min(420, Math.max(210, navigatorWidth.value + (event.key === "ArrowLeft" ? -10 : 10))));
 }
 
 function openProjectSession(record: ProjectGroup, path: string) {
@@ -90,9 +147,30 @@ function removeProjectSession(record: ProjectGroup, path: string) {
   emit("removeProjectSession", record, path);
 }
 
-watch(() => layout.layout.collapsed.navigator, () => sync("navigator", navigatorPanel.value));
+watch(() => [layout.layout.collapsed.navigator, layout.layout.navigatorPinned], ([collapsed], previous) => {
+  cancelNavigatorHide();
+  if (collapsed) navigatorHovered = false;
+  else {
+    if (previous?.[0]) navigatorProtectedUntil = Date.now() + 2000;
+    scheduleNavigatorHide();
+  }
+}, { immediate: true });
 watch(() => layout.layout.collapsed.chat, () => sync("chat", chatPanel.value));
 watch(() => layout.layout.collapsed.content, () => sync("content", contentPanel.value));
+onMounted(() => {
+  document.addEventListener("pointerdown", outsideNavigator, true);
+  document.addEventListener("pointermove", resizeNavigator);
+  document.addEventListener("pointerup", finishNavigatorResize);
+  document.addEventListener("pointercancel", finishNavigatorResize);
+});
+onBeforeUnmount(() => {
+  cancelNavigatorHide();
+  if (saveTimer.value) clearTimeout(saveTimer.value);
+  document.removeEventListener("pointerdown", outsideNavigator, true);
+  document.removeEventListener("pointermove", resizeNavigator);
+  document.removeEventListener("pointerup", finishNavigatorResize);
+  document.removeEventListener("pointercancel", finishNavigatorResize);
+});
 
 // Panel restore is driven by render events, not fixed waits: wait for the
 // window to be visible, wait until the splitter groups are measured (panel
@@ -106,7 +184,7 @@ function restoreTargets(): PanelSettleTarget[] {
       targets.push({
         element,
         collapsed: layout.layout.collapsed[panel],
-        width: layout.layout.widths[panel],
+        width: panel === "navigator" ? navigatorWidth.value : layout.layout.widths[panel],
       });
     }
   }
@@ -118,7 +196,6 @@ watch(() => layout.hydrated, async (hydrated) => {
   await whenVisible();
   await nextTick();
   if (shell.value) await whenMeasured(shell.value);
-  sync("navigator", navigatorPanel.value);
   sync("chat", chatPanel.value);
   sync("content", contentPanel.value);
   await whenPanelsSettle(restoreTargets());
@@ -129,36 +206,48 @@ watch(() => layout.hydrated, async (hydrated) => {
 
 <template>
   <div ref="shell" class="shell">
+    <div
+      id="navigator-panel"
+      ref="navigatorElement"
+      v-show="!layout.layout.collapsed.navigator"
+      class="navigator-container"
+      :data-state="layout.layout.collapsed.navigator ? 'collapsed' : 'expanded'"
+      :class="{ floating: !layout.layout.navigatorPinned }"
+      :style="{ width: `${navigatorWidth}px` }"
+      @mouseenter="navigatorHover(true)"
+      @mouseleave="navigatorHover(false)"
+      @focusin="cancelNavigatorHide"
+      @focusout="nextTick(scheduleNavigatorHide)"
+    >
+      <SessionNavigator
+        class="navigator"
+        @menu-open-change="navigatorMenuChanged"
+        @pick-project="$emit('pickProject')"
+        @activate-project="emit('activateProject', $event)"
+        @create-project-session="emit('createProjectSession', $event)"
+        @open-project-session="openProjectSession"
+        @rename="renameSession"
+        @remove-project-session="removeProjectSession"
+        @forget-project="emit('forgetProject', $event)"
+        @settings="$emit('settings')"
+      />
+      <div
+        class="navigator-resize resize-handle"
+        role="separator"
+        tabindex="0"
+        aria-orientation="vertical"
+        :aria-label="t('titlebar.resizeNavigator')"
+        :aria-valuenow="navigatorWidth"
+        :aria-valuemin="210"
+        :aria-valuemax="420"
+        @pointerdown.prevent="startNavigatorResize"
+        @lostpointercapture="finishNavigatorResize"
+        @keydown="resizeNavigatorWithKeyboard"
+      />
+    </div>
     <SplitterGroup id="pix-workbench" direction="horizontal" class="workbench-splitter">
       <SplitterPanel id="primary-panels" :order="1">
         <SplitterGroup id="pix-primary" direction="horizontal" class="workbench-splitter">
-          <SplitterPanel
-            id="navigator-panel"
-            ref="navigatorPanel"
-            :order="1"
-            collapsible
-            :collapsed-size="0"
-            :default-size="pct(layout.layout.widths.navigator)"
-            :min-size="pct(210)"
-            :max-size="pct(420)"
-            @resize="resized('navigator', $event)"
-            @collapse="panelState('navigator', true)"
-            @expand="panelState('navigator', false)"
-          >
-            <SessionNavigator
-              class="navigator"
-              @pick-project="$emit('pickProject')"
-              @activate-project="emit('activateProject', $event)"
-              @create-project-session="emit('createProjectSession', $event)"
-              @open-project-session="openProjectSession"
-              @rename="renameSession"
-              @remove-project-session="removeProjectSession"
-              @forget-project="emit('forgetProject', $event)"
-              @settings="$emit('settings')"
-            />
-          </SplitterPanel>
-          <SplitterResizeHandle class="resize-handle" />
-
           <SplitterPanel id="graph-panel" :order="2" :min-size="24">
             <GraphPanel class="graph" @new-session="$emit('newSession')" />
           </SplitterPanel>
@@ -167,11 +256,13 @@ watch(() => layout.hydrated, async (hydrated) => {
           <SplitterPanel
             id="chat-panel"
             ref="chatPanel"
+            :inert="layout.layout.collapsed.chat"
             :order="3"
             collapsible
             :collapsed-size="0"
-            :default-size="pct(layout.layout.widths.chat)"
-            :min-size="pct(310)"
+            size-unit="px"
+            :default-size="layout.layout.widths.chat"
+            :min-size="310"
             @resize="resized('chat', $event)"
             @collapse="panelState('chat', true)"
             @expand="panelState('chat', false)"
@@ -185,11 +276,13 @@ watch(() => layout.hydrated, async (hydrated) => {
       <SplitterPanel
         id="content-panel"
         ref="contentPanel"
+        :inert="layout.layout.collapsed.content"
         :order="2"
         collapsible
         :collapsed-size="0"
-        :default-size="pct(layout.layout.widths.content)"
-        :min-size="pct(300)"
+        size-unit="px"
+        :default-size="layout.layout.widths.content"
+        :min-size="300"
         @resize="resized('content', $event)"
         @collapse="panelState('content', true)"
         @expand="panelState('content', false)"
