@@ -22,10 +22,11 @@ const { t } = useI18n();
 // Markdown links split into two families. Absolute http/https links render
 // with target="_blank", which the main process hands to the OS browser;
 // plain left-clicks go to the built-in Browser tool instead (modified clicks
-// keep the OS path). Every other href — relative paths, file: URLs, #anchors
-// — renders without a target, so its default action would navigate the app
-// window itself; those resolve against the project and open as workspace
-// files (anchors scroll within the message), regardless of modifiers.
+// keep the OS path). Every other href — relative paths, file: URLs, absolute
+// filesystem paths, #anchors — renders without a target, so its default
+// action would navigate the app window itself; those resolve against the
+// project and open as workspace files (anchors scroll within the message),
+// regardless of modifiers.
 function onContentClick(event: MouseEvent) {
   if (!(event.target instanceof Element)) return;
   const href = event.target.closest("a[href]")?.getAttribute("href");
@@ -39,10 +40,15 @@ function onContentClick(event: MouseEvent) {
     return;
   }
   let url: URL | undefined;
-  try {
-    url = new URL(href);
-  } catch {
-    // Not an absolute URL — fall through to project-path handling.
+  // A Windows drive path like "D:/a.png" parses as a URL with scheme "d:"
+  // (and backslash forms may arrive percent-encoded), which is never a real
+  // scheme in chat — keep it on the project-path route.
+  if (!/^[a-zA-Z]:[\\/]/.test(decodePath(href))) {
+    try {
+      url = new URL(href);
+    } catch {
+      // Not an absolute URL — fall through to project-path handling.
+    }
   }
   if (url) {
     // Only web links and file: URLs are ours; mailto: and other schemes keep
@@ -73,41 +79,60 @@ function onContentClick(event: MouseEvent) {
 // Maps a markdown href onto a project-relative workspace path. file: URLs and
 // drive-letter/UNC paths must sit under the project root; bare paths resolve
 // against it ("x", "./x" and "/x" all count from the root, since chat has no
-// per-file base). Anything escaping the root yields null.
+// per-file base). A "/x" href that spells out the project root itself counts
+// as a POSIX absolute path instead. Anything escaping the root yields null.
 function resolveProjectPath(href: string, root: string | undefined): string | null {
   if (!root) return null;
-  let absolute: string | undefined;
-  if (/^[a-z]+:/i.test(href)) {
+  // A single-letter prefix is a Windows drive ("D:/a.png"), not a URL scheme;
+  // every scheme that reaches this handler (file:, mailto:, …) is longer.
+  if (/^[a-z]{2,}:/i.test(href)) {
     if (!/^file:/i.test(href)) return null;
     try {
-      // file:///D:/a/b.md → "/D:/a/b.md"; stays percent-encoded for now.
-      absolute = new URL(href).pathname;
+      // file:///D:/a/b.md → "/D:/a/b.md"; percent-decoded once, here.
+      const segments = hrefSegments(decodePath(new URL(href).pathname));
+      return segments ? sliceUnderRoot(segments, root) : null;
     } catch {
       return null;
     }
-  } else {
-    const normalized = href.replaceAll("\\", "/");
-    if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith("//"))
-      absolute = normalized;
   }
+  const normalized = decodePath(href).replaceAll("\\", "/");
+  const segments = hrefSegments(normalized);
+  if (!segments) return null;
+  if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith("//"))
+    return sliceUnderRoot(segments, root);
+  // A lone leading "/" is ambiguous in chat: "/README.md" is root-relative
+  // shorthand, but "/Users/me/proj/x" spells out a POSIX absolute path. The
+  // absolute reading only wins when it lands under the root; otherwise the
+  // href stays root-relative like any bare path.
+  if (normalized.startsWith("/")) {
+    const sliced = sliceUnderRoot(segments, root);
+    if (sliced) return sliced;
+  }
+  return segments.join("/");
+}
+
+// Splits a decoded path into clean segments, dropping "." and folding ".."
+// upwards; null when a ".." would climb past the start or nothing remains.
+function hrefSegments(path: string): string[] | null {
   const segments: string[] = [];
-  for (const segment of decodePath(absolute ?? href).replaceAll("\\", "/").split("/")) {
+  for (const segment of path.split("/")) {
     if (!segment || segment === ".") continue;
     if (segment === "..") {
       if (!segments.pop()) return null;
     } else segments.push(segment);
   }
-  if (!segments.length) return null;
-  if (!absolute) return segments.join("/");
-  // Absolute paths are matched segment-wise against the root (case-blind,
-  // Windows-friendly) instead of slicing strings, so case mismatches and
-  // multi-byte lowercasing cannot shift the boundary.
+  return segments.length ? segments : null;
+}
+
+// Absolute paths are matched segment-wise against the root (case-blind,
+// Windows-friendly) instead of slicing strings, so case mismatches and
+// multi-byte lowercasing cannot shift the boundary.
+function sliceUnderRoot(segments: string[], root: string): string | null {
   const rootSegments = root.replaceAll("\\", "/").replace(/\/+$/, "").split("/").filter(Boolean);
   const underRoot =
-    rootSegments.length <= segments.length &&
+    rootSegments.length < segments.length &&
     rootSegments.every((segment, index) => segments[index]!.toLowerCase() === segment.toLowerCase());
-  if (!underRoot) return null;
-  return segments.slice(rootSegments.length).join("/") || null;
+  return underRoot ? segments.slice(rootSegments.length).join("/") : null;
 }
 
 // Percent-decoding must never throw away the click, and "+" is literal in paths.

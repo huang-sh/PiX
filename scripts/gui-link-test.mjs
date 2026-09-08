@@ -31,6 +31,13 @@ mkdirSync(join(testHome, ".pix"), { recursive: true });
 mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
 writeFileSync(join(project, "README.md"), "# gui-link-project\n\nFixture project for the chat-link GUI test.\n");
 writeFileSync(
+  join(project, "NOTES.md"),
+  "# Notes\n\nFixture file for the absolute-path chat-link GUI test.\n",
+);
+// Forward slashes on purpose: chat models emit absolute paths this way, and
+// the drive-letter form must survive into the rendered href untouched.
+const notesHref = join(project, "NOTES.md").replaceAll("\\", "/");
+writeFileSync(
   join(testHome, ".pi", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
@@ -130,6 +137,44 @@ writeFileSync(
       id: "00000003",
       parentId: "00000002",
       timestamp: "2026-08-30T10:00:04.000Z",
+    },
+    {
+      type: "message",
+      message: {
+        role: "user",
+        content: "Open the notes via their absolute path.",
+        timestamp: epoch + 5000,
+      },
+      id: "00000004",
+      parentId: "00000003",
+      timestamp: "2026-08-30T10:00:05.000Z",
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: `The notes live at [NOTES.md](${notesHref}) on disk.`,
+          },
+        ],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-5.6",
+        usage: {
+          input: 90,
+          output: 30,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 120,
+        },
+        stopReason: "stop",
+        timestamp: epoch + 6000,
+      },
+      id: "00000005",
+      parentId: "00000004",
+      timestamp: "2026-08-30T10:00:06.000Z",
     },
   ]
     .map((entry) => JSON.stringify(entry) + "\n")
@@ -416,6 +461,68 @@ try {
     "document.querySelector('.code-editor')?.textContent?.slice(0, 60)",
   );
   result.probe = await cdp.evaluate("window.__linkProbe");
+
+  // Third turn: an absolute-path link (drive letter on Windows, POSIX on
+  // macOS) to an in-project file must open in the Files tool the same way.
+  // Vue Flow only mounts on-screen nodes, so the third card may have no DOM
+  // element to double-click; focus it through the store instead — the chat
+  // panel is already open and follows the focused node.
+  await cdp.evaluate('window.__pixTest.selectNode("turn:00000004")');
+  await retry(async () => {
+    if (!(await cdp.evaluate(
+      `Boolean(document.querySelector('.chat .agent-markdown a[href=${JSON.stringify(notesHref)}]'))`,
+    )))
+      throw new Error("Third turn did not expose the absolute-path file link");
+  });
+  await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 500))");
+  const absoluteLink = await retry(async () => {
+    const value = await cdp.evaluate(`(() => {
+      const a = document.querySelector('.chat .agent-markdown a[href=${JSON.stringify(notesHref)}]');
+      if (!a) return { missing: true };
+      a.scrollIntoView({ block: "center" });
+      const r = a.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, hitLink: Boolean(hit && (hit === a || a.contains(hit))), hitTag: hit?.tagName };
+    })()`);
+    if (value.missing) throw new Error("Absolute-path link vanished from the chat");
+    if (!value.hitLink)
+      throw new Error(`Click coordinates miss the absolute-path link (covered by <${value.hitTag}>)`);
+    return value;
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: absoluteLink.x,
+    y: absoluteLink.y,
+    button: "left",
+    clickCount: 1,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: absoluteLink.x,
+    y: absoluteLink.y,
+    button: "left",
+    clickCount: 1,
+  });
+  await retry(async () => {
+    const value = await cdp.evaluate(`({
+      section: window.__pixTest.state().contentSection,
+      fileTab: Boolean(document.querySelector('[data-file-tab="NOTES.md"]')),
+      fileTabActive: document.querySelector('[data-file-tab="NOTES.md"]')?.classList.contains('active'),
+      editor: Boolean(document.querySelector('.code-editor'))
+    })`);
+    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.editor)
+      throw new Error(
+        `Absolute-path link did not open the file in the Files tool: ${JSON.stringify(value)}`,
+      );
+    return value;
+  });
+  result.absolutePathOpenedInTool = true;
+  const absoluteShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(
+    join(artifacts, "gui-link-absolute-path.png"),
+    Buffer.from(absoluteShot.data, "base64"),
+  );
   await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 300))");
   const filesShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(

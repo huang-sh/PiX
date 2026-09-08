@@ -8,6 +8,7 @@ import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
 
 const project = { name: "demo", path: "D:\\dev\\PiX\\test-workspace" } as ProjectInfo;
+const macProject = { name: "demo", path: "/Users/foo/project" } as ProjectInfo;
 
 function settingsWith(openLinksInApp: boolean): SettingsBundle {
   return {
@@ -155,6 +156,78 @@ describe("MarkdownRenderer", () => {
 
     expect(useWorkspaceStore().tabs.map((tab) => tab.path)).toContain("docs/notes.md");
     expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "docs/notes.md" });
+    wrapper.unmount();
+  });
+
+  it("opens drive-letter links under the project root as workspace files", async () => {
+    useLayoutStore().settings = settingsWith(true);
+    useWorkspaceStore().project = project;
+    const wrapper = await mountWithLink(
+      "see [example](D:/dev/PiX/test-workspace/src/example.ts)",
+    );
+
+    expect(await clickFirstLink(wrapper)).toBe(true);
+    await flushPromises();
+
+    expect(useWorkspaceStore().tabs.map((tab) => tab.path)).toContain("src/example.ts");
+    expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "src/example.ts" });
+    wrapper.unmount();
+  });
+
+  it("opens backslash drive-letter links under the project root", async () => {
+    useLayoutStore().settings = settingsWith(true);
+    useWorkspaceStore().project = project;
+    const wrapper = await mountWithLink(
+      "see [example](D:\\dev\\PiX\\test-workspace\\src\\example.ts)",
+    );
+
+    expect(await clickFirstLink(wrapper)).toBe(true);
+    await flushPromises();
+
+    expect(useWorkspaceStore().tabs.map((tab) => tab.path)).toContain("src/example.ts");
+    expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "src/example.ts" });
+    wrapper.unmount();
+  });
+
+  it("warns for drive-letter links outside the project root", async () => {
+    useLayoutStore().settings = settingsWith(true);
+    useWorkspaceStore().project = project;
+    const layout = useLayoutStore();
+    const wrapper = await mountWithLink("see [qc](D:/project/shuang/QC_overview.png)");
+
+    expect(await clickFirstLink(wrapper)).toBe(true);
+    await flushPromises();
+
+    expect(useWorkspaceStore().tabs).toHaveLength(0);
+    expect(layout.notice?.message).toContain("QC_overview.png");
+    expect(layout.notice?.level).toBe("warning");
+    wrapper.unmount();
+  });
+
+  it("opens POSIX absolute links under the project root as workspace files", async () => {
+    useLayoutStore().settings = settingsWith(true);
+    useWorkspaceStore().project = macProject;
+    const wrapper = await mountWithLink(
+      "see [example](/Users/foo/project/src/example.ts)",
+    );
+
+    expect(await clickFirstLink(wrapper)).toBe(true);
+    await flushPromises();
+
+    expect(useWorkspaceStore().tabs.map((tab) => tab.path)).toContain("src/example.ts");
+    expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "src/example.ts" });
+    wrapper.unmount();
+  });
+
+  it("keeps lone-slash links root-relative on POSIX-style roots", async () => {
+    useLayoutStore().settings = settingsWith(true);
+    useWorkspaceStore().project = macProject;
+    const wrapper = await mountWithLink("see [readme](/README.md)");
+
+    await wrapper.get("a").trigger("click");
+    await flushPromises();
+
+    expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "README.md" });
     wrapper.unmount();
   });
 

@@ -1,1 +1,1 @@
-export const greeting = "Hello from the PiX workspace";
+export const greeting = "Hello from the edited PiX workspace";
