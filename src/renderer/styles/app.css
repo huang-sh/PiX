@@ -407,6 +407,7 @@ kbd {
 .draft-node > header button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--faint); }
 .draft-node > header button:hover { background: var(--muted-surface); color: var(--text); }
 .prompt-composer textarea { width: 100%; min-height: 92px; max-height: 190px; margin-top: 4px; padding: 10px 11px; resize: vertical; border-color: var(--border-strong); background: var(--surface); font-size: var(--font-size-body); line-height: var(--line-height-body); }
+.prompt-composer textarea::-webkit-resizer { background: transparent; }
 .prompt-composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring); }
 .composer-image-picker { display: none; }
 .composer-files { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0; }
