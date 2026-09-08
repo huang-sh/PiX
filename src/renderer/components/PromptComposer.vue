@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Brain, Check, ChevronDown, ChevronRight, FileText, Paperclip, Send, X } from "@lucide/vue";
+import { Brain, Check, ChevronDown, ChevronRight, FileText, Paperclip, Send, Square, X } from "@lucide/vue";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -47,7 +47,12 @@ const props = defineProps<{
   // model-driven adjustment so hosts can avoid persisting it as a user choice.
   onThinking: (level: string, explicit: boolean) => void;
   onSubmit: (text: string, images?: PromptImage[]) => Promise<boolean>;
+  // While the branch this composer targets is running, the submit button
+  // becomes the stop control for that run instead of living elsewhere in the host.
+  running?: boolean;
+  onStop?: () => void;
 }>();
+const stopping = computed(() => props.running === true && props.onStop !== undefined);
 
 const { t, te } = useI18n();
 // The composer is also mounted in isolated tests with no pinia installed; without
@@ -110,7 +115,8 @@ function selectModel(model: RuntimeModel) {
 
 async function submit() {
   const text = draft.value.trim();
-  if (!canSubmit.value) return;
+  // While the button is the stop control, no surface may send — Enter included.
+  if (stopping.value || !canSubmit.value) return;
   const command = slashCommands.value.find(command => `/${command.name}` === text
     && (command.source === "builtin" || command.source === "app"));
   if (command && !images.value.length && !files.value.length) {
@@ -434,8 +440,18 @@ defineExpose({ focus: focusEditor });
         </DropdownMenuPortal>
       </DropdownMenuRoot>
       </div>
-      <Button class="composer-submit" type="button" size="sm" :aria-label="sendHint" :disabled="!canSubmit" @click="submit">
-        <Send :size="14" />
+      <!-- One button element morphs between send and stop so focus survives the swap. -->
+      <Button
+        class="composer-submit"
+        type="button"
+        size="sm"
+        :aria-label="stopping ? t('graph.stopBranch') : sendHint"
+        :title="stopping ? t('graph.stopBranch') : undefined"
+        :disabled="!stopping && !canSubmit"
+        @click="stopping ? onStop?.() : submit()"
+      >
+        <Square v-if="stopping" :size="14" fill="currentColor" />
+        <Send v-else :size="14" />
       </Button>
     </footer>
   </div>

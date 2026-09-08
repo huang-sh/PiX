@@ -456,11 +456,13 @@ kbd {
    re-pins the bottom while following, keeping .branch-messages the scroll root. */
 .branch-messages-inner { display: block; }
 .chat-composer { flex: 0 0 auto; padding: 10px 14px 14px; background: linear-gradient(to top, var(--context) 82%, transparent); }
+.composer-bar { display: flex; gap: 8px; width: 100%; }
 .composer-collapsed {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 44px;
   padding: 0 14px;
   border: 1px solid var(--border);
@@ -476,6 +478,18 @@ kbd {
 .composer-collapsed > svg:first-child { flex: 0 0 auto; color: var(--accent); }
 .composer-collapsed > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-collapsed > svg:last-child { flex: 0 0 auto; color: var(--faint); }
+.composer-collapsed-stop {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 44px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+.composer-collapsed-stop:hover { background: var(--accent-strong); }
+.composer-collapsed-stop:focus-visible { box-shadow: 0 0 0 3px var(--ring); }
 .composer-expanded { position: relative; }
 .composer-head { position: absolute; z-index: 2; top: 9px; right: 9px; }
 .composer-head button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--faint); }

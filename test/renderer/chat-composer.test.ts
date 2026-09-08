@@ -99,6 +99,112 @@ describe("chat panel composer", () => {
     } finally { panel.unmount(); }
   });
 
+  it("turns the send button into a stop control while streaming and aborts from it", async () => {
+    // Pi's abort() waits for the agent to go idle before returning, so the
+    // control response already carries isStreaming=false — the composer must
+    // unlock from that snapshot instead of staying stuck on "Pi is working".
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async (_route, input) => {
+      if ((input as { action?: string }).action === "abort") {
+        const settled = snapshot(first, "a1");
+        settled.runtime.isStreaming = false;
+        return settled as never;
+      }
+      return {} as never;
+    });
+    const { session, panel } = await mountComposer(invoke);
+    invoke.mockClear();
+    const submit = () => panel.get<HTMLButtonElement>(".composer-submit");
+    expect(submit().attributes("aria-label")).toContain("Enter to send");
+
+    session.current!.runtime.isStreaming = true;
+    await flushPromises();
+    // The stop control lives on the send button, not in the panel header.
+    expect(panel.find("header .panel-header button").exists()).toBe(false);
+    expect(submit().attributes("disabled")).toBeUndefined();
+    expect(submit().attributes("aria-label")).toBe("Stop this run");
+    expect(panel.get(".prompt-composer textarea").attributes("disabled")).toBeDefined();
+
+    await submit().trigger("click");
+    expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
+      .toContainEqual({ action: "abort" });
+    await flushPromises();
+    expect(panel.get(".prompt-composer textarea").attributes("disabled")).toBeUndefined();
+    expect(submit().attributes("aria-label")).toContain("Enter to send");
+    panel.unmount();
+  });
+
+  it("stops the selected branch run from the composer button in graph sessions", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    invoke.mockClear();
+    session.current!.graph = {
+      id: "g1",
+      revision: 1,
+      runs: [{ branchId: "b1", runId: "r1", nodeId: "turn:u1", status: "running" }],
+    };
+    await flushPromises();
+
+    const stop = panel.get<HTMLButtonElement>(".composer-submit");
+    expect(stop.attributes("aria-label")).toBe("Stop this run");
+    await stop.trigger("click");
+    expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
+      .toContainEqual({ action: "branchAbort", branchId: "b1", runId: "r1" });
+    panel.unmount();
+  });
+
+  it("stops from the collapsed composer while the branch runs", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    session.focusedNode = "turn:u1";
+    session.current!.graph = {
+      id: "g1",
+      revision: 1,
+      runs: [{ branchId: "b1", runId: "r1", nodeId: "turn:u1", status: "running" }],
+    };
+    const panel = mount(BranchContextPanel, { global: { plugins: [i18n], attachTo: document.body } });
+    await flushPromises();
+
+    // Collapsed by default: the stop control rides the collapsed composer bar.
+    const stop = panel.get(".composer-collapsed-stop");
+    expect(stop.attributes("aria-label")).toBe("Stop this run");
+    await stop.trigger("click");
+    expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
+      .toContainEqual({ action: "branchAbort", branchId: "b1", runId: "r1" });
+
+    // The expand affordance keeps opening the composer.
+    await panel.get(".composer-collapsed").trigger("click");
+    expect(panel.find(".prompt-composer").exists()).toBe(true);
+    panel.unmount();
+  });
+
+  it("keeps Enter from sending while the composer shows the stop control", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    invoke.mockClear();
+    session.current!.graph = {
+      id: "g1",
+      revision: 1,
+      runs: [{ branchId: "b1", runId: "r1", nodeId: "turn:u1", status: "running" }],
+    };
+    await flushPromises();
+    const textarea = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
+
+    await textarea.setValue("fork while running");
+    await textarea.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(invoke.mock.calls.filter(([route]) => route === "agent.control")).toHaveLength(0);
+
+    // Once the run settles the button returns to send and Enter delivers again.
+    session.current!.graph!.runs[0]!.status = "idle";
+    await flushPromises();
+    await textarea.trigger("keydown", { key: "Enter" });
+    await vi.waitFor(() => expect(textarea.element.value).toBe(""));
+    expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ action: "promptAt", text: "fork while running" })]));
+    panel.unmount();
+  });
+
   it("starts collapsed, expands, and submits through the same pipeline as typing in a node", async () => {
     const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
     const { panel } = await mountComposer(invoke);

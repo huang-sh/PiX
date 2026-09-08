@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Terminal } from "@lucide/vue";
+import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
@@ -85,6 +85,17 @@ const composerThinkingValue = computed(() =>
 const composerPlaceholder = computed(() => !composerRunnable.value
   ? t(session.current?.runtime.isStreaming ? "graph.blockedStreaming" : "graph.blockedReadonly")
   : t("draft.placeholder"));
+// The composer's send button doubles as the stop control while the branch it
+// targets is running: graph runs stop per-branch, plain sessions abort the stream.
+const composerRunning = computed(() => Boolean(session.current?.graph
+  ? selectedRun.value?.status === "running"
+  : session.current?.runtime.isStreaming));
+
+function stopComposer() {
+  const run = session.current?.graph ? selectedRun.value : undefined;
+  if (run) void session.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId });
+  else void session.control({ action: "abort" });
+}
 const composerTarget = computed(() =>
   session.selectedNode
     ? t("branch.composerFrom", { title: session.selectedNode.title })
@@ -316,7 +327,6 @@ onBeforeUnmount(() => {
           <small>{{ session.selectedNode?.title ?? t("branch.noNodeSelected") }}</small>
         </span>
       </span>
-      <button v-if="selectedRun?.status === 'running'" type="button" @click="session.control({ action: 'branchAbort', branchId: selectedRun.branchId, runId: selectedRun.runId })">{{ t('graph.stopBranch') }}</button>
     </header>
     <div v-if="selectedRun?.error" class="graph-storage-state" role="status">
       <small>{{ selectedRun.error }}</small>
@@ -419,17 +429,30 @@ onBeforeUnmount(() => {
     </div>
 
     <footer v-if="session.current" class="chat-composer">
-      <button
-        v-if="!layout.layout.composer.open"
-        type="button"
-        class="composer-collapsed"
-        :title="composerTarget"
-        @click="layout.setComposerOpen(true)"
-      >
-        <MessageSquarePlus :size="14" />
-        <span>{{ composerTarget }}</span>
-        <ChevronUp :size="14" />
-      </button>
+      <div v-if="!layout.layout.composer.open" class="composer-bar">
+        <button
+          type="button"
+          class="composer-collapsed"
+          :title="composerTarget"
+          @click="layout.setComposerOpen(true)"
+        >
+          <MessageSquarePlus :size="14" />
+          <span>{{ composerTarget }}</span>
+          <ChevronUp :size="14" />
+        </button>
+        <!-- Collapsed form of the send button: stopping stays on the composer,
+             reachable even when a run was started from the graph draft node. -->
+        <button
+          v-if="composerRunning"
+          type="button"
+          class="composer-collapsed-stop"
+          :aria-label="t('graph.stopBranch')"
+          :title="t('graph.stopBranch')"
+          @click="stopComposer"
+        >
+          <Square :size="14" fill="currentColor" />
+        </button>
+      </div>
       <div v-else class="composer-expanded">
         <div class="composer-head">
           <button
@@ -447,10 +470,12 @@ onBeforeUnmount(() => {
           :thinking-level="composerThinkingValue"
           :models="session.models"
           :placeholder="composerPlaceholder"
+          :running="composerRunning"
           autofocus
           :on-model="setComposerModel"
           :on-thinking="setComposerThinking"
           :on-submit="submitComposer"
+          :on-stop="stopComposer"
         />
       </div>
     </footer>
