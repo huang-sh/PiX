@@ -17,6 +17,9 @@ export type ContentSection =
   | "events";
 export type ContentTab = Exclude<ContentSection, "home">;
 
+export const NOTICE_AUTO_DISMISS_MS = 6000;
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
 const defaultLayout = (): LayoutState => ({
   version: 4,
   navigatorPinned: false,
@@ -98,7 +101,16 @@ export const useLayoutStore = defineStore("layout", {
       this.hydrated = true;
     },
     showNotice(message: string, level = "info") {
+      clearTimeout(noticeTimer);
       this.notice = { message, level };
+      // Errors stay until dismissed; anything less urgent auto-expires so the
+      // corner does not accumulate a stale message the user never clicked.
+      if (level !== "error")
+        noticeTimer = setTimeout(() => { this.notice = undefined; }, NOTICE_AUTO_DISMISS_MS);
+    },
+    dismissNotice() {
+      clearTimeout(noticeTimer);
+      this.notice = undefined;
     },
     async setCollapsed(panel: PanelId, collapsed: boolean) {
       this.layout.collapsed[panel] = collapsed;

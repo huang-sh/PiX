@@ -1098,6 +1098,7 @@ kbd {
 
 .toast { position: fixed; right: 14px; bottom: 14px; z-index: 180; max-width: 500px; min-height: 39px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
 .toast.error { border-color: var(--danger); }
+.toast.warning { border-color: var(--warn); }
 .toast { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow-y: auto; }
 .remote-disconnected { position: fixed; top: 48px; left: 50%; transform: translateX(-50%); z-index: 180; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 32px); padding: 8px 12px; border: 1px solid var(--danger); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); font-size: var(--font-size-ui); }
 .remote-stage-log { margin: 16px 0 0; padding-left: 20px; text-align: left; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.8; }

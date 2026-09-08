@@ -1,8 +1,8 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toRaw } from "vue";
 import type { LayoutState, SettingsBundle } from "../../src/shared/types";
-import { useLayoutStore } from "../../src/renderer/stores/layout";
+import { NOTICE_AUTO_DISMISS_MS, useLayoutStore } from "../../src/renderer/stores/layout";
 
 const settings = {
   app: {
@@ -20,6 +20,7 @@ const settings = {
 
 describe("layout store", () => {
   beforeEach(() => setActivePinia(createPinia()));
+  afterEach(() => vi.useRealTimers());
 
   it("keeps graph outside the collapsible panel state", async () => {
     const layout = useLayoutStore();
@@ -151,5 +152,39 @@ describe("layout store", () => {
     await layout.closeTool("browser");
     expect(layout.contentSection).toBe("home");
     expect(layout.layout.collapsed.content).toBe(true);
+  });
+
+  it("auto-dismisses info and warning notices but keeps errors until clicked", () => {
+    vi.useFakeTimers();
+    const layout = useLayoutStore();
+
+    layout.showNotice("Copied last Pi response");
+    expect(layout.notice?.level).toBe("info");
+    vi.advanceTimersByTime(NOTICE_AUTO_DISMISS_MS - 1);
+    expect(layout.notice?.message).toBe("Copied last Pi response");
+    vi.advanceTimersByTime(1);
+    expect(layout.notice).toBeUndefined();
+
+    layout.showNotice("No assistant response to copy", "warning");
+    vi.advanceTimersByTime(NOTICE_AUTO_DISMISS_MS);
+    expect(layout.notice).toBeUndefined();
+
+    layout.showNotice("boom", "error");
+    vi.advanceTimersByTime(NOTICE_AUTO_DISMISS_MS * 10);
+    expect(layout.notice?.message).toBe("boom");
+
+    layout.dismissNotice();
+    expect(layout.notice).toBeUndefined();
+  });
+
+  it("replaces the pending auto-dismiss timer when a new notice arrives", () => {
+    vi.useFakeTimers();
+    const layout = useLayoutStore();
+
+    layout.showNotice("first");
+    vi.advanceTimersByTime(NOTICE_AUTO_DISMISS_MS / 2);
+    layout.showNotice("boom", "error");
+    vi.advanceTimersByTime(NOTICE_AUTO_DISMISS_MS * 10);
+    expect(layout.notice?.message).toBe("boom");
   });
 });

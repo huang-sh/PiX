@@ -621,7 +621,13 @@ onBeforeUnmount(() => {
     @connect-ssh="connectSsh"
     @probe-wsl="probeWslHomes"
   />
-  <button v-if="layout.notice" class="toast" :class="layout.notice.level" @click="layout.notice = undefined">
+  <button
+    v-if="layout.notice"
+    class="toast"
+    :class="layout.notice.level"
+    :role="layout.notice.level === 'error' ? 'alert' : 'status'"
+    @click="layout.dismissNotice()"
+  >
     {{ layout.notice.message }} ×
   </button>
   <div v-if="session.loading" class="loading-bar" />

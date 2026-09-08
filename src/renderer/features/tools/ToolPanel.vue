@@ -290,7 +290,7 @@ async function save(tab: WorkspaceTab) {
     <template v-else-if="layout.contentSection === 'terminal'" />
 
     <pre v-else-if="layout.contentSection === 'output'" class="log-view full-tool">{{
-      workspace.utilityOutput || layout.notice?.message || t("tools.noOutput")
+      workspace.utilityOutput || t("tools.noOutput")
     }}</pre>
     <pre v-else-if="layout.contentSection === 'events'" class="log-view full-tool">{{
       workspace.events.join("\n") || t("tools.noEvents")
