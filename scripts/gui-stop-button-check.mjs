@@ -94,7 +94,7 @@ try {
   await until(`Boolean(document.querySelector('.branch-panel textarea'))`);
   const send0 = await buttonState();
   assert.match(send0.label, /Enter to send/);
-  assert.match(send0.icon, /lucide-send/);
+  assert.match(send0.icon, /lucide-arrow-up/);
 
   // A held streaming run must morph the send button into the stop control.
   const before = (await requests()).length;
@@ -103,7 +103,7 @@ try {
     e.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
   await until(`(${runningExpr})`);
   const stopping = await buttonState();
-  assert.equal(stopping.label, 'Stop this run');
+  assert.equal(stopping.label, 'Stop generating');
   assert.equal(stopping.disabled, false);
   assert.match(stopping.icon, /lucide-square/);
 
@@ -122,7 +122,7 @@ try {
   assert.equal(settled.status, 'aborted');
   const send1 = await buttonState();
   assert.match(send1.label, /Enter to send/);
-  assert.match(send1.icon, /lucide-send/);
+  assert.match(send1.icon, /lucide-arrow-up/);
 
   // The collapsed composer bar keeps a stop control for graph-started runs.
   await evaluate(`(() => { const e = document.querySelector('.branch-panel textarea');
@@ -133,7 +133,7 @@ try {
   await until(`Boolean(document.querySelector('.branch-panel .composer-collapsed'))`);
   const collapsedStop = await evaluate(`(() => { const b = document.querySelector('.branch-panel .composer-collapsed-stop');
     return b && { label: b.getAttribute('aria-label'), icon: b.querySelector('svg')?.getAttribute('class') }; })()`);
-  assert.equal(collapsedStop.label, 'Stop this run');
+  assert.equal(collapsedStop.label, 'Stop generating');
   assert.match(collapsedStop.icon, /lucide-square/);
   await click('.branch-panel .composer-collapsed-stop');
   await until(`!(${runningExpr})`);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Brain, Check, ChevronDown, ChevronRight, FileText, Paperclip, Send, Square, X } from "@lucide/vue";
+import { ArrowUp, Brain, Check, ChevronDown, ChevronRight, FileText, Paperclip, Square, X } from "@lucide/vue";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -442,16 +442,16 @@ defineExpose({ focus: focusEditor });
       </div>
       <!-- One button element morphs between send and stop so focus survives the swap. -->
       <Button
-        class="composer-submit"
+        :class="stopping ? 'composer-submit composer-stop' : 'composer-submit'"
         type="button"
         size="sm"
         :aria-label="stopping ? t('graph.stopBranch') : sendHint"
-        :title="stopping ? t('graph.stopBranch') : undefined"
+        :title="stopping ? t('graph.stopBranch') : sendHint"
         :disabled="!stopping && !canSubmit"
         @click="stopping ? onStop?.() : submit()"
       >
-        <Square v-if="stopping" :size="14" fill="currentColor" />
-        <Send v-else :size="14" />
+        <Square v-if="stopping" :size="12" :stroke-width="0" fill="currentColor" />
+        <ArrowUp v-else :size="16" :stroke-width="2" />
       </Button>
     </footer>
   </div>

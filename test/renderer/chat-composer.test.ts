@@ -121,7 +121,7 @@ describe("chat panel composer", () => {
     // The stop control lives on the send button, not in the panel header.
     expect(panel.find("header .panel-header button").exists()).toBe(false);
     expect(submit().attributes("disabled")).toBeUndefined();
-    expect(submit().attributes("aria-label")).toBe("Stop this run");
+    expect(submit().attributes("aria-label")).toBe("Stop generating");
     expect(panel.get(".prompt-composer textarea").attributes("disabled")).toBeDefined();
 
     await submit().trigger("click");
@@ -145,7 +145,7 @@ describe("chat panel composer", () => {
     await flushPromises();
 
     const stop = panel.get<HTMLButtonElement>(".composer-submit");
-    expect(stop.attributes("aria-label")).toBe("Stop this run");
+    expect(stop.attributes("aria-label")).toBe("Stop generating");
     await stop.trigger("click");
     expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
       .toContainEqual({ action: "branchAbort", branchId: "b1", runId: "r1" });
@@ -167,7 +167,7 @@ describe("chat panel composer", () => {
 
     // Collapsed by default: the stop control rides the collapsed composer bar.
     const stop = panel.get(".composer-collapsed-stop");
-    expect(stop.attributes("aria-label")).toBe("Stop this run");
+    expect(stop.attributes("aria-label")).toBe("Stop generating");
     await stop.trigger("click");
     expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
       .toContainEqual({ action: "branchAbort", branchId: "b1", runId: "r1" });

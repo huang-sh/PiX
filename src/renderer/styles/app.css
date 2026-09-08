@@ -426,7 +426,26 @@ kbd {
 .prompt-composer > footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 30px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border); }
 .prompt-composer > footer > span { color: var(--faint); font-size: var(--font-size-caption); white-space: nowrap; }
 .composer-settings { display: flex; align-items: center; gap: 2px; min-width: 0; height: 26px; margin-left: auto; }
-.prompt-composer .composer-submit { flex: none; width: 26px; height: 26px; padding: 0; }
+.prompt-composer .composer-submit, .composer-collapsed-stop {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--surface);
+  box-shadow: none;
+  transition: background-color 140ms ease, color 140ms ease, transform 100ms ease;
+}
+.prompt-composer .composer-submit:hover { background: color-mix(in srgb, var(--text) 85%, var(--surface)); }
+.prompt-composer .composer-stop, .composer-collapsed-stop { background: var(--border-strong); color: var(--text); }
+.prompt-composer .composer-stop:hover, .composer-collapsed-stop:hover { background: color-mix(in srgb, var(--border-strong) 88%, var(--text)); }
+.prompt-composer .composer-submit:disabled { background: var(--border); color: var(--muted); opacity: 1; }
+.prompt-composer .composer-submit:active:not(:disabled), .composer-collapsed-stop:active { transform: scale(.94); }
+.prompt-composer .composer-submit:focus-visible, .composer-collapsed-stop:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .vue-flow__handle { width: 8px; height: 8px; border: 2px solid var(--surface); background: var(--accent); }
 .vue-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.6; }
 .vue-flow__edge.running-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2.2; }
@@ -478,18 +497,7 @@ kbd {
 .composer-collapsed > svg:first-child { flex: 0 0 auto; color: var(--accent); }
 .composer-collapsed > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-collapsed > svg:last-child { flex: 0 0 auto; color: var(--faint); }
-.composer-collapsed-stop {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 44px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--accent);
-  color: var(--accent-foreground);
-}
-.composer-collapsed-stop:hover { background: var(--accent-strong); }
-.composer-collapsed-stop:focus-visible { box-shadow: 0 0 0 3px var(--ring); }
+.composer-collapsed-stop { align-self: center; }
 .composer-expanded { position: relative; }
 .composer-head { position: absolute; z-index: 2; top: 9px; right: 9px; }
 .composer-head button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--faint); }
@@ -529,8 +537,6 @@ kbd {
 .chat-composer .node-footer-select { height: 30px; padding: 0 7px; border-radius: 8px; color: var(--text); }
 .chat-composer .node-footer-select > span { color: var(--text); font-size: var(--font-size-caption); }
 .chat-composer .node-thinking-select > svg:first-child { color: var(--text); }
-.chat-composer .prompt-composer .composer-submit { width: 32px; height: 32px; border-radius: 10px; box-shadow: 0 4px 12px color-mix(in srgb,var(--accent) 20%,transparent); }
-.chat-composer .prompt-composer .composer-submit:disabled { background: var(--muted-surface); color: var(--faint); box-shadow: none; opacity: 1; }
 .draft-node .prompt-composer textarea { min-height: 120px; max-height: 260px; }
 .branch-message { margin: 0 0 19px; }
 .branch-message.user { width: fit-content; max-width: calc(100% - 28px); margin-left: auto; }

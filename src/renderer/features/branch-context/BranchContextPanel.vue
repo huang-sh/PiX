@@ -450,7 +450,7 @@ onBeforeUnmount(() => {
           :title="t('graph.stopBranch')"
           @click="stopComposer"
         >
-          <Square :size="14" fill="currentColor" />
+          <Square :size="12" :stroke-width="0" fill="currentColor" />
         </button>
       </div>
       <div v-else class="composer-expanded">
