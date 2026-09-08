@@ -1,0 +1,3 @@
+- Fix problems at their root cause instead of applying temporary patches or workarounds.
+- Apply Occam's Razor: do not introduce entities or complexity without necessity.
+- Do not just add code; remove obsolete or unnecessary code whenever appropriate.
