@@ -88,8 +88,41 @@ try {
   await until(`__pixTest.state().current && document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').panelsSettled`);
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await until(`!(${expanded})`);
+  // Reverse transitions before they finish, including both nested splitters at once.
+  for (let toggle = 0; toggle < 3; toggle++) {
+    await click('[data-action="chat-panel"]');
+    await click('[data-action="tool-panel"]');
+    await sleep(60);
+  }
+  await until(`['chat','content'].every(id=>Math.abs(document.querySelector('#'+id+'-panel').getBoundingClientRect().width-__pixTest.state().layout.widths[id])<1)`);
+  report.rapidRightToggles = await evaluate(`__pixTest.state().layout`);
+  assert.equal(report.rapidRightToggles.widths.chat,356, 'rapid toggles preserve chat width');
+  assert.equal(report.rapidRightToggles.widths.content,320, 'rapid toggles preserve tool width');
+  for (const [panel, selector] of [['chat','.resize-handle:has(+ #chat-panel)'],['content','.resize-handle:has(+ #content-panel)']]) {
+    await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+    await send('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowLeft',code:'ArrowLeft',windowsVirtualKeyCode:37});
+    assert.equal(await evaluate(`getComputedStyle(document.querySelector('#${panel}-panel')).transitionDuration`),'0s', `${panel} keyboard resize must not animate`);
+    await send('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowLeft',code:'ArrowLeft',windowsVirtualKeyCode:37});
+    await send('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    await send('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+  }
+  await click('[data-action="chat-panel"]');
+  await click('[data-action="tool-panel"]');
+  await until(`['chat','content'].every(id=>document.querySelector('#'+id+'-panel').getBoundingClientRect().width===0)`);
+  await evaluate(`document.querySelector('${button}').focus()`);
+  for (let toggle = 0; toggle < 3; toggle++) {
+    await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
+    await sleep(60);
+  }
+  await until(`${expanded} && document.querySelector('#navigator-panel').getBoundingClientRect().left===0`);
+  assert.equal(await evaluate(`document.querySelector('#navigator-panel').inert`),false, 'reopened navigator is interactive');
+  await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
+  await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
+  await until(`getComputedStyle(document.querySelector('#navigator-panel')).display==='none'`);
   await click(button, true);
   await until(`${expanded} && ${pinned}`);
+  await until(`document.querySelector('#navigator-panel').getBoundingClientRect().left===0`);
   await until(`Boolean(document.querySelector('#chat-panel .copy-button'))`);
   // Exercise the real trigger with the outer clip guard disabled: collapsed
   // chat copy-status spans used to escape to .shell, and Tab reached their
@@ -243,6 +276,7 @@ try {
       await move(handle);
       await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,...handle});
       await send('Input.dispatchMouseEvent',{type:'mouseMoved',buttons:1,x:handle.x+delta,y:handle.y});
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#${panel}-panel')).transitionDuration`),'0s', `${panel} drag disables transitions`);
       await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,clickCount:1,x:handle.x+delta,y:handle.y});
       await sleep(300);
       const after = await rightWidths();
@@ -318,6 +352,7 @@ try {
   report.floatingAutoHides=true;
   await click(button);
   await until(expanded);
+  await until(`document.querySelector('#navigator-panel').getBoundingClientRect().left===0`);
   await move(await point('.session-search input'));
   await until(`${expanded} && !(${pinned})`);
   await click('.project-actions button');
@@ -329,6 +364,40 @@ try {
   await sleep(2500);
   report.afterMenuUnmount = await evaluate(`({expanded:${expanded},pinned:${pinned},focus:document.activeElement.tagName})`);
   assert.equal(report.afterMenuUnmount.expanded,false, 'removed menu releases auto-hide');
+  // Sample rendered frames through real button clicks, including the 500ms gesture window.
+  report.panelTransitions = [];
+  for (const [panel, trigger, metric] of [
+    ['navigator', button, 'opacity'],
+    ['chat', '[data-action="chat-panel"]', 'width'],
+    ['content', '[data-action="tool-panel"]', 'width'],
+  ]) {
+    for (let toggle = 0; toggle < 2; toggle++) {
+      await evaluate(`(() => {
+        const panel = document.querySelector('#${panel}-panel');
+        const read = () => ({width:panel.getBoundingClientRect().width,opacity:getComputedStyle(panel).display==='none'?0:Number(getComputedStyle(panel).opacity)});
+        window.panelMotion = {before:read(),frames:[]};
+        window.panelMotionDone = new Promise(resolve => {
+          const end = performance.now()+1000;
+          const sample = () => {
+            window.panelMotion.frames.push(read());
+            if(performance.now()<end) requestAnimationFrame(sample);
+            else resolve(window.panelMotion);
+          };
+          requestAnimationFrame(sample);
+        });
+      })()`);
+      await click(trigger);
+      const motion = await evaluate('window.panelMotionDone');
+      const start = motion.before[metric], end = motion.frames.at(-1)[metric];
+      const intermediate = motion.frames.filter(frame => frame[metric]>Math.min(start,end)+0.01 && frame[metric]<Math.max(start,end)-0.01);
+      assert.ok(Math.abs(end-start)>0.5, `${panel} toggles`);
+      assert.ok(intermediate.length>=2, `${panel} has multiple intermediate frames`);
+      report.panelTransitions.push({panel,start,end,intermediate:intermediate.length});
+    }
+  }
+  await send('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+  await click('[data-action="chat-panel"]');
+  assert.ok(await evaluate(`getComputedStyle(document.querySelector('#chat-panel')).transitionDuration.split(',').every(value=>parseFloat(value)<0.001)`), 'reduced motion disables panel animation');
   assert.equal(errors.length,0);
   report.result = 'passed';
   console.log(JSON.stringify({home,...report},null,2));

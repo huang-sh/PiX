@@ -209,6 +209,16 @@ kbd {
 .navigator-container { position: relative; flex: 0 0 auto; height: 100%; max-width: 100%; border-right: 1px solid var(--border); }
 .navigator-container.floating { position: absolute; inset: 0 auto 0 0; z-index: 30; box-shadow: 8px 0 24px #0002; }
 .navigator-container > .navigator-resize { position: absolute; top: 0; right: -1px; bottom: 0; width: 1px; touch-action: none; }
+.navigator-enter-active, .navigator-leave-active {
+  transition: transform 260ms cubic-bezier(.22,1,.36,1),
+    margin-left 260ms cubic-bezier(.22,1,.36,1), opacity 180ms ease;
+}
+.navigator-enter-from, .navigator-leave-to {
+  margin-left: calc(-1 * var(--navigator-width));
+  opacity: 0;
+}
+.navigator-container.floating { margin-left: 0; }
+.floating.navigator-enter-from, .floating.navigator-leave-to { transform: translateX(-100%); }
 .workbench-splitter { display: flex; }
 .workbench-splitter > [data-panel] {
   min-width: 0;
@@ -217,6 +227,12 @@ kbd {
   transition: opacity 220ms ease;
 }
 .workbench-splitter > [data-state="collapsed"] { opacity: 0; }
+/* Animate explicit pixel widths, not the splitter's responsive flex ratios. */
+.panels-ready #chat-panel, .panels-ready #content-panel {
+  transition: flex-basis 260ms cubic-bezier(.22,1,.36,1), opacity 180ms ease;
+}
+.shell:has([data-resize-handle-active], [data-resize-handle]:focus-visible) #chat-panel,
+.shell:has([data-resize-handle-active], [data-resize-handle]:focus-visible) #content-panel { transition: none; }
 .panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .panel-header {
   display: flex;
@@ -619,7 +635,7 @@ kbd {
 
 .tool-panel {
   background: var(--tool-surface);
-  transition: transform 340ms cubic-bezier(.22,1,.36,1), opacity 220ms ease;
+  transition: transform 260ms cubic-bezier(.22,1,.36,1), opacity 180ms ease;
 }
 #content-panel[data-state="collapsed"] .tool-panel { opacity: 0; transform: translateX(36px); }
 .tool-tabs-bar { display: flex; align-items: center; gap: 5px; flex: 0 0 var(--panel-header-height); min-width: 0; padding: 5px 45px 5px 7px; border-bottom: 1px solid var(--border); background: var(--surface); }

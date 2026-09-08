@@ -492,7 +492,7 @@ function defaultFocusId() {
   return session.pendingPrompt?.message.entryId ?? "draft:root";
 }
 
-const isPanelElement = (target: Element) => target.matches(".workbench-splitter > [data-panel]");
+const isPanelElement = (target: Element) => target.matches(".workbench-splitter > [data-panel], .navigator-container");
 
 async function center(id = defaultFocusId(), ensureReadable = false, animate = true) {
   const request = ++centerRequest;

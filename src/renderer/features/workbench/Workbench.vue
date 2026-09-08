@@ -205,46 +205,49 @@ watch(() => layout.hydrated, async (hydrated) => {
 </script>
 
 <template>
-  <div ref="shell" class="shell">
-    <div
-      id="navigator-panel"
-      ref="navigatorElement"
-      v-show="!layout.layout.collapsed.navigator"
-      class="navigator-container"
-      :data-state="layout.layout.collapsed.navigator ? 'collapsed' : 'expanded'"
-      :class="{ floating: !layout.layout.navigatorPinned }"
-      :style="{ width: `${navigatorWidth}px` }"
-      @mouseenter="navigatorHover(true)"
-      @mouseleave="navigatorHover(false)"
-      @focusin="cancelNavigatorHide"
-      @focusout="nextTick(scheduleNavigatorHide)"
-    >
-      <SessionNavigator
-        class="navigator"
-        @menu-open-change="navigatorMenuChanged"
-        @pick-project="$emit('pickProject')"
-        @activate-project="emit('activateProject', $event)"
-        @create-project-session="emit('createProjectSession', $event)"
-        @open-project-session="openProjectSession"
-        @rename="renameSession"
-        @remove-project-session="removeProjectSession"
-        @forget-project="emit('forgetProject', $event)"
-        @settings="$emit('settings')"
-      />
+  <div ref="shell" class="shell" :class="{ 'panels-ready': layout.panelsSettled }">
+    <Transition name="navigator" :css="layout.panelsSettled">
       <div
-        class="navigator-resize resize-handle"
-        role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
-        :aria-label="t('titlebar.resizeNavigator')"
-        :aria-valuenow="navigatorWidth"
-        :aria-valuemin="210"
-        :aria-valuemax="420"
-        @pointerdown.prevent="startNavigatorResize"
-        @lostpointercapture="finishNavigatorResize"
-        @keydown="resizeNavigatorWithKeyboard"
-      />
-    </div>
+        id="navigator-panel"
+        ref="navigatorElement"
+        v-show="!layout.layout.collapsed.navigator"
+        class="navigator-container"
+        :data-state="layout.layout.collapsed.navigator ? 'collapsed' : 'expanded'"
+        :class="{ floating: !layout.layout.navigatorPinned }"
+        :style="{ width: `${navigatorWidth}px`, '--navigator-width': `${navigatorWidth}px` }"
+        :inert="layout.layout.collapsed.navigator"
+        @mouseenter="navigatorHover(true)"
+        @mouseleave="navigatorHover(false)"
+        @focusin="cancelNavigatorHide"
+        @focusout="nextTick(scheduleNavigatorHide)"
+      >
+        <SessionNavigator
+          class="navigator"
+          @menu-open-change="navigatorMenuChanged"
+          @pick-project="$emit('pickProject')"
+          @activate-project="emit('activateProject', $event)"
+          @create-project-session="emit('createProjectSession', $event)"
+          @open-project-session="openProjectSession"
+          @rename="renameSession"
+          @remove-project-session="removeProjectSession"
+          @forget-project="emit('forgetProject', $event)"
+          @settings="$emit('settings')"
+        />
+        <div
+          class="navigator-resize resize-handle"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          :aria-label="t('titlebar.resizeNavigator')"
+          :aria-valuenow="navigatorWidth"
+          :aria-valuemin="210"
+          :aria-valuemax="420"
+          @pointerdown.prevent="startNavigatorResize"
+          @lostpointercapture="finishNavigatorResize"
+          @keydown="resizeNavigatorWithKeyboard"
+        />
+      </div>
+    </Transition>
     <!-- Render pixel widths directly: the splitter's rounded flex ratios and
          handle space otherwise change right-panel widths when the group resizes. -->
     <SplitterGroup id="pix-workbench" direction="horizontal" class="workbench-splitter">
