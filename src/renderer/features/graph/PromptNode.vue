@@ -91,7 +91,7 @@ function keepPreview() {
 
 function hidePreview() {
   window.clearTimeout(openTimer);
-  closeTimer = window.setTimeout(closePreview, 120);
+  closeTimer = window.setTimeout(closePreview, 1000);
 }
 
 function suppressPreview() {
