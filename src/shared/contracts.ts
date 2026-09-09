@@ -130,6 +130,30 @@ export function validateRouteInput(
       };
     case "layout.save":
       return { layout: obj(v.layout) };
+    case "wiki.state":
+      return { path: str(v.path, "path") };
+    case "wiki.control": {
+      const action = str(v.action, "action")!;
+      if (!["refresh", "update", "retry", "configure"].includes(action))
+        throw new Error("Unknown wiki action");
+      const patch = action === "configure" ? obj(v.patch) : {};
+      if (action === "configure") {
+        if (patch.enabled !== undefined && typeof patch.enabled !== "boolean")
+          throw new Error("enabled must be a boolean");
+        for (const key of ["provider", "modelId"] as const)
+          if (patch[key] !== undefined && typeof patch[key] !== "string")
+            throw new Error(`${key} must be a string`);
+        if (patch.budgetTokens !== undefined && patch.budgetTokens !== null
+          && (!Number.isInteger(patch.budgetTokens as number) || (patch.budgetTokens as number) < 0))
+          throw new Error("budgetTokens must be a non-negative integer");
+      }
+      return {
+        action,
+        path: str(v.path, "path"),
+        ...(v.branchId !== undefined ? { branchId: str(v.branchId, "branchId") } : {}),
+        ...(action === "configure" ? { patch } : {}),
+      };
+    }
     case "agent.control": {
       const action = str(v.action, "action")!;
       if (action === "deleteNode")

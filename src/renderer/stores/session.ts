@@ -11,6 +11,7 @@ import type {
   SessionSnapshot,
   SessionSummary,
 } from "../../shared/types";
+import type { WikiStatus } from "../../shared/wiki";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
 import { entryAnchorForNode, projectSession } from "../../shared/session";
@@ -48,6 +49,7 @@ export const useSessionStore = defineStore("session", {
     branchActivities: {} as Record<string, { runId: string; activity?: AgentActivity }>,
     pendingPrompt: undefined as PendingPrompt | undefined,
     deletingNode: false,
+    wiki: undefined as WikiStatus | undefined,
   }),
   getters: {
     deleteBlockedReason(state): string | undefined {
@@ -121,6 +123,7 @@ export const useSessionStore = defineStore("session", {
       this.branchActivities = {};
       this.pendingPrompt = undefined;
       this.current = undefined;
+      this.wiki = undefined;
       this.commands = [];
       this.commandRequest++;
       this.syncProject();
@@ -149,6 +152,7 @@ export const useSessionStore = defineStore("session", {
       const previousGraph = this.current?.graph;
       if (previousGraph && snapshot.graph && previousGraph.id === snapshot.graph.id && previousGraph.epoch === snapshot.graph.epoch && previousGraph.revision > snapshot.graph.revision) return;
       const graphChanged = this.current?.session.path !== snapshot.session.path;
+      if (graphChanged) this.wiki = undefined;
       if (!graphChanged && this.focusedNode && previousProjection?.nodes.some(node => node.id === this.focusedNode)
         && !snapshot.projection.nodes.some(node => node.id === this.focusedNode)) {
         const previous = new Map(previousProjection.nodes.map(node => [node.id, node]));
@@ -238,14 +242,32 @@ export const useSessionStore = defineStore("session", {
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
         this.applySnapshot(snapshot);
-        this.focusedNode = snapshot.projection.activeNodeId;
-        await Promise.all([
-          this.refresh(),
-          this.loadCommands(),
-          this.loadModels().catch(() => {}),
-        ]);
-      } finally { this.loading = false; }
-    },
+      this.focusedNode = snapshot.projection.activeNodeId;
+      await Promise.all([
+        this.refresh(),
+        this.loadCommands(),
+        this.loadModels().catch(() => {}),
+        this.loadWiki(),
+      ]);
+    } finally { this.loading = false; }
+  },
+  async loadWiki() {
+    const path = this.current?.session.path;
+    if (!path) { this.wiki = undefined; return; }
+    try { this.wiki = await desktop.invoke<WikiStatus>("wiki.state", { path }); }
+    catch { this.wiki = undefined; }
+  },
+  applyWiki(status: WikiStatus) {
+    if (!this.current || this.current.session.path === status.sessionPath) this.wiki = status;
+  },
+  async wikiControl<T = WikiStatus>(action: string, extra: Record<string, unknown> = {}) {
+    const path = this.current?.session.path;
+    if (!path) return undefined;
+    const result = await desktop.invoke<T>("wiki.control", { action, path, ...extra });
+    if (result && typeof result === "object" && Array.isArray((result as unknown as WikiStatus).branches))
+      this.wiki = result as unknown as WikiStatus;
+    return result;
+  },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
       const result = await desktop.invoke<T>("agent.control", input);
       if (result && typeof result === "object" && "projection" in result)
@@ -383,6 +405,7 @@ export const useSessionStore = defineStore("session", {
         this.activity = undefined;
         this.pendingPrompt = undefined;
         this.userThinking = undefined;
+        this.wiki = undefined;
         this.commands = [];
       }
       this.syncProject();

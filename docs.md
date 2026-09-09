@@ -16,11 +16,29 @@ Renderer -> isolated preload -> MainController
                                 |- WorkspaceService
                                 |- GitService
                                 |- ShellService
-                                `- SettingsService
+                                |- SettingsService
+                                `- WikiService
 ```
 
 Routes are runtime-validated before dispatch. Workspace paths are confined to
 the active project. Browser content uses an isolated webview partition.
+
+## Session wiki
+
+Each graph owns a derived wiki under `<session>.jsonl.pix-tree/wiki`:
+`branches/<id>.md` summaries, program-generated `sources/<id>.md` evidence
+exports, `tree.md`/`index.md`, and `manifest.json` receipts (the inclusion
+watermark used for restart recovery). Source sessions are read-only to the
+wiki; `wiki-compiler.ts` holds the deterministic layer ported from the offline
+demo script, and `wiki-service.ts` owns queueing (per-branch serial tasks,
+merging turns that arrive mid-run, retry with backoff, a token budget, and
+cancellation on session deletion). Branch summaries come from standalone
+background model calls (`streamSimple`, no tools, never the chat runtime's
+session); before publishing, every result is re-verified against the read
+range, the page hash, and the session identity so stale output cannot
+overwrite newer summaries or manual edits. Auto-update is opt-in
+(`~/.pix/settings.json` under `app.wiki`: `enabled`, `provider`/`modelId`,
+`budgetTokens`) and remote (WSL/SSH) sessions are explicitly disabled.
 
 ## Settings precedence
 

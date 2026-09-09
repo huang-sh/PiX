@@ -22,6 +22,8 @@ import { sessionEventEncoder } from "../shared/session-updates.js";
 import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { WikiService, type WikiModelReply } from "./wiki-service.js";
+import type { WikiStatus } from "../shared/wiki.js";
 import { WslHostClient } from "./wsl-host-client.js";
 import { brokerOptions } from "./model-broker.js";
 import { listSshHosts } from "./ssh-host-installer.js";
@@ -63,6 +65,7 @@ export class MainController {
   shell: ShellService;
   files: SessionFiles;
   pi: PiRuntime;
+  wiki: WikiService;
   current?: SessionSnapshot;
   platform: Platform;
   localProjectPath: string | null;
@@ -121,6 +124,17 @@ export class MainController {
         } catch {}
       }
     }, (url) => this.platform.openExternal(url));
+    this.wiki = new WikiService({
+      settings: () => this.settings.bundle().app.wiki ?? {},
+      defaultModel: () => {
+        const model = this.current?.runtime.model;
+        return model ? { provider: model.provider, id: model.id } : null;
+      },
+      callModel: request => this.wikiCallModel(request),
+      emit: status => this.emit({ type: "wiki", payload: status }),
+      notify: (message, level) => this.emit({ type: "notice", payload: { message, level } }),
+    });
+    (this.pi as GraphRuntime).wikiNotify = (main, event) => this.wiki.handleGraphEvent(main, event);
   }
   onEvent(f: (e: DesktopEvent) => void, patches = false) {
     const encode = patches ? sessionEventEncoder() : undefined;
@@ -143,6 +157,34 @@ export class MainController {
       this.liveProgress.clear();
     }
     this.listeners.forEach((f) => f(e));
+  }
+  /** Standalone background model call: never enters the chat runtime's session. */
+  private async wikiCallModel(request: {
+    provider: string; modelId: string; systemPrompt: string; userPrompt: string; maxTokens: number; signal: AbortSignal;
+  }): Promise<WikiModelReply> {
+    const runtime = await this.pi.modelRuntime();
+    const model = runtime.getModel(request.provider, request.modelId);
+    if (!model) throw new Error(`Wiki 后台模型不可用：${request.provider}/${request.modelId}`);
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(180_000)]);
+    const stream = runtime.streamSimple(model, {
+      systemPrompt: request.systemPrompt,
+      messages: [{ role: "user", content: [{ type: "text", text: request.userPrompt }], timestamp: Date.now() }],
+    }, { maxTokens: request.maxTokens, signal });
+    type Reply = { content?: Array<{ type?: string; text?: string }>; usage?: { input?: number; output?: number; cost?: { total?: number } } };
+    let result: Reply | null = null;
+    for await (const event of stream as AsyncIterable<{ type?: string; reason?: unknown; error?: { errorMessage?: string }; message?: Reply }>) {
+      if (event.type === "done") result = event.message ?? null;
+      else if (event.type === "error") throw new Error(String(event.error?.errorMessage ?? event.reason ?? "Wiki 模型调用失败"));
+    }
+    if (!result) throw new Error("Wiki 模型调用未返回结果");
+    return {
+      text: (result.content ?? []).filter(b => b.type === "text").map(b => String(b.text ?? "")).join(""),
+      usage: result.usage ? {
+        inputTokens: result.usage.input ?? null,
+        outputTokens: result.usage.output ?? null,
+        cost: typeof result.usage.cost?.total === "number" ? result.usage.cost.total : null,
+      } : null,
+    };
   }
   remoteEvent(event: DesktopEvent) {
     const current = (event.payload as { current?: SessionSnapshot } | null)?.current;
@@ -711,6 +753,8 @@ export class MainController {
         const currentPath = this.current?.session.path;
         const deletingCurrent = currentPath && realpathSync(currentPath) === p;
         if (runtimePath && realpathSync(runtimePath) === p) await this.pi.close();
+        // Cancel wiki work before unlinking: results must not resurrect anything.
+        this.wiki.cancel(p);
         this.files.delete(p);
         if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
@@ -810,12 +854,43 @@ export class MainController {
       case "layout.save":
         this.settings.saveLayout(v.layout as unknown as any);
         return { ok: true };
+      case "wiki.state": {
+        const path = String(v.path);
+        if (this.wsl)
+          return {
+            sessionPath: path, available: false, reason: "remote-host", enabled: false, model: null,
+            usage: { input: 0, output: 0, calls: 0, cost: null }, branches: [], updatedAt: new Date().toISOString(),
+          } satisfies WikiStatus;
+        return this.wiki.state(path);
+      }
+      case "wiki.control": {
+        if (this.wsl) throw new Error("远程会话暂不支持 Wiki 自动更新；请在本机会话上使用");
+        const path = String(v.path);
+        const branchId = v.branchId === undefined ? undefined : String(v.branchId);
+        if (v.action === "refresh") return this.wiki.refresh(path);
+        if (v.action === "update") return this.wiki.update(path, branchId);
+        if (v.action === "retry") return this.wiki.retry(path, branchId ?? "main");
+        const patch = v.patch as Record<string, unknown>;
+        const provider = typeof patch.provider === "string" && patch.provider.trim() ? patch.provider.trim() : undefined;
+        const modelId = typeof patch.modelId === "string" && patch.modelId.trim() ? patch.modelId.trim() : undefined;
+        const budget = patch.budgetTokens === null || patch.budgetTokens === undefined ? undefined : Number(patch.budgetTokens);
+        this.settings.update("app", {
+          wiki: {
+            ...(this.settings.bundle().app.wiki ?? {}),
+            ...(patch.enabled !== undefined ? { enabled: patch.enabled === true } : {}),
+            ...(provider !== undefined || modelId !== undefined ? { provider, modelId } : {}),
+            ...(budget !== undefined ? { budgetTokens: budget } : {}),
+          },
+        });
+        return this.wiki.emitStatus(path);
+      }
     }
   }
   dispose() {
     this.liveProgress.clear();
     void this.closeWsl();
     this.shell.dispose();
+    this.wiki.dispose();
     this.pi.dispose();
   }
 }

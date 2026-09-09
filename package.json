@@ -27,6 +27,7 @@
     "test:gui:terminal": "npm run build && node test/terminal-gui-test.mjs",
     "test:gui:typography": "npm run build && node test/typography-gui-test.mjs",
     "test:gui:stop": "npm run build && node test/gui-stop-button-check.mjs",
+    "test:gui:wiki": "npm run build && node test/wiki-gui-check.mjs",
     "test:gui:wsl": "node scripts/install-wsl-server.mjs && npm run build && node test/gui-test.mjs --wsl",
     "test:gui:ssh": "npm run build && node test/gui-test.mjs --ssh",
     "verify": "npm run typecheck && npm test && npm run test:pi && npm run test:gui",

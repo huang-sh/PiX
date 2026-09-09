@@ -24,6 +24,8 @@ function snapshotParent(id: string, entries: Map<string, RawSessionEntry>): stri
 /** One owner per graph; SDK runtimes themselves remain independent. */
 export class GraphRuntime extends PiRuntime {
   graph?: GraphFiles;
+  /** Fired after persisted data changed (settled/opened/deleted); never awaited. */
+  wikiNotify?: (main: string, event: { kind: "opened" } | { kind: "settled"; branchId: string } | { kind: "deleted" }) => void;
   private workers = new Map<string, Worker>();
   private admission: Promise<unknown> = Promise.resolve();
   private mainWork?: Promise<void>;
@@ -87,6 +89,7 @@ export class GraphRuntime extends PiRuntime {
       }
       this.storageError = graph.recoveryMessages.join("; ") || undefined;
       this.deletionRecovery = undefined;
+      try { this.wikiNotify?.(graph.main, { kind: "opened" }); } catch {}
       return this.snapshot();
     } catch (error) {
       await super.close().catch(() => {});
@@ -289,6 +292,7 @@ export class GraphRuntime extends PiRuntime {
         }
       }
       this.notify();
+      try { this.wikiNotify?.(graph.main, { kind: "deleted" }); } catch {}
     } catch (error) {
       // A partially committed journal must finish before any new session writes.
       // Publish an explicitly unavailable snapshot instead of advertising a dead runtime.
@@ -330,8 +334,13 @@ export class GraphRuntime extends PiRuntime {
       void work.then(() => {
         graph.sealMain(this.data(this));
         durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n");
+        try { this.wikiNotify?.(graph.main, { kind: "settled", branchId: "main" }); } catch {}
       },
-        error => { this.storageError = String(error); }).finally(() => {
+        error => {
+          this.storageError = String(error);
+          // Aborted or failed runs still check their saved content.
+          try { this.wikiNotify?.(graph.main, { kind: "settled", branchId: "main" }); } catch {}
+        }).finally(() => {
         this.mainWork = undefined;
         if (this.runtime) graph.saveLeaf(this.runtime.session.sessionManager.getLeafId());
         this.notify();
@@ -425,6 +434,7 @@ export class GraphRuntime extends PiRuntime {
     } finally {
       worker.work = undefined;
       graph.save(record);
+      try { this.wikiNotify?.(graph.main, { kind: "settled", branchId: record.id }); } catch {}
       this.notify();
     }
   }

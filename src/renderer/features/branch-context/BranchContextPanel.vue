@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal } from "@lucide/vue";
+import { BookOpen, Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, RefreshCw, Square, Terminal, TriangleAlert } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
+import type { WikiBranchStatus } from "../../../shared/wiki";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
@@ -12,10 +13,12 @@ import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
+import { useWorkspaceStore } from "../../stores/workspace";
 
 const session = useSessionStore();
 const selectedRun = computed(() => session.selectedRun);
 const layout = useLayoutStore();
+const workspace = useWorkspaceStore();
 // Every branch's store updates immediately; only the visible view is frame-paced.
 const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.selectedActivity);
 const activity = shallowRef<AgentActivity>();
@@ -128,6 +131,51 @@ const showingActivity = computed(() => Boolean(
   activity.value &&
   (session.current?.graph || !session.selectedNode || session.selectedNode.id === session.current?.projection.activeNodeId),
 ));
+
+// --- Session wiki region -------------------------------------------------
+const wiki = computed(() => session.wiki);
+const wikiBranchId = computed(() => session.selectedNode?.branchId ?? "main");
+const wikiBranch = computed<WikiBranchStatus | undefined>(() =>
+  wiki.value?.branches.find(branch => branch.branchId === wikiBranchId.value));
+const wikiTotals = computed(() => (wiki.value?.branches ?? []).reduce(
+  (acc, branch) => ({ covered: acc.covered + branch.coveredTurns, total: acc.total + branch.totalTurns }),
+  { covered: 0, total: 0 },
+));
+const wikiStatusLabel = (status: WikiBranchStatus["status"]) => t(`wiki.status.${status}`);
+const wikiModelValue = computed(() => wiki.value?.model ? `${wiki.value.model.provider}\u0000${wiki.value.model.id}` : "");
+function wikiConfigure(patch: Record<string, unknown>) {
+  void session.wikiControl("configure", { patch }).catch(error => {
+    layout.showNotice(String(error instanceof Error ? error.message : error), "error");
+  });
+}
+function setWikiModel(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  if (!value) return wikiConfigure({ provider: "", modelId: "" });
+  const [provider, id] = value.split("\u0000");
+  wikiConfigure({ provider, modelId: id });
+}
+// Wiki lives under the session file inside the project; open its pages with
+// the regular workspace viewer (relative path, no extra authority).
+function wikiRelative(file: string) {
+  const root = workspace.project?.path;
+  const path = session.current?.session.path;
+  if (!root || !path || !path.startsWith(root)) return null;
+  return `${path.slice(root.length).replace(/^[\\/]+/, "")}.pix-tree/wiki/${file}`;
+}
+async function openWikiFile(file: string) {
+  const rel = wikiRelative(file);
+  if (!rel) {
+    layout.showNotice(t("wiki.outsideProject"), "warning");
+    return;
+  }
+  try {
+    await workspace.openFile(rel);
+    await layout.openTool("files");
+  } catch (error) {
+    layout.showNotice(String(error instanceof Error ? error.message : error), "warning");
+  }
+}
+
 const replacingHistory = computed(() => showingActivity.value && !activity.value?.partial);
 
 const turns = computed(() => {
@@ -335,6 +383,61 @@ onBeforeUnmount(() => {
       {{ t('graph.storageNotice') }}
       <small>{{ session.current.graph.storageError }}</small>
     </div>
+
+    <details v-if="wiki" class="wiki-region">
+      <summary>
+        <BookOpen :size="13" />
+        <strong>{{ t("wiki.title") }}</strong>
+        <span v-if="wiki.available" class="wiki-coverage">{{ t("wiki.coverage", wikiTotals) }}</span>
+        <span v-else class="wiki-coverage">{{ t("wiki.remoteDisabled") }}</span>
+        <ChevronRight class="disclosure" :size="13" />
+      </summary>
+      <div v-if="wiki.available" class="wiki-body">
+        <p v-if="wiki.paused" class="wiki-note"><TriangleAlert :size="13" /> {{ t("wiki.budgetPaused") }}</p>
+        <dl class="wiki-facts">
+          <div>
+            <dt>{{ t("wiki.branchState") }}</dt>
+            <dd :class="`wiki-state-${wikiBranch?.status ?? 'dirty'}`">
+              {{ wikiBranch ? `${wikiStatusLabel(wikiBranch.status)} · ${t("wiki.coverage", { covered: wikiBranch.coveredTurns, total: wikiBranch.totalTurns })}` : t("wiki.notGenerated") }}
+            </dd>
+          </div>
+          <div>
+            <dt>{{ t("wiki.model") }}</dt>
+            <dd>
+              <select class="wiki-model" :value="wikiModelValue" @change="setWikiModel" :aria-label="t('wiki.model')">
+                <option value="">{{ t("wiki.followSession") }}</option>
+                <option v-for="model in session.models" :key="`${model.provider}/${model.id}`" :value="`${model.provider}\u0000${model.id}`">
+                  {{ model.name || model.id }}
+                </option>
+              </select>
+            </dd>
+          </div>
+          <div>
+            <dt>{{ t("wiki.usage") }}</dt>
+            <dd>{{ t("wiki.tokens", { n: wiki.usage.input + wiki.usage.output }) }} · {{ t("wiki.calls", { n: wiki.usage.calls }) }}</dd>
+          </div>
+        </dl>
+        <p v-if="wikiBranch?.error" class="wiki-error">{{ wikiBranch.error }}</p>
+        <div class="wiki-actions">
+          <label class="wiki-toggle">
+            <input type="checkbox" :checked="wiki.enabled"
+              @change="wikiConfigure({ enabled: ($event.target as HTMLInputElement).checked })" />
+            {{ t("wiki.enabled") }}
+          </label>
+          <button type="button" @click="session.wikiControl('refresh')">
+            <RefreshCw :size="12" /> {{ t("wiki.refresh") }}
+          </button>
+          <button type="button" @click="session.wikiControl('update', wikiBranch ? { branchId: wikiBranch.branchId } : {})">
+            {{ t("wiki.updateNow") }}
+          </button>
+          <button v-if="wikiBranch?.status === 'failed'" type="button" @click="session.wikiControl('retry', { branchId: wikiBranch.branchId })">
+            {{ t("wiki.retry") }}
+          </button>
+          <button type="button" @click="openWikiFile(`branches/${wikiBranchId}.md`)">{{ t("wiki.viewSummary") }}</button>
+          <button type="button" @click="openWikiFile('index.md')">{{ t("wiki.viewIndex") }}</button>
+        </div>
+      </div>
+    </details>
 
     <div ref="scroll" class="branch-messages" @scroll="updateScrollFollow">
       <div ref="content" class="branch-messages-inner">

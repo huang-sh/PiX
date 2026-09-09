@@ -1,6 +1,7 @@
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
 import type { ThemePreference } from "./theme.js";
+import type { WikiAppSettings } from "./wiki.js";
 
 export type PromptImage = ImageContent;
 
@@ -334,6 +335,7 @@ export interface AppSettings {
   enterToSend: boolean;
   openLinksInApp: boolean;
   closeToTray: boolean;
+  wiki?: WikiAppSettings;
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -473,9 +475,11 @@ export type DesktopRoute =
   | "settings.get"
   | "settings.update"
   | "settings.reset"
-  | "layout.save";
+  | "layout.save"
+  | "wiki.state"
+  | "wiki.control";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "wiki";
   payload: unknown;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";

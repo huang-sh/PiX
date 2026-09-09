@@ -481,6 +481,28 @@ kbd {
 .graph-storage-state { padding: 6px 16px; color: var(--faint); font-size: var(--font-size-small); }
 .graph-storage-state small { display: block; overflow-wrap: anywhere; }
 .graph-storage-state button { margin-left: 8px; color: var(--accent); cursor: pointer; }
+/* Session wiki strip: a lightweight, collapsible status region under the header. */
+.wiki-region { flex: 0 0 auto; border-bottom: 1px solid var(--border); font-size: var(--font-size-caption); }
+.wiki-region > summary { display: flex; gap: 6px; align-items: center; padding: 5px 16px; color: var(--faint); cursor: pointer; user-select: none; }
+.wiki-region > summary:hover { color: var(--text); }
+.wiki-region > summary .disclosure { margin-left: auto; transition: transform 150ms ease; }
+.wiki-region[open] > summary .disclosure { transform: rotate(90deg); }
+.wiki-coverage { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wiki-body { display: flex; flex-direction: column; gap: 8px; padding: 4px 16px 10px; }
+.wiki-facts { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.wiki-facts div { display: flex; gap: 8px; }
+.wiki-facts dt { flex: 0 0 auto; color: var(--faint); }
+.wiki-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.wiki-model { max-width: 100%; }
+.wiki-state-fresh { color: var(--accent); }
+.wiki-state-failed, .wiki-state-invalid, .wiki-error { color: #c33d3d; }
+.wiki-state-updating, .wiki-state-queued { color: var(--faint); }
+.wiki-note { display: flex; gap: 6px; align-items: center; margin: 0; color: var(--faint); }
+.wiki-error { margin: 0; }
+.wiki-actions { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.wiki-actions button { display: inline-flex; gap: 4px; align-items: center; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--faint); cursor: pointer; }
+.wiki-actions button:hover { color: var(--text); }
+.wiki-toggle { display: inline-flex; gap: 4px; align-items: center; color: var(--faint); cursor: pointer; }
 .branch-panel .panel-header { background: var(--context); }
 .branch-title > span { display: flex; flex-direction: column; min-width: 0; }
 .branch-title small { max-width: 250px; overflow: hidden; color: var(--faint); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }

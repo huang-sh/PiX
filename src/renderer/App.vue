@@ -21,6 +21,7 @@ import type {
   WslDistribution,
   RemoteConnectStage,
 } from "../shared/types";
+import type { WikiStatus } from "../shared/wiki";
 import { desktop } from "./api";
 import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
@@ -469,6 +470,8 @@ function onEvent(wireEvent: DesktopEvent) {
     if (payload.deletedPath && payload.sessions)
       session.applyDeletion(payload.deletedPath, payload.sessions);
     else if (payload.current) session.applySnapshot(payload.current);
+  } else if (event.type === "wiki") {
+    session.applyWiki(event.payload as WikiStatus);
   }
 }
 
@@ -500,6 +503,7 @@ onMounted(() => {
         current: session.current,
         commands: session.commands,
         focusedNode: session.focusedNode,
+        wiki: session.wiki,
         layout: layout.layout,
         contentSection: layout.contentSection,
         contentTabs: layout.contentTabs,
