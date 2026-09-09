@@ -35,11 +35,6 @@ win:
   # The pi-computer-use helper prebuilts for other OSes are dead weight;
   # scripts/ stays because the extension runs its setup script at runtime.
   extraResources:
-    - from: server
-      to: server
-      filter:
-        - "**/*"
-        - "!node_modules/**"
     # Bundled pi package (computer-use), resolved at runtime by
     # src/main/builtin-packages.ts from <resources>/pi-builtin. Shipped as
     # real files outside the asar because pi's extension loader expects
@@ -79,11 +74,6 @@ mac:
   identity: null
   artifactName: PiX-${version}-${arch}.${ext}
   extraResources:
-    - from: server
-      to: server
-      filter:
-        - "**/*"
-        - "!node_modules/**"
     - from: node_modules/@injaneity/pi-computer-use
       to: pi-builtin/node_modules/@injaneity/pi-computer-use
       filter:

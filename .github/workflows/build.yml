@@ -2,7 +2,6 @@ name: build
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -21,8 +20,6 @@ jobs:
           - os: macos-15-intel
             targets: --mac --x64
     runs-on: ${{ matrix.os }}
-    # Publishing a GitHub Release on tag builds needs contents write access
-    # for the workflow's built-in token.
     permissions:
       contents: write
     steps:
@@ -62,8 +59,7 @@ jobs:
         run: npm run build
 
       - name: Package
-        # Publishing from both matrix jobs in parallel would race and create
-        # two draft releases; the release job below publishes everything once.
+        # The release job creates one draft with installers from all platforms.
         run: npx electron-builder ${{ matrix.targets }} --publish never
         env:
           # No signing identity exists on runners; keep unsigned builds explicit.
@@ -82,9 +78,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: publish release
+    name: draft release
     needs: package
-    # Only tag builds publish; branch builds stop at workflow artifacts.
+    # Only tag builds create drafts; manual branch builds stop at workflow artifacts.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -95,12 +91,13 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Publish GitHub release
+      - name: Create GitHub release draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ github.ref_name }}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "PiX ${{ github.ref_name }}" \
+            --draft \
             --generate-notes \
             release/*
