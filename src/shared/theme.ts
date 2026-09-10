@@ -1,10 +1,10 @@
 // Shared by the renderer, terminal and Electron window chrome.
-export type ThemeId = "light" | "dark" | "teal";
+export type ThemeId = "light" | "dark" | "teal" | "peach";
 export type ThemePreference = ThemeId | "system";
 export type ColorScheme = "light" | "dark";
 
 export function normalizeTheme(value: unknown): ThemePreference {
-  return value === "dark" || value === "system" || value === "teal" ? value : "light";
+  return value === "dark" || value === "system" || value === "teal" || value === "peach" ? value : "light";
 }
 
 export function resolveTheme(preference: ThemePreference, systemDark: boolean): ThemeId {
@@ -60,6 +60,31 @@ export const themeColors = {
     "running": "#d97706",
     "warn": "#d97706",
     "shadow": "0 18px 55px rgba(21, 49, 41, 0.14)",
+    "accent-foreground": "#ffffff",
+    "danger-foreground": "#ffffff"
+  },
+  "peach": {
+    "background": "#fff8f3",
+    "surface": "#ffffff",
+    "surface-subtle": "#fffdfb",
+    "navigator": "#fdf3ec",
+    "context": "#fffdfb",
+    "tool-surface": "#fdf6f0",
+    "muted-surface": "#f9ece2",
+    "border": "#f3e4da",
+    "border-strong": "#dfc3b1",
+    "text": "#4a3f3a",
+    "muted": "#6f6057",
+    "faint": "#9a8b82",
+    // Deep peach for filled controls so white labels stay readable on it.
+    "accent": "#c4572b",
+    "accent-strong": "#a8481f",
+    "accent-soft": "#ffe3d4",
+    "ring": "rgba(255, 138, 92, 0.28)",
+    "danger": "#c94836",
+    "running": "#d97706",
+    "warn": "#d97706",
+    "shadow": "0 12px 36px rgba(196, 138, 92, 0.14), 0 2px 6px rgba(196, 138, 92, 0.08)",
     "accent-foreground": "#ffffff",
     "danger-foreground": "#ffffff"
   },

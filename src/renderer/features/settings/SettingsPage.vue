@@ -141,7 +141,7 @@ const rows = computed<Row[]>(() => {
       ];
     case "appearance":
       return [
-        { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal"] },
+        { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal", "peach"] },
         { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
       ];
     case "models":
