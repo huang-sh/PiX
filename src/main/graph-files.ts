@@ -69,6 +69,22 @@ export function durableWrite(file: string, text: string) {
 /** Branch sidecar next to the session file; removed together with it. */
 export const graphDir = (main: string) => `${resolve(main)}.pix-tree`;
 
+/**
+ * `canonical()` re-prefixes a branch's own entries, so an inherited value is
+ * either the entry's own id (inherited from main) or that same entry as an
+ * ancestor names it. Any other value collapses two entries onto one id, which
+ * duplicates or drops graph nodes instead of failing where it happened.
+ */
+function inheritsConsistently(record: BranchRecord) {
+  const baseline = new Set(record.baseline.map(entry => entry.id));
+  const seen = new Set<string>();
+  for (const [id, canonical] of Object.entries(record.inherited)) {
+    if (!baseline.has(id) || (canonical !== id && !canonical.endsWith(`:${id}`)) || seen.has(canonical)) return false;
+    seen.add(canonical);
+  }
+  return true;
+}
+
 export class GraphFiles {
   readonly dir: string;
   readonly records = new Map<string, BranchRecord>();
@@ -142,6 +158,7 @@ export class GraphFiles {
       try {
         record = this.readJson(join(this.dir, name));
         if (basename(this.origin(record.id)) !== name || !record.inherited || typeof record.request?.text !== "string"
+          || !inheritsConsistently(record)
           || !["prepared", "running", "idle", "interrupted"].includes(record.status)) throw new Error("Invalid branch origin");
         parseStrict(encodeSession({ header: record.header, entries: record.baseline }));
       }
@@ -205,7 +222,8 @@ export class GraphFiles {
           if (`request-${data.requestId}.json` !== name || !["settled", "cancelled"].includes(data.state))
             throw new Error("Invalid deletion request receipt");
         } else {
-          if (`${data.id}.jsonl.origin.json` !== name || !data.inherited || typeof data.request?.text !== "string")
+          if (`${data.id}.jsonl.origin.json` !== name || !data.inherited || typeof data.request?.text !== "string"
+            || !inheritsConsistently(data))
             throw new Error("Invalid deletion branch metadata");
           parseStrict(encodeSession({ header: data.header, entries: data.baseline }));
         }
