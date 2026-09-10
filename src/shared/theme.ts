@@ -77,7 +77,7 @@ export const themeColors = {
     "muted": "#6f6057",
     "faint": "#9a8b82",
     // Deep peach for filled controls so white labels stay readable on it.
-    "accent": "#c4572b",
+    "accent": "#bd5329",
     "accent-strong": "#a8481f",
     "accent-soft": "#ffe3d4",
     "ring": "rgba(255, 138, 92, 0.28)",
