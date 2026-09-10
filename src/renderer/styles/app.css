@@ -332,7 +332,7 @@ kbd {
   min-height: 0;
 }
 .session-flow, .welcome, .graph-empty {
-  background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 25%,transparent) var(--dot-grid-dot, 1px), transparent var(--dot-grid-dot, 1px)) 0 0/var(--dot-grid-size, 24px) var(--dot-grid-size, 24px) var(--surface-subtle);
+  background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 25%,transparent) var(--dot-grid-dot, 2px), transparent var(--dot-grid-dot, 2px)) 0 0/var(--dot-grid-size, 24px) var(--dot-grid-size, 24px) var(--surface-subtle);
 }
 html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { background-image: none; }
 .graph-controls { position: absolute; right: 8px; bottom: 33px; z-index: 10; display: flex; gap: 2px; }

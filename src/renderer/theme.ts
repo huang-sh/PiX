@@ -32,8 +32,9 @@ export function startTheme(initial: ThemePreference) {
   };
 }
 
-// The session canvas dot grid is drawn by .session-flow in app.css from these
-// root-level controls: dot/spacing variables and an off switch.
+// The canvas dot grid is drawn by .session-flow/.welcome/.graph-empty in
+// app.css from these root-level controls: dot/spacing variables and an off
+// switch. Fallbacks there must match the defaults used here.
 export function applyDotGrid(app: { canvasDotGrid?: boolean; canvasDotGridSpacing?: number; canvasDotGridDotSize?: number }) {
   const root = document.documentElement;
   if (app.canvasDotGrid === false) root.dataset.dotGrid = "off";
