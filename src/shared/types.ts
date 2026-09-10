@@ -376,6 +376,15 @@ export interface RuntimeSkill {
   source: string;
   scope: "user" | "project" | "temporary";
   disableModelInvocation: boolean;
+  /** True when the file sits in a skills folder PiX may rewrite. */
+  editable: boolean;
+}
+export interface RuntimeSkillDocument {
+  path: string;
+  name: string;
+  description: string;
+  body: string;
+  disableModelInvocation: boolean;
 }
 export interface RuntimeExtension {
   path: string;
@@ -415,6 +424,32 @@ export type AgentControl =
         | "reload";
     }
   | { action: "getSkills"; reload?: boolean }
+  | { action: "getSkill"; path: string }
+  | {
+      action: "createSkill";
+      scope: "user" | "project";
+      name: string;
+      description: string;
+      body: string;
+      disableModelInvocation: boolean;
+    }
+  | {
+      action: "importSkill";
+      scope: "user" | "project";
+      /** Fallback name when the document has no frontmatter name. */
+      name: string;
+      content: string;
+    }
+  | {
+      action: "updateSkill";
+      path: string;
+      name: string;
+      description: string;
+      body: string;
+      disableModelInvocation: boolean;
+    }
+  | { action: "deleteSkill"; path: string }
+  | { action: "setSkillManualOnly"; path: string; manualOnly: boolean }
   | { action: "getModels"; broker?: boolean }
   | { action: "getExtensions"; reload?: boolean }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }

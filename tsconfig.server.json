@@ -11,6 +11,7 @@
     "src/main/model-broker.ts",
     "src/main/bash-resolution.ts",
     "src/main/pi-runtime.ts",
+    "src/main/skill-files.ts",
     "src/main/graph-export-worker.ts",
     "src/main/services.ts",
     "src/shared/**/*.ts",

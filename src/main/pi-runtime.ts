@@ -1,4 +1,6 @@
-import { dirname, join } from "node:path";
+import { dirname, basename, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { FileChangeTracker } from "./file-changes.js";
 import { FILE_CHANGE_CUSTOM_TYPE } from "../shared/file-changes.js";
@@ -12,6 +14,18 @@ import {
   withDetectedBashShell,
 } from "./bash-resolution.js";
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
+import {
+  SKILL_BODY_MESSAGES,
+  SKILL_DESCRIPTION_MESSAGES,
+  SKILL_NAME_MESSAGES,
+  assertEditableSkillPath,
+  isEditableSkillPath,
+  isPathInside,
+  parseSkillDocument,
+  serializeSkillDocument,
+  skillRoots,
+} from "./skill-files.js";
+import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../shared/skills.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
@@ -23,6 +37,7 @@ import type {
   RuntimeExtension,
   RuntimeProvider,
   RuntimeSkill,
+  RuntimeSkillDocument,
   RuntimeState,
   SessionSnapshot,
   SessionSummary,
@@ -82,6 +97,53 @@ export class PiRuntime {
     return process.env.PIX_HOME
       ? join(process.env.PIX_HOME, ".pi", "agent")
       : pi.getAgentDir();
+  }
+  /** Skill roots PiX may create or rewrite for the active project. */
+  private async skillFileRoots() {
+    const pi = await this.pi();
+    return skillRoots(this.agentDir(pi), this.cwd ?? homedir(), pi.CONFIG_DIR_NAME, homedir());
+  }
+  /**
+   * Reloads discovery after a skill file changes so the settings list and the
+   * /skill:name commands (expanded against the live loader) agree with disk.
+   * The active session's system prompt is deliberately left alone: it is the
+   * prompt-cache prefix, and rebuilding it would reprocess the entire history.
+   * The <available_skills> advertisement only refreshes in a new or reloaded
+   * session, the same trade-off Pi's own CLI makes.
+   */
+  private async reloadSkills() {
+    const loader = this.runtime?.session?.resourceLoader;
+    if (loader) {
+      await loader.reload();
+      return;
+    }
+    await this.modelRuntime();
+    await this.modelServices?.resourceLoader?.reload();
+  }
+  private async skillTarget(path: string) {
+    const roots = await this.skillFileRoots();
+    return { roots, file: assertEditableSkillPath(path, roots.editable) };
+  }
+  private async skillRoot(scope: "user" | "project") {
+    if (scope === "project" && !this.cwd) throw new Error("Open a project first");
+    const { user, project } = await this.skillFileRoots();
+    return resolve(scope === "project" ? project : user);
+  }
+  /** Validates the editable fields shared by create, import, and update. */
+  private assertSkillFields(name: string, description: string, body: string) {
+    const nameError = skillNameError(name);
+    if (nameError) throw new Error(SKILL_NAME_MESSAGES[nameError]);
+    const descriptionError = skillDescriptionError(description);
+    if (descriptionError) throw new Error(SKILL_DESCRIPTION_MESSAGES[descriptionError]);
+    const bodyError = skillBodyError(body);
+    if (bodyError) throw new Error(SKILL_BODY_MESSAGES[bodyError]);
+  }
+  private skillFile(root: string, name: string) {
+    const slug = slugifySkillName(name);
+    const file = join(root, slug, "SKILL.md");
+    if (existsSync(file) || existsSync(join(root, `${slug}.md`)))
+      throw new Error(`A skill named "${name}" already exists`);
+    return file;
   }
   async modelRuntime() {
     if (this.runtime?.session?.modelRuntime)
@@ -396,6 +458,12 @@ export class PiRuntime {
       "getCustomModels",
       "getProviders",
       "getSkills",
+      "getSkill",
+      "createSkill",
+      "importSkill",
+      "updateSkill",
+      "deleteSkill",
+      "setSkillManualOnly",
       "getExtensions",
       "loginApiKey",
       "loginOAuth",
@@ -614,6 +682,7 @@ export class PiRuntime {
         if (!s) await this.modelRuntime();
         const loader = s?.resourceLoader ?? this.modelServices.resourceLoader;
         if (input.reload) await loader.reload();
+        const { editable } = await this.skillFileRoots();
         return loader.getSkills().skills.map(
           (skill: any): RuntimeSkill => ({
             name: String(skill.name),
@@ -622,8 +691,97 @@ export class PiRuntime {
             source: String(skill.sourceInfo?.source ?? "local"),
             scope: skill.sourceInfo?.scope ?? "project",
             disableModelInvocation: Boolean(skill.disableModelInvocation),
+            editable: isEditableSkillPath(String(skill.filePath), editable),
           }),
         );
+      }
+      case "getSkill": {
+        const { file } = await this.skillTarget(input.path);
+        const document = parseSkillDocument(await readFile(file, "utf8"));
+        // A skill file may omit the frontmatter name. Pi then falls back to the
+        // containing folder for a SKILL.md, or to the file name for a root .md
+        // (case-insensitive, matching the editable-path check), so the editor
+        // starts from the same name the list shows.
+        const fallback = basename(file).toLowerCase() === "skill.md"
+          ? basename(dirname(file))
+          : basename(file).replace(/\.md$/i, "");
+        return {
+          path: file,
+          name: document.name || fallback,
+          description: document.description,
+          body: document.body,
+          disableModelInvocation: document.disableModelInvocation,
+        } satisfies RuntimeSkillDocument;
+      }
+      case "createSkill": {
+        const root = await this.skillRoot(input.scope);
+        this.assertSkillFields(input.name, input.description, input.body);
+        const target = this.skillFile(root, input.name);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, serializeSkillDocument({
+          name: input.name.trim(),
+          description: input.description.trim(),
+          body: input.body,
+          disableModelInvocation: input.disableModelInvocation,
+          extra: {},
+        }), "utf8");
+        await this.reloadSkills();
+        return { path: target };
+      }
+      case "importSkill": {
+        const root = await this.skillRoot(input.scope);
+        const document = parseSkillDocument(input.content);
+        // Pi tolerates a name that breaks the spec, but PiX only manages
+        // spec-valid skills, so an import normalizes whatever it finds into a
+        // slug instead of refusing a document Pi would happily load.
+        const name = slugifySkillName(document.name || input.name);
+        if (!name) throw new Error("Skill name must contain at least one letter or number");
+        this.assertSkillFields(name, document.description, document.body);
+        const target = this.skillFile(root, name);
+        await mkdir(dirname(target), { recursive: true });
+        // Rewriting through the parser normalizes the document so Pi is
+        // guaranteed to load it, while unmanaged frontmatter survives.
+        await writeFile(target, serializeSkillDocument({
+          ...document,
+          name,
+          description: document.description.trim(),
+        }), "utf8");
+        await this.reloadSkills();
+        return { path: target };
+      }
+      case "updateSkill": {
+        const { file } = await this.skillTarget(input.path);
+        this.assertSkillFields(input.name, input.description, input.body);
+        const existing = parseSkillDocument(await readFile(file, "utf8"));
+        await writeFile(file, serializeSkillDocument({
+          ...existing,
+          name: input.name.trim(),
+          description: input.description.trim(),
+          body: input.body,
+          disableModelInvocation: input.disableModelInvocation,
+        }), "utf8");
+        await this.reloadSkills();
+        return { path: file };
+      }
+      case "deleteSkill": {
+        const { roots, file } = await this.skillTarget(input.path);
+        const directory = dirname(file);
+        const ownsDirectory = basename(file).toLowerCase() === "skill.md" &&
+          roots.editable.some((root) => resolve(root) !== directory && isPathInside(root, directory));
+        if (ownsDirectory) await rm(directory, { recursive: true, force: true });
+        else await rm(file, { force: true });
+        await this.reloadSkills();
+        return { ok: true };
+      }
+      case "setSkillManualOnly": {
+        const { file } = await this.skillTarget(input.path);
+        const document = parseSkillDocument(await readFile(file, "utf8"));
+        await writeFile(file, serializeSkillDocument({
+          ...document,
+          disableModelInvocation: input.manualOnly,
+        }), "utf8");
+        await this.reloadSkills();
+        return { ok: true };
       }
       case "getExtensions": {
         if (!s) await this.modelRuntime();

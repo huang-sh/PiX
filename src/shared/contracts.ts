@@ -1,6 +1,7 @@
 import type { DesktopRoute } from "./types.js";
 import { CUSTOM_MODEL_APIS } from "./types.js";
 import { validatePromptImages } from "./images.js";
+import { MAX_SKILL_BYTES } from "./skills.js";
 const obj = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected object payload");
@@ -211,6 +212,36 @@ export function validateRouteInput(
         };
       if (action === "getSkills" || action === "getExtensions")
         return { action, reload: v.reload === true };
+      if (action === "getSkill" || action === "deleteSkill")
+        return { action, path: str(v.path, "path") };
+      if (action === "setSkillManualOnly")
+        return { action, path: str(v.path, "path"), manualOnly: v.manualOnly === true };
+      if (action === "createSkill" || action === "updateSkill") {
+        const body = str(v.body, "body")!;
+        if (new TextEncoder().encode(body).length > MAX_SKILL_BYTES)
+          throw new Error("body exceeds the skill size limit");
+        const skill = {
+          action,
+          name: str(v.name, "name")!,
+          description: str(v.description, "description")!,
+          body,
+          disableModelInvocation: v.disableModelInvocation === true,
+        };
+        return action === "createSkill"
+          ? { ...skill, scope: v.scope === "project" ? "project" : "user" }
+          : { ...skill, path: str(v.path, "path")! };
+      }
+      if (action === "importSkill") {
+        const content = str(v.content, "content")!;
+        if (new TextEncoder().encode(content).length > MAX_SKILL_BYTES)
+          throw new Error("content exceeds the skill size limit");
+        return {
+          action,
+          scope: v.scope === "project" ? "project" : "user",
+          name: str(v.name, "name")!,
+          content,
+        };
+      }
       if (action === "loginApiKey")
         return {
           action,
