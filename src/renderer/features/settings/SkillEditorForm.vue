@@ -26,7 +26,6 @@ const draft = reactive({
 // A pristine draft has no name or description yet; the starter body is a
 // placeholder, so only what the user must write decides whether it is empty.
 const pristine = computed(() => !props.skill && !draft.name.trim() && !draft.description.trim());
-const slug = computed(() => slugifySkillName(draft.name));
 // The folder an existing skill lives in, taken from its own path: a skill can
 // sit in `.agents/skills` or a package, so naming a root here would lie.
 const skillFolder = computed(() => props.skill ? props.skill.path.replace(/[\\/][^\\/]*$/, "") : "");
@@ -109,7 +108,6 @@ async function save() {
         <div class="skill-sheet-body">
           <label class="skill-field">
             <span class="skill-field-label">{{ t("settings.skillName") }}</span>
-            <span class="skill-field-hint">{{ skill ? t("settings.skillNameEditHint") : slug ? t("settings.skillNameHint", { slug }) : t("settings.skillNameRule") }}</span>
             <input
               ref="nameInput"
               :value="draft.name"
@@ -121,7 +119,6 @@ async function save() {
 
           <label class="skill-field">
             <span class="skill-field-label">{{ t("settings.skillDescription") }}</span>
-            <span class="skill-field-hint">{{ t("settings.skillDescriptionHint") }}</span>
             <textarea v-model="draft.description" data-skill-description rows="2" :placeholder="t('settings.skillDescriptionPlaceholder')" />
           </label>
 
@@ -130,7 +127,6 @@ async function save() {
               <span>{{ t("settings.skillBody") }}</span>
               <span class="skill-byte-count" :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</span>
             </div>
-            <span class="skill-field-hint">{{ t("settings.skillBodyHint") }}</span>
             <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="skillTemplate('')" />
           </div>
 
@@ -191,7 +187,6 @@ async function save() {
 .skill-field { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
 .skill-field-label { color: var(--text); font-size: var(--font-size-small); font-weight: 600; }
 .skill-field-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.skill-field-hint { margin: -2px 0 2px; color: var(--muted); font-size: var(--font-size-caption); line-height: 1.5; }
 .skill-byte-count { color: var(--faint); font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; }
 .skill-byte-count.is-over { color: var(--danger); }
 .skill-body { font-family: var(--font-mono); font-size: var(--font-size-caption); line-height: 1.6; resize: vertical; }
