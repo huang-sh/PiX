@@ -590,8 +590,14 @@ describe("SettingsPage save", () => {
     });
 
     await wrapper.get("[data-skill-new]").trigger("click");
-    // A readable name is accepted and stored as its slug.
+    // Typing a name must not nag about the description the user has not
+    // reached yet; the form only speaks once a field is left behind empty.
     await wrapper.get("[data-skill-name]").setValue("PDF Tools");
+    expect(wrapper.find(".skill-sheet-error").exists()).toBe(false);
+    expect((wrapper.get("[data-skill-save]").element as HTMLButtonElement).disabled).toBe(true);
+    await wrapper.get("[data-skill-description]").trigger("blur");
+    expect(wrapper.get(".skill-sheet-error").text()).toContain("Description is required");
+    // A readable name is accepted and stored as its slug.
     await wrapper.get("[data-skill-description]").setValue("A new skill");
     await wrapper.get("form[data-skill-form]").trigger("submit");
     await flushPromises();

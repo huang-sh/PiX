@@ -105,7 +105,11 @@ export class PiRuntime {
   }
   /**
    * Reloads discovery after a skill file changes so the settings list and the
-   * next turn's system prompt agree with what is on disk.
+   * /skill:name commands (expanded against the live loader) agree with disk.
+   * The active session's system prompt is deliberately left alone: it is the
+   * prompt-cache prefix, and rebuilding it would reprocess the entire history.
+   * The <available_skills> advertisement only refreshes in a new or reloaded
+   * session, the same trade-off Pi's own CLI makes.
    */
   private async reloadSkills() {
     const loader = this.runtime?.session?.resourceLoader;

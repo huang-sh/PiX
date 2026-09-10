@@ -26,9 +26,9 @@ const draft = reactive({
   disableModelInvocation: props.skill?.disableModelInvocation ?? false,
 });
 
-// A pristine draft has no name or description yet; the starter body is a
-// placeholder, so only what the user must write decides whether it is empty.
-const pristine = computed(() => !props.skill && !draft.name.trim() && !draft.description.trim());
+// Which fields the user has left. An empty field stays quiet until then —
+// filling in the name must not nag about the description not reached yet.
+const left = reactive({ name: false, description: false, body: false });
 // The folder an existing skill lives in, taken from its own path: a skill can
 // sit in `.agents/skills` or a package, so naming a root here would lie.
 const skillFolder = computed(() => props.skill ? props.skill.path.replace(/[\\/][^\\/]*$/, "") : "");
@@ -40,13 +40,16 @@ const kilobytes = computed(() => {
   return bytes.value < 10_240 ? Number((bytes.value / 1024).toFixed(1)) : Math.round(bytes.value / 1024);
 });
 
+const nameIssue = computed(() => skillDisplayNameError(draft.name));
+const descriptionIssue = computed(() => skillDescriptionError(draft.description));
+const bodyIssue = computed(() => skillBodyError(draft.body));
+const invalid = computed(() => !!(nameIssue.value || descriptionIssue.value || bodyIssue.value));
+// A field reports a broken rule once it has content; an empty one waits until
+// the user leaves it, so the form never complains about a field still ahead.
 const errorKey = computed(() => {
-  const name = skillDisplayNameError(draft.name);
-  if (name) return `settings.skillError.${name}`;
-  const description = skillDescriptionError(draft.description);
-  if (description) return `settings.skillError.${description}`;
-  const body = skillBodyError(draft.body);
-  if (body) return `settings.skillError.${body}`;
+  if (nameIssue.value && (left.name || draft.name.trim())) return `settings.skillError.${nameIssue.value}`;
+  if (descriptionIssue.value && (left.description || draft.description.trim())) return `settings.skillError.${descriptionIssue.value}`;
+  if (bodyIssue.value && (left.body || draft.body.trim())) return `settings.skillError.${bodyIssue.value}`;
   return "";
 });
 
@@ -62,7 +65,7 @@ function setName(value: string) {
 }
 
 async function save() {
-  if (busy.value || errorKey.value) return;
+  if (busy.value || invalid.value) return;
   busy.value = true;
   error.value = "";
   // The frontmatter name has to satisfy the Agent Skills spec even when the
@@ -117,12 +120,13 @@ async function save() {
               data-skill-name
               :placeholder="t('settings.skillNamePlaceholder')"
               @input="setName(($event.target as HTMLInputElement).value)"
+              @blur="left.name = true"
             />
           </label>
 
           <label class="skill-field">
             <span class="skill-field-label">{{ t("settings.skillDescription") }}</span>
-            <textarea v-model="draft.description" data-skill-description rows="2" :placeholder="t('settings.skillDescriptionPlaceholder')" />
+            <textarea v-model="draft.description" data-skill-description rows="2" :placeholder="t('settings.skillDescriptionPlaceholder')" @blur="left.description = true" />
           </label>
 
           <div class="skill-field">
@@ -130,7 +134,7 @@ async function save() {
               <span>{{ t("settings.skillBody") }}</span>
               <span class="skill-byte-count" :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</span>
             </div>
-            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="starter('')" />
+            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="starter('')" @blur="left.body = true" />
           </div>
 
           <div class="skill-field">
@@ -161,13 +165,13 @@ async function save() {
         </div>
 
         <p v-if="error" class="skill-sheet-error" role="alert">{{ error }}</p>
-        <p v-else-if="errorKey && !pristine" class="skill-sheet-error" role="alert">{{ t(errorKey) }}</p>
+        <p v-else-if="errorKey" class="skill-sheet-error" role="alert">{{ t(errorKey) }}</p>
 
         <footer class="skill-sheet-actions">
           <span class="skill-sheet-note">{{ t("settings.skillSheetNote") }}</span>
           <div class="skill-sheet-actions-end">
             <Button type="button" variant="ghost" :disabled="busy" @click="emit('cancel')">{{ t("settings.customCancel") }}</Button>
-            <Button type="submit" data-skill-save :disabled="busy || !!errorKey || (pristine && !skill)">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
+            <Button type="submit" data-skill-save :disabled="busy || invalid">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
           </div>
         </footer>
       </form>
