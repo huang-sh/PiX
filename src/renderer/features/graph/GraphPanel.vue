@@ -17,7 +17,7 @@ import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
 import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
-import { layoutGraph, reserveManualPositions, type BranchDirection } from "../../graph-layout";
+import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualPosition } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
@@ -46,7 +46,9 @@ watch(nodes, items => {
   }
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
-const dragged = new Map<string, { x: number; y: number }>();
+const dragged = new Map<string, ManualPosition>();
+// Holding the branch modifier at any point of a drag carries the cards after it too.
+let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
 const branchOrder = new Map<string, number>();
@@ -176,9 +178,12 @@ function rebuild() {
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
   // Only deletions invalidate moved manual slots to close gaps. Adding a
   // branch must preserve the user's coordinates even when its auto slots move.
+  // Transient cards (composer, pending) are never in the projection, so they keep a
+  // slot made for them until they leave the screen.
   for (const id of dragged.keys()) {
     const before = autoPositions?.get(id);
     const after = positions.get(id);
+    if (!after && !before && nodes.value.some(node => node.id === id)) continue;
     if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
   }
   autoPositions = positions;
@@ -378,7 +383,13 @@ function layoutBranches(items: RenderNode[]) {
   const pending = session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
   const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
-  reserveManualPositions(placed.nodes, dragged);
+  // Cards that were not on screen yet may be moved out of a pinned card's way;
+  // the ones the user can already see keep the position they have.
+  const known = new Set(nodes.value.map(node => node.id));
+  // A card that made way for a pin is held there, so the next rebuild cannot drop
+  // it back on top of the pin it just cleared.
+  for (const [id, position] of reserveManualPositions(placed.nodes, dragged, new Set(visible.filter(node => !known.has(node.id)).map(node => node.id))))
+    dragged.set(id, position);
   let moved = false;
   for (let i = 0; i < visible.length; i++) {
     const node = visible[i]!, position = placed.nodes[i]!;
@@ -483,6 +494,14 @@ function acceptSubmittedNode() {
   if (id && draftOrder && activeSession === sessionKey.value) rememberBranchOrder(id, draftOrder);
   if (id) resetDraft();
   return id;
+}
+
+// One click discards every manual slot: the automatic layout then puts each
+// branch back into its own lane, and the current card comes back into view.
+async function tidy() {
+  dragged.clear();
+  rebuild();
+  await center(defaultFocusId(), true);
 }
 
 function defaultFocusId() {
@@ -605,13 +624,29 @@ async function ready(store: VueFlowStore) {
   }
 }
 
+function holdsBranchModifier(event: NodeMouseEvent) {
+  return Boolean((event as { event?: { shiftKey?: boolean } }).event?.shiftKey);
+}
+
+function startDrag(event: NodeMouseEvent) {
+  dragFollowsBranch = holdsBranchModifier(event);
+}
+
+function trackDragModifier(event: NodeMouseEvent) {
+  if (holdsBranchModifier(event)) dragFollowsBranch = true;
+}
+
 function rememberDrag(event: NodeMouseEvent) {
-  dragged.set(event.node.id, { ...event.node.position });
+  const branch = dragFollowsBranch || holdsBranchModifier(event);
+  dragFollowsBranch = false;
+  dragged.set(event.node.id, { ...event.node.position, branch });
   const node = nodes.value.find(node => node.id === event.node.id);
-  if (node) {
-    node.position = { ...event.node.position };
-    nodes.value = [...nodes.value];
-  }
+  if (!node) return;
+  node.position = { ...event.node.position };
+  // Lay out from the drop at once, so a branch dragged along moves with its card
+  // instead of following on some later rebuild.
+  layoutBranches(nodes.value);
+  nodes.value = [...nodes.value];
 }
 
 function syncNodeDimensions(changes: NodeChange[]) {
@@ -684,6 +719,8 @@ watch(
       @pane-ready="ready"
       @node-click="({ node }: NodeMouseEvent) => select(node.id)"
       @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
+      @node-drag-start="startDrag"
+      @node-drag="trackDragModifier"
       @node-drag-stop="rememberDrag"
       @nodes-change="syncNodeDimensions"
     >
@@ -715,7 +752,7 @@ watch(
         :title="t('graph.toggleMinimap')"
         @click="layout.toggleMinimap()"
       ><MapIcon :size="15" /></Button>
-      <Button variant="ghost" size="icon" :aria-label="t('graph.centerCurrent')" :title="t('graph.centerCurrent')" @click="center(defaultFocusId(), true)"><Focus :size="15" /></Button>
+      <Button variant="ghost" size="icon" :aria-label="t('graph.tidyLayout')" :title="t('graph.tidyLayout')" @click="tidy()"><Focus :size="15" /></Button>
     </nav>
 
     <footer class="graph-footer">
