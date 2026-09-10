@@ -140,6 +140,8 @@ export class SettingsService {
       enterToSend: true,
       openLinksInApp: true,
       closeToTray: true,
+      canvasDotGrid: true,
+      canvasDotGridSize: 24,
     };
     const app = merge(
       defaults as unknown as Record<string, unknown>,

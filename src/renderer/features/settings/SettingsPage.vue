@@ -2,6 +2,7 @@
 import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, toRaw, watch } from "vue";
 import { normalizeTheme } from "../../../shared/theme";
+import { applyDotGrid } from "../../theme";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
@@ -34,6 +35,7 @@ const { locale, t, te } = useI18n();
 const draft = ref<SettingsBundle>();
 onBeforeUnmount(() => {
   document.documentElement.dataset.density = layout.settings?.app.density ?? "comfortable";
+  applyDotGrid(layout.settings?.app ?? {});
 });
 const shortcutsPage = ref<InstanceType<typeof KeyboardShortcuts>>();
 function close() { shortcutsPage.value?.requestClose(); }
@@ -143,6 +145,8 @@ const rows = computed<Row[]>(() => {
       return [
         { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal", "peach"] },
         { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
+        { path: "canvasDotGrid", label: "settings.rows.canvasDotGrid", scope: "app", type: "check", fallback: true, description: "settings.rows.canvasDotGridDesc" },
+        { path: "canvasDotGridSize", label: "settings.rows.canvasDotGridSize", scope: "app", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSizeDesc" },
       ];
     case "models":
       return [
@@ -458,6 +462,8 @@ function setValue(row: Row, event: Event) {
   });
   if (row.scope === "app" && row.path === "density")
     document.documentElement.dataset.density = String(next);
+  if (row.scope === "app" && (row.path === "canvasDotGrid" || row.path === "canvasDotGridSize") && draft.value)
+    applyDotGrid(draft.value.app);
 }
 
 function modelSettingsKey(model: RuntimeModel) {

@@ -31,3 +31,13 @@ export function startTheme(initial: ThemePreference) {
     if (systemTheme === media) systemTheme = undefined;
   };
 }
+
+// The session canvas dot grid is drawn by .session-flow in app.css from these
+// root-level controls: a size variable and an off switch.
+export function applyDotGrid(app: { canvasDotGrid?: boolean; canvasDotGridSize?: number }) {
+  const root = document.documentElement;
+  if (app.canvasDotGrid === false) root.dataset.dotGrid = "off";
+  else delete root.dataset.dotGrid;
+  const size = Math.min(96, Math.max(8, Math.round(Number(app.canvasDotGridSize) || 24)));
+  root.style.setProperty("--dot-grid-size", `${size}px`);
+}
