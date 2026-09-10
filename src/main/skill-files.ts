@@ -19,10 +19,11 @@ export interface SkillDocument {
 
 /**
  * Splits the document the way Pi's `parseFrontmatter` does, so a document PiX
- * reads and rewrites stays recognized by the loader.
+ * reads and rewrites stays recognized by the loader. That includes the BOM
+ * Windows editors write: Pi strips it before looking for `---`.
  */
 function splitFrontmatter(content: string): { yaml: string | null; body: string } {
-  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalized = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!normalized.startsWith("---")) return { yaml: null, body: normalized.trim() };
   const end = normalized.indexOf("\n---", 3);
   if (end === -1) return { yaml: null, body: normalized.trim() };
@@ -34,8 +35,12 @@ export function parseSkillDocument(content: string): SkillDocument {
   let frontmatter: Record<string, unknown> = {};
   if (yaml) {
     const parsed = parse(yaml);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-      frontmatter = parsed as Record<string, unknown>;
+    // Frontmatter that parses to a list or scalar has no name or description,
+    // so Pi refuses to load the file as a skill. Fail closed here too instead
+    // of silently rewriting the document without the text the author wrote.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("This file's frontmatter is not a valid skill document");
+    frontmatter = parsed as Record<string, unknown>;
   }
   const { name, description, "disable-model-invocation": manualOnly, ...extra } = frontmatter;
   return {

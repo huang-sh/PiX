@@ -84,6 +84,32 @@ test("a document without frontmatter is treated as body only", () => {
   assert.equal(document.body, "# Just a file");
 });
 
+test("a UTF-8 BOM does not hide the frontmatter from an edit", () => {
+  const bomFile = "\uFEFF---\nname: pdf-tools\ndescription: Extract text.\n---\n\n# PDF tools\nRun the extractor.";
+  const document = parseSkillDocument(bomFile);
+  assert.equal(document.name, "pdf-tools");
+  assert.equal(document.description, "Extract text.");
+  assert.equal(document.body, "# PDF tools\nRun the extractor.");
+  // Editing and saving must not fold the original header into the body.
+  const rewritten = serializeSkillDocument({ ...document, description: "New text." });
+  const reparsed = parseSkillDocument(rewritten);
+  assert.equal(reparsed.name, "pdf-tools");
+  assert.equal(reparsed.description, "New text.");
+  assert.equal(reparsed.body, "# PDF tools\nRun the extractor.");
+  assert.equal(rewritten.startsWith("---\nname: pdf-tools"), true);
+});
+
+test("frontmatter that is not a mapping fails closed instead of being dropped", () => {
+  assert.throws(
+    () => parseSkillDocument("---\n- one\n- two\n---\n\n# Body\n"),
+    /not a valid skill document/,
+  );
+  assert.throws(
+    () => parseSkillDocument("---\n42\n---\n\n# Body\n"),
+    /not a valid skill document/,
+  );
+});
+
 test("only skills inside user, project, or .agents folders are writable", () => {
   const roots = skillRoots("/home/me/.pi/agent", "/work/app", ".pi", "/home/me");
   assert.deepEqual(

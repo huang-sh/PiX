@@ -695,11 +695,12 @@ export class PiRuntime {
         const { file } = await this.skillTarget(input.path);
         const document = parseSkillDocument(await readFile(file, "utf8"));
         // A skill file may omit the frontmatter name. Pi then falls back to the
-        // containing folder for a SKILL.md, or to the file name for a root .md,
-        // so the editor starts from the same name the list shows.
+        // containing folder for a SKILL.md, or to the file name for a root .md
+        // (case-insensitive, matching the editable-path check), so the editor
+        // starts from the same name the list shows.
         const fallback = basename(file).toLowerCase() === "skill.md"
           ? basename(dirname(file))
-          : basename(file, ".md");
+          : basename(file).replace(/\.md$/i, "");
         return {
           path: file,
           name: document.name || fallback,
