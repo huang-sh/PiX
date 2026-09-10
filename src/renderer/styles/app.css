@@ -331,10 +331,10 @@ kbd {
   flex: 1;
   min-height: 0;
 }
-.session-flow, .welcome {
+.session-flow, .welcome, .graph-empty {
   background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 25%,transparent) var(--dot-grid-dot, 1px), transparent var(--dot-grid-dot, 1px)) 0 0/var(--dot-grid-size, 24px) var(--dot-grid-size, 24px) var(--surface-subtle);
 }
-html[data-dot-grid="off"] :is(.session-flow, .welcome) { background-image: none; }
+html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { background-image: none; }
 .graph-controls { position: absolute; right: 8px; bottom: 33px; z-index: 10; display: flex; gap: 2px; }
 .graph-controls button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
 .session-flow .vue-flow__minimap { right: auto; bottom: 5px; left: 5px; margin: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 12px rgba(28,36,48,.06); }
