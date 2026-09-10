@@ -69,13 +69,42 @@ export class GraphSnapshotCache {
       // Flatten references only when a source changes. Payloads and node objects
       // in every unaffected branch retain their identity for the wire diff.
       this.entries = [...this.sources.values()].flatMap(source => source.entries);
-      this.nodes = [...this.sources.values()].flatMap(source => source.nodes);
+      this.nodes = this.reattach([...this.sources.values()].flatMap(source => source.nodes));
       const edges = new Map(this.edges.map(edge => [edge.id, edge]));
       this.edges = this.nodes.filter(node => node.parentId).map(node => {
         const id = `${node.parentId}->${node.id}`;
         return edges.get(id) ?? { id, source: node.parentId!, target: node.id };
       });
     }
+  }
+
+  /**
+   * A branch can be re-canonicalized or dropped independently of the branches
+   * that forked from it, which leaves their first node pointing at a parent that
+   * is no longer in this graph. Such a link draws no edge and leaves the layout
+   * no structure to place the card by, so reattach it to the nearest ancestor
+   * turn that survived.
+   */
+  private reattach(nodes: GraphNode[]) {
+    const ids = new Set(nodes.map(node => node.id));
+    const byUserEntry = new Map(nodes.map(node => [node.userEntryId, node.id]));
+    const parent = new Map<string, string>();
+    for (const node of nodes) {
+      if (!node.parentId || ids.has(node.parentId)) continue;
+      const walked = new Set<string>();
+      let cursor = this.entriesById.get(node.userEntryId)?.parentId ?? undefined;
+      while (cursor && !walked.has(cursor)) {
+        walked.add(cursor);
+        const entry = this.entriesById.get(cursor);
+        if (!entry) break;
+        const owner = entry.type === "message" && (entry.message as { role?: string })?.role === "user" ? byUserEntry.get(cursor) : undefined;
+        if (owner) { parent.set(node.id, owner); break; }
+        cursor = entry.parentId ?? undefined;
+      }
+    }
+    return parent.size
+      ? nodes.map(node => parent.has(node.id) ? { ...node, parentId: parent.get(node.id)! } : node)
+      : nodes;
   }
 
   error(id: string) { return this.sources.get(id)?.error; }

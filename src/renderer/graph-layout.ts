@@ -111,29 +111,32 @@ export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new
     a.sort((x, y) => (order.get(x.id) ?? 0) - (order.get(y.id) ?? 0) || x.timestamp.localeCompare(y.timestamp));
   let next = 0;
   const row = new Map<string, number>();
-  const roots = children.get(null) ?? [];
   const seen = new Set<string>();
-  const stack = [...roots].reverse().map((node) => ({ node, exit: false, height: size(node).height }));
-  while (stack.length) {
-    const { node, exit, height } = stack.pop()!;
-    if (exit) {
-      let min = Infinity, max = -Infinity;
-      for (const child of children.get(node.id) ?? []) {
-        const r = row.get(child.id);
-        if (r !== undefined) { min = Math.min(min, r); max = Math.max(max, r); }
+  const place = (seeds: T[]) => {
+    const stack = [...seeds].reverse().map((node) => ({ node, exit: false, height: size(node).height }));
+    while (stack.length) {
+      const { node, exit, height } = stack.pop()!;
+      if (exit) {
+        let min = Infinity, max = -Infinity;
+        for (const child of children.get(node.id) ?? []) {
+          const r = row.get(child.id);
+          if (r !== undefined) { min = Math.min(min, r); max = Math.max(max, r); }
+        }
+        row.set(node.id, min === Infinity ? next + height / 2 : (min + max) / 2);
+        if (min === Infinity) next += height + rg;
+      } else if (!seen.has(node.id)) {
+        seen.add(node.id);
+        stack.push({ node, exit: true, height });
+        for (const child of [...(children.get(node.id) ?? [])].reverse())
+          stack.push({ node: child, exit: false, height: Math.max(height, size(child).height) });
       }
-      row.set(node.id, min === Infinity ? next + height / 2 : (min + max) / 2);
-      if (min === Infinity) next += height + rg;
-    } else if (!seen.has(node.id)) {
-      seen.add(node.id);
-      stack.push({ node, exit: true, height });
-      for (const child of [...(children.get(node.id) ?? [])].reverse())
-        stack.push({ node: child, exit: false, height: Math.max(height, size(child).height) });
     }
-  }
-  p.nodes.forEach((n) => {
-    if (!row.has(n.id)) { row.set(n.id, next + size(n).height / 2); next += size(n).height + rg; }
-  });
+  };
+  place(children.get(null) ?? []);
+  // A node whose parent is missing from these nodes is the root of a detached
+  // component: lay its own subtree out as one, so its cards stay aligned to each
+  // other instead of being stacked flat past every other branch.
+  place(p.nodes.filter((node) => !seen.has(node.id)));
   const maxDepth = p.nodes.reduce((max, node) => Math.max(max, node.depth), 0);
   const widths = new Map<number, number>();
   // Transient cards (draft, pending) reserve vertical space but never widen

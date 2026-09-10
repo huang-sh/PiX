@@ -91,3 +91,21 @@ test("graph is laid out left to right with separated siblings", () => {
   assert.ok(children.every((x) => x.x > r.x));
   assert.notEqual(children[0]?.y, children[1]?.y);
 });
+test("a node whose parent is missing keeps its own subtree aligned", () => {
+  const tree = {
+    nodes: [
+      { id: "root", parentId: null as string | null, timestamp: "0", depth: 0 },
+      { id: "kept", parentId: "root", timestamp: "1", depth: 1 },
+      // "orphan" forked from a node that is not part of this graph.
+      { id: "orphan", parentId: "turn:absent", timestamp: "2", depth: 1 },
+      { id: "child", parentId: "orphan", timestamp: "3", depth: 2 },
+      { id: "grandchild", parentId: "child", timestamp: "4", depth: 3 },
+    ],
+  };
+  const placed = layoutGraph(tree).nodes;
+  const at = (id: string) => placed.find((node) => node.id === id)!;
+  assert.equal(at("child").x - at("orphan").x, at("kept").x - at("root").x, "columns stay on the depth grid");
+  assert.equal(at("child").y, at("orphan").y, "a single child stays on its parent's row");
+  assert.equal(at("grandchild").y, at("child").y);
+  assert.notEqual(at("orphan").y, at("kept").y, "the detached component gets its own rows");
+});
