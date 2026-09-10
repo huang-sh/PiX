@@ -920,6 +920,18 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .resource-info small { color: var(--muted); font-size: var(--font-size-caption); }
 .resource-badges { display: flex; justify-content: flex-end; gap: 5px; }
 .resource-badges em { padding: 3px 7px; border-radius: 999px; background: var(--muted-surface); color: var(--muted); font-size: var(--font-size-caption); font-style: normal; white-space: nowrap; }
+.skill-toolbar-actions { display: flex; align-items: center; gap: 8px; }
+.skill-filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 0; }
+.skill-card .provider-section-title code { margin-left: auto; overflow: hidden; color: var(--faint); font-size: var(--font-size-caption); letter-spacing: 0; text-overflow: ellipsis; text-transform: none; white-space: nowrap; }
+.skill-row { grid-template-columns: 38px minmax(0,1fr) auto auto; }
+.skill-row.is-busy { opacity: .6; }
+.skill-row .resource-info strong { display: flex; align-items: center; gap: 5px; }
+.skill-row .resource-info strong svg { flex: 0 0 auto; color: var(--faint); }
+.skill-manual-toggle { padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: var(--font-size-caption); white-space: nowrap; }
+.skill-manual-toggle:hover { color: var(--text); }
+.skill-manual-toggle.on { border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); color: var(--accent-strong); }
+.skill-row-actions { display: flex; gap: 2px; }
+.skill-row-actions .is-arming { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); }
 .extension-card { max-width: 1120px; margin: auto; container-type: inline-size; }
 .extension-overview { overflow: hidden; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
 .extension-intro { display: flex; align-items: center; gap: 16px; padding: 25px 26px; background: var(--surface); }

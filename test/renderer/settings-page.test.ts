@@ -510,8 +510,8 @@ describe("SettingsPage save", () => {
 
   it("shows, filters, and refreshes skills detected by Pi", async () => {
     const skills: RuntimeSkill[] = [
-      { name: "docx", description: "Create Word documents", path: "/home/me/.pi/agent/skills/docx/SKILL.md", source: "local", scope: "user", disableModelInvocation: false },
-      { name: "project-review", description: "Review this project", path: "/project/.pi/skills/review/SKILL.md", source: "local", scope: "project", disableModelInvocation: true },
+      { name: "docx", description: "Create Word documents", path: "/home/me/.pi/agent/skills/docx/SKILL.md", source: "local", scope: "user", disableModelInvocation: false, editable: true },
+      { name: "project-review", description: "Review this project", path: "/project/.pi/skills/review/SKILL.md", source: "local", scope: "project", disableModelInvocation: true, editable: true },
     ];
     vi.mocked(desktop.invoke).mockImplementation(async (route) =>
       route === "agent.control" ? skills : settings,
@@ -533,6 +533,74 @@ describe("SettingsPage save", () => {
     await wrapper.get('.skill-card button[title="Refresh skills"]').trigger("click");
     await flushPromises();
     expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "getSkills", reload: true });
+  });
+
+  it("creates, edits, toggles, and deletes editable skills", async () => {
+    const skills: RuntimeSkill[] = [
+      { name: "docx", description: "Create Word documents", path: "/home/me/.pi/agent/skills/docx/SKILL.md", source: "local", scope: "user", disableModelInvocation: false, editable: true },
+      { name: "bundled", description: "Ships with a package", path: "/app/pkg/skills/bundled/SKILL.md", source: "cli", scope: "temporary", disableModelInvocation: false, editable: false },
+    ];
+    const calls: Record<string, unknown>[] = [];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const input = payload as Record<string, unknown>;
+      calls.push(input);
+      if (input.action === "getSkills") return skills;
+      if (input.action === "getSkill")
+        return { path: input.path, name: "docx", description: "Create Word documents", body: "# docx", disableModelInvocation: false };
+      if (input.action === "createSkill") return { path: "/home/me/.pi/agent/skills/new-skill/SKILL.md" };
+      if (input.action === "updateSkill") return { path: input.path };
+      return { ok: true };
+    });
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "skills";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+
+    // A skill outside the editable folders offers no edit or delete actions.
+    const bundled = wrapper.get('[data-skill="bundled"]');
+    expect(bundled.find(".skill-row-actions").exists()).toBe(false);
+    expect(bundled.find('[aria-label="Read-only"]').exists()).toBe(true);
+
+    await wrapper.get('[data-skill="docx"] .skill-manual-toggle').trigger("click");
+    await flushPromises();
+    expect(calls.find((call) => call.action === "setSkillManualOnly")).toMatchObject({
+      path: "/home/me/.pi/agent/skills/docx/SKILL.md",
+      manualOnly: true,
+    });
+
+    // The delete button arms on the first press and only then removes.
+    const remove = wrapper.get('[data-skill="docx"] .skill-row-actions button:last-child');
+    await remove.trigger("click");
+    await flushPromises();
+    expect(calls.some((call) => call.action === "deleteSkill")).toBe(false);
+    await remove.trigger("click");
+    await flushPromises();
+    expect(calls.find((call) => call.action === "deleteSkill")).toMatchObject({
+      path: "/home/me/.pi/agent/skills/docx/SKILL.md",
+    });
+
+    await wrapper.get("[data-skill-new]").trigger("click");
+    await wrapper.get("[data-skill-name]").setValue("new-skill");
+    await wrapper.get("[data-skill-description]").setValue("A new skill");
+    await wrapper.get("form[data-skill-form]").trigger("submit");
+    await flushPromises();
+    expect(calls.find((call) => call.action === "createSkill")).toMatchObject({
+      scope: "user",
+      name: "new-skill",
+      description: "A new skill",
+      disableModelInvocation: false,
+    });
+    expect(wrapper.find("form[data-skill-form]").exists()).toBe(false);
+
+    await wrapper.get('[data-skill="docx"] .skill-row-actions button').trigger("click");
+    await flushPromises();
+    expect(calls.some((call) => call.action === "getSkill")).toBe(true);
+    expect((wrapper.get("[data-skill-name]").element as HTMLInputElement).value).toBe("docx");
   });
 
   it("shows, filters, and refreshes extensions detected by Pi", async () => {

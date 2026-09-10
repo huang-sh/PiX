@@ -336,6 +336,7 @@ test("maps skills discovered by the SDK resource loader", async () => {
     source: "local",
     scope: "project",
     disableModelInvocation: true,
+    editable: true,
   }]);
 });
 

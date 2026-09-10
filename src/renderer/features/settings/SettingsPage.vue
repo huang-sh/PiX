@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Lock, Palette, Pencil, Plus, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Trash2, Upload, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, toRaw, watch } from "vue";
 import { normalizeTheme } from "../../../shared/theme";
 import { applyAppearance } from "../../theme";
 import { useI18n } from "vue-i18n";
-import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
+import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, RuntimeSkillDocument, SettingsBundle } from "../../../shared/types";
+import { slugifySkillName } from "../../../shared/skills";
 import Button from "../../components/ui/Button.vue";
 import CustomModelForm from "./CustomModelForm.vue";
 import KeyboardShortcuts from "./KeyboardShortcuts.vue";
+import SkillEditorForm from "./SkillEditorForm.vue";
 import AboutPage from "./AboutPage.vue";
 import { desktop } from "../../api";
 import { useLayoutStore } from "../../stores/layout";
@@ -65,8 +67,14 @@ const saving = ref(false);
 const runtimeError = ref("");
 const skills = ref<RuntimeSkill[]>([]);
 const skillQuery = ref("");
+const skillScope = ref<"all" | RuntimeSkill["scope"]>("all");
 const skillBusy = ref(false);
 const skillError = ref("");
+const skillActionPath = ref("");
+const skillImport = ref<HTMLInputElement>();
+const confirmingSkillPath = ref("");
+const skillEditor = ref<{ document?: RuntimeSkillDocument; scope: "user" | "project" }>();
+const canUseProjectSkills = computed(() => !!workspace.project);
 const extensions = ref<RuntimeExtension[]>([]);
 const extensionQuery = ref("");
 const extensionScope = ref<"all" | RuntimeExtension["scope"]>("all");
@@ -238,19 +246,23 @@ const selectedThinkingLevels = computed(() =>
     ? ["off"]
     : ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 );
-const filteredSkills = computed(() => {
+const queriedSkills = computed(() => {
   const query = skillQuery.value.trim().toLowerCase();
-  return skills.value
-    .filter((skill) => !query || `${skill.name} ${skill.description} ${skill.path} ${skill.source}`.toLowerCase().includes(query))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return skills.value.filter((skill) => !query || `${skill.name} ${skill.description} ${skill.path} ${skill.source}`.toLowerCase().includes(query));
 });
+const filteredSkills = computed(() => queriedSkills.value
+  .filter((skill) => skillScope.value === "all" || skill.scope === skillScope.value)
+  .sort((a, b) => a.name.localeCompare(b.name)));
 const skillSections = computed(() => (["project", "user", "temporary"] as const)
   .map((scope) => ({
     scope,
     label: t(`settings.skillScopes.${scope}`),
+    root: t(`settings.skillScopePaths.${scope}`),
     skills: filteredSkills.value.filter((skill) => skill.scope === scope),
   }))
   .filter((section) => section.skills.length));
+const skillFilters = computed(() => (["all", "project", "user", "temporary"] as const)
+  .map((scope) => ({ scope, count: queriedSkills.value.filter((skill) => scope === "all" || skill.scope === scope).length })));
 const filteredExtensions = computed(() => {
   const query = extensionQuery.value.trim().toLowerCase();
   return extensions.value
@@ -389,6 +401,99 @@ async function loadSkills(reload = false) {
   }
 }
 
+// A new skill or import lands in the project only when the project filter is
+// active and a project is open; otherwise it belongs to the user.
+function skillWriteScope(): "user" | "project" {
+  return skillScope.value === "project" && canUseProjectSkills.value ? "project" : "user";
+}
+
+function openCreateSkill() {
+  skillError.value = "";
+  skillEditor.value = { scope: skillWriteScope() };
+}
+
+async function openEditSkill(skill: RuntimeSkill) {
+  if (skillActionPath.value) return;
+  skillActionPath.value = skill.path;
+  skillError.value = "";
+  try {
+    const document = await session.control<RuntimeSkillDocument>({ action: "getSkill", path: skill.path });
+    skillEditor.value = { document, scope: skill.scope === "project" ? "project" : "user" };
+  } catch (error) {
+    skillError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    skillActionPath.value = "";
+  }
+}
+
+async function skillSaved() {
+  const created = !skillEditor.value?.document;
+  skillEditor.value = undefined;
+  await loadSkills();
+  layout.showNotice(t(created ? "settings.skillCreated" : "settings.skillSaved"));
+}
+
+// The frontmatter toggle is Pi's own "manual only" flag: the model stops
+// auto-loading the skill while /skill:name keeps working.
+async function toggleManualOnly(skill: RuntimeSkill) {
+  if (skillActionPath.value) return;
+  skillActionPath.value = skill.path;
+  skillError.value = "";
+  try {
+    await session.control({ action: "setSkillManualOnly", path: skill.path, manualOnly: !skill.disableModelInvocation });
+    await loadSkills();
+    layout.showNotice(t(skill.disableModelInvocation ? "settings.skillAutoEnabled" : "settings.skillManualEnabled", { name: skill.name }));
+  } catch (error) {
+    skillError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    skillActionPath.value = "";
+  }
+}
+
+// First press arms the row, second press deletes; the arm lapses so a stray
+// click cannot remove a skill later.
+async function removeSkill(skill: RuntimeSkill) {
+  if (confirmingSkillPath.value !== skill.path) {
+    confirmingSkillPath.value = skill.path;
+    window.setTimeout(() => {
+      if (confirmingSkillPath.value === skill.path) confirmingSkillPath.value = "";
+    }, 4000);
+    return;
+  }
+  confirmingSkillPath.value = "";
+  if (skillActionPath.value) return;
+  skillActionPath.value = skill.path;
+  skillError.value = "";
+  try {
+    await session.control({ action: "deleteSkill", path: skill.path });
+    await loadSkills();
+    layout.showNotice(t("settings.skillDeleted", { name: skill.name }));
+  } catch (error) {
+    skillError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    skillActionPath.value = "";
+  }
+}
+
+async function importSkillFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file || skillActionPath.value) return;
+  skillActionPath.value = "import";
+  skillError.value = "";
+  try {
+    const name = slugifySkillName(file.name.replace(/\.md$/i, "")) || "imported-skill";
+    await session.control({ action: "importSkill", scope: skillWriteScope(), name, content: await file.text() });
+    await loadSkills();
+    layout.showNotice(t("settings.skillImported", { name }));
+  } catch (error) {
+    skillError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    skillActionPath.value = "";
+  }
+}
+
 async function loadExtensions(reload = false) {
   if (layout.settingsCategory !== "extensions" || extensionBusy.value) return;
   extensionBusy.value = true;
@@ -408,6 +513,8 @@ watch(
     selectedExtensionPath.value = "";
     expandedProvider.value = "";
     editingProvider.value = "";
+    skillEditor.value = undefined;
+    confirmingSkillPath.value = "";
     void loadRuntime();
     void loadSkills();
     void loadExtensions();
@@ -763,17 +870,29 @@ async function logout(provider: RuntimeProvider) {
           <footer class="model-cycle-actions"><span>{{ t("settings.cyclePreferencesHint") }}</span><Button variant="ghost" size="sm" @click="setAllCycling(true)">{{ t("settings.cycleAll") }}</Button><Button variant="ghost" size="sm" @click="setAllCycling(false)">{{ t("settings.clearCycle") }}</Button></footer>
         </section>
       </div>
-      <section v-else-if="layout.settingsCategory === 'skills'" class="settings-card skill-card">
+      <section v-else-if="layout.settingsCategory === 'skills'" class="settings-card skill-card" :aria-busy="skillBusy">
         <div class="settings-toolbar">
           <label class="settings-search">
-            <Search :size="15" />
-            <input v-model="skillQuery" data-skill-search :placeholder="t('settings.searchSkills')" />
+            <Search :size="15" aria-hidden="true" />
+            <input v-model="skillQuery" data-skill-search :aria-label="t('settings.searchSkills')" :placeholder="t('settings.searchSkills')" />
+            <button v-if="skillQuery" type="button" :aria-label="t('common.close')" @click="skillQuery = ''"><X :size="14" /></button>
           </label>
-          <Button variant="outline" size="icon" :title="t('settings.refreshSkills')" :disabled="skillBusy" @click="loadSkills(true)">
-            <RefreshCw :size="15" :class="{ spin: skillBusy }" />
-          </Button>
+          <div class="skill-toolbar-actions">
+            <input ref="skillImport" type="file" accept=".md,text/markdown" hidden @change="importSkillFile" />
+            <Button variant="outline" size="sm" data-skill-import :disabled="!!skillActionPath" @click="skillImport?.click()"><Upload :size="14" />{{ t("settings.importSkill") }}</Button>
+            <Button variant="outline" size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
+            <Button variant="outline" size="icon" :title="t('settings.refreshSkills')" :disabled="skillBusy" @click="loadSkills(true)">
+              <RefreshCw :size="15" :class="{ spin: skillBusy }" />
+            </Button>
+          </div>
         </div>
-        <p v-if="skillError" class="settings-error">{{ skillError }}</p>
+        <div class="skill-filter-bar">
+          <div class="model-filters" role="group" :aria-label="t('settings.skillFilterLabel')">
+            <button v-for="filter in skillFilters" :key="filter.scope" type="button" :data-skill-filter="filter.scope" :aria-pressed="skillScope === filter.scope" @click="skillScope = filter.scope">{{ t(`settings.skillFilters.${filter.scope}`) }}<span>{{ filter.count }}</span></button>
+          </div>
+          <span class="model-result-count" role="status">{{ t("settings.skillResults", { n: filteredSkills.length }) }}</span>
+        </div>
+        <p v-if="skillError" class="settings-error" role="alert">{{ skillError }}</p>
         <p v-else-if="skillBusy && !skills.length" class="settings-empty">{{ t("settings.loadingSkills") }}</p>
         <p v-else-if="!skills.length" class="settings-empty">{{ t("settings.noSkills") }}</p>
         <p v-else-if="!filteredSkills.length" class="settings-empty">{{ t("settings.noMatchingSkills") }}</p>
@@ -781,17 +900,23 @@ async function logout(provider: RuntimeProvider) {
           <section v-for="section in skillSections" :key="section.scope" class="resource-section">
             <header class="provider-section-title">
               <strong>{{ section.label }}</strong><span>{{ section.skills.length }}</span>
+              <code v-if="section.root">{{ section.root }}</code>
             </header>
             <div class="resource-list">
-              <article v-for="skill in section.skills" :key="skill.path" class="resource-row" :data-skill="skill.name" :title="skill.path">
+              <article v-for="skill in section.skills" :key="skill.path" class="resource-row skill-row" :class="{ 'is-busy': skillActionPath === skill.path }" :data-skill="skill.name" :title="skill.path">
                 <span class="resource-icon"><Sparkles :size="17" /></span>
                 <span class="resource-info">
-                  <strong>{{ skill.name }}</strong>
+                  <strong>{{ skill.name }}<Lock v-if="!skill.editable" :size="12" :aria-label="t('settings.skillReadOnly')" /></strong>
                   <small>{{ skill.description }}</small>
                 </span>
                 <span class="resource-badges">
                   <em>{{ skill.source }}</em>
-                  <em v-if="skill.disableModelInvocation">{{ t("settings.manualSkill") }}</em>
+                  <button v-if="skill.editable" type="button" class="skill-manual-toggle" :class="{ on: skill.disableModelInvocation }" :aria-pressed="skill.disableModelInvocation" :title="t('settings.skillManualOnlyHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">{{ t("settings.manualSkill") }}</button>
+                  <em v-else-if="skill.disableModelInvocation">{{ t("settings.manualSkill") }}</em>
+                </span>
+                <span v-if="skill.editable" class="skill-row-actions">
+                  <Button variant="ghost" size="icon" :title="t('settings.editSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Pencil :size="15" /></Button>
+                  <Button variant="ghost" size="icon" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
                 </span>
               </article>
             </div>
@@ -868,6 +993,7 @@ async function logout(provider: RuntimeProvider) {
           <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @input="setValue(row, $event)" />
         </label>
       </section>
+      <SkillEditorForm v-if="skillEditor" :key="skillEditor.document?.path ?? `new:${skillEditor.scope}`" :skill="skillEditor.document" :scope="skillEditor.scope" :can-use-project="canUseProjectSkills" @saved="skillSaved" @cancel="skillEditor = undefined" />
     </main>
     <aside v-if="layout.settingsCategory === 'models' && selectedProvider" id="model-details-panel" class="settings-inspector model-inspector" aria-labelledby="model-details-title" @keydown.esc.stop="closeDetailsPanel">
       <header class="settings-inspector-header">
