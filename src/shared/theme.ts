@@ -41,8 +41,8 @@ export const themeColors = {
   "teal": {
     "background": "#eef2f1",
     "surface": "#ffffff",
-    "surface-subtle": "#f8faf9",
-    "navigator": "#f3f6f5",
+    "surface-subtle": "#f4f8f6",
+    "navigator": "#f7f9fa",
     "context": "#fbfcfc",
     "tool-surface": "#f7f9fa",
     "muted-surface": "#edf2f0",
@@ -66,8 +66,8 @@ export const themeColors = {
   "peach": {
     "background": "#fff8f3",
     "surface": "#ffffff",
-    "surface-subtle": "#fffdfb",
-    "navigator": "#fdf3ec",
+    "surface-subtle": "#fdf3ec",
+    "navigator": "#fdf6f0",
     "context": "#fffdfb",
     "tool-surface": "#fdf6f0",
     "muted-surface": "#f9ece2",
