@@ -75,12 +75,6 @@ const skillImport = ref<HTMLInputElement>();
 const confirmingSkillPath = ref("");
 const skillEditor = ref<{ document?: RuntimeSkillDocument; scope: "user" | "project" }>();
 const canUseProjectSkills = computed(() => !!workspace.project);
-// The resolved project path answers "where does this land", so the folder
-// header shows it in full rather than a relative suffix.
-const projectSkillsRoot = computed(() => {
-  const path = workspace.project?.path?.replaceAll("\\", "/").replace(/\/+$/, "");
-  return path ? `${path}/.pi/skills` : ".pi/skills";
-});
 const extensions = ref<RuntimeExtension[]>([]);
 const extensionQuery = ref("");
 const extensionScope = ref<"all" | RuntimeExtension["scope"]>("all");
@@ -272,7 +266,6 @@ const skillSections = computed(() => {
     .map((scope) => ({
       scope,
       label: t(`settings.skillScopes.${scope}`),
-      root: scope === "project" ? projectSkillsRoot.value : t(`settings.skillScopePaths.${scope}`),
       skills: filteredSkills.value.filter((skill) => skill.scope === scope),
     }))
     .filter((section) => searching ? section.skills.length > 0 : section.scope !== "temporary" || section.skills.length > 0);
@@ -933,7 +926,6 @@ async function logout(provider: RuntimeProvider) {
             <section v-for="section in skillSections" :key="section.scope" class="skill-group">
               <header class="skill-group-header">
                 <span class="skill-group-label">{{ section.label }}</span>
-                <code v-if="section.root" class="skill-group-path" :title="section.root">{{ section.root }}</code>
                 <span class="skill-group-count">{{ section.skills.length }}</span>
               </header>
               <div v-if="section.skills.length" class="skill-list" role="list">
@@ -943,7 +935,7 @@ async function logout(provider: RuntimeProvider) {
                     <div class="skill-row-title">
                       <span class="skill-name">{{ skill.name }}</span>
                       <span class="skill-badge is-level">{{ t(`settings.skillFilters.${skill.scope}`) }}</span>
-                      <span v-if="skill.disableModelInvocation" class="skill-badge is-manual">{{ t("settings.manualSkill") }}</span>
+                      <span v-if="skill.disableModelInvocation && !skill.editable" class="skill-badge is-manual">{{ t("settings.manualSkill") }}</span>
                       <span v-if="!skill.editable" class="skill-badge"><Lock :size="10" />{{ t("settings.skillReadOnly") }}</span>
                     </div>
                     <p class="skill-description" :title="skill.description">{{ skill.description }}</p>
