@@ -253,14 +253,21 @@ const queriedSkills = computed(() => {
 const filteredSkills = computed(() => queriedSkills.value
   .filter((skill) => skillScope.value === "all" || skill.scope === skillScope.value)
   .sort((a, b) => a.name.localeCompare(b.name)));
-const skillSections = computed(() => (["project", "user", "temporary"] as const)
-  .map((scope) => ({
-    scope,
-    label: t(`settings.skillScopes.${scope}`),
-    root: t(`settings.skillScopePaths.${scope}`),
-    skills: filteredSkills.value.filter((skill) => skill.scope === scope),
-  }))
-  .filter((section) => section.skills.length));
+const skillSections = computed(() => {
+  // Filters and search narrow the rows; they never hide a folder that exists,
+  // because the folder header is where a new skill or an import lands.
+  const scopes = skillScope.value === "all"
+    ? (["project", "user", "temporary"] as const)
+    : ([skillScope.value] as const);
+  return scopes
+    .map((scope) => ({
+      scope,
+      label: t(`settings.skillScopes.${scope}`),
+      root: t(`settings.skillScopePaths.${scope}`),
+      skills: filteredSkills.value.filter((skill) => skill.scope === scope),
+    }))
+    .filter((section) => section.scope !== "temporary" || section.skills.length);
+});
 const skillFilters = computed(() => (["all", "project", "user", "temporary"] as const)
   .map((scope) => ({ scope, count: queriedSkills.value.filter((skill) => scope === "all" || skill.scope === scope).length })));
 const filteredExtensions = computed(() => {
@@ -407,9 +414,18 @@ function skillWriteScope(): "user" | "project" {
   return skillScope.value === "project" && canUseProjectSkills.value ? "project" : "user";
 }
 
-function openCreateSkill() {
+function openCreateSkill(scope: "user" | "project" = skillWriteScope()) {
   skillError.value = "";
-  skillEditor.value = { scope: skillWriteScope() };
+  skillEditor.value = { scope: scope === "project" && canUseProjectSkills.value ? "project" : "user" };
+}
+
+// The group header owns import, so a file always lands in the folder it was
+// picked from. The hidden input's change event carries no scope, so remember
+// which header started it.
+const importingScope = ref<"user" | "project">("user");
+function startImport(scope: "user" | "project") {
+  importingScope.value = scope;
+  skillImport.value?.click();
 }
 
 async function openEditSkill(skill: RuntimeSkill) {
@@ -487,7 +503,8 @@ async function importSkillFile(event: Event) {
   skillError.value = "";
   try {
     const name = slugifySkillName(file.name.replace(/\.md$/i, "")) || "imported-skill";
-    await session.control({ action: "importSkill", scope: skillWriteScope(), name, content: await file.text() });
+    const scope = importingScope.value === "project" && canUseProjectSkills.value ? "project" : "user";
+    await session.control({ action: "importSkill", scope, name, content: await file.text() });
     await loadSkills();
     layout.showNotice(t("settings.skillImported", { name }));
   } catch (error) {
@@ -887,8 +904,7 @@ async function logout(provider: RuntimeProvider) {
           </label>
           <div class="skill-toolbar-actions">
             <input ref="skillImport" type="file" accept=".md,text/markdown" hidden @change="importSkillFile" />
-            <Button variant="outline" size="sm" data-skill-import :disabled="!!skillActionPath" @click="skillImport?.click()"><Upload :size="14" />{{ t("settings.importSkill") }}</Button>
-            <Button size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
+            <Button size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill()"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
             <Button variant="outline" size="icon" :title="t('settings.refreshSkills')" :disabled="skillBusy" @click="loadSkills(true)">
               <RefreshCw :size="15" :class="{ spin: skillBusy }" />
             </Button>
@@ -900,12 +916,11 @@ async function logout(provider: RuntimeProvider) {
             <span class="skill-empty-icon"><RefreshCw :size="18" class="spin" /></span>
             <span>{{ t("settings.loadingSkills") }}</span>
           </div>
-          <div v-else-if="!queriedSkills.length" class="skill-empty">
-            <span class="skill-empty-icon"><Sparkles :size="18" /></span>
-            <strong>{{ skills.length ? t("settings.noMatchingSkills") : t("settings.noSkills") }}</strong>
-            <span>{{ skills.length ? t("settings.skillNoMatchHint") : t("settings.skillEmptyHint") }}</span>
-            <Button v-if="skills.length" variant="outline" size="sm" @click="skillQuery = ''; skillScope = 'all'">{{ t("settings.modelResetFilters") }}</Button>
-            <Button v-else size="sm" data-skill-empty-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
+          <div v-else-if="skillQuery && !queriedSkills.length" class="skill-empty">
+            <span class="skill-empty-icon"><Search :size="18" /></span>
+            <strong>{{ t("settings.noMatchingSkills") }}</strong>
+            <span>{{ t("settings.skillNoMatchHint") }}</span>
+            <Button variant="outline" size="sm" @click="skillQuery = ''">{{ t("settings.modelResetFilters") }}</Button>
           </div>
           <template v-else>
             <section v-for="section in skillSections" :key="section.scope" class="skill-group">
@@ -913,8 +928,11 @@ async function logout(provider: RuntimeProvider) {
                 <span class="skill-group-label">{{ section.label }}</span>
                 <code v-if="section.root" class="skill-group-path" :title="section.root">{{ section.root }}</code>
                 <span class="skill-group-count">{{ section.skills.length }}</span>
+                <span v-if="section.scope !== 'temporary'" class="skill-group-action">
+                  <Button variant="outline" size="sm" :data-skill-import="section.scope" :disabled="!!skillActionPath" @click="startImport(section.scope)"><Upload :size="13" />{{ t("settings.importSkill") }}</Button>
+                </span>
               </header>
-              <div class="skill-list" role="list">
+              <div v-if="section.skills.length" class="skill-list" role="list">
                 <article v-for="skill in section.skills" :key="skill.path" class="skill-row" :class="{ 'is-off': skill.disableModelInvocation, 'is-busy': skillActionPath === skill.path }" role="listitem" :data-skill="skill.name" :title="skill.path">
                   <span class="skill-glyph" aria-hidden="true"><Sparkles :size="15" /></span>
                   <div class="skill-copy">
@@ -934,6 +952,10 @@ async function logout(provider: RuntimeProvider) {
                     <Button v-if="skill.editable" class="skill-action" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" variant="ghost" size="icon" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
                   </div>
                 </article>
+              </div>
+              <div v-else class="skill-group-empty">
+                <span>{{ t("settings.skillGroupEmpty") }}</span>
+                <Button size="sm" :data-skill-new="section.scope" :disabled="!!skillActionPath" @click="openCreateSkill(section.scope as 'user' | 'project')"><Plus :size="13" />{{ t("settings.newSkill") }}</Button>
               </div>
             </section>
           </template>
@@ -1009,7 +1031,7 @@ async function logout(provider: RuntimeProvider) {
           <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @input="setValue(row, $event)" />
         </label>
       </section>
-      <SkillEditorForm v-if="skillEditor" :key="skillEditor.document?.path ?? `new:${skillEditor.scope}`" :skill="skillEditor.document" :scope="skillEditor.scope" :can-use-project="canUseProjectSkills" @saved="skillSaved" @cancel="skillEditor = undefined" />
+      <SkillEditorForm v-if="skillEditor" :key="skillEditor.document?.path ?? `new:${skillEditor.scope}`" :skill="skillEditor.document" :scope="skillEditor.scope" @saved="skillSaved" @cancel="skillEditor = undefined" />
     </main>
     <aside v-if="layout.settingsCategory === 'models' && selectedProvider" id="model-details-panel" class="settings-inspector model-inspector" aria-labelledby="model-details-title" @keydown.esc.stop="closeDetailsPanel">
       <header class="settings-inspector-header">

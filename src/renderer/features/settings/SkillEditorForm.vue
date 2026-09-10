@@ -2,12 +2,13 @@
 import { computed, reactive, ref, watch } from "vue";
 import { DialogRoot, DialogOverlay, DialogContent, DialogTitle } from "reka-ui";
 import { useI18n } from "vue-i18n";
+import { X } from "@lucide/vue";
 import { MAX_SKILL_BYTES, skillBodyError, skillDescriptionError, skillNameError, skillTemplate, slugifySkillName } from "../../../shared/skills";
 import type { RuntimeSkillDocument } from "../../../shared/types";
 import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
 
-const props = defineProps<{ skill?: RuntimeSkillDocument; scope: "user" | "project"; canUseProject: boolean }>();
+const props = defineProps<{ skill?: RuntimeSkillDocument; scope: "user" | "project" }>();
 const emit = defineEmits<{ saved: [path: string]; cancel: [] }>();
 const { t } = useI18n();
 const session = useSessionStore();
@@ -15,13 +16,10 @@ const busy = ref(false);
 const error = ref("");
 
 const draft = reactive({
-  // A new draft starts empty so the starter template stays a placeholder until
-  // the name is known, then seeds the body once.
   name: props.skill?.name ?? "",
   description: props.skill?.description ?? "",
   body: props.skill?.body.trim() ?? "",
   disableModelInvocation: props.skill?.disableModelInvocation ?? false,
-  scope: props.scope,
 });
 
 // A pristine draft has no name or description yet; the starter body is a
@@ -69,7 +67,7 @@ async function save() {
         })
       : await session.control<{ path: string }>({
           action: "createSkill",
-          scope: draft.scope,
+          scope: props.scope,
           name: draft.name.trim(),
           description: draft.description.trim(),
           body: draft.body,
@@ -87,17 +85,20 @@ async function save() {
 <template>
   <DialogRoot :open="true" @update:open="!$event && !busy && emit('cancel')">
     <DialogOverlay class="dialog-overlay" />
-    <DialogContent class="skill-dialog" :aria-describedby="undefined" @interact-outside.prevent @escape-key-down="busy && $event.preventDefault()">
-      <form class="settings-card model-options" data-skill-form :aria-busy="busy" @submit.prevent="save">
-        <header class="model-options-header">
-          <DialogTitle>{{ t(skill ? "settings.editSkill" : "settings.newSkill") }}</DialogTitle>
+    <DialogContent class="skill-sheet" :aria-describedby="undefined" @interact-outside.prevent @escape-key-down="busy && $event.preventDefault()">
+      <form class="skill-sheet-form" data-skill-form :aria-busy="busy" @submit.prevent="save">
+        <header class="skill-sheet-head">
+          <div>
+            <DialogTitle class="skill-sheet-title">{{ t(skill ? "settings.editSkill" : "settings.newSkill") }}</DialogTitle>
+            <p class="skill-sheet-sub">{{ t("settings.skillSheetSubtitle") }}</p>
+          </div>
+          <button type="button" class="skill-sheet-close" :aria-label="t('common.close')" :disabled="busy" @click="emit('cancel')"><X :size="15" /></button>
         </header>
-        <fieldset :disabled="busy" class="custom-model-fields">
-          <label class="setting-row">
-            <span>
-              <strong>{{ t("settings.skillName") }}</strong>
-              <small>{{ skill ? t("settings.skillNameEditHint") : slug ? t("settings.skillNameHint", { slug }) : t("settings.skillNamePlaceholder") }}</small>
-            </span>
+
+        <div class="skill-sheet-body">
+          <label class="skill-field">
+            <span class="skill-field-label">{{ t("settings.skillName") }}</span>
+            <span class="skill-field-hint">{{ skill ? t("settings.skillNameEditHint") : slug ? t("settings.skillNameHint", { slug }) : t("settings.skillNamePlaceholder") }}</span>
             <input
               :value="draft.name"
               data-skill-name
@@ -106,46 +107,55 @@ async function save() {
               @input="setName(($event.target as HTMLInputElement).value)"
             />
           </label>
-          <label class="setting-row">
-            <span>
-              <strong>{{ t("settings.skillDescription") }}</strong>
-              <small>{{ t("settings.skillDescriptionHint") }}</small>
-            </span>
-            <input v-model="draft.description" data-skill-description :placeholder="t('settings.skillDescriptionPlaceholder')" />
+
+          <label class="skill-field">
+            <span class="skill-field-label">{{ t("settings.skillDescription") }}</span>
+            <span class="skill-field-hint">{{ t("settings.skillDescriptionHint") }}</span>
+            <textarea v-model="draft.description" data-skill-description rows="2" :placeholder="t('settings.skillDescriptionPlaceholder')" />
           </label>
-          <label class="setting-row">
-            <span>
-              <strong>{{ t("settings.skillManualOnly") }}</strong>
-              <small>{{ t("settings.skillManualOnlyHint") }}</small>
-            </span>
-            <input v-model="draft.disableModelInvocation" class="switch" data-skill-manual type="checkbox" />
-          </label>
-          <label v-if="!skill" class="setting-row">
-            <span>
-              <strong>{{ t("settings.skillScope") }}</strong>
-              <small>{{ t("settings.skillScopeHint") }}</small>
-            </span>
-            <select v-model="draft.scope" data-skill-scope>
-              <option value="user">{{ t("settings.skillScopeUser") }}</option>
-              <option v-if="canUseProject" value="project">{{ t("settings.skillScopeProject") }}</option>
-            </select>
-          </label>
-          <div class="skill-body-field">
-            <div class="setting-row">
-              <span>
-                <strong>{{ t("settings.skillBody") }}</strong>
-                <small>{{ t("settings.skillBodyHint") }}</small>
-              </span>
-              <em :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</em>
+
+          <div class="skill-field">
+            <div class="skill-field-label skill-field-label-row">
+              <span>{{ t("settings.skillBody") }}</span>
+              <span class="skill-byte-count" :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</span>
             </div>
-            <textarea v-model="draft.body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="skillTemplate('')" />
+            <span class="skill-field-hint">{{ t("settings.skillBodyHint") }}</span>
+            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="skillTemplate('')" />
           </div>
-        </fieldset>
-        <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
-        <p v-else-if="errorKey && !pristine" class="settings-error" role="alert">{{ t(errorKey) }}</p>
-        <footer class="model-options-header">
-          <Button type="button" variant="outline" :disabled="busy" @click="emit('cancel')">{{ t("settings.customCancel") }}</Button>
-          <Button type="submit" data-skill-save :disabled="busy || !!errorKey || (pristine && !skill)">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
+
+          <div class="skill-field">
+            <span class="skill-field-label">{{ t("settings.skillScope") }}</span>
+            <div class="skill-tile">
+              <div class="skill-tile-copy">
+                <span class="skill-tile-label">{{ scope === "project" ? t("settings.skillScopeProject") : t("settings.skillScopeUser") }}</span>
+                <span class="skill-tile-hint">{{ t("settings.skillScopeDecided") }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="skill-field">
+            <span class="skill-field-label">{{ t("settings.skillInvocation") }}</span>
+            <div class="skill-tile">
+              <div class="skill-tile-copy">
+                <span class="skill-tile-label">{{ t(draft.disableModelInvocation ? "settings.manualSkill" : "settings.skillAuto") }}</span>
+                <span class="skill-tile-hint">{{ t("settings.skillManualOnlyHint") }}</span>
+              </div>
+              <button type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="draft.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
+                <span class="skill-switch-thumb" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <p v-if="error" class="skill-sheet-error" role="alert">{{ error }}</p>
+        <p v-else-if="errorKey && !pristine" class="skill-sheet-error" role="alert">{{ t(errorKey) }}</p>
+
+        <footer class="skill-sheet-actions">
+          <span class="skill-sheet-note">{{ t("settings.skillSheetNote") }}</span>
+          <div class="skill-sheet-actions-end">
+            <Button type="button" variant="ghost" :disabled="busy" @click="emit('cancel')">{{ t("settings.customCancel") }}</Button>
+            <Button type="submit" data-skill-save :disabled="busy || !!errorKey || (pristine && !skill)">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
+          </div>
         </footer>
       </form>
     </DialogContent>
@@ -153,17 +163,30 @@ async function save() {
 </template>
 
 <style scoped>
-.skill-dialog { position: fixed; z-index: 151; top: 5vh; left: 50%; display: flex; flex-direction: column; transform: translateX(-50%); width: min(760px, calc(100vw - 40px)); max-height: 90vh; overflow: hidden; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 90px rgba(14,38,31,.26); }
-.skill-dialog > form { display: flex; min-height: 0; flex-direction: column; }
-.skill-dialog h2 { margin: 0; font-size: var(--font-size-ui); }
-.custom-model-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
-/* Only the fields scroll, so Save and Cancel stay reachable however long the
-   instructions grow. */
-.skill-dialog .custom-model-fields { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.skill-dialog .model-options-header { flex: 0 0 auto; }
-.skill-body-field { display: block; padding: 14px 21px; border-top: 1px solid var(--border); }
-.skill-body-field > .setting-row { padding: 0 0 8px; border: 0; }
-.skill-body-field em { color: var(--muted); font-size: var(--font-size-caption); font-style: normal; }
-.skill-body-field em.is-over { color: var(--danger); }
-.skill-body-field textarea { width: 100%; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--font-size-caption); line-height: 1.6; resize: vertical; }
+/* Head, body and actions are separated by spacing, not rules; only the fields
+   scroll, so the title and the actions stay put. */
+.skill-sheet { position: fixed; z-index: 151; top: 40px; left: 50%; display: flex; width: min(100% - 32px, 560px); max-height: calc(100vh - 80px); overflow: hidden; transform: translateX(-50%); border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: 0 30px 90px rgba(14, 38, 31, .26); }
+.skill-sheet-form { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.skill-sheet-head { display: flex; align-items: center; gap: 12px; padding: 16px 16px 10px 18px; }
+.skill-sheet-head > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.skill-sheet-title { margin: 0; color: var(--text); font-size: var(--font-size-body); font-weight: 650; letter-spacing: -.01em; }
+.skill-sheet-sub { margin: 0; color: var(--muted); font-size: var(--font-size-small); line-height: 1.5; }
+.skill-sheet-close { display: inline-flex; width: 26px; height: 26px; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 6px; color: var(--faint); }
+.skill-sheet-close:hover:not(:disabled) { background: var(--muted-surface); color: var(--text); }
+.skill-sheet-body { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 16px; padding: 12px 18px 16px; overflow-y: auto; }
+.skill-field { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+.skill-field-label { color: var(--text); font-size: var(--font-size-small); font-weight: 600; }
+.skill-field-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.skill-field-hint { margin: -2px 0 2px; color: var(--muted); font-size: var(--font-size-caption); line-height: 1.5; }
+.skill-byte-count { color: var(--faint); font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; }
+.skill-byte-count.is-over { color: var(--danger); }
+.skill-body { font-family: var(--font-mono); font-size: var(--font-size-caption); line-height: 1.6; resize: vertical; }
+.skill-tile { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--surface-subtle); }
+.skill-tile-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.skill-tile-label { color: var(--text); font-size: var(--font-size-small); font-weight: 500; }
+.skill-tile-hint { color: var(--muted); font-size: var(--font-size-caption); line-height: 1.45; }
+.skill-sheet-error { margin: 0 18px 8px; padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--danger); font-size: var(--font-size-small); line-height: 1.5; }
+.skill-sheet-actions { display: flex; align-items: center; gap: 12px; padding: 6px 18px 14px; }
+.skill-sheet-note { max-width: 30ch; color: var(--faint); font-size: var(--font-size-caption); line-height: 1.45; }
+.skill-sheet-actions-end { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 </style>
