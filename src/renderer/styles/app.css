@@ -927,7 +927,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   always visible because it is the state the list is read for. Edit and delete
   stay out of the way until the row is engaged.
 */
-.skill-card { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+.skill-card { container-type: inline-size; display: flex; flex-direction: column; gap: 14px; padding: 16px; }
 .skill-toolbar { --skill-control-height: 32px; display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 8px; }
 .skill-segments { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 2px; height: var(--skill-control-height); padding: 2px; border-radius: 9px; background: var(--muted-surface); }
 .skill-segments button { display: inline-flex; height: 100%; align-items: center; gap: 6px; padding: 0 11px; border-radius: 7px; color: var(--muted); font-size: var(--font-size-small); font-weight: 500; white-space: nowrap; }
@@ -936,7 +936,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-segment-count { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
 .skill-segments button.active .skill-segment-count { color: var(--muted); }
 .skill-search { display: inline-flex; flex: 1 1 180px; max-width: 320px; align-items: center; gap: 6px; height: var(--skill-control-height); padding: 0 11px; border-radius: 999px; background: var(--muted-surface); color: var(--muted); }
-.skill-search:focus-within { box-shadow: 0 0 0 1px var(--border-strong); }
+.skill-search:focus-within { box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--ring); }
 .skill-search input { min-width: 0; height: 100%; flex: 1; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--text); font-size: var(--font-size-small); }
 .skill-search input::placeholder { color: var(--faint); }
 .skill-search input::-webkit-search-cancel-button, .skill-search input::-webkit-search-decoration { appearance: none; }
@@ -960,7 +960,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-glyph { display: inline-flex; width: 28px; height: 28px; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 8px; color: var(--muted); }
 .skill-row:hover .skill-glyph { color: var(--text); }
 .skill-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
-.skill-row-title { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
+.skill-row-title { display: flex; min-width: 0; flex-wrap: nowrap; align-items: center; gap: 6px; overflow: hidden; }
 .skill-name { overflow: hidden; color: var(--text); font-size: var(--font-size-ui); font-weight: 650; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .skill-badge { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: var(--muted-surface); color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1.4; white-space: nowrap; }
 .skill-badge.is-level { background: color-mix(in srgb, var(--muted-surface) 70%, var(--surface)); }
@@ -975,7 +975,6 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-switch:hover:not(:disabled) { background: var(--faint); }
 .skill-switch[aria-checked="true"] { background: var(--accent); }
 .skill-switch[aria-checked="true"]:hover:not(:disabled) { background: var(--accent-strong); }
-.skill-switch:focus-visible { box-shadow: 0 0 0 2px var(--ring); }
 .skill-switch:disabled { opacity: .5; }
 .skill-switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .18); transition: transform 140ms ease; }
 .skill-switch[aria-checked="true"] .skill-switch-thumb { transform: translateX(12px); }
@@ -994,6 +993,19 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-skeleton-line { height: 10px; border-radius: 999px; background: var(--muted-surface); }
 .skill-skeleton-line.is-desc { width: 56%; }
 @keyframes skill-shimmer { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+/* PiX styles focus per section; skills and the sheet follow the same 2px accent
+   outline the model and extension sections use, rather than Chromium's
+   sub-pixel default. */
+.skill-card button:focus-visible, .skill-sheet button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The toolbar's own row cannot give a 2px outline room without overlapping its
+   neighbours, so it goes inside the button. */
+.skill-segments button:focus-visible { outline-offset: -2px; }
+/* Nothing to land in at this width, so the shared row becomes a shared stack
+   with the search on its own full-width line. */
+@container (max-width: 700px) {
+  .skill-toolbar-actions { order: 2; margin-left: auto; }
+  .skill-search { order: 3; flex: 1 1 100%; max-width: none; }
+}
 .extension-card { max-width: 1120px; margin: auto; container-type: inline-size; }
 .extension-overview { overflow: hidden; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
 .extension-intro { display: flex; align-items: center; gap: 16px; padding: 25px 26px; background: var(--surface); }
