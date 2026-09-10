@@ -3,7 +3,7 @@ import { computed, nextTick, reactive, ref, watch } from "vue";
 import { DialogRoot, DialogOverlay, DialogContent, DialogTitle } from "reka-ui";
 import { useI18n } from "vue-i18n";
 import { X } from "@lucide/vue";
-import { MAX_SKILL_BYTES, skillBodyError, skillDescriptionError, skillDisplayNameError, skillTemplate, slugifySkillName } from "../../../shared/skills";
+import { MAX_SKILL_BYTES, skillBodyError, skillDescriptionError, skillDisplayNameError, slugifySkillName } from "../../../shared/skills";
 import type { RuntimeSkillDocument } from "../../../shared/types";
 import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
@@ -13,6 +13,9 @@ const emit = defineEmits<{ saved: [path: string]; cancel: [] }>();
 const { t } = useI18n();
 const session = useSessionStore();
 const busy = ref(false);
+// The document the editor opens with comes from the locale, so a Chinese UI
+// does not seed an English SKILL.md.
+const starter = (name: string) => t("settings.skillTemplate", { name: name.trim() || t("settings.newSkill") });
 const error = ref("");
 const nameInput = ref<HTMLInputElement>();
 
@@ -55,7 +58,7 @@ function setName(value: string) {
   draft.name = value;
   // Seed the body once so a new skill is never a blank page, but never
   // overwrite instructions the user has already started writing.
-  if (!props.skill && !draft.body.trim()) draft.body = skillTemplate(value);
+  if (!props.skill && !draft.body.trim()) draft.body = starter(value);
 }
 
 async function save() {
@@ -127,7 +130,7 @@ async function save() {
               <span>{{ t("settings.skillBody") }}</span>
               <span class="skill-byte-count" :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</span>
             </div>
-            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="skillTemplate('')" />
+            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="starter('')" />
           </div>
 
           <div class="skill-field">

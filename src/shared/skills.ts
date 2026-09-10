@@ -72,23 +72,3 @@ export function skillBodyError(body: string): SkillBodyError | undefined {
   if (new TextEncoder().encode(body).length > MAX_SKILL_BYTES) return "body-too-large";
   return undefined;
 }
-
-/**
- * Starter document shown for a new skill. The description is the only part the
- * model reads before deciding to open a skill, so the shape teaches both.
- */
-export function skillTemplate(name: string): string {
-  const title = name.trim() || "New skill";
-  return `# ${title}
-
-## When to use this
-Describe the situation that should make the model reach for this skill.
-
-## Steps
-1. ...
-2. ...
-
-## Notes
-Anything the model would otherwise guess wrong.
-`;
-}
