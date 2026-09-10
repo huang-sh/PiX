@@ -15,6 +15,7 @@ artifacts/
 # Pi agent session data (test/workspace/.pi/settings.json is a tracked fixture)
 /.pi/
 test/workspace/.pi/sessions/
+test/workspace/.pi/wiki/
 
 # Workspace fixture dirt: install-fixtures.mjs intentionally leaves
 # src/example.ts modified and src/new-file.ts untracked in the nested repo.

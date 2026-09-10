@@ -154,20 +154,17 @@ function setWikiModel(event: Event) {
   const [provider, id] = value.split("\u0000");
   wikiConfigure({ provider, modelId: id });
 }
-// Wiki lives under the session file inside the project; open its pages with
-// the regular workspace viewer (relative path, no extra authority).
-function wikiRelative(file: string) {
+// One workspace wiki at <project>/.pi/wiki; the current session owns the
+// sessions/<sessionKey>/ section. Open pages with the regular workspace
+// viewer (relative path, no extra authority).
+async function openWikiFile(file: "index" | "summary") {
   const root = workspace.project?.path;
-  const path = session.current?.session.path;
-  if (!root || !path || !path.startsWith(root)) return null;
-  return `${path.slice(root.length).replace(/^[\\/]+/, "")}.pix-tree/wiki/${file}`;
-}
-async function openWikiFile(file: string) {
-  const rel = wikiRelative(file);
-  if (!rel) {
+  const key = wiki.value?.sessionKey;
+  if (!root || (file === "summary" && !key)) {
     layout.showNotice(t("wiki.outsideProject"), "warning");
     return;
   }
+  const rel = file === "index" ? ".pi/wiki/index.md" : `.pi/wiki/sessions/${key}/branches/${wikiBranchId.value}.md`;
   try {
     await workspace.openFile(rel);
     await layout.openTool("files");
@@ -433,8 +430,8 @@ onBeforeUnmount(() => {
           <button v-if="wikiBranch?.status === 'failed'" type="button" @click="session.wikiControl('retry', { branchId: wikiBranch.branchId })">
             {{ t("wiki.retry") }}
           </button>
-          <button type="button" @click="openWikiFile(`branches/${wikiBranchId}.md`)">{{ t("wiki.viewSummary") }}</button>
-          <button type="button" @click="openWikiFile('index.md')">{{ t("wiki.viewIndex") }}</button>
+          <button type="button" @click="openWikiFile('summary')">{{ t("wiki.viewSummary") }}</button>
+          <button type="button" @click="openWikiFile('index')">{{ t("wiki.viewIndex") }}</button>
         </div>
       </div>
     </details>

@@ -26,9 +26,12 @@ export interface WikiStatus {
   available: boolean;
   reason?: string;
   enabled: boolean;
+  /** Session section key inside the workspace wiki (its header id). */
+  sessionKey?: string;
   model: { provider: string; id: string } | null;
   budgetTokens?: number;
   paused?: boolean;
+  /** Workspace-wide cumulative spend across all sessions in this wiki. */
   usage: WikiUsageSummary;
   branches: WikiBranchStatus[];
   updatedAt: string;

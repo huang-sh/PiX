@@ -23,16 +23,20 @@ Renderer -> isolated preload -> MainController
 Routes are runtime-validated before dispatch. Workspace paths are confined to
 the active project. Browser content uses an isolated webview partition.
 
-## Session wiki
+## Workspace wiki
 
-Each graph owns a derived wiki under `<session>.jsonl.pix-tree/wiki`:
+One wiki per workspace (project) under `<project>/.pi/wiki`; every session
+that has been opened owns a `sessions/<sessionId>/` section with
 `branches/<id>.md` summaries, program-generated `sources/<id>.md` evidence
-exports, `tree.md`/`index.md`, and `manifest.json` receipts (the inclusion
-watermark used for restart recovery). Source sessions are read-only to the
-wiki; `wiki-compiler.ts` holds the deterministic layer ported from the offline
-demo script, and `wiki-service.ts` owns queueing (per-branch serial tasks,
-merging turns that arrive mid-run, retry with backoff, a token budget, and
-cancellation on session deletion). Branch summaries come from standalone
+exports and a `tree.md` lane map, while the workspace shares one `index.md`,
+`manifest.json` (receipts, per-session inclusion watermarks for restart
+recovery, and cumulative spend) and `log.md`. Source sessions are read-only
+to the wiki; `wiki-compiler.ts` holds the deterministic layer ported from the
+offline demo script, and `wiki-service.ts` owns queueing (per-branch serial
+tasks, merging turns that arrive mid-run, retry with backoff, a token budget,
+and per-session cancellation/removal on session deletion). Refreshes are
+scoped to one session's section, so other sessions keep their last computed
+state without re-reading their sources. Branch summaries come from standalone
 background model calls (`streamSimple`, no tools, never the chat runtime's
 session); before publishing, every result is re-verified against the read
 range, the page hash, and the session identity so stale output cannot

@@ -1,12 +1,13 @@
 // Wiki lifecycle: queueing, deduplication, budgets, retries and cancellation
-// for background branch summaries. The deterministic layer (wiki-compiler) is
-// synchronous; the only async gap is the model call, and every publish is
-// re-verified against disk before anything is written.
+// for background branch summaries. One wiki per workspace; tasks are keyed by
+// session file. The deterministic layer (wiki-compiler) is synchronous; the
+// only async gap is the model call, and every publish is re-verified against
+// disk before anything is written.
 import { existsSync } from "node:fs";
 import { type WikiGraphEvent, type WikiAppSettings, type WikiStatus, type WikiBranchStatus } from "../shared/wiki.js";
 import {
-  WikiPublishError, parseModelSummary, prepareCompile, publishSummary, readManifest, refreshWiki, wikiDir,
-  WIKI_SYSTEM_PROMPT,
+  WikiPublishError, WIKI_SYSTEM_PROMPT, parseModelSummary, prepareCompile, publishSummary, readManifest,
+  refreshSessionWiki, removeSessionWiki,
 } from "./wiki-compiler.js";
 
 export interface WikiModelReply { text: string; usage: { inputTokens: number | null; outputTokens: number | null; cost: number | null } | null }
@@ -15,6 +16,8 @@ export type WikiModelCaller = (request: {
 }) => Promise<WikiModelReply>;
 
 export interface WikiServiceDeps {
+  /** Workspace wiki root (one per project); null when no local project is open. */
+  wikiRoot: () => string | null;
   settings: () => WikiAppSettings;
   defaultModel: () => { provider: string; id: string } | null;
   callModel: WikiModelCaller;
@@ -59,35 +62,36 @@ export class WikiService {
 
   /** Deterministic refresh plus re-enqueue of anything not yet covered. */
   private onOpened(main: string) {
-    if (!existsSync(main)) return;
-    let result: ReturnType<typeof refreshWiki> | null = null;
-    try { result = refreshWiki(wikiDir(main)); } catch { /* broken sources keep the last state */ }
+    const root = this.deps.wikiRoot();
+    if (!root || !existsSync(main)) return;
+    let result: ReturnType<typeof refreshSessionWiki> | null = null;
+    try { result = refreshSessionWiki(root, main); } catch { /* broken sources keep the last state */ }
     this.emitStatus(main);
     if (!this.deps.settings().enabled || !result) return;
     // Branches without a fresh page include those never summarized at all.
-    const covered = new Set(Object.entries(result.manifest.pageStatus)
-      .filter(([, state]) => state === "fresh").map(([rel]) => rel));
-    for (const id of Object.keys(result.manifest.sources))
-      if (!covered.has(`branches/${id}.md`)) this.enqueue(main, id);
+    const sid = result.snap.session.id;
+    for (const branchId of Object.keys(result.manifest.sessions[sid]?.sources ?? {}))
+      if (result.manifest.pageStatus[`sessions/${sid}/branches/${branchId}.md`] !== "fresh") this.enqueue(main, branchId);
   }
   private onSettled(main: string, branchId: string) {
     if (this.deps.settings().enabled) this.enqueue(main, branchId);
   }
   private onDeleted(main: string) {
+    const root = this.deps.wikiRoot();
+    if (!root || !existsSync(main)) return;
     // Deleted turns make affected pages invalid; compile treats invalid as a
     // full rebuild. Fresh branches cost nothing (no model call).
-    if (!existsSync(main)) return;
-    try {
-      const result = refreshWiki(wikiDir(main));
-      if (this.deps.settings().enabled)
-        for (const id of Object.keys(result.manifest.sources)) this.enqueue(main, id);
-    } catch { /* broken sources keep the last state */ }
+    let result: ReturnType<typeof refreshSessionWiki> | null = null;
+    try { result = refreshSessionWiki(root, main); } catch { /* broken sources keep the last state */ }
+    if (this.deps.settings().enabled && result)
+      for (const branchId of Object.keys(result.manifest.sessions[result.snap.session.id]?.sources ?? {}))
+        this.enqueue(main, branchId);
     this.emitStatus(main);
   }
 
   enqueue(main: string, branchId: string) {
     const session = this.sessionOf(main);
-    if (session.cancelled || !existsSync(main)) return;
+    if (session.cancelled || !this.deps.wikiRoot() || !existsSync(main)) return;
     let task = session.tasks.get(branchId);
     if (!task) {
       task = { branchId, queued: false, running: false, again: false, failures: 0 };
@@ -119,18 +123,18 @@ export class WikiService {
   private async runJob(main: string, branchId: string) {
     const session = this.sessions.get(main);
     const task = session?.tasks.get(branchId);
-    if (!session || !task || session.cancelled) return;
+    const root = this.deps.wikiRoot();
+    if (!session || !task || session.cancelled || !root) return;
     task.running = true;
     task.queued = false;
     task.again = false;
     task.error = undefined;
     this.emitStatus(main);
-    const wiki = wikiDir(main);
     try {
       if (!existsSync(main)) throw new WikiPublishError("Session file is gone");
-      const plan = prepareCompile(wiki, branchId);
+      const plan = prepareCompile(root, main, branchId);
       if (plan) {
-        const usage = readManifest(wiki)?.usage;
+        const usage = readManifest(root)?.usage;
         const used = (usage?.input ?? 0) + (usage?.output ?? 0);
         const budget = this.deps.settings().budgetTokens;
         if (budget && used >= budget) {
@@ -156,14 +160,14 @@ export class WikiService {
           });
           // A late result must never resurrect a cancelled (deleted) session.
           if (session.cancelled || !existsSync(main)) return;
-          const published = publishSummary(wiki, plan, parseModelSummary(reply.text), {
+          const published = publishSummary(root, plan, parseModelSummary(reply.text), {
             inputTokens: reply.usage?.inputTokens ?? null,
             outputTokens: reply.usage?.outputTokens ?? null,
             cost: reply.usage?.cost ?? null,
           });
           // Reuse the publish-time snapshot: nothing can change the sources between
           // that synchronous verification and this refresh.
-          refreshWiki(wiki, published.snap);
+          refreshSessionWiki(root, main, published.snap);
         } finally { this.aborts.delete(main); }
       }
     } catch (error) {
@@ -193,16 +197,22 @@ export class WikiService {
 
   /** Manual deterministic refresh; safe regardless of the auto-update setting. */
   refresh(main: string): WikiStatus {
-    try { refreshWiki(wikiDir(main)); } catch { /* keep the persisted state */ }
+    const root = this.deps.wikiRoot();
+    if (root && existsSync(main)) {
+      try { refreshSessionWiki(root, main); } catch { /* keep the persisted state */ }
+    }
     return this.emitStatus(main);
   }
   /** Manual update: enqueue dirty (or one) branch even when auto-update is off. */
   update(main: string, branchId?: string): WikiStatus {
-    if (!existsSync(main)) return this.emitStatus(main);
-    let result: ReturnType<typeof refreshWiki> | null = null;
-    try { result = refreshWiki(wikiDir(main)); } catch { /* keep the persisted state */ }
+    const root = this.deps.wikiRoot();
+    if (!root || !existsSync(main)) return this.emitStatus(main);
+    let result: ReturnType<typeof refreshSessionWiki> | null = null;
+    try { result = refreshSessionWiki(root, main); } catch { /* keep the persisted state */ }
     if (result) {
-      const targets = branchId ? [branchId] : Object.keys(result.manifest.sources);
+      const sid = result.snap.session.id;
+      const sources = result.manifest.sessions[sid]?.sources ?? {};
+      const targets = branchId ? [branchId] : Object.keys(sources);
       for (const id of targets) this.enqueue(main, id);
     } else if (branchId) this.enqueue(main, branchId);
     return this.emitStatus(main);
@@ -228,6 +238,13 @@ export class WikiService {
     this.aborts.delete(main);
     this.sessions.delete(main);
   }
+  /** A deleted session leaves the workspace wiki entirely. */
+  forget(main: string) {
+    this.cancel(main);
+    const root = this.deps.wikiRoot();
+    if (!root) return;
+    try { removeSessionWiki(root, main); } catch { /* keep the last state */ }
+  }
   dispose() {
     for (const main of [...this.sessions.keys()]) this.cancel(main);
   }
@@ -242,13 +259,15 @@ export class WikiService {
   }
   private buildStatus(main: string): WikiStatus {
     const settings = this.deps.settings();
-    const manifest = existsSync(main) ? readManifest(wikiDir(main)) : null;
+    const root = this.deps.wikiRoot();
+    const manifest = root && existsSync(main) ? readManifest(root) : null;
     const session = this.sessions.get(main);
+    const entry = manifest && Object.entries(manifest.sessions).find(([, value]) => value.path === main);
     const usage = manifest?.usage ?? { input: 0, output: 0, calls: 0, cost: null };
     const used = usage.input + usage.output;
     const paused = Boolean(settings.budgetTokens && used >= settings.budgetTokens);
-    const branches: WikiBranchStatus[] = Object.entries(manifest?.sources ?? {}).map(([id, info]) => {
-      const rel = `branches/${id}.md`;
+    const branches: WikiBranchStatus[] = Object.entries(entry?.[1].sources ?? {}).map(([id, info]) => {
+      const rel = `sessions/${entry![0]}/branches/${id}.md`;
       const receipt = manifest?.pages?.[rel];
       const task = session?.tasks.get(id);
       const status: WikiBranchStatus["status"] = task?.running ? "updating"
@@ -267,9 +286,10 @@ export class WikiService {
       : this.deps.defaultModel();
     return {
       sessionPath: main,
-      available: existsSync(main),
-      ...(!existsSync(main) ? { reason: "session-missing" } : {}),
+      available: Boolean(root) && existsSync(main),
+      ...(!root ? { reason: "no-project" } : !existsSync(main) ? { reason: "session-missing" } : {}),
       enabled: Boolean(settings.enabled),
+      ...(entry ? { sessionKey: entry[0] } : {}),
       ...(model ? { model } : { model: null }),
       ...(settings.budgetTokens ? { budgetTokens: settings.budgetTokens } : {}),
       ...(paused ? { paused: true } : {}),

@@ -121,6 +121,7 @@ try {
         branchRows: state.wiki ? state.wiki.branches.map(b => \`\${b.branchId.slice(0, 8)}:\${b.status}:\${b.coveredTurns}/\${b.totalTurns}\`) : null,
         available: state.wiki?.available,
         enabled: state.wiki?.enabled,
+        sessionKey: state.wiki?.sessionKey ?? null,
       };
     })()`);
     if (!value) throw new Error("wiki region not rendered");
@@ -132,6 +133,7 @@ try {
   if (!region.actions.some(a => /自动更新|Auto-update/.test(a))) throw new Error(`auto toggle missing: ${JSON.stringify(region.actions)}`);
   if (!region.actions.some(a => /立即更新|Update now/.test(a))) throw new Error(`update button missing: ${JSON.stringify(region.actions)}`);
   if (!region.branchRows.length) throw new Error(`no branch rows after deterministic refresh: ${JSON.stringify(region)}`);
+  if (!region.sessionKey) throw new Error(`no session section key in workspace wiki: ${JSON.stringify(region)}`);
 
   // The refresh action must round-trip through the wiki.control route.
   const refreshOk = await retry(async () => {

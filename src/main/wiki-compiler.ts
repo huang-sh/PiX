@@ -1,9 +1,9 @@
 // Wiki compiler: deterministic snapshot/lint/render of session graphs plus the
-// model-side branch-summary pipeline. The wiki is strictly derived data under
-// `<session>.jsonl.pix-tree/wiki`; source sessions are read but never written.
-// Ported from the offline demo script (.tools/generate.cjs) — do not keep both.
+// model-side branch-summary pipeline. One wiki per workspace (project) under
+// `<project>/.pi/wiki`; every session that has been opened owns a
+// `sessions/<sessionId>/` section. Source sessions are read but never written.
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { GraphFiles, encodeSession, parseStrict, samePersistedValue, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
@@ -12,19 +12,18 @@ import type { WikiPageState } from "../shared/wiki.js";
 
 const hash = (value: unknown) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
 const text = (file: string) => readFileSync(file, "utf8");
-const json = (file: string) => JSON.parse(text(file));
 const short = (id: string) => id === "main" ? id : id.slice(0, 8);
 const clip = (value: unknown, max: number) => { const s = String(value ?? ""); return s.length > max ? `${s.slice(0, max)} [省略 ${s.length - max} 字符；按 entry 读取原始 JSONL]` : s; };
 const cell = (value: unknown) => String(value ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 const blocks = (content: unknown) => typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
-const isUser = (e: RawSessionEntry) => e.type === "message" && (e.message as { role?: string } | undefined)?.role === "user";
 const STATUS = /<!-- pix-wiki:status:start -->[\s\S]*?<!-- pix-wiki:status:end -->\s*/g;
 const bodyOf = (value: string) => value.replace(STATUS, "").trim() + "\n";
 const references = (value: string) => [...value.matchAll(/`(turn:[^`\r\n]+)`/g)].map(m => m[1]!);
 const section = (body: string, name: string) => body.match(new RegExp(`^## ${name}\\r?\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))`, "m"))?.[1]?.trim() ?? "";
-const pageTitle = (body: string) => body.match(/^# (.+)$/m)?.[1] ?? "未命名";
 
-export const wikiDir = (sessionPath: string) => join(`${resolve(sessionPath)}.pix-tree`, "wiki");
+/** The workspace wiki lives inside the project, one per workspace. */
+export const workspaceWikiDir = (projectRoot: string) => join(resolve(projectRoot), ".pi", "wiki");
+export const sessionPageRel = (sessionId: string, branchId: string) => `sessions/${sessionId}/branches/${branchId}.md`;
 
 export interface WikiSourceInfo {
   sourceRevision: string;
@@ -40,6 +39,8 @@ export interface WikiPage {
   semanticRevision: string;
   refs: string[];
   branchId: string | null;
+  /** Session section this page belongs to (sessions/<sid>/...). */
+  sessionId: string;
 }
 export type WikiPages = Record<string, WikiPage>;
 export interface WikiReceipt {
@@ -50,25 +51,20 @@ export interface WikiReceipt {
   evidenceThrough: string | null;
   generator: string;
   generatedAt?: string;
-  /** Topic receipts only: branch page hashes this topic was compiled against. */
-  dependsOn?: Record<string, string>;
   usage: { inputTokens: number | null; outputTokens: number | null; cost?: number | null; reason?: string };
 }
 export interface WikiManifest {
-  version: 2;
+  version: 3;
   generator: string;
-  session: { id: string; path: string; name: string };
-  snapshotRevision: string;
-  policyRevision: string;
-  sources: Record<string, WikiSourceInfo>;
+  sessions: Record<string, { path: string; name: string; snapshotRevision: string; sources: Record<string, WikiSourceInfo> }>;
   pages: Record<string, WikiReceipt>;
   pageStatus: Record<string, WikiPageState>;
   usage?: { input: number; output: number; calls: number; cost: number | null };
 }
 export interface WikiSnapshot {
-  wiki: string;
   dir: string;
   mainPath: string;
+  sessionKey: string;
   ids: string[];
   nodes: GraphNode[];
   nodeById: Map<string, GraphNode>;
@@ -92,28 +88,24 @@ export interface WikiSnapshot {
 
 const WIKI_POLICY = `# Wiki 规则（policy）
 
-- Wiki 位于 \`<session>.jsonl.pix-tree/wiki/\`，是会话图的派生视图；原始会话只读。
-- \`branches/<id>.md\`：每个存储分支的摘要页。必需章节：摘要、目标、关键结论、修正与限制、未解决项。
+- 一个工作区一个 Wiki，位于 \`<project>/.pi/wiki/\`；每个打开过的会话占 \`sessions/<会话ID>/\` 一节。原始会话只读。
+- \`sessions/<id>/branches/<branch>.md\`：分支摘要页。必需章节：摘要、目标、关键结论、修正与限制、未解决项。
 - 证据引用使用完整节点 ID 的反引号形式，例如 \`turn:<uuid>:<entry>\`，且必须位于该分支的祖先链上。
-- \`sources/<id>.md\`：程序生成的有损证据导出；\`tree.md\`：车道地图；\`index.md\`：程序装配的首页。
-- \`manifest.json\`：编译收据与收录水位。页面状态：已收录（fresh）/ 待更新（dirty）/ 引用结构失效（invalid）。
+- \`sessions/<id>/sources/<branch>.md\`：程序生成的有损证据导出；\`sessions/<id>/tree.md\`：该会话的车道地图；\`index.md\`：工作区首页。
+- \`manifest.json\`：编译收据、收录水位与全工作区累计消耗。页面状态：已收录（fresh）/ 待更新（dirty）/ 引用结构失效（invalid）。
 - 分支摘要由后台模型按增量更新：旧摘要 + 未收录轮次 → 小型结构化结果 → 程序校验引用后渲染落盘。
 - “已收录”表示证据版本一致，不表示任务已完成或结论经过验证。日志只记录 ID、状态与费用。
 `;
 // The policy lives in code; SCHEMA.md is its rendered copy for wiki readers.
 const POLICY_REVISION = hash(WIKI_POLICY);
 
-function trackedRead(tracked: Map<string, string>) {
-  return (file: string) => { const raw = text(file); tracked.set(file, raw); return raw; };
-}
-
 /** Read every storage branch and build the merged canonical snapshot. Read-only. */
-export function loadWikiSnapshot(wiki: string): WikiSnapshot {
-  const dir = dirname(wiki), mainPath = dir.replace(/\.pix-tree$/, "");
-  if (mainPath === dir) throw new Error("wiki must be inside <session>.jsonl.pix-tree");
+export function loadWikiSnapshot(mainPath: string): WikiSnapshot {
+  mainPath = resolve(mainPath);
+  const dir = `${mainPath}.pix-tree`;
   if (!existsSync(mainPath)) throw new Error(`Session file is gone: ${basename(mainPath)}`);
   const tracked = new Map<string, string>();
-  const read = trackedRead(tracked);
+  const read = (file: string) => { const raw = text(file); tracked.set(file, raw); return raw; };
   const names = () => readdirSync(dir).filter(n => /\.jsonl(?:\.origin\.json)?$/.test(n)).sort();
   const originalNames = names();
   const ids = originalNames.filter(n => n.endsWith(".jsonl")).map(n => n.slice(0, -6));
@@ -150,7 +142,7 @@ export function loadWikiSnapshot(wiki: string): WikiSnapshot {
   const nodes = projection.nodes, nodeById = new Map(nodes.map(n => [n.id, n]));
   const branchOf = (node: GraphNode) => { const id = node.id.slice(5), i = id.indexOf(":"); return i < 0 ? "main" : id.slice(0, i); };
   const owner = new Map<string, string | null>();
-  for (const e of entries) owner.set(e.id, isUser(e) ? e.id : owner.get(e.parentId ?? "") ?? null);
+  for (const e of entries) owner.set(e.id, e.type === "message" && (e.message as { role?: string } | undefined)?.role === "user" ? e.id : owner.get(e.parentId ?? "") ?? null);
   const messages = new Map<string, RawSessionEntry[]>();
   for (const e of entries) if (e.type === "message") {
     const turn = `turn:${owner.get(e.id)}`;
@@ -185,12 +177,13 @@ export function loadWikiSnapshot(wiki: string): WikiSnapshot {
   const evidenceState = (node: GraphNode) => {
     const assistants = (messages.get(node.id) ?? []).filter(e => (e.message as { role?: string })?.role === "assistant");
     if (!assistants.length) return "无 assistant 记录；原因未知";
-    const last = assistants.at(-1)!.message as { stopReason?: string; content?: unknown; errorMessage?: string };
+    const last = assistants.at(-1)!.message as { stopReason?: string; content?: unknown };
     if (last.stopReason === "stop" && blocks(last.content).some(b => b.type === "text" && String(b.text ?? "").trim())) return "有文本及正常 stop；不等于任务完成";
     return `有 assistant；末次 stopReason=${last.stopReason ?? "unknown"}`;
   };
+  const session = { id: String(data.get("main")!.header.id), path: mainPath, name: String([...locals.get("main")!].reverse().find(e => e.type === "session_info")?.name ?? basename(mainPath)) };
   return {
-    wiki, dir, mainPath, ids: ["main", ...ids], nodes, nodeById, byId, sources, scopes, locals, contexts, records, messages, localEntryIds,
+    dir, mainPath, sessionKey: session.id, ids: ["main", ...ids], nodes, nodeById, byId, sources, scopes, locals, contexts, records, messages, localEntryIds,
     branchOf, leaves, lanePath, evidenceState,
     revisionThrough(branchId, canonicalEntryId) {
       const local = locals.get(branchId);
@@ -200,22 +193,29 @@ export function loadWikiSnapshot(wiki: string): WikiSnapshot {
       return hash({ version: 2, local: local.slice(0, index + 1), context: contexts.get(branchId) ?? [] });
     },
     revision: hash([...tracked].map(([file, raw]) => [relative(dir, file).replaceAll("\\", "/"), hash(raw)]).sort((a, b) => a[0]!.localeCompare(b[0]!))),
-    session: { id: String(data.get("main")!.header.id), path: mainPath, name: String([...locals.get("main")!].reverse().find(e => e.type === "session_info")?.name ?? basename(mainPath)) },
+    session,
     assertUnchanged() {
       if (JSON.stringify(names()) !== JSON.stringify(originalNames) || [...tracked].some(([file, raw]) => !existsSync(file) || text(file) !== raw)) throw new Error("Source changed during refresh/compile; retry without advancing receipts");
     },
   };
 }
 
-export function scanPages(wiki: string): WikiPages {
+/** Scan one session's branch pages inside the workspace wiki. */
+export function scanSessionPages(wikiRoot: string, sessionId: string): WikiPages {
   const pages: WikiPages = {};
-  for (const dir of ["branches", "topics"]) {
-    if (!existsSync(join(wiki, dir))) continue;
-    for (const file of readdirSync(join(wiki, dir)).filter(n => n.endsWith(".md")).sort()) {
-      const rel = `${dir}/${file}`, body = bodyOf(text(join(wiki, rel)));
-      pages[rel] = { body, semanticRevision: hash(body), refs: references(body), branchId: dir === "branches" ? file.slice(0, -3) : null };
-    }
+  const dir = join(wikiRoot, "sessions", sessionId, "branches");
+  if (!existsSync(dir)) return pages;
+  for (const file of readdirSync(dir).filter(n => n.endsWith(".md")).sort()) {
+    const rel = sessionPageRel(sessionId, file.slice(0, -3)), body = bodyOf(text(join(wikiRoot, rel)));
+    pages[rel] = { body, semanticRevision: hash(body), refs: references(body), branchId: file.slice(0, -3), sessionId };
   }
+  return pages;
+}
+function scanAllPages(wikiRoot: string): WikiPages {
+  const pages: WikiPages = {};
+  const sessions = join(wikiRoot, "sessions");
+  if (!existsSync(sessions)) return pages;
+  for (const sid of readdirSync(sessions)) Object.assign(pages, scanSessionPages(wikiRoot, sid));
   return pages;
 }
 export function lintPage(rel: string, page: WikiPage, snap: WikiSnapshot) {
@@ -230,25 +230,12 @@ export function lintPage(rel: string, page: WikiPage, snap: WikiSnapshot) {
     if (!snap.sources[page.branchId]) errors.push(`${rel}: unknown storage branch`);
     for (const name of ["摘要", "目标", "关键结论", "修正与限制", "未解决项"]) if (!section(page.body, name)) errors.push(`${rel}: missing section ${name}`);
   }
-  for (const m of page.body.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
-    if (/^[a-z]+:/i.test(m[1]!)) continue;
-    const target = resolve(snap.wiki, dirname(rel), m[1]!.split("#")[0]!);
-    if (!existsSync(target)) errors.push(`${rel}: broken link ${m[1]}`);
-  }
   return errors;
 }
-function dependencyPaths(page: WikiPage, snap: WikiSnapshot) {
-  return [...new Set(page.refs.filter(ref => snap.nodeById.has(ref)).map(ref => `branches/${snap.branchOf(snap.nodeById.get(ref)!)}.md`))].sort();
-}
-export function pageState(rel: string, pages: WikiPages, manifest: WikiManifest, snap: WikiSnapshot, policy: string): WikiPageState {
-  const page = pages[rel], receipt = manifest.pages?.[rel];
-  if (!page) return "dirty";
-  if (lintPage(rel, page, snap).length) return "invalid";
+function pageState(page: WikiPage, receipt: WikiReceipt | undefined, snap: WikiSnapshot, policy: string): WikiPageState {
+  if (lintPage(sessionPageRel(page.sessionId, page.branchId!), page, snap).length) return "invalid";
   if (!receipt || receipt.policyRevision !== policy || receipt.semanticRevision !== page.semanticRevision) return "dirty";
-  if (page.branchId) return receipt.compiledRevision === snap.sources[page.branchId]?.sourceRevision ? "fresh" : "dirty";
-  const deps = dependencyPaths(page, snap);
-  if (!deps.length || JSON.stringify(Object.keys(receipt.dependsOn ?? {}).sort()) !== JSON.stringify(deps)) return "dirty";
-  return deps.every(dep => pages[dep] && pageState(dep, pages, manifest, snap, policy) === "fresh" && receipt.dependsOn?.[dep] === pages[dep]!.semanticRevision) ? "fresh" : "dirty";
+  return receipt.compiledRevision === snap.sources[page.branchId!]?.sourceRevision ? "fresh" : "dirty";
 }
 
 function renderMessageEntry(e: RawSessionEntry, snap: WikiSnapshot, id: string): string {
@@ -279,7 +266,7 @@ function renderSources(id: string, snap: WikiSnapshot) {
   return out;
 }
 function renderTree(snap: WikiSnapshot) {
-  let out = `# 会话树地图 — ${snap.session.name}\n\n> 程序生成；${snap.leaves.length} 条车道 · ${snap.ids.length} 个存储分支 · ${snap.nodes.length} 轮。时间使用 UTC；“最后请求”不是运行结束时间。\n> 车道为根到叶子的完整路径，编号仅本次展示有效。持久化状态不是在线状态，stop 记录不是任务结论。\n\n| 车道 | 路径 | 叶子（继续点） | 最后请求 UTC | 存储状态快照 | 消息证据 |\n|---|---|---|---|---|---|\n`;
+  let out = `# ${snap.session.name} · 会话树地图\n\n> 程序生成；${snap.leaves.length} 条车道 · ${snap.ids.length} 个存储分支 · ${snap.nodes.length} 轮。时间使用 UTC；“最后请求”不是运行结束时间。\n> 车道为根到叶子的完整路径，编号仅本次展示有效。持久化状态不是在线状态，stop 记录不是任务结论。\n\n| 车道 | 路径 | 叶子（继续点） | 最后请求 UTC | 存储状态快照 | 消息证据 |\n|---|---|---|---|---|---|\n`;
   snap.leaves.forEach((leaf, i) => {
     const segments: Array<{ id: string; count: number }> = [];
     for (const n of snap.lanePath(leaf)) { const id = snap.branchOf(n), last = segments.at(-1); if (last?.id === id) last.count++; else segments.push({ id, count: 1 }); }
@@ -293,19 +280,31 @@ function renderTree(snap: WikiSnapshot) {
   }
   return out;
 }
-function renderIndex(snap: WikiSnapshot, pages: WikiPages, manifest: WikiManifest) {
+function renderIndex(manifest: WikiManifest, pages: WikiPages) {
   const labels: Record<string, string> = { fresh: "已收录", dirty: "待更新", invalid: "引用/结构失效" };
   const label = (rel: string) => labels[manifest.pageStatus[rel] ?? ""] ?? "未收录";
-  const covered = snap.ids.reduce((n, id) => n + (manifest.pageStatus[`branches/${id}.md`] === "fresh" ? snap.sources[id]!.turns.length : 0), 0);
-  let out = `# ${snap.session.name} · 轻量 Wiki\n\n> 程序装配，不单独调用模型。${snap.leaves.length} 条车道 · ${snap.ids.length} 个存储分支 · ${snap.nodes.length} 轮。\n> 最新版本摘要覆盖：${covered}/${snap.nodes.length} 轮；“已收录”不是“任务已完成”或“当前代码已验证”。\n> 历史证据截至 ${Object.values(snap.sources).map(s => s.evidenceThrough).sort().at(-1)}；当前仓库/发布状态未在本次整理中复核。\n\n## 探索入口（按叶子导航，不复制存储分支总评）\n\n| 车道 | 叶子请求 | 继续点 | 摘要 |\n|---|---|---|---|\n`;
-  snap.leaves.forEach((leaf, i) => { const rel = `branches/${snap.branchOf(leaf)}.md`; out += `| L${i + 1} | ${cell(leaf.title)} | \`${leaf.id}\` | [${short(snap.branchOf(leaf))}](${rel}) · ${label(rel)} |\n`; });
-  out += `\n路径与消息证据见 [tree.md](tree.md)。L 编号会随树变化；继续执行前检查未完成工具，勿自动重放。\n\n## 存储分支短摘要\n\n| 分支 | 一句话摘要（模型/人） | 新鲜度 |\n|---|---|---|\n`;
-  for (const id of snap.ids) { const rel = `branches/${id}.md`; out += `| [${short(id)}](${rel}) | ${cell(pages[rel] ? section(pages[rel].body, "摘要") : "尚未生成")} | ${label(rel)} |\n`; }
-  out += "\n## 已沉淀主题（按需更新）\n\n";
-  for (const [rel, page] of Object.entries(pages).filter(([rel]) => rel.startsWith("topics/"))) out += `- [${pageTitle(page.body)}](${rel}) · ${label(rel)}\n`;
-  out += "\n## 未解决项（从摘要装配，不作全树优先级排序）\n\n";
-  for (const id of snap.ids) { const rel = `branches/${id}.md`; if (pages[rel]) out += `### [${short(id)}](${rel}) · ${label(rel)}\n\n${section(pages[rel].body, "未解决项")}\n\n`; }
-  return out + "## 使用与维护\n\n先读相关短摘要，再按 turn 下钻 sources；工具详情与图片回到原始 JSONL。规则和低成本更新命令见 [SCHEMA.md](SCHEMA.md)，收据见 [manifest.json](manifest.json)，历史迁移与执行日志见 [log.md](log.md)。\n";
+  const latest = (entry: WikiManifest["sessions"][string]) =>
+    Object.values(entry.sources).map(s => s.evidenceThrough ?? "").sort().at(-1) ?? "";
+  const order = Object.entries(manifest.sessions)
+    .sort((a, b) => latest(b[1]).localeCompare(latest(a[1])) || a[0].localeCompare(b[0]));
+  let turns = 0, covered = 0, branches = 0;
+  for (const [sid, entry] of Object.entries(manifest.sessions))
+    for (const [branchId, info] of Object.entries(entry.sources)) {
+      branches += 1;
+      turns += info.turns.length;
+      if (manifest.pageStatus[sessionPageRel(sid, branchId)] === "fresh") covered += info.turns.length;
+    }
+  const usage = manifest.usage;
+  let out = `# 工作区 · 轻量 Wiki\n\n> 程序装配，不单独调用模型。${order.length} 个会话 · ${branches} 个存储分支 · ${turns} 轮；最新版本摘要覆盖 ${covered}/${turns} 轮。“已收录”不是“任务已完成”或“当前代码已验证”。\n`;
+  if (usage) out += `> 累计后台消耗：input ${usage.input} · output ${usage.output} tokens · ${usage.calls} 次调用${usage.cost !== null ? ` · 约 ${usage.cost.toFixed(4)} 成本单位` : ""}。\n`;
+  for (const [sid, entry] of order) {
+    out += `\n## ${entry.name} · \`${short(sid)}\`\n\n> 会话文件：${cell(basename(entry.path))}；[树地图](sessions/${sid}/tree.md)。未解决项见各分支摘要页。\n\n| 分支 | 一句话摘要（模型/人） | 轮数 | 新鲜度 |\n|---|---|---|---|\n`;
+    for (const branchId of Object.keys(entry.sources)) {
+      const rel = sessionPageRel(sid, branchId);
+      out += `| [${short(branchId)}](${rel}) | ${cell(pages[rel] ? section(pages[rel].body, "摘要") : "尚未生成")} | ${entry.sources[branchId]!.turns.length} | ${label(rel)} |\n`;
+    }
+  }
+  return out + "\n## 使用与维护\n\n先读相关短摘要，再按 turn 下钻 sources；工具详情与图片回到原始 JSONL。规则见 [SCHEMA.md](SCHEMA.md)，收据见 [manifest.json](manifest.json)，执行日志见 [log.md](log.md)。\n";
 }
 export function atomicWrite(file: string, value: string) {
   if (existsSync(file) && text(file) === value) return false;
@@ -316,14 +315,29 @@ export function atomicWrite(file: string, value: string) {
   return true;
 }
 
-export function readManifest(wiki: string): WikiManifest | null {
-  const file = join(wiki, "manifest.json");
+export function readManifest(wikiRoot: string): WikiManifest | null {
+  const file = join(wikiRoot, "manifest.json");
   if (!existsSync(file)) return null;
   try {
-    const value = json(file);
-    return value && value.version === 2 ? value as WikiManifest : null;
+    const value = JSON.parse(text(file));
+    return value && value.version === 3 ? value as WikiManifest : null;
   } catch { return null; }
 }
+function writeManifest(wikiRoot: string, manifest: WikiManifest): WikiManifest {
+  atomicWrite(join(wikiRoot, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+  return manifest;
+}
+function appendLog(wikiRoot: string, line: string) {
+  const log = join(wikiRoot, "log.md"), prefix = existsSync(log) ? text(log).trimEnd() : "# 编译日志";
+  atomicWrite(log, `${prefix}\n\n## [${new Date().toISOString()}] ${line}`);
+}
+function emptyManifest(): WikiManifest {
+  return { version: 3, generator: "pix.wiki v3", sessions: {}, pages: {}, pageStatus: {} };
+}
+const banner = (status: string, evidenceThrough: string | null) =>
+  `<!-- pix-wiki:status:start -->\n> 程序收据：${status}。证据截至 ${evidenceThrough ?? "尚未确认"}；详情见 [manifest](../../../manifest.json)。\n<!-- pix-wiki:status:end -->\n\n`;
+const statusText = (state: WikiPageState) =>
+  state === "fresh" ? "已收录此证据版本；不是当前代码验证" : state === "invalid" ? "引用/结构失效；旧正文仅供历史查阅" : "待更新/待确认；旧正文不可当作最新事实";
 
 export interface RefreshResult {
   snap: WikiSnapshot;
@@ -332,38 +346,73 @@ export interface RefreshResult {
   changed: number;
 }
 
-/** Deterministic refresh: recompute freshness, rewrite generated pages, keep receipts.
- *  A verified snapshot (e.g. from publishSummary) can be reused to skip a re-read. */
-export function refreshWiki(wiki: string, snapshot?: WikiSnapshot): RefreshResult {
-  wiki = resolve(wiki);
-  if (!existsSync(wiki)) mkdirSync(wiki, { recursive: true });
-  if (!existsSync(join(wiki, "SCHEMA.md"))) atomicWrite(join(wiki, "SCHEMA.md"), WIKI_POLICY);
-  const snap = snapshot ?? loadWikiSnapshot(wiki), pages = scanPages(wiki), policy = POLICY_REVISION;
-  const file = join(wiki, "manifest.json"), old = readManifest(wiki);
-  const manifest: WikiManifest = { version: 2, generator: "pix.wiki v2", session: snap.session, snapshotRevision: snap.revision, policyRevision: policy, sources: snap.sources, pages: old?.pages ?? {}, pageStatus: {}, ...(old?.usage ? { usage: old.usage } : {}) };
+/**
+ * Deterministic refresh of ONE session's section inside the workspace wiki:
+ * recompute its freshness, rewrite its generated pages and the shared index,
+ * and keep receipts. Other sessions keep their last computed state.
+ * A verified snapshot can be reused to skip a re-read.
+ */
+export function refreshSessionWiki(wikiRoot: string, mainPath: string, snapshot?: WikiSnapshot): RefreshResult {
+  wikiRoot = resolve(wikiRoot);
+  const snap = snapshot ?? loadWikiSnapshot(mainPath);
+  const sid = snap.session.id;
+  mkdirSync(join(wikiRoot, "sessions", sid, "branches"), { recursive: true });
+  mkdirSync(join(wikiRoot, "sessions", sid, "sources"), { recursive: true });
+  if (!existsSync(join(wikiRoot, "SCHEMA.md"))) atomicWrite(join(wikiRoot, "SCHEMA.md"), WIKI_POLICY);
+  const policy = POLICY_REVISION;
+  const previous = readManifest(wikiRoot);
+  const manifest = previous ?? emptyManifest();
+  // Register the session before rendering: the shared index lists it.
+  manifest.sessions[sid] = { path: resolve(mainPath), name: snap.session.name, snapshotRevision: snap.revision, sources: snap.sources };
+  const pages = scanSessionPages(wikiRoot, sid);
   const errors = Object.entries(pages).flatMap(([rel, page]) => lintPage(rel, page, snap));
-  for (const id of snap.ids) if (!pages[`branches/${id}.md`]) errors.push(`Missing branch summary: ${id}`);
-  for (const rel of Object.keys(pages)) manifest.pageStatus[rel] = pageState(rel, pages, manifest, snap, policy);
-  const outputs = new Map<string, string>([["tree.md", renderTree(snap)], ["index.md", renderIndex(snap, pages, manifest)]]);
-  for (const id of snap.ids) outputs.set(`sources/${id}.md`, renderSources(id, snap));
+  // Drop stale entries for this session, then recompute each page's state.
+  for (const rel of Object.keys(manifest.pageStatus))
+    if (rel.startsWith(`sessions/${sid}/`) && !pages[rel]) {
+      delete manifest.pageStatus[rel];
+      delete manifest.pages[rel];
+    }
+  for (const [rel, page] of Object.entries(pages))
+    manifest.pageStatus[rel] = pageState(page, manifest.pages[rel], snap, policy);
+  const outputs = new Map<string, string>([
+    [`sessions/${sid}/tree.md`, renderTree(snap)],
+    ["index.md", renderIndex(manifest, scanAllPages(wikiRoot))],
+  ]);
+  for (const id of snap.ids) outputs.set(`sessions/${sid}/sources/${id}.md`, renderSources(id, snap));
   for (const [rel, page] of Object.entries(pages)) {
-    const state = manifest.pageStatus[rel], receipt = manifest.pages[rel];
-    const status = state === "fresh" ? "已收录此证据版本；不是当前代码验证" : state === "invalid" ? "引用/结构失效；旧正文仅供历史查阅" : "待更新/待确认；旧正文不可当作最新事实";
-    outputs.set(rel, `<!-- pix-wiki:status:start -->\n> 程序收据：${status}。证据截至 ${receipt?.evidenceThrough ?? "尚未确认"}；详情见 [manifest](../manifest.json)。\n<!-- pix-wiki:status:end -->\n\n${page.body}`);
+    outputs.set(rel, banner(statusText(manifest.pageStatus[rel]!), manifest.pages[rel]?.evidenceThrough ?? null) + page.body);
   }
   snap.assertUnchanged();
-  const obsoleteSources = existsSync(join(wiki, "sources")) ? readdirSync(join(wiki, "sources"))
-    .filter(name => name.endsWith(".md") && !outputs.has(`sources/${name}`) && /^# .+ — 证据阅读导出（有损）/u.test(text(join(wiki, "sources", name)))) : [];
+  const sourcesDir = join(wikiRoot, "sessions", sid, "sources");
+  const obsoleteSources = readdirSync(sourcesDir)
+    .filter(name => name.endsWith(".md") && !outputs.has(`sessions/${sid}/sources/${name}`)
+      && /^# .+ — 证据阅读导出（有损）/u.test(text(join(sourcesDir, name))));
   let changed = 0;
-  for (const [rel, value] of outputs) if (atomicWrite(join(wiki, rel), value)) changed++;
-  for (const name of obsoleteSources) { unlinkSync(join(wiki, "sources", name)); changed++; }
+  for (const [rel, value] of outputs) if (atomicWrite(join(wikiRoot, rel), value)) changed++;
+  for (const name of obsoleteSources) { unlinkSync(join(sourcesDir, name)); changed++; }
   // Export success alone never advances receipts; the manifest is written last.
-  if (atomicWrite(file, JSON.stringify(manifest, null, 2) + "\n")) changed++;
-  if (changed) {
-    const log = join(wiki, "log.md"), prefix = existsSync(log) ? text(log).trimEnd() : "# 编译日志";
-    atomicWrite(log, `${prefix}\n\n## [${new Date().toISOString()}] refresh | wiki v2\n- snapshotRevision: ${snap.revision}\n- 修改文件数（不含日志）: ${changed}；校验问题: ${errors.length}\n- 仅刷新确定性层/新鲜度；未推进编译收据\n- 脚本 LLM 调用: 0\n`);
-  }
+  if (atomicWrite(join(wikiRoot, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")) changed++;
+  if (changed) appendLog(wikiRoot, `refresh | wiki v3\n- 会话: ${short(sid)} · snapshotRevision: ${snap.revision}\n- 修改文件数（不含日志）: ${changed}；校验问题: ${errors.length}\n- 仅刷新确定性层/新鲜度；未推进编译收据；LLM 调用: 0`);
   return { snap, manifest, errors, changed };
+}
+
+/** Remove a deleted session's section from the workspace wiki; keep other sessions. */
+export function removeSessionWiki(wikiRoot: string, mainPath: string) {
+  wikiRoot = resolve(wikiRoot);
+  const manifest = readManifest(wikiRoot);
+  if (!manifest) return;
+  const sid = Object.keys(manifest.sessions).find(key => manifest.sessions[key]!.path === resolve(mainPath));
+  if (!sid) return;
+  rmSync(join(wikiRoot, "sessions", sid), { recursive: true, force: true });
+  delete manifest.sessions[sid];
+  for (const rel of Object.keys(manifest.pageStatus))
+    if (rel.startsWith(`sessions/${sid}/`)) {
+      delete manifest.pageStatus[rel];
+      delete manifest.pages[rel];
+    }
+  atomicWrite(join(wikiRoot, "index.md"), renderIndex(manifest, scanAllPages(wikiRoot)));
+  writeManifest(wikiRoot, manifest);
+  appendLog(wikiRoot, `remove | wiki v3\n- 会话: ${short(sid)} 已删除；其页面与收据一并移除`);
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +420,7 @@ export function refreshWiki(wiki: string, snapshot?: WikiSnapshot): RefreshResul
 // ---------------------------------------------------------------------------
 
 export const WIKI_SYSTEM_PROMPT = [
-  "你是会话 Wiki 的后台摘要器。你只读取给定的旧摘要与新增证据，输出一个 JSON 对象，不执行工具、不写文件、不输出 JSON 以外的内容。",
+  "你是工作区 Wiki 的后台摘要器。你只读取给定的旧摘要与新增证据，输出一个 JSON 对象，不执行工具、不写文件、不输出 JSON 以外的内容。",
   "规则：结论必须来自证据中出现的轮次；每条结论/未解决项尽量给出 evidence 数组，元素必须是证据中出现过的完整 turn: 节点 ID。",
   "不要复述工具输出全文；纠正旧摘要中被新证据推翻的内容，写入 corrections。",
   "输出格式：{\"summary\":string(一句话),\"goal\":string,\"conclusions\":[{\"text\":string,\"evidence\":string[]}],\"corrections\":[{\"text\":string,\"evidence\":string[]}],\"openQuestions\":[{\"text\":string,\"evidence\":string[]}]}",
@@ -391,6 +440,8 @@ export interface WikiModelSummary {
   openQuestions: WikiModelSummaryItem[];
 }
 export interface CompilePlan {
+  /** Session main file; the wiki section key is its header id. */
+  mainPath: string;
   branchId: string;
   pageRel: string;
   mode: "incremental" | "reset";
@@ -458,16 +509,18 @@ function isIncrementalReceipt(
  * Decide what a branch compile needs: null when the page is already fresh.
  * Throws on unreadable sources (fail closed).
  */
-export function prepareCompile(wiki: string, branchId: string): CompilePlan | null {
-  const snap = loadWikiSnapshot(wiki);
+export function prepareCompile(wikiRoot: string, mainPath: string, branchId: string): CompilePlan | null {
+  const snap = loadWikiSnapshot(mainPath);
   const info = snap.sources[branchId];
   if (!info) throw new WikiPublishError(`Unknown storage branch: ${branchId}`);
-  const pages = scanPages(wiki);
+  wikiRoot = resolve(wikiRoot);
+  const sid = snap.session.id;
+  const pages = scanSessionPages(wikiRoot, sid);
   const policy = POLICY_REVISION;
-  const manifest = readManifest(wiki);
-  const pageRel = `branches/${branchId}.md`;
+  const manifest = readManifest(wikiRoot);
+  const pageRel = sessionPageRel(sid, branchId);
   const page = pages[pageRel];
-  if (page && manifest && pageState(pageRel, pages, manifest, snap, policy) === "fresh") return null;
+  if (page && manifest && pageState(page, manifest.pages[pageRel], snap, policy) === "fresh") return null;
   const receipt = manifest?.pages[pageRel];
   const localOrder = new Map(snap.locals.get(branchId)!.map((e, i) => [e.id, i]));
   const leafOf = (turn: string) => snap.nodeById.get(turn)?.leafEntryId ?? null;
@@ -481,7 +534,7 @@ export function prepareCompile(wiki: string, branchId: string): CompilePlan | nu
   const uncovered = info.turns.filter(t => !coveredSet.has(t));
   if (!uncovered.length) return null;
   // Fit the newest turns first; older leftovers stay uncovered for the next run.
-  const order = [...uncovered].sort((a, b) => localOrder.get(leafOf(a)!)! - localOrder.get(leafOf(b)!)!);
+  const order = [...uncovered].sort((a, b) => (localOrder.get(leafOf(a) ?? "") ?? -1) - (localOrder.get(leafOf(b) ?? "") ?? -1));
   const selected: string[] = [];
   let used = 0, truncatedNote = "";
   for (let i = order.length - 1; i >= 0; i--) {
@@ -501,6 +554,7 @@ export function prepareCompile(wiki: string, branchId: string): CompilePlan | nu
   const lastIncludedEntryId = leafOf(includedTurns.at(-1)!)!;
   const evidence = includedTurns.map(turn => renderEvidenceTurn(turn, snap, branchId)).join("");
   return {
+    mainPath: snap.mainPath,
     branchId, pageRel, mode,
     oldSummary,
     userPrompt: buildUserPrompt(oldSummary, evidence, truncatedNote),
@@ -537,13 +591,13 @@ export function parseModelSummary(reply: string): WikiModelSummary {
   return { summary: clip(summary, 600), goal, conclusions: items(v.conclusions), corrections: items(v.corrections), openQuestions: items(v.openQuestions) };
 }
 
-function renderSummaryBody(branchId: string, value: WikiModelSummary, validRefs: Set<string>) {
+function renderSummaryBody(sessionName: string, branchId: string, value: WikiModelSummary, validRefs: Set<string>) {
   const refText = (refs: string[]) => refs.filter(ref => validRefs.has(ref)).map(ref => ` \`${ref}\``).join("");
   const bullets = (items: WikiModelSummaryItem[]) => {
     const lines = items.map(item => `- ${item.text}${refText(item.evidence)}`);
     return lines.length ? lines.join("\n") : "无";
   };
-  return `# ${short(branchId)} 分支摘要\n\n## 摘要\n\n${value.summary}\n\n## 目标\n\n${value.goal || "（未明确）"}\n\n## 关键结论\n\n${bullets(value.conclusions)}\n\n## 修正与限制\n\n${bullets(value.corrections)}\n\n## 未解决项\n\n${bullets(value.openQuestions)}\n`;
+  return `# ${sessionName} · ${short(branchId)} 分支摘要\n\n## 摘要\n\n${value.summary}\n\n## 目标\n\n${value.goal || "（未明确）"}\n\n## 关键结论\n\n${bullets(value.conclusions)}\n\n## 修正与限制\n\n${bullets(value.corrections)}\n\n## 未解决项\n\n${bullets(value.openQuestions)}\n`;
 }
 
 /**
@@ -552,14 +606,18 @@ function renderSummaryBody(branchId: string, value: WikiModelSummary, validRefs:
  * the read range, the page, or the session identity changed meanwhile.
  */
 export function publishSummary(
-  wiki: string,
+  wikiRoot: string,
   plan: CompilePlan,
   value: WikiModelSummary,
   usage: { inputTokens: number | null; outputTokens: number | null; cost: number | null },
 ): { receipt: WikiReceipt; snap: WikiSnapshot } {
-  if (!existsSync(dirname(wiki))) throw new WikiPublishError("Wiki directory is gone");
-  const snap = loadWikiSnapshot(wiki);
+  wikiRoot = resolve(wikiRoot);
+  if (!existsSync(wikiRoot)) throw new WikiPublishError("Wiki directory is gone");
+  const snap = loadWikiSnapshot(plan.mainPath);
   if (snap.session.id !== plan.sessionId) throw new WikiPublishError("Session identity changed");
+  // The page must land in the session section that owns this main file.
+  const recorded = readManifest(wikiRoot)?.sessions[snap.session.id]?.path;
+  if (recorded && recorded !== snap.session.path) throw new WikiPublishError("Session moved to a different file during compilation");
   if (hash(snap.contexts.get(plan.branchId) ?? []) !== plan.contextHash) throw new WikiPublishError("Ancestor context changed during compilation");
   for (const entry of plan.includedEntries) {
     const current = snap.byId.get(entry.id);
@@ -570,7 +628,7 @@ export function publishSummary(
   for (const turn of plan.includedTurns) if (!info.turns.includes(turn)) throw new WikiPublishError(`Covered turn disappeared: ${turn}`);
   const compiledRevision = snap.revisionThrough(plan.branchId, plan.lastIncludedEntryId);
   if (!compiledRevision) throw new WikiPublishError("Read range is no longer part of the branch");
-  const pageFile = join(wiki, plan.pageRel);
+  const pageFile = join(wikiRoot, plan.pageRel);
   if (plan.expectedPageRevision === null) {
     if (existsSync(pageFile)) throw new WikiPublishError("A page appeared while compiling");
   } else {
@@ -581,7 +639,7 @@ export function publishSummary(
   const allowed = new Set(plan.allowedTurns);
   const validRefs = new Set(value.conclusions.flatMap(i => i.evidence).concat(value.corrections.flatMap(i => i.evidence), value.openQuestions.flatMap(i => i.evidence)).filter(ref => allowed.has(ref) && snap.scopes.get(plan.branchId)?.has(ref)));
   if (!validRefs.size) throw new WikiPublishError("模型输出缺少位于该分支祖先链上的有效证据引用");
-  const body = renderSummaryBody(plan.branchId, value, validRefs);
+  const body = renderSummaryBody(snap.session.name, plan.branchId, value, validRefs);
   const policy = POLICY_REVISION;
   const receipt: WikiReceipt = {
     semanticRevision: hash(body),
@@ -593,29 +651,25 @@ export function publishSummary(
     generatedAt: new Date().toISOString(),
     usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(usage.cost !== null ? { cost: usage.cost } : {}) },
   };
-  const lint = lintPage(plan.pageRel, { body, semanticRevision: receipt.semanticRevision, refs: references(body), branchId: plan.branchId }, snap);
+  const rel = plan.pageRel;
+  const lint = lintPage(rel, { body, semanticRevision: receipt.semanticRevision, refs: references(body), branchId: plan.branchId, sessionId: snap.session.id }, snap);
   if (lint.length) throw new WikiPublishError(`Generated page failed validation: ${lint.join("; ")}`);
-  const manifest = readManifest(wiki);
-  const next: WikiManifest = manifest ?? {
-    version: 2, generator: "pix.wiki v2", session: snap.session, snapshotRevision: snap.revision, policyRevision: policy,
-    sources: snap.sources, pages: {}, pageStatus: {},
-  };
+  const manifest = readManifest(wikiRoot) ?? emptyManifest();
   // Incremental publishes extend the previous coverage; resets replace it.
-  const coveredTotal = new Set<string>(plan.mode === "incremental" ? [...(manifest?.pages[plan.pageRel]?.coveredTurns ?? []), ...plan.includedTurns] : plan.includedTurns);
+  const coveredTotal = new Set<string>(plan.mode === "incremental" ? [...(manifest.pages[plan.pageRel]?.coveredTurns ?? []), ...plan.includedTurns] : plan.includedTurns);
   receipt.coveredTurns = info.turns.filter(t => coveredTotal.has(t));
-  const usage0 = next.usage ?? { input: 0, output: 0, calls: 0, cost: null };
-  next.usage = {
+  const usage0 = manifest.usage ?? { input: 0, output: 0, calls: 0, cost: null };
+  manifest.usage = {
     input: usage0.input + (usage.inputTokens ?? 0),
     output: usage0.output + (usage.outputTokens ?? 0),
     calls: usage0.calls + 1,
     cost: usage.cost !== null ? (usage0.cost ?? 0) + usage.cost : usage0.cost,
   };
-  next.pages[plan.pageRel] = receipt;
-  const status = "已收录此证据版本；不是当前代码验证";
-  atomicWrite(pageFile, `<!-- pix-wiki:status:start -->\n> 程序收据：${status}。证据截至 ${receipt.evidenceThrough ?? "尚未确认"}；详情见 [manifest](../manifest.json)。\n<!-- pix-wiki:status:end -->\n\n${body}`);
-  atomicWrite(join(wiki, "manifest.json"), JSON.stringify(next, null, 2) + "\n");
-  const log = join(wiki, "log.md"), prefix = existsSync(log) ? text(log).trimEnd() : "# 编译日志";
-  atomicWrite(log, `${prefix}\n\n## [${receipt.generatedAt}] ingest | wiki v2\n- 分支: ${short(plan.branchId)} · 模式: ${plan.mode} · 收录 ${plan.includedTurns.length} 轮\n- tokens: input=${usage.inputTokens ?? "unknown"} output=${usage.outputTokens ?? "unknown"}${usage.cost !== null ? ` cost=${usage.cost.toFixed(5)}` : ""}\n- compiledRevision: ${compiledRevision}\n`);
+  manifest.sessions[snap.session.id] ??= { path: snap.session.path, name: snap.session.name, snapshotRevision: snap.revision, sources: snap.sources };
+  manifest.pages[plan.pageRel] = receipt;
+  atomicWrite(pageFile, banner("已收录此证据版本；不是当前代码验证", receipt.evidenceThrough) + body);
+  writeManifest(wikiRoot, manifest);
+  appendLog(wikiRoot, `ingest | wiki v3\n- 会话: ${short(snap.session.id)} · 分支: ${short(plan.branchId)} · 模式: ${plan.mode} · 收录 ${plan.includedTurns.length} 轮\n- tokens: input=${usage.inputTokens ?? "unknown"} output=${usage.outputTokens ?? "unknown"}${usage.cost !== null ? ` cost=${usage.cost.toFixed(5)}` : ""}\n- compiledRevision: ${compiledRevision}`);
   // The verified snapshot is returned so callers can refresh without re-reading sources.
   return { receipt, snap };
 }

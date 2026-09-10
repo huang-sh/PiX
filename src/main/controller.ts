@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { basename, posix, resolve } from "node:path";
+import { basename, join, posix, resolve } from "node:path";
 import type {
   AgentControl,
   DesktopEvent,
@@ -125,6 +125,9 @@ export class MainController {
       }
     }, (url) => this.platform.openExternal(url));
     this.wiki = new WikiService({
+      wikiRoot: () => this.project && !this.project.remote
+        ? join(this.project.path, ".pi", "wiki")
+        : null,
       settings: () => this.settings.bundle().app.wiki ?? {},
       defaultModel: () => {
         const model = this.current?.runtime.model;
@@ -753,8 +756,9 @@ export class MainController {
         const currentPath = this.current?.session.path;
         const deletingCurrent = currentPath && realpathSync(currentPath) === p;
         if (runtimePath && realpathSync(runtimePath) === p) await this.pi.close();
-        // Cancel wiki work before unlinking: results must not resurrect anything.
-        this.wiki.cancel(p);
+        // Cancel wiki work and remove the session's wiki section before
+        // unlinking: results must not resurrect anything.
+        this.wiki.forget(p);
         this.files.delete(p);
         if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
