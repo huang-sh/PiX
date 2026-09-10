@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import { DialogRoot, DialogOverlay, DialogContent, DialogTitle } from "reka-ui";
 import { useI18n } from "vue-i18n";
 import { X } from "@lucide/vue";
@@ -14,6 +14,7 @@ const { t } = useI18n();
 const session = useSessionStore();
 const busy = ref(false);
 const error = ref("");
+const nameInput = ref<HTMLInputElement>();
 
 const draft = reactive({
   name: props.skill?.name ?? "",
@@ -95,7 +96,7 @@ async function save() {
 <template>
   <DialogRoot :open="true" @update:open="!$event && !busy && emit('cancel')">
     <DialogOverlay class="dialog-overlay" />
-    <DialogContent class="skill-sheet" aria-describedby="skill-sheet-subtitle" @interact-outside.prevent @escape-key-down="busy && $event.preventDefault()">
+    <DialogContent class="skill-sheet" aria-describedby="skill-sheet-subtitle" @open-auto-focus.prevent="nextTick(() => nameInput?.focus())" @interact-outside.prevent @escape-key-down="busy && $event.preventDefault()">
       <form class="skill-sheet-form" data-skill-form :aria-busy="busy" @submit.prevent="save">
         <header class="skill-sheet-head">
           <div>
@@ -108,11 +109,11 @@ async function save() {
         <div class="skill-sheet-body">
           <label class="skill-field">
             <span class="skill-field-label">{{ t("settings.skillName") }}</span>
-            <span class="skill-field-hint">{{ skill ? t("settings.skillNameEditHint") : slug ? t("settings.skillNameHint", { slug }) : t("settings.skillNamePlaceholder") }}</span>
+            <span class="skill-field-hint">{{ skill ? t("settings.skillNameEditHint") : slug ? t("settings.skillNameHint", { slug }) : t("settings.skillNameRule") }}</span>
             <input
+              ref="nameInput"
               :value="draft.name"
               data-skill-name
-              autofocus
               :placeholder="t('settings.skillNamePlaceholder')"
               @input="setName(($event.target as HTMLInputElement).value)"
             />
