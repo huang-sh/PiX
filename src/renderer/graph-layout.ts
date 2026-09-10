@@ -9,7 +9,14 @@ export interface PositionedNode extends GraphNode {
 type LayoutNode = Pick<GraphNode, "id" | "parentId" | "timestamp" | "depth">;
 type LayoutBox = { id: string; parentId: string | null; x: number; y: number; width: number; height: number };
 
-export type ManualPosition = { x: number; y: number; branch?: boolean };
+export type ManualPosition = {
+  x: number;
+  y: number;
+  /** Carry the cards after this one along when it moves. */
+  branch?: boolean;
+  /** The layout moved this card to make room, so its ancestors keep following it. */
+  yielded?: boolean;
+};
 
 /**
  * A manual card keeps the coordinates the user gave it. Only a card dropped with
@@ -51,7 +58,6 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
     block.push(node);
     blocks.set(root.id, block);
   }
-  if (!blocks.size) return moved;
   const bounds = (items: LayoutBox[]) => {
     let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
     for (const node of items) {
@@ -79,10 +85,18 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
     for (const node of block) node.y += offset;
     const root = byId.get(rootId)!;
     // The whole block moved together, so holding its root must hold its cards too.
-    moved.set(rootId, { x: root.x, y: root.y, branch: true });
-    // A branch reads as one shape, so a parent follows the room its child needed.
-    // Only the parent moves, only while it lands on nothing, and never off a pin.
-    let cursor = root.parentId ? byId.get(root.parentId) : undefined;
+    moved.set(rootId, { x: root.x, y: root.y, branch: true, yielded: true });
+  }
+  // A branch reads as one shape, so the parent of a card the layout moved aside takes
+  // the centre of its children again. This runs on every render, for the cards that
+  // still say they were moved aside: doing it only while sliding would let the parent
+  // snap back on the next rebuild. Only a parent moves, only while it lands on
+  // nothing, and never off a manual card.
+  const yielded = new Set(moved.keys());
+  for (const node of nodes) if (manual.get(node.id)?.yielded) yielded.add(node.id);
+  for (const node of nodes) {
+    if (!yielded.has(node.id)) continue;
+    let cursor = node.parentId ? byId.get(node.parentId) : undefined;
     while (cursor && !manual.has(cursor.id)) {
       const children = nodes.filter(child => child.parentId === cursor!.id);
       const rows = children.map(child => child.y + child.height / 2);

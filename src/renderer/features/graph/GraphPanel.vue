@@ -620,6 +620,10 @@ function holdsBranchModifier(event: NodeMouseEvent) {
   return Boolean((event as { event?: { shiftKey?: boolean } }).event?.shiftKey);
 }
 
+function startDrag(event: NodeMouseEvent) {
+  dragFollowsBranch = holdsBranchModifier(event);
+}
+
 function trackDragModifier(event: NodeMouseEvent) {
   if (holdsBranchModifier(event)) dragFollowsBranch = true;
 }
@@ -707,6 +711,7 @@ watch(
       @pane-ready="ready"
       @node-click="({ node }: NodeMouseEvent) => select(node.id)"
       @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
+      @node-drag-start="startDrag"
       @node-drag="trackDragModifier"
       @node-drag-stop="rememberDrag"
       @nodes-change="syncNodeDimensions"

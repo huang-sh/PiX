@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layoutGraph, reserveManualPositions } from "../src/renderer/graph-layout.js";
+import { layoutGraph, reserveManualPositions, type ManualPosition } from "../src/renderer/graph-layout.js";
 import type { SessionProjection } from "../src/shared/types.js";
 
 test("manual cards hold their coordinates and leave the settled branches alone", () => {
@@ -134,8 +134,8 @@ test("a card that appears later makes room for a pin", () => {
     "the card that appeared clears the pin instead of sitting under it");
   assert.ok(at("next").y > settled.find((node) => node.id === "left")!.y,
     "making room moves it to a later lane, never ahead of the cards before it");
-  assert.deepEqual([...moved], [["next", { x: at("next").x, y: at("next").y, branch: true }]],
-    "the position it made room for is handed back, branch included, so the caller can hold it");
+  assert.deepEqual([...moved], [["next", { x: at("next").x, y: at("next").y, branch: true, yielded: true }]],
+    "the position it made room for is handed back, flagged so the caller holds it and keeps its branch");
 });
 
 test("a manual card drags its branch only when it was dropped with the modifier", () => {
@@ -161,4 +161,50 @@ test("a manual card drags its branch only when it was dropped with the modifier"
     { x: 900 - settled[1]!.x, y: 700 - settled[1]!.y },
     "the modifier carries them by the delta the card itself moved",
   );
+});
+
+test("a card that made room and the parent that followed it hold across renders", () => {
+  const turn = (id: string, parentId: string | null, depth: number, timestamp: string) => ({
+    id, userEntryId: id, parentId, title: id, preview: "", timestamp, rawEntryIds: [id],
+    leafEntryId: id, toolCallCount: 0, hasError: false, depth,
+  });
+  const p: SessionProjection = {
+    nodes: [
+      turn("root", null, 0, "0"),
+      turn("p1", "root", 1, "1"), turn("p2", "root", 1, "2"), turn("p3", "root", 1, "3"),
+      turn("a1", "p1", 2, "4"), turn("a2", "p1", 2, "5"),
+      turn("a2g", "a2", 3, "6"),
+      turn("b1", "p2", 2, "7"),
+    ],
+    edges: [],
+    activeBranchNodeIds: ["root"],
+    activeBranchEntryIds: ["root"],
+    messages: [],
+    leafId: "root",
+    activeNodeId: "root",
+  };
+  const layout = () => layoutGraph(p).nodes;
+  const base = layout();
+  const baseAt = new Map(base.map((node) => [node.id, node]));
+  let slid = 0, followed = 0;
+  for (const pin of base) for (const child of base) {
+    if (pin.id === child.id || !child.parentId || pin.x !== child.x) continue;
+    const manual = new Map<string, ManualPosition>([[pin.id, { x: child.x, y: child.y, branch: true }]]);
+    const first = layout();
+    const moved = reserveManualPositions(first, manual, new Set([child.id]));
+    const at1 = new Map(first.map((node) => [node.id, node]));
+    if (Math.abs(at1.get(child.id)!.y - baseAt.get(child.id)!.y) <= 60) continue;
+    slid++;
+    if (Math.abs(at1.get(child.parentId)!.y - baseAt.get(child.parentId)!.y) > 1) followed++;
+    const kept = new Map(manual);
+    for (const [id, position] of moved) kept.set(id, position);
+    const second = layout();
+    reserveManualPositions(second, kept, new Set());
+    const at2 = new Map(second.map((node) => [node.id, node]));
+    assert.equal(at2.get(child.id)!.y, at1.get(child.id)!.y, `${child.id} lost the room it made`);
+    assert.equal(at2.get(child.parentId)!.y, at1.get(child.parentId)!.y,
+      `${child.parentId} stopped following ${child.id} on the next render`);
+  }
+  assert.ok(slid, "the fixture makes at least one card slide");
+  assert.ok(followed, "the fixture makes at least one parent follow");
 });
