@@ -526,8 +526,9 @@ describe("SettingsPage save", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-skill="docx"]').text()).toContain("Create Word documents");
-    expect((wrapper.get('[data-skill="docx"] [data-skill-manual]').element as HTMLInputElement).checked).toBe(false);
-    expect((wrapper.get('[data-skill="project-review"] [data-skill-manual]').element as HTMLInputElement).checked).toBe(true);
+    expect(wrapper.get('[data-skill="docx"] [data-skill-manual]').attributes("aria-checked")).toBe("false");
+    expect(wrapper.get('[data-skill="project-review"] [data-skill-manual]').attributes("aria-checked")).toBe("true");
+    expect(wrapper.get('[data-skill="project-review"]').text()).toContain("manual only");
     await wrapper.get("[data-skill-search]").setValue("Word");
     expect(wrapper.find('[data-skill="project-review"]').exists()).toBe(false);
 
@@ -562,12 +563,13 @@ describe("SettingsPage save", () => {
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
     await flushPromises();
 
-    // A skill outside the editable folders offers no edit or delete actions.
+    // A skill outside the editable folders offers no edit, delete, or switch.
     const bundled = wrapper.get('[data-skill="bundled"]');
-    expect(bundled.find(".skill-row-actions").exists()).toBe(false);
-    expect(bundled.find('[aria-label="Read-only"]').exists()).toBe(true);
+    expect(bundled.find(".skill-action").exists()).toBe(false);
+    expect(bundled.find("[data-skill-manual]").exists()).toBe(false);
+    expect(bundled.text()).toContain("Read-only");
 
-    await wrapper.get('[data-skill="docx"] [data-skill-manual]').setValue(true);
+    await wrapper.get('[data-skill="docx"] [data-skill-manual]').trigger("click");
     await flushPromises();
     expect(calls.find((call) => call.action === "setSkillManualOnly")).toMatchObject({
       path: "/home/me/.pi/agent/skills/docx/SKILL.md",
@@ -575,7 +577,7 @@ describe("SettingsPage save", () => {
     });
 
     // The delete button arms on the first press and only then removes.
-    const remove = wrapper.get('[data-skill="docx"] .skill-row-actions button:last-child');
+    const remove = wrapper.get('[data-skill="docx"] .skill-actions button:last-child');
     await remove.trigger("click");
     await flushPromises();
     expect(calls.some((call) => call.action === "deleteSkill")).toBe(false);
@@ -598,7 +600,7 @@ describe("SettingsPage save", () => {
     });
     expect(wrapper.find("form[data-skill-form]").exists()).toBe(false);
 
-    await wrapper.get('[data-skill="docx"] .skill-row-actions button').trigger("click");
+    await wrapper.get('[data-skill="docx"] .skill-actions .skill-action').trigger("click");
     await flushPromises();
     expect(calls.some((call) => call.action === "getSkill")).toBe(true);
     expect((wrapper.get("[data-skill-name]").element as HTMLInputElement).value).toBe("docx");

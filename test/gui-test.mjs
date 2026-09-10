@@ -1082,7 +1082,7 @@ try {
     if (!readFileSync(guiSkillFile, "utf8").includes("disable-model-invocation"))
       throw new Error("Manual-only toggle was not written to the skill file");
   });
-  const guiSkillRemove = "document.querySelector('[data-skill=\"pix-gui-skill\"] .skill-row-actions button:last-child')";
+  const guiSkillRemove = "document.querySelector('[data-skill=\"pix-gui-skill\"] .skill-actions button:last-child')";
   await cdp.evaluate(`${guiSkillRemove}.click()`);
   await retry(async () => {
     if (!(await cdp.evaluate(`Boolean(${guiSkillRemove}?.classList.contains('is-arming'))`)))

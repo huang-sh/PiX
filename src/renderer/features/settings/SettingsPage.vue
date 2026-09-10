@@ -874,59 +874,70 @@ async function logout(provider: RuntimeProvider) {
         </section>
       </div>
       <section v-else-if="layout.settingsCategory === 'skills'" class="settings-card skill-card" :aria-busy="skillBusy">
-        <div class="settings-toolbar">
-          <label class="settings-search">
-            <Search :size="15" aria-hidden="true" />
-            <input v-model="skillQuery" data-skill-search :aria-label="t('settings.searchSkills')" :placeholder="t('settings.searchSkills')" />
-            <button v-if="skillQuery" type="button" :aria-label="t('common.close')" @click="skillQuery = ''"><X :size="14" /></button>
+        <div class="skill-toolbar">
+          <div class="skill-segments" role="radiogroup" :aria-label="t('settings.skillFilterLabel')">
+            <button v-for="filter in skillFilters" :key="filter.scope" type="button" role="radio" :aria-checked="skillScope === filter.scope" :class="{ active: skillScope === filter.scope }" :data-skill-filter="filter.scope" @click="skillScope = filter.scope">
+              {{ t(`settings.skillFilters.${filter.scope}`) }}<span class="skill-segment-count">{{ filter.count }}</span>
+            </button>
+          </div>
+          <label class="skill-search">
+            <Search :size="13" aria-hidden="true" />
+            <input type="search" v-model="skillQuery" data-skill-search :aria-label="t('settings.searchSkills')" :placeholder="t('settings.searchSkills')" />
+            <button v-if="skillQuery" type="button" class="skill-search-clear" :aria-label="t('common.close')" @click="skillQuery = ''"><X :size="11" /></button>
           </label>
           <div class="skill-toolbar-actions">
             <input ref="skillImport" type="file" accept=".md,text/markdown" hidden @change="importSkillFile" />
             <Button variant="outline" size="sm" data-skill-import :disabled="!!skillActionPath" @click="skillImport?.click()"><Upload :size="14" />{{ t("settings.importSkill") }}</Button>
-            <Button variant="outline" size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
+            <Button size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
             <Button variant="outline" size="icon" :title="t('settings.refreshSkills')" :disabled="skillBusy" @click="loadSkills(true)">
               <RefreshCw :size="15" :class="{ spin: skillBusy }" />
             </Button>
           </div>
         </div>
-        <div class="skill-filter-bar">
-          <div class="model-filters" role="group" :aria-label="t('settings.skillFilterLabel')">
-            <button v-for="filter in skillFilters" :key="filter.scope" type="button" :data-skill-filter="filter.scope" :aria-pressed="skillScope === filter.scope" @click="skillScope = filter.scope">{{ t(`settings.skillFilters.${filter.scope}`) }}<span>{{ filter.count }}</span></button>
+        <div class="skill-panel" :class="{ 'is-refreshing': skillBusy && skills.length }">
+          <p v-if="skillError" class="settings-error" role="alert">{{ skillError }}</p>
+          <div v-if="skillBusy && !skills.length" class="skill-empty" role="status">
+            <span class="skill-empty-icon"><RefreshCw :size="18" class="spin" /></span>
+            <span>{{ t("settings.loadingSkills") }}</span>
           </div>
-          <span class="model-result-count" role="status">{{ t("settings.skillResults", { n: filteredSkills.length }) }}</span>
+          <div v-else-if="!queriedSkills.length" class="skill-empty">
+            <span class="skill-empty-icon"><Sparkles :size="18" /></span>
+            <strong>{{ skills.length ? t("settings.noMatchingSkills") : t("settings.noSkills") }}</strong>
+            <span>{{ skills.length ? t("settings.skillNoMatchHint") : t("settings.skillEmptyHint") }}</span>
+            <Button v-if="skills.length" variant="outline" size="sm" @click="skillQuery = ''; skillScope = 'all'">{{ t("settings.modelResetFilters") }}</Button>
+            <Button v-else size="sm" data-skill-empty-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
+          </div>
+          <template v-else>
+            <section v-for="section in skillSections" :key="section.scope" class="skill-group">
+              <header class="skill-group-header">
+                <span class="skill-group-label">{{ section.label }}</span>
+                <code v-if="section.root" class="skill-group-path" :title="section.root">{{ section.root }}</code>
+                <span class="skill-group-count">{{ section.skills.length }}</span>
+              </header>
+              <div class="skill-list" role="list">
+                <article v-for="skill in section.skills" :key="skill.path" class="skill-row" :class="{ 'is-off': skill.disableModelInvocation, 'is-busy': skillActionPath === skill.path }" role="listitem" :data-skill="skill.name" :title="skill.path">
+                  <span class="skill-glyph" aria-hidden="true"><Sparkles :size="15" /></span>
+                  <div class="skill-copy">
+                    <div class="skill-row-title">
+                      <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badge is-level">{{ t(`settings.skillFilters.${skill.scope}`) }}</span>
+                      <span v-if="skill.disableModelInvocation" class="skill-badge is-manual">{{ t("settings.manualSkill") }}</span>
+                      <span v-if="!skill.editable" class="skill-badge"><Lock :size="10" />{{ t("settings.skillReadOnly") }}</span>
+                    </div>
+                    <p class="skill-description" :title="skill.description">{{ skill.description }}</p>
+                  </div>
+                  <div class="skill-actions">
+                    <button v-if="skill.editable" type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="skill.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" :title="t('settings.skillManualOnlyHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">
+                      <span class="skill-switch-thumb" />
+                    </button>
+                    <Button v-if="skill.editable" class="skill-action" variant="ghost" size="icon" :title="t('settings.editSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Pencil :size="15" /></Button>
+                    <Button v-if="skill.editable" class="skill-action" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" variant="ghost" size="icon" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
+                  </div>
+                </article>
+              </div>
+            </section>
+          </template>
         </div>
-        <p v-if="skillError" class="settings-error" role="alert">{{ skillError }}</p>
-        <p v-else-if="skillBusy && !skills.length" class="settings-empty">{{ t("settings.loadingSkills") }}</p>
-        <p v-else-if="!skills.length" class="settings-empty">{{ t("settings.noSkills") }}</p>
-        <p v-else-if="!filteredSkills.length" class="settings-empty">{{ t("settings.noMatchingSkills") }}</p>
-        <template v-else>
-          <section v-for="section in skillSections" :key="section.scope" class="resource-section">
-            <header class="provider-section-title">
-              <strong>{{ section.label }}</strong><span>{{ section.skills.length }}</span>
-              <code v-if="section.root">{{ section.root }}</code>
-            </header>
-            <div class="resource-list">
-              <article v-for="skill in section.skills" :key="skill.path" class="resource-row skill-row" :class="{ 'is-busy': skillActionPath === skill.path }" :data-skill="skill.name" :title="skill.path">
-                <span class="resource-icon"><Sparkles :size="17" /></span>
-                <span class="resource-info">
-                  <strong>{{ skill.name }}<Lock v-if="!skill.editable" :size="12" :aria-label="t('settings.skillReadOnly')" /></strong>
-                  <small>{{ skill.description }}</small>
-                </span>
-                <span class="resource-badges">
-                  <em>{{ skill.source }}</em>
-                  <em v-if="skill.disableModelInvocation">{{ t("settings.manualSkill") }}</em>
-                </span>
-                <span v-if="skill.editable" class="skill-row-actions">
-                  <label class="skill-manual-switch" :title="t('settings.skillManualOnlyHint')">
-                    <input class="switch" type="checkbox" data-skill-manual :checked="skill.disableModelInvocation" :disabled="!!skillActionPath" :aria-label="t('settings.skillManualOnly')" @change="toggleManualOnly(skill)" />
-                  </label>
-                  <Button variant="ghost" size="icon" :title="t('settings.editSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Pencil :size="15" /></Button>
-                  <Button variant="ghost" size="icon" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
-                </span>
-              </article>
-            </div>
-          </section>
-        </template>
       </section>
       <section v-else-if="layout.settingsCategory === 'extensions'" class="extension-card" :aria-busy="extensionBusy">
         <div class="extension-overview">
