@@ -2,7 +2,7 @@
 import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Palette, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, toRaw, watch } from "vue";
 import { normalizeTheme } from "../../../shared/theme";
-import { applyDotGrid } from "../../theme";
+import { applyAppearance } from "../../theme";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../../shared/types";
 import Button from "../../components/ui/Button.vue";
@@ -34,8 +34,7 @@ const session = useSessionStore();
 const { locale, t, te } = useI18n();
 const draft = ref<SettingsBundle>();
 onBeforeUnmount(() => {
-  document.documentElement.dataset.density = layout.settings?.app.density ?? "comfortable";
-  applyDotGrid(layout.settings?.app ?? {});
+  applyAppearance(layout.settings?.app ?? {});
 });
 const shortcutsPage = ref<InstanceType<typeof KeyboardShortcuts>>();
 function close() { shortcutsPage.value?.requestClose(); }
@@ -461,10 +460,8 @@ function setValue(row: Row, event: Event) {
       current = current![key] as Record<string, unknown>;
     }
   });
-  if (row.scope === "app" && row.path === "density")
-    document.documentElement.dataset.density = String(next);
-  if (row.scope === "app" && row.path.startsWith("canvasDotGrid") && draft.value)
-    applyDotGrid(draft.value.app);
+  if (row.scope === "app" && ["density", "canvasDotGrid", "canvasDotGridSpacing", "canvasDotGridDotSize"].includes(row.path) && draft.value)
+    applyAppearance(draft.value.app);
 }
 
 function modelSettingsKey(model: RuntimeModel) {

@@ -32,11 +32,12 @@ export function startTheme(initial: ThemePreference) {
   };
 }
 
-// The canvas dot grid is drawn by .session-flow/.welcome/.graph-empty in
-// app.css from these root-level controls: dot/spacing variables and an off
-// switch. Fallbacks there must match the defaults used here.
-export function applyDotGrid(app: { canvasDotGrid?: boolean; canvasDotGridSpacing?: number; canvasDotGridDotSize?: number }) {
+// Root-level appearance controls beyond theme: UI density and the canvas dot
+// grid drawn by .session-flow/.welcome/.graph-empty in app.css. Fallbacks
+// there must match the defaults used here.
+export function applyAppearance(app: { density?: "comfortable" | "compact"; canvasDotGrid?: boolean; canvasDotGridSpacing?: number; canvasDotGridDotSize?: number }) {
   const root = document.documentElement;
+  root.dataset.density = app.density ?? "comfortable";
   if (app.canvasDotGrid === false) root.dataset.dotGrid = "off";
   else delete root.dataset.dotGrid;
   const spacing = Math.min(96, Math.max(8, Math.round(Number(app.canvasDotGridSpacing) || 24)));

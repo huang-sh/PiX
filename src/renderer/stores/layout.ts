@@ -4,7 +4,7 @@ import type { LayoutState, PanelId, SettingsBundle } from "../../shared/types";
 import { desktop } from "../api";
 import type { PromptImage } from "../../shared/types";
 import { imageDataUrl } from "../../shared/images";
-import { applyDotGrid, applyTheme } from "../theme";
+import { applyAppearance, applyTheme } from "../theme";
 import type { ThemePreference } from "../../shared/theme";
 
 export type ContentSection =
@@ -50,8 +50,7 @@ export const useLayoutStore = defineStore("layout", {
     applySettings(settings: SettingsBundle) {
       this.settings = settings;
       applyTheme(settings.app.theme);
-      document.documentElement.dataset.density = settings.app.density;
-      applyDotGrid(settings.app);
+      applyAppearance(settings.app);
     },
     async setTheme(preference: ThemePreference) {
       if (!this.settings || this.themeSaving) return;
