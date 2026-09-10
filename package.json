@@ -35,7 +35,8 @@
     "test:packaged": "node test/packaged-smoke-test.mjs",
     "test:fff": "node test/builtin-fff-smoke-test.mjs",
     "test:web": "node --test test/bundle-pi-package.test.mjs && node test/builtin-web-smoke-test.mjs",
-    "dev": "electron-vite dev"
+    "dev": "electron-vite dev",
+    "postinstall": "node node_modules/electron/install.js"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.0",
