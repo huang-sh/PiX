@@ -156,13 +156,15 @@ export class WikiService {
           });
           // A late result must never resurrect a cancelled (deleted) session.
           if (session.cancelled || !existsSync(main)) return;
-          publishSummary(wiki, plan, parseModelSummary(reply.text), {
+          const published = publishSummary(wiki, plan, parseModelSummary(reply.text), {
             inputTokens: reply.usage?.inputTokens ?? null,
             outputTokens: reply.usage?.outputTokens ?? null,
             cost: reply.usage?.cost ?? null,
           });
+          // Reuse the publish-time snapshot: nothing can change the sources between
+          // that synchronous verification and this refresh.
+          refreshWiki(wiki, published.snap);
         } finally { this.aborts.delete(main); }
-        refreshWiki(wiki);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

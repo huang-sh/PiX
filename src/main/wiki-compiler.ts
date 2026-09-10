@@ -90,7 +90,7 @@ export interface WikiSnapshot {
   assertUnchanged: () => void;
 }
 
-const DEFAULT_SCHEMA = `# Wiki 规则（policy）
+const WIKI_POLICY = `# Wiki 规则（policy）
 
 - Wiki 位于 \`<session>.jsonl.pix-tree/wiki/\`，是会话图的派生视图；原始会话只读。
 - \`branches/<id>.md\`：每个存储分支的摘要页。必需章节：摘要、目标、关键结论、修正与限制、未解决项。
@@ -100,6 +100,8 @@ const DEFAULT_SCHEMA = `# Wiki 规则（policy）
 - 分支摘要由后台模型按增量更新：旧摘要 + 未收录轮次 → 小型结构化结果 → 程序校验引用后渲染落盘。
 - “已收录”表示证据版本一致，不表示任务已完成或结论经过验证。日志只记录 ID、状态与费用。
 `;
+// The policy lives in code; SCHEMA.md is its rendered copy for wiki readers.
+const POLICY_REVISION = hash(WIKI_POLICY);
 
 function trackedRead(tracked: Map<string, string>) {
   return (file: string) => { const raw = text(file); tracked.set(file, raw); return raw; };
@@ -330,12 +332,13 @@ export interface RefreshResult {
   changed: number;
 }
 
-/** Deterministic refresh: recompute freshness, rewrite generated pages, keep receipts. */
-export function refreshWiki(wiki: string): RefreshResult {
+/** Deterministic refresh: recompute freshness, rewrite generated pages, keep receipts.
+ *  A verified snapshot (e.g. from publishSummary) can be reused to skip a re-read. */
+export function refreshWiki(wiki: string, snapshot?: WikiSnapshot): RefreshResult {
   wiki = resolve(wiki);
   if (!existsSync(wiki)) mkdirSync(wiki, { recursive: true });
-  if (!existsSync(join(wiki, "SCHEMA.md"))) atomicWrite(join(wiki, "SCHEMA.md"), DEFAULT_SCHEMA);
-  const snap = loadWikiSnapshot(wiki), pages = scanPages(wiki), policy = hash(text(join(wiki, "SCHEMA.md")));
+  if (!existsSync(join(wiki, "SCHEMA.md"))) atomicWrite(join(wiki, "SCHEMA.md"), WIKI_POLICY);
+  const snap = snapshot ?? loadWikiSnapshot(wiki), pages = scanPages(wiki), policy = POLICY_REVISION;
   const file = join(wiki, "manifest.json"), old = readManifest(wiki);
   const manifest: WikiManifest = { version: 2, generator: "pix.wiki v2", session: snap.session, snapshotRevision: snap.revision, policyRevision: policy, sources: snap.sources, pages: old?.pages ?? {}, pageStatus: {}, ...(old?.usage ? { usage: old.usage } : {}) };
   const errors = Object.entries(pages).flatMap(([rel, page]) => lintPage(rel, page, snap));
@@ -460,7 +463,7 @@ export function prepareCompile(wiki: string, branchId: string): CompilePlan | nu
   const info = snap.sources[branchId];
   if (!info) throw new WikiPublishError(`Unknown storage branch: ${branchId}`);
   const pages = scanPages(wiki);
-  const policy = hash(text(join(wiki, "SCHEMA.md")));
+  const policy = POLICY_REVISION;
   const manifest = readManifest(wiki);
   const pageRel = `branches/${branchId}.md`;
   const page = pages[pageRel];
@@ -553,7 +556,7 @@ export function publishSummary(
   plan: CompilePlan,
   value: WikiModelSummary,
   usage: { inputTokens: number | null; outputTokens: number | null; cost: number | null },
-): WikiReceipt {
+): { receipt: WikiReceipt; snap: WikiSnapshot } {
   if (!existsSync(dirname(wiki))) throw new WikiPublishError("Wiki directory is gone");
   const snap = loadWikiSnapshot(wiki);
   if (snap.session.id !== plan.sessionId) throw new WikiPublishError("Session identity changed");
@@ -579,7 +582,7 @@ export function publishSummary(
   const validRefs = new Set(value.conclusions.flatMap(i => i.evidence).concat(value.corrections.flatMap(i => i.evidence), value.openQuestions.flatMap(i => i.evidence)).filter(ref => allowed.has(ref) && snap.scopes.get(plan.branchId)?.has(ref)));
   if (!validRefs.size) throw new WikiPublishError("模型输出缺少位于该分支祖先链上的有效证据引用");
   const body = renderSummaryBody(plan.branchId, value, validRefs);
-  const policy = hash(text(join(wiki, "SCHEMA.md")));
+  const policy = POLICY_REVISION;
   const receipt: WikiReceipt = {
     semanticRevision: hash(body),
     policyRevision: policy,
@@ -613,5 +616,6 @@ export function publishSummary(
   atomicWrite(join(wiki, "manifest.json"), JSON.stringify(next, null, 2) + "\n");
   const log = join(wiki, "log.md"), prefix = existsSync(log) ? text(log).trimEnd() : "# 编译日志";
   atomicWrite(log, `${prefix}\n\n## [${receipt.generatedAt}] ingest | wiki v2\n- 分支: ${short(plan.branchId)} · 模式: ${plan.mode} · 收录 ${plan.includedTurns.length} 轮\n- tokens: input=${usage.inputTokens ?? "unknown"} output=${usage.outputTokens ?? "unknown"}${usage.cost !== null ? ` cost=${usage.cost.toFixed(5)}` : ""}\n- compiledRevision: ${compiledRevision}\n`);
-  return receipt;
+  // The verified snapshot is returned so callers can refresh without re-reading sources.
+  return { receipt, snap };
 }

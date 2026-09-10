@@ -171,7 +171,7 @@ test("out-of-scope references are dropped; pages without valid evidence are reje
   const plan = prepareCompile(f.wiki, BID)!;
   // References outside the branch ancestry or beyond what was shown are filtered.
   const mixed = parseModelSummary(summaryJson([`turn:${BID}:b1`, "turn:u2", "turn:missing"]));
-  const receipt = publishSummary(f.wiki, plan, mixed, { inputTokens: 1, outputTokens: 1, cost: null });
+  const { receipt } = publishSummary(f.wiki, plan, mixed, { inputTokens: 1, outputTokens: 1, cost: null });
   assert.equal(receipt.coveredTurns.length, 1);
   assert.doesNotMatch(read(join(f.wiki, BRANCH)), /turn:u2/);
   // A reply whose only references are out of scope is rejected outright.

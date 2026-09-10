@@ -6,6 +6,7 @@ import { PiRuntime } from "./pi-runtime.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, encodeSession, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
+import type { WikiGraphEvent } from "../shared/wiki.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, SessionSnapshot } from "../shared/types.js";
 
 type PromptAt = Extract<AgentControl, { action: "promptAt" }>;
@@ -25,7 +26,7 @@ function snapshotParent(id: string, entries: Map<string, RawSessionEntry>): stri
 export class GraphRuntime extends PiRuntime {
   graph?: GraphFiles;
   /** Fired after persisted data changed (settled/opened/deleted); never awaited. */
-  wikiNotify?: (main: string, event: { kind: "opened" } | { kind: "settled"; branchId: string } | { kind: "deleted" }) => void;
+  wikiNotify?: (main: string, event: WikiGraphEvent) => void;
   private workers = new Map<string, Worker>();
   private admission: Promise<unknown> = Promise.resolve();
   private mainWork?: Promise<void>;
