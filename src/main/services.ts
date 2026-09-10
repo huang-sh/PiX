@@ -142,7 +142,7 @@ export class SettingsService {
       closeToTray: true,
       canvasDotGrid: true,
       canvasDotGridSpacing: 24,
-      canvasDotGridDotSize: 2,
+      canvasDotGridDotSize: 4,
     };
     const app = merge(
       defaults as unknown as Record<string, unknown>,

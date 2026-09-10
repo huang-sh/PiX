@@ -147,7 +147,7 @@ const rows = computed<Row[]>(() => {
         { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
         { path: "canvasDotGrid", label: "settings.rows.canvasDotGrid", scope: "app", type: "check", fallback: true, description: "settings.rows.canvasDotGridDesc" },
         { path: "canvasDotGridSpacing", label: "settings.rows.canvasDotGridSpacing", scope: "app", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSpacingDesc" },
-        { path: "canvasDotGridDotSize", label: "settings.rows.canvasDotGridDotSize", scope: "app", type: "number", fallback: 2, min: 1, max: 6, description: "settings.rows.canvasDotGridDotSizeDesc" },
+        { path: "canvasDotGridDotSize", label: "settings.rows.canvasDotGridDotSize", scope: "app", type: "number", fallback: 4, min: 1, max: 6, description: "settings.rows.canvasDotGridDotSizeDesc" },
       ];
     case "models":
       return [

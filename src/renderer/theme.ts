@@ -41,6 +41,6 @@ export function applyDotGrid(app: { canvasDotGrid?: boolean; canvasDotGridSpacin
   const spacing = Math.min(96, Math.max(8, Math.round(Number(app.canvasDotGridSpacing) || 24)));
   root.style.setProperty("--dot-grid-size", `${spacing}px`);
   // The setting is a diameter in px; the gradient stop is a radius.
-  const dot = Math.min(6, Math.max(1, Math.round(Number(app.canvasDotGridDotSize) || 2)));
+  const dot = Math.min(6, Math.max(1, Math.round(Number(app.canvasDotGridDotSize) || 4)));
   root.style.setProperty("--dot-grid-dot", `${dot / 2}px`);
 }

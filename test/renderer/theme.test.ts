@@ -13,7 +13,7 @@ import { i18n } from "../../src/renderer/i18n";
 const bundle = (): SettingsBundle => ({
   app: { theme: "light", language: "en", density: "comfortable", browserHome: "https://pi.dev",
     confirmDestructiveActions: true, enterToSend: true, openLinksInApp: true,
-    closeToTray: true, openLastSessionOnStartup: false, canvasDotGrid: true, canvasDotGridSpacing: 24, canvasDotGridDotSize: 2 },
+    closeToTray: true, openLastSessionOnStartup: false, canvasDotGrid: true, canvasDotGridSpacing: 24, canvasDotGridDotSize: 4 },
   piGlobal: {}, piProject: {}, effective: {}, paths: { app: "", global: "", project: null },
 });
 
