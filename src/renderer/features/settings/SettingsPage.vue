@@ -423,18 +423,9 @@ function skillWriteScope(): "user" | "project" {
   return skillScope.value === "project" && canUseProjectSkills.value ? "project" : "user";
 }
 
-function openCreateSkill(scope: "user" | "project" = skillWriteScope()) {
+function openCreateSkill() {
   skillError.value = "";
-  skillEditor.value = { scope: scope === "project" && canUseProjectSkills.value ? "project" : "user" };
-}
-
-// The group header owns import, so a file always lands in the folder it was
-// picked from. The hidden input's change event carries no scope, so remember
-// which header started it.
-const importingScope = ref<"user" | "project">("user");
-function startImport(scope: "user" | "project") {
-  importingScope.value = scope;
-  skillImport.value?.click();
+  skillEditor.value = { scope: skillWriteScope() };
 }
 
 async function openEditSkill(skill: RuntimeSkill) {
@@ -515,7 +506,7 @@ async function importSkillFile(event: Event) {
   skillError.value = "";
   try {
     const name = slugifySkillName(file.name.replace(/\.md$/i, "")) || "imported-skill";
-    const scope = importingScope.value === "project" && canUseProjectSkills.value ? "project" : "user";
+    const scope = skillWriteScope();
     await session.control({ action: "importSkill", scope, name, content: await file.text() });
     if (skillScope.value !== "all" && skillScope.value !== scope) skillScope.value = scope;
     await loadSkills();
@@ -917,7 +908,8 @@ async function logout(provider: RuntimeProvider) {
           </label>
           <div class="skill-toolbar-actions">
             <input ref="skillImport" type="file" accept=".md,text/markdown" hidden @change="importSkillFile" />
-            <Button size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill()"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
+            <Button variant="outline" size="sm" data-skill-import :title="t('settings.skillImportHint')" :disabled="!!skillActionPath" @click="skillImport?.click()"><Download :size="14" />{{ t("settings.importSkill") }}</Button>
+            <Button size="sm" data-skill-new :disabled="!!skillActionPath" @click="openCreateSkill"><Plus :size="14" />{{ t("settings.newSkill") }}</Button>
             <Button variant="outline" size="icon" :title="t('settings.refreshSkills')" :disabled="skillBusy" @click="loadSkills(true)">
               <RefreshCw :size="15" :class="{ spin: skillBusy }" />
             </Button>
@@ -943,9 +935,6 @@ async function logout(provider: RuntimeProvider) {
                 <span class="skill-group-label">{{ section.label }}</span>
                 <code v-if="section.root" class="skill-group-path" :title="section.root">{{ section.root }}</code>
                 <span class="skill-group-count">{{ section.skills.length }}</span>
-                <span v-if="section.scope !== 'temporary'" class="skill-group-action">
-                  <Button variant="outline" size="sm" :data-skill-import="section.scope" :disabled="!!skillActionPath" @click="startImport(section.scope)"><Download :size="13" />{{ t("settings.importSkill") }}</Button>
-                </span>
               </header>
               <div v-if="section.skills.length" class="skill-list" role="list">
                 <article v-for="skill in section.skills" :key="skill.path" class="skill-row" :class="{ 'is-off': skill.disableModelInvocation, 'is-busy': skillActionPath === skill.path }" role="listitem" :data-skill="skill.name" :title="skill.path">
@@ -968,10 +957,7 @@ async function logout(provider: RuntimeProvider) {
                   </div>
                 </article>
               </div>
-              <div v-else class="skill-group-empty">
-                <span>{{ t("settings.skillGroupEmpty") }}</span>
-                <Button size="sm" :data-skill-new="section.scope" :disabled="!!skillActionPath" @click="openCreateSkill(section.scope as 'user' | 'project')"><Plus :size="13" />{{ t("settings.newSkill") }}</Button>
-              </div>
+              <p v-else class="skill-group-empty">{{ t("settings.skillGroupEmpty") }}</p>
             </section>
           </template>
         </div>

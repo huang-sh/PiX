@@ -951,9 +951,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-group-label { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
 .skill-group-path { min-width: 0; flex: 0 1 auto; overflow: hidden; color: var(--faint); font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .skill-group-count { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; background: var(--muted-surface); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.skill-group-action { display: inline-flex; flex: 0 0 auto; align-items: center; margin-left: auto; }
-.skill-group-action > button { min-height: 26px; padding: 3px 9px; font-size: var(--font-size-caption); }
-.skill-group-empty { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 11px; background: var(--surface-subtle); color: var(--faint); font-size: var(--font-size-small); }
+.skill-group-empty { padding: 10px 14px; border-radius: 11px; background: var(--surface-subtle); color: var(--faint); font-size: var(--font-size-small); }
 .skill-list { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
 .skill-row { display: flex; min-width: 0; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 11px; background: var(--surface-subtle); transition: background 140ms ease; }
 .skill-row:hover { background: var(--muted-surface); }

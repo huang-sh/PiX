@@ -140,7 +140,7 @@ async function save() {
                 <span v-if="skill" class="skill-tile-label is-path" :title="skill.path">{{ skillFolder }}</span>
                 <template v-else>
                   <span class="skill-tile-label">{{ scope === "project" ? t("settings.skillScopeProject") : t("settings.skillScopeUser") }}</span>
-                  <span class="skill-tile-hint">{{ t("settings.skillScopeDecided") }}</span>
+                  <span class="skill-tile-hint">{{ t(scope === "project" ? "settings.skillScopeDecided" : "settings.skillScopeDefaultUser") }}</span>
                 </template>
               </div>
             </div>
