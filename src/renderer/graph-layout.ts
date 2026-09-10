@@ -37,14 +37,20 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
     return [node.id, { x: pin.x - node.x, y: pin.y - node.y }];
   }));
   // A card is placed already when the user put it there, or when the nearest
-  // manual ancestor above it is dragging its branch along.
+  // manual ancestor above it is dragging its branch along. The renderer's tree
+  // mixes projection and transient cards, so these upward walks stop on a repeat
+  // instead of assuming every parent chain reaches a root.
   const fixed = new Set(manual.keys());
   for (const node of nodes) {
     const pin = manual.get(node.id);
     if (pin) { node.x = pin.x; node.y = pin.y; continue; }
     let parent = node.parentId ? byId.get(node.parentId) : undefined;
-    while (parent && !manual.has(parent.id)) parent = parent.parentId ? byId.get(parent.parentId) : undefined;
-    const offset = parent && manual.get(parent.id)!.branch ? offsets.get(parent.id) : undefined;
+    const walked = new Set<string>();
+    while (parent && !manual.has(parent.id) && !walked.has(parent.id)) {
+      walked.add(parent.id);
+      parent = parent.parentId ? byId.get(parent.parentId) : undefined;
+    }
+    const offset = parent && manual.get(parent.id)?.branch ? offsets.get(parent.id) : undefined;
     if (!offset) continue;
     fixed.add(node.id);
     node.x += offset.x; node.y += offset.y;
@@ -53,7 +59,11 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
   for (const node of nodes) {
     if (!fresh.has(node.id) || fixed.has(node.id)) continue;
     let root = node;
-    while (root.parentId && fresh.has(root.parentId) && !fixed.has(root.parentId)) root = byId.get(root.parentId) ?? root;
+    const walked = new Set<string>();
+    while (root.parentId && fresh.has(root.parentId) && !fixed.has(root.parentId) && !walked.has(root.parentId)) {
+      walked.add(root.parentId);
+      root = byId.get(root.parentId) ?? root;
+    }
     const block = blocks.get(root.id) ?? [];
     block.push(node);
     blocks.set(root.id, block);
@@ -97,7 +107,9 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
   for (const node of nodes) {
     if (!yielded.has(node.id)) continue;
     let cursor = node.parentId ? byId.get(node.parentId) : undefined;
-    while (cursor && !manual.has(cursor.id)) {
+    const walked = new Set<string>();
+    while (cursor && !manual.has(cursor.id) && !walked.has(cursor.id)) {
+      walked.add(cursor.id);
       const children = nodes.filter(child => child.parentId === cursor!.id);
       const rows = children.map(child => child.y + child.height / 2);
       const target = (Math.min(...rows) + Math.max(...rows)) / 2 - cursor.height / 2;

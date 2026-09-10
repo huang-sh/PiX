@@ -208,3 +208,23 @@ test("a card that made room and the parent that followed it hold across renders"
   assert.ok(slid, "the fixture makes at least one card slide");
   assert.ok(followed, "the fixture makes at least one parent follow");
 });
+test("a cyclic parent chain cannot hang the manual layout", () => {
+  const box = (id: string, parentId: string | null, x: number, y: number) => ({ id, parentId, x, y, width: 280, height: 146 });
+  const nodes = [
+    box("root", null, 48, 48),
+    box("pin", "root", 420, 48),
+    // b -> a -> c -> b: corrupted links that no longer reach a root.
+    box("b", "a", 792, 260),
+    box("a", "c", 1164, 260),
+    box("c", "b", 1546, 260),
+    box("e", "b", 1928, 260),
+  ];
+  const manual = new Map<string, ManualPosition>([
+    ["pin", { x: 900, y: 600, branch: true }],
+    ["e", { x: 1928, y: 80, yielded: true }],
+  ]);
+  reserveManualPositions(nodes, manual, new Set(["b", "a", "c"]));
+  for (const node of nodes) assert.ok(Number.isFinite(node.x) && Number.isFinite(node.y), `${node.id} keeps a finite position`);
+  assert.deepEqual({ x: nodes[1]!.x, y: nodes[1]!.y }, { x: 900, y: 600 });
+  assert.deepEqual({ x: nodes[5]!.x, y: nodes[5]!.y }, { x: 1928, y: 80 });
+});
