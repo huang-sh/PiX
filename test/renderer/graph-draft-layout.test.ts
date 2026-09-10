@@ -164,6 +164,7 @@ describe("draft placement", () => {
     await graph.compose("turn:a"); await flushPromises();
     expectClear(graph, "draft:turn:a");
     expect(graph.nodes.find((node: any) => node.id === "turn:c").position).toEqual(manual);
+    const settled = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
     const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
       const next = [...entries, { type: "message", id: "a2", parentId: "a", timestamp: "5",
         message: { role: "user", content: "second child" } }];
@@ -180,9 +181,10 @@ describe("draft placement", () => {
     const second = graph.nodes.find((node: any) => node.id === "turn:a2");
     const parent = graph.nodes.find((node: any) => node.id === "turn:a");
     expect(first.position.y).toBeLessThan(second.position.y);
-    expect(second.position.y + second.dimensions.height + 28).toBeLessThanOrEqual(manual.y);
-    expect(parent.position.y).toBe((first.position.y + second.position.y) / 2);
     expect(second.position.x).toBe(parent.position.x + parent.dimensions.width + 92);
+    // Submitting only adds a card, so the sibling already on screen is not pushed
+    // anywhere: the new child yields to the pin instead.
+    expect(graph.nodes.find((node: any) => node.id === "turn:a1").position).toEqual(settled.get("turn:a1"));
   });
 
   it.each(["cancel", "submit"])("restores manual positions after draft %s and removes temporary spacing", async (action) => {

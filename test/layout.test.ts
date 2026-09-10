@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { layoutGraph, reserveManualPositions } from "../src/renderer/graph-layout.js";
 import type { SessionProjection } from "../src/shared/types.js";
 
-test("manual obstacles keep their coordinates while automatic branches stay connected and clear", () => {
+test("manual cards hold their coordinates and leave the settled branches alone", () => {
   const nodes = [{ id: "root", parentId: null as string | null, timestamp: "0", depth: 0 }];
   for (let i = 0; i < 5; i++) {
     nodes.push({ id: `branch${i}`, parentId: "root", timestamp: String(i), depth: 1 });
@@ -13,17 +13,15 @@ test("manual obstacles keep their coordinates while automatic branches stay conn
     ["leaf1", { x: 800, y: 100 }],
     ["leaf3", { x: 790, y: 500 }],
   ]);
+  const settled = layoutGraph({ nodes }).nodes;
   const placed = layoutGraph({ nodes }).nodes;
   reserveManualPositions(placed, manual);
   for (const node of placed) {
     const pin = manual.get(node.id);
+    const before = settled.find((item) => item.id === node.id)!;
     if (pin) assert.deepEqual({ x: node.x, y: node.y }, pin);
-    for (const other of placed) {
-      if (node.id === other.id || (pin && manual.has(other.id))) continue;
-      assert.ok(node.x + node.width + 28 <= other.x || other.x + other.width + 28 <= node.x
-        || node.y + node.height + 28 <= other.y || other.y + other.height + 28 <= node.y,
-      `${node.id} overlaps ${other.id}`);
-    }
+    else assert.deepEqual({ x: node.x, y: node.y }, { x: before.x, y: before.y },
+      "a card that is already on screen keeps the position the layout gave it");
   }
   for (const i of [0, 2, 4]) {
     const parent = placed.find(node => node.id === `branch${i}`)!;
@@ -110,13 +108,13 @@ test("a node whose parent is missing keeps its own subtree aligned", () => {
   assert.notEqual(at("orphan").y, at("kept").y, "the detached component gets its own rows");
 });
 
-test("a pinned card nudges a neighbouring branch to the closer side", () => {
+test("a card that appears later makes room for a pin", () => {
   const turn = (id: string, parentId: string | null, depth: number) => ({
     id, userEntryId: id, parentId, title: id, preview: "", timestamp: String(depth), rawEntryIds: [id],
     leafEntryId: id, toolCallCount: 0, hasError: false, depth,
   });
   const p: SessionProjection = {
-    nodes: [turn("root", null, 0), turn("left", "root", 1), turn("right", "root", 1)],
+    nodes: [turn("root", null, 0), turn("left", "root", 1)],
     edges: [],
     activeBranchNodeIds: ["root"],
     activeBranchEntryIds: ["root"],
@@ -124,18 +122,18 @@ test("a pinned card nudges a neighbouring branch to the closer side", () => {
     leafId: "root",
     activeNodeId: "root",
   };
-  // Dragged down over its sibling, so the nearer free space is above it.
   const settled = layoutGraph(p).nodes;
-  const pin = { x: settled.find((node) => node.id === "left")!.x, y: 300 };
-  const placed = layoutGraph(p).nodes;
-  reserveManualPositions(placed, new Map([["left", pin]]));
+  // The pin sits where the next child would land.
+  const pin = { x: settled[1]!.x, y: settled[1]!.y + 174 };
+  const tree = { nodes: [...p.nodes, turn("next", "root", 1)] };
+  const placed = layoutGraph(tree).nodes;
+  const moved = reserveManualPositions(placed, new Map([["left", pin]]), new Set(["next"]));
   const at = (id: string) => placed.find((node) => node.id === id)!;
-  const left = at("left"), right = at("right");
-  assert.equal(left.y, pin.y, "the pinned card keeps its coordinates");
-  assert.ok(left.y + left.height + 28 <= right.y || right.y + right.height + 28 <= left.y,
-    "clearing the pin must not leave the two branches overlapping");
-  assert.ok(right.y + right.height + 28 <= left.y,
-    `expected the nearer gap above the pin, got y=${Math.round(right.y)} for a pin at ${pin.y}`);
-  assert.ok(Math.abs(right.y - settled[2]!.y) < left.height + 28,
-    `expected a nudge smaller than the pin itself, moved ${Math.round(Math.abs(right.y - settled[2]!.y))}px`);
+  assert.equal(at("left").y, pin.y, "the pinned card keeps its coordinates");
+  assert.ok(at("next").y + at("next").height + 28 <= pin.y || pin.y + at("left").height + 28 <= at("next").y,
+    "the card that appeared clears the pin instead of sitting under it");
+  assert.ok(at("next").y > settled.find((node) => node.id === "left")!.y,
+    "making room moves it to a later lane, never ahead of the cards before it");
+  assert.deepEqual([...moved], [["next", { x: at("next").x, y: at("next").y }]],
+    "the position it made room for is handed back so the caller can hold it");
 });
