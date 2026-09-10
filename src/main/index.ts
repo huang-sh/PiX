@@ -137,6 +137,10 @@ async function create() {
   // through the same protocol-allowlisted external open (and is dropped for
   // non-web protocols such as file:).
   win.webContents.on("will-navigate", (event: Event, url: string) => {
+    // A navigation to the page's own URL is the app reloading itself (vite
+    // HMR full-reload in dev); it must proceed in-place, not be handed to
+    // the OS browser as if it were an external link.
+    if (url === win.webContents.getURL()) return;
     event.preventDefault();
     void openExternal(url).catch(() => {});
   });
