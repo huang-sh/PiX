@@ -89,7 +89,7 @@ describe("keyboard shortcuts settings", () => {
   beforeEach(() => {
     i18n.global.locale.value = "en";
     persisted = {
-      app: { language: "en", theme: "dark", density: "comfortable", confirmDestructiveActions: true, browserHome: "https://pi.dev", openLastSessionOnStartup: false, enterToSend: true, openLinksInApp: true, closeToTray: true, canvasDotGrid: true, canvasDotGridSize: 24 },
+      app: { language: "en", theme: "dark", density: "comfortable", confirmDestructiveActions: true, browserHome: "https://pi.dev", openLastSessionOnStartup: false, enterToSend: true, openLinksInApp: true, closeToTray: true, canvasDotGrid: true, canvasDotGridSpacing: 24, canvasDotGridDotSize: 2 },
       piGlobal: {}, piProject: {}, effective: {}, paths: { app: "", global: "", project: null },
     };
     vi.mocked(desktop.invoke).mockReset();

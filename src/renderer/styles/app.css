@@ -330,7 +330,7 @@ kbd {
 .session-flow {
   flex: 1;
   min-height: 0;
-  background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 25%,transparent) 1px, transparent 1px) 0 0/var(--dot-grid-size, 24px) var(--dot-grid-size, 24px) var(--surface-subtle);
+  background: radial-gradient(circle, color-mix(in srgb,var(--border-strong) 25%,transparent) var(--dot-grid-dot, 1px), transparent var(--dot-grid-dot, 1px)) 0 0/var(--dot-grid-size, 24px) var(--dot-grid-size, 24px) var(--surface-subtle);
 }
 html[data-dot-grid="off"] .session-flow { background-image: none; }
 .graph-controls { position: absolute; right: 8px; bottom: 33px; z-index: 10; display: flex; gap: 2px; }

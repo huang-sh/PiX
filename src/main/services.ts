@@ -141,7 +141,8 @@ export class SettingsService {
       openLinksInApp: true,
       closeToTray: true,
       canvasDotGrid: true,
-      canvasDotGridSize: 24,
+      canvasDotGridSpacing: 24,
+      canvasDotGridDotSize: 2,
     };
     const app = merge(
       defaults as unknown as Record<string, unknown>,

@@ -335,7 +335,8 @@ export interface AppSettings {
   openLinksInApp: boolean;
   closeToTray: boolean;
   canvasDotGrid: boolean;
-  canvasDotGridSize: number;
+  canvasDotGridSpacing: number;
+  canvasDotGridDotSize: number;
 }
 export interface SettingsBundle {
   app: AppSettings;

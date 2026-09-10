@@ -33,11 +33,14 @@ export function startTheme(initial: ThemePreference) {
 }
 
 // The session canvas dot grid is drawn by .session-flow in app.css from these
-// root-level controls: a size variable and an off switch.
-export function applyDotGrid(app: { canvasDotGrid?: boolean; canvasDotGridSize?: number }) {
+// root-level controls: dot/spacing variables and an off switch.
+export function applyDotGrid(app: { canvasDotGrid?: boolean; canvasDotGridSpacing?: number; canvasDotGridDotSize?: number }) {
   const root = document.documentElement;
   if (app.canvasDotGrid === false) root.dataset.dotGrid = "off";
   else delete root.dataset.dotGrid;
-  const size = Math.min(96, Math.max(8, Math.round(Number(app.canvasDotGridSize) || 24)));
-  root.style.setProperty("--dot-grid-size", `${size}px`);
+  const spacing = Math.min(96, Math.max(8, Math.round(Number(app.canvasDotGridSpacing) || 24)));
+  root.style.setProperty("--dot-grid-size", `${spacing}px`);
+  // The setting is a diameter in px; the gradient stop is a radius.
+  const dot = Math.min(6, Math.max(1, Math.round(Number(app.canvasDotGridDotSize) || 2)));
+  root.style.setProperty("--dot-grid-dot", `${dot / 2}px`);
 }

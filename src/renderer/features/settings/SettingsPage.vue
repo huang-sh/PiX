@@ -146,7 +146,8 @@ const rows = computed<Row[]>(() => {
         { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal", "peach"] },
         { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
         { path: "canvasDotGrid", label: "settings.rows.canvasDotGrid", scope: "app", type: "check", fallback: true, description: "settings.rows.canvasDotGridDesc" },
-        { path: "canvasDotGridSize", label: "settings.rows.canvasDotGridSize", scope: "app", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSizeDesc" },
+        { path: "canvasDotGridSpacing", label: "settings.rows.canvasDotGridSpacing", scope: "app", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSpacingDesc" },
+        { path: "canvasDotGridDotSize", label: "settings.rows.canvasDotGridDotSize", scope: "app", type: "number", fallback: 2, min: 1, max: 6, description: "settings.rows.canvasDotGridDotSizeDesc" },
       ];
     case "models":
       return [
@@ -462,7 +463,7 @@ function setValue(row: Row, event: Event) {
   });
   if (row.scope === "app" && row.path === "density")
     document.documentElement.dataset.density = String(next);
-  if (row.scope === "app" && (row.path === "canvasDotGrid" || row.path === "canvasDotGridSize") && draft.value)
+  if (row.scope === "app" && row.path.startsWith("canvasDotGrid") && draft.value)
     applyDotGrid(draft.value.app);
 }
 
