@@ -29,6 +29,8 @@ const draft = reactive({
 const pristine = computed(() => !props.skill && !draft.name.trim() && !draft.description.trim());
 const slug = computed(() => slugifySkillName(draft.name));
 const bytes = computed(() => new TextEncoder().encode(draft.body).length);
+// A one-decimal reading keeps a small body from showing up as a flat "0 KB".
+const kilobytes = computed(() => bytes.value < 10_240 ? Number((bytes.value / 1024).toFixed(1)) : Math.round(bytes.value / 1024));
 
 const errorKey = computed(() => {
   const name = skillNameError(draft.name);
@@ -134,7 +136,7 @@ async function save() {
                 <strong>{{ t("settings.skillBody") }}</strong>
                 <small>{{ t("settings.skillBodyHint") }}</small>
               </span>
-              <em :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: Math.round(bytes / 1024), max: MAX_SKILL_BYTES / 1024 }) }}</em>
+              <em :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</em>
             </div>
             <textarea v-model="draft.body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="skillTemplate('')" />
           </div>
@@ -151,9 +153,14 @@ async function save() {
 </template>
 
 <style scoped>
-.skill-dialog { position: fixed; z-index: 151; top: 5vh; left: 50%; transform: translateX(-50%); width: min(760px, calc(100vw - 40px)); max-height: 90vh; overflow: auto; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 90px rgba(14,38,31,.26); }
+.skill-dialog { position: fixed; z-index: 151; top: 5vh; left: 50%; display: flex; flex-direction: column; transform: translateX(-50%); width: min(760px, calc(100vw - 40px)); max-height: 90vh; overflow: hidden; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 90px rgba(14,38,31,.26); }
+.skill-dialog > form { display: flex; min-height: 0; flex-direction: column; }
 .skill-dialog h2 { margin: 0; font-size: var(--font-size-ui); }
-.custom-model-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.custom-model-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+/* Only the fields scroll, so Save and Cancel stay reachable however long the
+   instructions grow. */
+.skill-dialog .custom-model-fields { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.skill-dialog .model-options-header { flex: 0 0 auto; }
 .skill-body-field { display: block; padding: 14px 21px; border-top: 1px solid var(--border); }
 .skill-body-field > .setting-row { padding: 0 0 8px; border: 0; }
 .skill-body-field em { color: var(--muted); font-size: var(--font-size-caption); font-style: normal; }

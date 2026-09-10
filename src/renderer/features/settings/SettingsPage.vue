@@ -444,7 +444,10 @@ async function toggleManualOnly(skill: RuntimeSkill) {
     await loadSkills();
     layout.showNotice(t(skill.disableModelInvocation ? "settings.skillAutoEnabled" : "settings.skillManualEnabled", { name: skill.name }));
   } catch (error) {
-    skillError.value = error instanceof Error ? error.message : String(error);
+    // Reload first so the switch snaps back to what the disk actually says.
+    const message = error instanceof Error ? error.message : String(error);
+    await loadSkills();
+    skillError.value = message;
   } finally {
     skillActionPath.value = "";
   }
@@ -911,10 +914,12 @@ async function logout(provider: RuntimeProvider) {
                 </span>
                 <span class="resource-badges">
                   <em>{{ skill.source }}</em>
-                  <button v-if="skill.editable" type="button" class="skill-manual-toggle" :class="{ on: skill.disableModelInvocation }" :aria-pressed="skill.disableModelInvocation" :title="t('settings.skillManualOnlyHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">{{ t("settings.manualSkill") }}</button>
-                  <em v-else-if="skill.disableModelInvocation">{{ t("settings.manualSkill") }}</em>
+                  <em v-if="skill.disableModelInvocation">{{ t("settings.manualSkill") }}</em>
                 </span>
                 <span v-if="skill.editable" class="skill-row-actions">
+                  <label class="skill-manual-switch" :title="t('settings.skillManualOnlyHint')">
+                    <input class="switch" type="checkbox" data-skill-manual :checked="skill.disableModelInvocation" :disabled="!!skillActionPath" :aria-label="t('settings.skillManualOnly')" @change="toggleManualOnly(skill)" />
+                  </label>
                   <Button variant="ghost" size="icon" :title="t('settings.editSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Pencil :size="15" /></Button>
                   <Button variant="ghost" size="icon" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
                 </span>

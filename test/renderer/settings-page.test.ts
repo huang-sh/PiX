@@ -526,7 +526,8 @@ describe("SettingsPage save", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-skill="docx"]').text()).toContain("Create Word documents");
-    expect(wrapper.get('[data-skill="project-review"]').text()).toContain("manual only");
+    expect((wrapper.get('[data-skill="docx"] [data-skill-manual]').element as HTMLInputElement).checked).toBe(false);
+    expect((wrapper.get('[data-skill="project-review"] [data-skill-manual]').element as HTMLInputElement).checked).toBe(true);
     await wrapper.get("[data-skill-search]").setValue("Word");
     expect(wrapper.find('[data-skill="project-review"]').exists()).toBe(false);
 
@@ -566,7 +567,7 @@ describe("SettingsPage save", () => {
     expect(bundled.find(".skill-row-actions").exists()).toBe(false);
     expect(bundled.find('[aria-label="Read-only"]').exists()).toBe(true);
 
-    await wrapper.get('[data-skill="docx"] .skill-manual-toggle').trigger("click");
+    await wrapper.get('[data-skill="docx"] [data-skill-manual]').setValue(true);
     await flushPromises();
     expect(calls.find((call) => call.action === "setSkillManualOnly")).toMatchObject({
       path: "/home/me/.pi/agent/skills/docx/SKILL.md",

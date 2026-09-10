@@ -1077,7 +1077,7 @@ try {
   });
   if (!readFileSync(guiSkillFile, "utf8").includes("Created by the PiX GUI test."))
     throw new Error("Skill file did not keep its description");
-  await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] .skill-manual-toggle').click()");
+  await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] [data-skill-manual]').click()");
   await retry(async () => {
     if (!readFileSync(guiSkillFile, "utf8").includes("disable-model-invocation"))
       throw new Error("Manual-only toggle was not written to the skill file");

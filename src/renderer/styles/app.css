@@ -927,10 +927,9 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-row.is-busy { opacity: .6; }
 .skill-row .resource-info strong { display: flex; align-items: center; gap: 5px; }
 .skill-row .resource-info strong svg { flex: 0 0 auto; color: var(--faint); }
-.skill-manual-toggle { padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: var(--font-size-caption); white-space: nowrap; }
-.skill-manual-toggle:hover { color: var(--text); }
-.skill-manual-toggle.on { border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); color: var(--accent-strong); }
-.skill-row-actions { display: flex; gap: 2px; }
+.skill-manual-switch { display: grid; place-items: center; width: 42px; height: 32px; }
+.skill-manual-switch .switch { justify-self: center; }
+.skill-row-actions { display: flex; align-items: center; gap: 2px; }
 .skill-row-actions .is-arming { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); }
 .extension-card { max-width: 1120px; margin: auto; container-type: inline-size; }
 .extension-overview { overflow: hidden; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
