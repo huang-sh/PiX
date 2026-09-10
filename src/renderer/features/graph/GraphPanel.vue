@@ -496,6 +496,14 @@ function acceptSubmittedNode() {
   return id;
 }
 
+// One click discards every manual slot: the automatic layout then puts each
+// branch back into its own lane, and the current card comes back into view.
+async function tidy() {
+  dragged.clear();
+  rebuild();
+  await center(defaultFocusId(), true);
+}
+
 function defaultFocusId() {
   const value = projection.value;
   if (!value) return undefined;
@@ -744,7 +752,7 @@ watch(
         :title="t('graph.toggleMinimap')"
         @click="layout.toggleMinimap()"
       ><MapIcon :size="15" /></Button>
-      <Button variant="ghost" size="icon" :aria-label="t('graph.centerCurrent')" :title="t('graph.centerCurrent')" @click="center(defaultFocusId(), true)"><Focus :size="15" /></Button>
+      <Button variant="ghost" size="icon" :aria-label="t('graph.tidyLayout')" :title="t('graph.tidyLayout')" @click="tidy()"><Focus :size="15" /></Button>
     </nav>
 
     <footer class="graph-footer">

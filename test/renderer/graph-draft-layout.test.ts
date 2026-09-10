@@ -192,6 +192,19 @@ describe("draft placement", () => {
     expect(graph.nodes.find((node: any) => node.id === "turn:a1").position).toEqual(settled.get("turn:a1"));
   });
 
+  it("tidies every card back into its automatic lane", async () => {
+    const { graph } = setup();
+    graph.rebuild(); await flushPromises();
+    const auto = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
+    graph.rememberDrag({ node: { id: "turn:b", position: { x: 1400, y: 800 } }, event: { shiftKey: false } });
+    await flushPromises();
+    expect(graph.nodes.find((node: any) => node.id === "turn:b").position).toEqual({ x: 1400, y: 800 });
+    await graph.tidy();
+    await flushPromises();
+    for (const node of graph.nodes) expect(node.position).toEqual(auto.get(node.id), `card ${node.id} back in its lane`);
+    expectClear(graph, "turn:b");
+  });
+
   it("moves only the card itself unless the branch modifier is held", async () => {
     const { graph } = setup();
     const before = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
