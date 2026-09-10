@@ -15,6 +15,7 @@ export type SkillScope = "user" | "project" | "temporary";
 export type SkillWriteScope = "user" | "project";
 
 export type SkillNameError = "name-required" | "name-too-long" | "name-invalid";
+export type SkillDisplayNameError = "name-required" | "name-slug-empty";
 export type SkillDescriptionError = "description-required" | "description-too-long";
 export type SkillBodyError = "body-required" | "body-too-large";
 
@@ -46,6 +47,16 @@ export function skillNameError(name: string): SkillNameError | undefined {
   if (value.length > MAX_SKILL_NAME_LENGTH) return "name-too-long";
   if (!/^[a-z0-9-]+$/.test(value) || value.startsWith("-") || value.endsWith("-") || value.includes("--"))
     return "name-invalid";
+  return undefined;
+}
+
+/**
+ * Authors write a readable name; only the stored slug has to satisfy the spec.
+ * "PDF Tools" is a fine thing to type — it is saved as `pdf-tools`.
+ */
+export function skillDisplayNameError(name: string): SkillDisplayNameError | undefined {
+  if (!name.trim()) return "name-required";
+  if (!slugifySkillName(name)) return "name-slug-empty";
   return undefined;
 }
 

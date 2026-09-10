@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Folder, History, Info, Keyboard, KeyRound, Lock, Palette, Pencil, Plus, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Trash2, Upload, Wrench, X } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Download, Folder, History, Info, Keyboard, KeyRound, Lock, Palette, Pencil, Plus, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Trash2, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, toRaw, watch } from "vue";
 import { normalizeTheme } from "../../../shared/theme";
 import { applyAppearance } from "../../theme";
@@ -75,6 +75,12 @@ const skillImport = ref<HTMLInputElement>();
 const confirmingSkillPath = ref("");
 const skillEditor = ref<{ document?: RuntimeSkillDocument; scope: "user" | "project" }>();
 const canUseProjectSkills = computed(() => !!workspace.project);
+// The resolved project path answers "where does this land", so the folder
+// header shows it in full rather than a relative suffix.
+const projectSkillsRoot = computed(() => {
+  const path = workspace.project?.path?.replaceAll("\\", "/").replace(/\/+$/, "");
+  return path ? `${path}/.pi/skills` : ".pi/skills";
+});
 const extensions = ref<RuntimeExtension[]>([]);
 const extensionQuery = ref("");
 const extensionScope = ref<"all" | RuntimeExtension["scope"]>("all");
@@ -263,7 +269,7 @@ const skillSections = computed(() => {
     .map((scope) => ({
       scope,
       label: t(`settings.skillScopes.${scope}`),
-      root: t(`settings.skillScopePaths.${scope}`),
+      root: scope === "project" ? projectSkillsRoot.value : t(`settings.skillScopePaths.${scope}`),
       skills: filteredSkills.value.filter((skill) => skill.scope === scope),
     }))
     .filter((section) => section.scope !== "temporary" || section.skills.length);
@@ -444,7 +450,10 @@ async function openEditSkill(skill: RuntimeSkill) {
 
 async function skillSaved() {
   const created = !skillEditor.value?.document;
+  const scope = skillEditor.value?.scope;
   skillEditor.value = undefined;
+  // Reveal what was just written instead of leaving it behind a filter.
+  if (created && scope && skillScope.value !== "all" && skillScope.value !== scope) skillScope.value = scope;
   await loadSkills();
   layout.showNotice(t(created ? "settings.skillCreated" : "settings.skillSaved"));
 }
@@ -505,6 +514,7 @@ async function importSkillFile(event: Event) {
     const name = slugifySkillName(file.name.replace(/\.md$/i, "")) || "imported-skill";
     const scope = importingScope.value === "project" && canUseProjectSkills.value ? "project" : "user";
     await session.control({ action: "importSkill", scope, name, content: await file.text() });
+    if (skillScope.value !== "all" && skillScope.value !== scope) skillScope.value = scope;
     await loadSkills();
     layout.showNotice(t("settings.skillImported", { name }));
   } catch (error) {
@@ -911,10 +921,12 @@ async function logout(provider: RuntimeProvider) {
           </div>
         </div>
         <div class="skill-panel" :class="{ 'is-refreshing': skillBusy && skills.length }">
-          <p v-if="skillError" class="settings-error" role="alert">{{ skillError }}</p>
-          <div v-if="skillBusy && !skills.length" class="skill-empty" role="status">
-            <span class="skill-empty-icon"><RefreshCw :size="18" class="spin" /></span>
-            <span>{{ t("settings.loadingSkills") }}</span>
+          <p v-if="skillError" class="skill-error" role="alert">{{ skillError }}</p>
+          <div v-if="skillBusy && !skills.length" class="skill-skeleton" role="status" :aria-label="t('settings.loadingSkills')">
+            <div v-for="row in 3" :key="row" class="skill-skeleton-row">
+              <span class="skill-skeleton-glyph" />
+              <span class="skill-skeleton-lines"><span class="skill-skeleton-line" /><span class="skill-skeleton-line is-desc" /></span>
+            </div>
           </div>
           <div v-else-if="skillQuery && !queriedSkills.length" class="skill-empty">
             <span class="skill-empty-icon"><Search :size="18" /></span>
@@ -929,7 +941,7 @@ async function logout(provider: RuntimeProvider) {
                 <code v-if="section.root" class="skill-group-path" :title="section.root">{{ section.root }}</code>
                 <span class="skill-group-count">{{ section.skills.length }}</span>
                 <span v-if="section.scope !== 'temporary'" class="skill-group-action">
-                  <Button variant="outline" size="sm" :data-skill-import="section.scope" :disabled="!!skillActionPath" @click="startImport(section.scope)"><Upload :size="13" />{{ t("settings.importSkill") }}</Button>
+                  <Button variant="outline" size="sm" :data-skill-import="section.scope" :disabled="!!skillActionPath" @click="startImport(section.scope)"><Download :size="13" />{{ t("settings.importSkill") }}</Button>
                 </span>
               </header>
               <div v-if="section.skills.length" class="skill-list" role="list">
@@ -949,7 +961,7 @@ async function logout(provider: RuntimeProvider) {
                       <span class="skill-switch-thumb" />
                     </button>
                     <Button v-if="skill.editable" class="skill-action" variant="ghost" size="icon" :title="t('settings.editSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Pencil :size="15" /></Button>
-                    <Button v-if="skill.editable" class="skill-action" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" variant="ghost" size="icon" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
+                    <Button v-if="skill.editable" class="skill-action skill-action-delete" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" variant="ghost" size="icon" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
                   </div>
                 </article>
               </div>

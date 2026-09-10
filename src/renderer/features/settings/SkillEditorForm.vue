@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { DialogRoot, DialogOverlay, DialogContent, DialogTitle } from "reka-ui";
 import { useI18n } from "vue-i18n";
 import { X } from "@lucide/vue";
-import { MAX_SKILL_BYTES, skillBodyError, skillDescriptionError, skillNameError, skillTemplate, slugifySkillName } from "../../../shared/skills";
+import { MAX_SKILL_BYTES, skillBodyError, skillDescriptionError, skillDisplayNameError, skillTemplate, slugifySkillName } from "../../../shared/skills";
 import type { RuntimeSkillDocument } from "../../../shared/types";
 import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
@@ -27,11 +27,15 @@ const draft = reactive({
 const pristine = computed(() => !props.skill && !draft.name.trim() && !draft.description.trim());
 const slug = computed(() => slugifySkillName(draft.name));
 const bytes = computed(() => new TextEncoder().encode(draft.body).length);
-// A one-decimal reading keeps a small body from showing up as a flat "0 KB".
-const kilobytes = computed(() => bytes.value < 10_240 ? Number((bytes.value / 1024).toFixed(1)) : Math.round(bytes.value / 1024));
+// The counter exists to warn about the cap, so it never reports a non-empty
+// body as "0 KB": under a kilobyte it says so, and small sizes keep a decimal.
+const kilobytes = computed(() => {
+  if (bytes.value < 1024) return "<1";
+  return bytes.value < 10_240 ? Number((bytes.value / 1024).toFixed(1)) : Math.round(bytes.value / 1024);
+});
 
 const errorKey = computed(() => {
-  const name = skillNameError(draft.name);
+  const name = skillDisplayNameError(draft.name);
   if (name) return `settings.skillError.${name}`;
   const description = skillDescriptionError(draft.description);
   if (description) return `settings.skillError.${description}`;
@@ -55,12 +59,15 @@ async function save() {
   if (busy.value || errorKey.value) return;
   busy.value = true;
   error.value = "";
+  // The frontmatter name has to satisfy the Agent Skills spec even when the
+  // author typed something more readable; the field's hint shows the result.
+  const name = slugifySkillName(draft.name);
   try {
     const result = props.skill
       ? await session.control<{ path: string }>({
           action: "updateSkill",
           path: props.skill.path,
-          name: draft.name.trim(),
+          name,
           description: draft.description.trim(),
           body: draft.body,
           disableModelInvocation: draft.disableModelInvocation,
@@ -68,7 +75,7 @@ async function save() {
       : await session.control<{ path: string }>({
           action: "createSkill",
           scope: props.scope,
-          name: draft.name.trim(),
+          name,
           description: draft.description.trim(),
           body: draft.body,
           disableModelInvocation: draft.disableModelInvocation,
@@ -85,12 +92,12 @@ async function save() {
 <template>
   <DialogRoot :open="true" @update:open="!$event && !busy && emit('cancel')">
     <DialogOverlay class="dialog-overlay" />
-    <DialogContent class="skill-sheet" :aria-describedby="undefined" @interact-outside.prevent @escape-key-down="busy && $event.preventDefault()">
+    <DialogContent class="skill-sheet" aria-describedby="skill-sheet-subtitle" @interact-outside.prevent @escape-key-down="busy && $event.preventDefault()">
       <form class="skill-sheet-form" data-skill-form :aria-busy="busy" @submit.prevent="save">
         <header class="skill-sheet-head">
           <div>
             <DialogTitle class="skill-sheet-title">{{ t(skill ? "settings.editSkill" : "settings.newSkill") }}</DialogTitle>
-            <p class="skill-sheet-sub">{{ t("settings.skillSheetSubtitle") }}</p>
+            <p id="skill-sheet-subtitle" class="skill-sheet-sub">{{ t("settings.skillSheetSubtitle") }}</p>
           </div>
           <button type="button" class="skill-sheet-close" :aria-label="t('common.close')" :disabled="busy" @click="emit('cancel')"><X :size="15" /></button>
         </header>
@@ -128,7 +135,7 @@ async function save() {
             <div class="skill-tile">
               <div class="skill-tile-copy">
                 <span class="skill-tile-label">{{ scope === "project" ? t("settings.skillScopeProject") : t("settings.skillScopeUser") }}</span>
-                <span class="skill-tile-hint">{{ t("settings.skillScopeDecided") }}</span>
+                <span class="skill-tile-hint" :class="{ 'is-path': skill }" :title="skill ? skill.path : undefined">{{ skill ? skill.path : t("settings.skillScopeDecided") }}</span>
               </div>
             </div>
           </div>
@@ -140,7 +147,7 @@ async function save() {
                 <span class="skill-tile-label">{{ t(draft.disableModelInvocation ? "settings.manualSkill" : "settings.skillAuto") }}</span>
                 <span class="skill-tile-hint">{{ t("settings.skillManualOnlyHint") }}</span>
               </div>
-              <button type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="draft.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
+              <button type="button" class="skill-switch" role="switch" data-skill-invocation :aria-checked="draft.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
                 <span class="skill-switch-thumb" />
               </button>
             </div>
@@ -185,6 +192,7 @@ async function save() {
 .skill-tile-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .skill-tile-label { color: var(--text); font-size: var(--font-size-small); font-weight: 500; }
 .skill-tile-hint { color: var(--muted); font-size: var(--font-size-caption); line-height: 1.45; }
+.skill-tile-hint.is-path { overflow: hidden; font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .skill-sheet-error { margin: 0 18px 8px; padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--danger); font-size: var(--font-size-small); line-height: 1.5; }
 .skill-sheet-actions { display: flex; align-items: center; gap: 12px; padding: 6px 18px 14px; }
 .skill-sheet-note { max-width: 30ch; color: var(--faint); font-size: var(--font-size-caption); line-height: 1.45; }

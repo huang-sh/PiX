@@ -11,7 +11,7 @@ import {
   serializeSkillDocument,
   skillRoots,
 } from "../src/main/skill-files.js";
-import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../src/shared/skills.js";
+import { skillBodyError, skillDescriptionError, skillDisplayNameError, skillNameError, slugifySkillName } from "../src/shared/skills.js";
 import { validateRouteInput } from "../src/shared/contracts.js";
 import type { RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
@@ -34,6 +34,10 @@ test("skill names follow the Agent Skills slug rules", () => {
   assert.equal(skillNameError("PDF"), "name-invalid");
   assert.equal(skillNameError("two--dash"), "name-invalid");
   assert.equal(skillNameError(`${"a".repeat(65)}`), "name-too-long");
+  // Authors type a readable name; only the stored slug has to satisfy the spec.
+  assert.equal(skillDisplayNameError("PDF Tools"), undefined);
+  assert.equal(skillDisplayNameError("  "), "name-required");
+  assert.equal(skillDisplayNameError("工具箱"), "name-slug-empty");
   assert.equal(skillDescriptionError("Extracts tables from PDFs."), undefined);
   assert.equal(skillDescriptionError(" "), "description-required");
   assert.equal(skillDescriptionError("x".repeat(1025)), "description-too-long");
@@ -174,6 +178,13 @@ test("create, read, toggle, edit, and delete a skill through the runtime", async
       runtime.control({ action: "getSkill", path: join(home, "outside.md") }),
       /outside the user and project/,
     );
+
+    // A root-level .md skill has no folder of its own, so the file name names it.
+    const rootFile = join(agentDir, "skills", "root-skill.md");
+    writeFileSync(rootFile, "---\ndescription: Root level skill.\n---\n\n# Root\n");
+    const rootDocument = await runtime.control({ action: "getSkill", path: rootFile }) as RuntimeSkillDocument;
+    assert.equal(rootDocument.name, "root-skill");
+    assert.equal(rootDocument.description, "Root level skill.");
 
     await runtime.control({ action: "deleteSkill", path: created.path });
     skills = await runtime.control({ action: "getSkills" }) as RuntimeSkill[];

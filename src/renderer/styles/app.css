@@ -985,6 +985,17 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .skill-empty-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--muted-surface); color: var(--faint); }
 .skill-empty strong { color: var(--text); font-size: var(--font-size-ui); font-weight: 600; }
 .skill-empty > span:not(.skill-empty-icon) { max-width: 44ch; line-height: 1.45; }
+.skill-error { margin: 0; padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--danger); font-size: var(--font-size-small); line-height: 1.5; }
+.skill-action-delete:hover:not(:disabled) { color: var(--danger); }
+.skill-skeleton { display: flex; flex-direction: column; gap: 6px; }
+.skill-skeleton-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 11px; background: var(--surface-subtle); animation: skill-shimmer 1.3s ease-in-out infinite; }
+.skill-skeleton-row:nth-child(2) { animation-delay: 160ms; }
+.skill-skeleton-row:nth-child(3) { animation-delay: 320ms; }
+.skill-skeleton-glyph { width: 28px; height: 28px; flex: 0 0 auto; border-radius: 8px; background: var(--muted-surface); }
+.skill-skeleton-lines { display: flex; flex: 1; flex-direction: column; gap: 6px; }
+.skill-skeleton-line { height: 10px; border-radius: 999px; background: var(--muted-surface); }
+.skill-skeleton-line.is-desc { width: 56%; }
+@keyframes skill-shimmer { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 .extension-card { max-width: 1120px; margin: auto; container-type: inline-size; }
 .extension-overview { overflow: hidden; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
 .extension-intro { display: flex; align-items: center; gap: 16px; padding: 25px 26px; background: var(--surface); }

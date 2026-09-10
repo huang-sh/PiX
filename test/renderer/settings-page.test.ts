@@ -588,13 +588,14 @@ describe("SettingsPage save", () => {
     });
 
     await wrapper.get("[data-skill-new]").trigger("click");
-    await wrapper.get("[data-skill-name]").setValue("new-skill");
+    // A readable name is accepted and stored as its slug.
+    await wrapper.get("[data-skill-name]").setValue("PDF Tools");
     await wrapper.get("[data-skill-description]").setValue("A new skill");
     await wrapper.get("form[data-skill-form]").trigger("submit");
     await flushPromises();
     expect(calls.find((call) => call.action === "createSkill")).toMatchObject({
       scope: "user",
-      name: "new-skill",
+      name: "pdf-tools",
       description: "A new skill",
       disableModelInvocation: false,
     });
