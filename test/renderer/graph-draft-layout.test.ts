@@ -182,6 +182,11 @@ describe("draft placement", () => {
     const parent = graph.nodes.find((node: any) => node.id === "turn:a");
     expect(first.position.y).toBeLessThan(second.position.y);
     expect(second.position.x).toBe(parent.position.x + parent.dimensions.width + 92);
+    // The parent follows the room its child needed as far as its column allows, so
+    // the branch still reads as one shape. Only the first drop leaves that lane free.
+    if (manual.x === 1200) expect(parent.position.y).toBe((first.position.y + second.position.y) / 2);
+    expect(parent.position.y + parent.dimensions.height / 2)
+      .toBeGreaterThanOrEqual(first.position.y + first.dimensions.height / 2);
     // Submitting only adds a card, so the sibling already on screen is not pushed
     // anywhere: the new child yields to the pin instead.
     expect(graph.nodes.find((node: any) => node.id === "turn:a1").position).toEqual(settled.get("turn:a1"));

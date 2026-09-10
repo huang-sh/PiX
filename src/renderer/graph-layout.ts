@@ -80,6 +80,20 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, {
     for (const node of block) node.y += offset;
     const root = byId.get(rootId)!;
     moved.set(rootId, { x: root.x, y: root.y });
+    // A branch reads as one shape, so a parent follows the room its child needed.
+    // Only the parent moves, only while it lands on nothing, and never off a pin.
+    let cursor = root.parentId ? byId.get(root.parentId) : undefined;
+    while (cursor && !manual.has(cursor.id)) {
+      const children = nodes.filter(child => child.parentId === cursor!.id);
+      const rows = children.map(child => child.y + child.height / 2);
+      const target = (Math.min(...rows) + Math.max(...rows)) / 2 - cursor.height / 2;
+      const clear = !nodes.some(other => other !== cursor
+        && other.y < target + cursor!.height && target < other.y + other.height
+        && cursor!.x < other.x + other.width && other.x < cursor!.x + cursor!.width);
+      if (!clear) break;
+      cursor.y = target;
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
   }
   return moved;
 }
