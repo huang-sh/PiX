@@ -219,9 +219,21 @@ app.whenReady().then(async () => {
   ipcMain.handle(
     "pix:invoke",
     async (_e: unknown, route: DesktopRoute, input: unknown) => {
-      const result = await controller.invoke(route, input);
-      if (route === "settings.update" || route === "settings.reset") syncWindowTheme();
-      return result;
+      try {
+        const result = await controller.invoke(route, input);
+        if (route === "settings.update" || route === "settings.reset") syncWindowTheme();
+        return { ok: true as const, result };
+      } catch (error) {
+        // Answering with the failure keeps Electron from re-wrapping the
+        // message as "Error invoking remote method 'pix:invoke': ...". The
+        // renderer turns this back into an Error; log it here for parity with
+        // the rejection Electron used to report.
+        console.error(`[pix:invoke] ${route}:`, error instanceof Error ? error.message : error);
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
     },
   );
   ipcMain.handle("pix:copy", (_e: unknown, text: string) =>

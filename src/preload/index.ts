@@ -4,11 +4,13 @@ import type {
   DesktopEvent,
   DesktopRoute,
 } from "../shared/types.js";
+import { unwrapInvokeReply, type InvokeReply } from "../shared/ipc.js";
 
 const api: DesktopApi & { copy(text: string): Promise<void> } = {
   initialTheme: ipcRenderer.sendSync("pix:initial-theme"),
-  invoke<T>(route: DesktopRoute, input?: unknown) {
-    return ipcRenderer.invoke("pix:invoke", route, input);
+  async invoke<T>(route: DesktopRoute, input?: unknown) {
+    const reply = await ipcRenderer.invoke("pix:invoke", route, input) as InvokeReply<T>;
+    return unwrapInvokeReply(reply);
   },
   onEvent(listener: (event: DesktopEvent) => void) {
     const handle = (_event: unknown, payload: DesktopEvent) => listener(payload);
