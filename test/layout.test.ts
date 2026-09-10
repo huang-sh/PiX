@@ -109,3 +109,33 @@ test("a node whose parent is missing keeps its own subtree aligned", () => {
   assert.equal(at("grandchild").y, at("child").y);
   assert.notEqual(at("orphan").y, at("kept").y, "the detached component gets its own rows");
 });
+
+test("a pinned card nudges a neighbouring branch to the closer side", () => {
+  const turn = (id: string, parentId: string | null, depth: number) => ({
+    id, userEntryId: id, parentId, title: id, preview: "", timestamp: String(depth), rawEntryIds: [id],
+    leafEntryId: id, toolCallCount: 0, hasError: false, depth,
+  });
+  const p: SessionProjection = {
+    nodes: [turn("root", null, 0), turn("left", "root", 1), turn("right", "root", 1)],
+    edges: [],
+    activeBranchNodeIds: ["root"],
+    activeBranchEntryIds: ["root"],
+    messages: [],
+    leafId: "root",
+    activeNodeId: "root",
+  };
+  // Dragged down over its sibling, so the nearer free space is above it.
+  const settled = layoutGraph(p).nodes;
+  const pin = { x: settled.find((node) => node.id === "left")!.x, y: 300 };
+  const placed = layoutGraph(p).nodes;
+  reserveManualPositions(placed, new Map([["left", pin]]));
+  const at = (id: string) => placed.find((node) => node.id === id)!;
+  const left = at("left"), right = at("right");
+  assert.equal(left.y, pin.y, "the pinned card keeps its coordinates");
+  assert.ok(left.y + left.height + 28 <= right.y || right.y + right.height + 28 <= left.y,
+    "clearing the pin must not leave the two branches overlapping");
+  assert.ok(right.y + right.height + 28 <= left.y,
+    `expected the nearer gap above the pin, got y=${Math.round(right.y)} for a pin at ${pin.y}`);
+  assert.ok(Math.abs(right.y - settled[2]!.y) < left.height + 28,
+    `expected a nudge smaller than the pin itself, moved ${Math.round(Math.abs(right.y - settled[2]!.y))}px`);
+});

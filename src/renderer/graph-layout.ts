@@ -75,18 +75,20 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, {
   // ponytail: scan branch boxes; use a spatial index if many manual pins make this costly.
   for (const { group } of automatic) {
     const blockers = occupied.filter(other => group.left < other.right + 28 && group.right + 28 > other.left)
-      .map(other => ({ start: other.top - group.bottom - 28, end: other.bottom - group.top + 28, order: other.order }))
+      .map(other => ({ start: other.top - group.bottom - 28, end: other.bottom - group.top + 28 }))
       .sort((a, b) => a.start - b.start);
-    const collision = blockers.find(blocker => blocker.start < 0 && blocker.end > 0);
-    if (collision) {
+    // Clear every blocker on whichever side needs the smaller move, so a branch
+    // that barely overlaps lands in the nearest free space instead of being sent
+    // past the whole obstacle and away from its own parent.
+    const clear = (up: boolean) => {
       let offset = 0;
-      if (group.order <= collision.order) {
-        for (const blocker of [...blockers].reverse())
-          if (offset > blocker.start && offset < blocker.end) offset = blocker.start;
-      } else {
-        for (const blocker of blockers)
-          if (offset > blocker.start && offset < blocker.end) offset = blocker.end;
-      }
+      for (const blocker of up ? [...blockers].reverse() : blockers)
+        if (offset > blocker.start && offset < blocker.end) offset = up ? blocker.start : blocker.end;
+      return offset;
+    };
+    const above = clear(true), below = clear(false);
+    const offset = Math.abs(above) <= Math.abs(below) ? above : below;
+    if (offset) {
       for (const node of group.branch) node.y += offset;
       group.top += offset; group.bottom += offset;
     }
