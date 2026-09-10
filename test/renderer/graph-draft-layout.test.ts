@@ -131,10 +131,10 @@ describe("draft placement", () => {
     expect(savedOrders.some(([id]) => id === "pending:new")).toBe(false);
   });
 
-  it("keeps a continuation to the right of a manually moved parent before and after submitting", async () => {
+  it("carries a continuation along when a parent is moved with the branch modifier", async () => {
     const { graph, session } = setup();
     const manual = { x: 1400, y: 800 };
-    graph.rememberDrag({ node: { id: "turn:a", position: manual } });
+    graph.rememberDrag({ node: { id: "turn:a", position: manual }, event: { shiftKey: true } });
     await graph.compose("turn:a"); await flushPromises();
     const parent = graph.nodes.find((node: any) => node.id === "turn:a");
     const draft = graph.nodes.find((node: any) => node.type === "draft");
@@ -190,6 +190,27 @@ describe("draft placement", () => {
     // Submitting only adds a card, so the sibling already on screen is not pushed
     // anywhere: the new child yields to the pin instead.
     expect(graph.nodes.find((node: any) => node.id === "turn:a1").position).toEqual(settled.get("turn:a1"));
+  });
+
+  it("moves only the card itself unless the branch modifier is held", async () => {
+    const { graph } = setup();
+    const before = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
+    const plain = { x: 1400, y: 800 };
+    graph.rememberDrag({ node: { id: "turn:b", position: plain }, event: { shiftKey: false } });
+    await flushPromises();
+    const at = (id: string) => graph.nodes.find((node: any) => node.id === id).position;
+    expect(at("turn:b")).toEqual(plain);
+    expect(at("turn:c")).toEqual(before.get("turn:c"));
+    const shifted = { x: 1000, y: 300 };
+    graph.rememberDrag({ node: { id: "turn:b", position: shifted }, event: { shiftKey: true } });
+    await flushPromises();
+    expect(at("turn:b")).toEqual(shifted);
+    // The card after it follows by the delta the card itself moved away from where
+    // the layout had placed it.
+    expect(at("turn:c")).toEqual({
+      x: before.get("turn:c").x + shifted.x - before.get("turn:b").x,
+      y: before.get("turn:c").y + shifted.y - before.get("turn:b").y,
+    });
   });
 
   it.each(["cancel", "submit"])("restores manual positions after draft %s and removes temporary spacing", async (action) => {

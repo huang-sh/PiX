@@ -17,7 +17,7 @@ import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
 import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
-import { layoutGraph, reserveManualPositions, type BranchDirection } from "../../graph-layout";
+import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualPosition } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
@@ -46,7 +46,9 @@ watch(nodes, items => {
   }
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
-const dragged = new Map<string, { x: number; y: number }>();
+const dragged = new Map<string, ManualPosition>();
+// Holding the branch modifier at any point of a drag carries the cards after it too.
+let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
 const branchOrder = new Map<string, number>();
@@ -614,13 +616,25 @@ async function ready(store: VueFlowStore) {
   }
 }
 
+function holdsBranchModifier(event: NodeMouseEvent) {
+  return Boolean((event as { event?: { shiftKey?: boolean } }).event?.shiftKey);
+}
+
+function trackDragModifier(event: NodeMouseEvent) {
+  if (holdsBranchModifier(event)) dragFollowsBranch = true;
+}
+
 function rememberDrag(event: NodeMouseEvent) {
-  dragged.set(event.node.id, { ...event.node.position });
+  const branch = dragFollowsBranch || holdsBranchModifier(event);
+  dragFollowsBranch = false;
+  dragged.set(event.node.id, { ...event.node.position, branch });
   const node = nodes.value.find(node => node.id === event.node.id);
-  if (node) {
-    node.position = { ...event.node.position };
-    nodes.value = [...nodes.value];
-  }
+  if (!node) return;
+  node.position = { ...event.node.position };
+  // Lay out from the drop at once, so a branch dragged along moves with its card
+  // instead of following on some later rebuild.
+  layoutBranches(nodes.value);
+  nodes.value = [...nodes.value];
 }
 
 function syncNodeDimensions(changes: NodeChange[]) {
@@ -693,6 +707,7 @@ watch(
       @pane-ready="ready"
       @node-click="({ node }: NodeMouseEvent) => select(node.id)"
       @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
+      @node-drag="trackDragModifier"
       @node-drag-stop="rememberDrag"
       @nodes-change="syncNodeDimensions"
     >

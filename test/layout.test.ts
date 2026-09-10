@@ -134,6 +134,31 @@ test("a card that appears later makes room for a pin", () => {
     "the card that appeared clears the pin instead of sitting under it");
   assert.ok(at("next").y > settled.find((node) => node.id === "left")!.y,
     "making room moves it to a later lane, never ahead of the cards before it");
-  assert.deepEqual([...moved], [["next", { x: at("next").x, y: at("next").y }]],
-    "the position it made room for is handed back so the caller can hold it");
+  assert.deepEqual([...moved], [["next", { x: at("next").x, y: at("next").y, branch: true }]],
+    "the position it made room for is handed back, branch included, so the caller can hold it");
+});
+
+test("a manual card drags its branch only when it was dropped with the modifier", () => {
+  const nodes = [
+    { id: "root", parentId: null as string | null, timestamp: "0", depth: 0 },
+    { id: "parent", parentId: "root", timestamp: "1", depth: 1 },
+    { id: "child", parentId: "parent", timestamp: "2", depth: 2 },
+  ];
+  const settled = layoutGraph({ nodes }).nodes;
+  const drag = (pin: { x: number; y: number; branch?: boolean }) => {
+    const placed = layoutGraph({ nodes }).nodes;
+    reserveManualPositions(placed, new Map([["parent", pin]]), new Set());
+    return placed;
+  };
+  const at = (placed: ReturnType<typeof drag>, id: string) => placed.find((node) => node.id === id)!;
+  const plain = drag({ x: 900, y: 700 });
+  assert.deepEqual({ x: at(plain, "parent").x, y: at(plain, "parent").y }, { x: 900, y: 700 });
+  assert.deepEqual({ x: at(plain, "child").x, y: at(plain, "child").y },
+    { x: settled[2]!.x, y: settled[2]!.y }, "a plain drag leaves the cards after it where the layout put them");
+  const carried = drag({ x: 900, y: 700, branch: true });
+  assert.deepEqual(
+    { x: at(carried, "child").x - settled[2]!.x, y: at(carried, "child").y - settled[2]!.y },
+    { x: 900 - settled[1]!.x, y: 700 - settled[1]!.y },
+    "the modifier carries them by the delta the card itself moved",
+  );
 });

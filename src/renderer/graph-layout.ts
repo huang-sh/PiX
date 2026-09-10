@@ -9,39 +9,38 @@ export interface PositionedNode extends GraphNode {
 type LayoutNode = Pick<GraphNode, "id" | "parentId" | "timestamp" | "depth">;
 type LayoutBox = { id: string; parentId: string | null; x: number; y: number; width: number; height: number };
 
+export type ManualPosition = { x: number; y: number; branch?: boolean };
+
 /**
- * A manual card keeps the coordinates the user gave it, and its own branch follows
- * it. Only cards that appear in this render are then slid out of a pin's way:
- * anything already on screen keeps the position it has, so neither a drag nor a
- * later rebuild re-arranges the graph behind the user. The positions this hands
- * back are the cards that made way, so the caller can hold them there instead of
- * letting the next rebuild drop them back on top of the pin.
+ * A manual card keeps the coordinates the user gave it. Only a card dropped with
+ * the branch modifier drags the cards that follow it; otherwise the rest of its
+ * branch stays where the layout put it. Only cards that appear in this render are
+ * then slid out of a manual card's way: anything already on screen keeps the
+ * position it has, so neither a drag nor a later rebuild re-arranges the graph
+ * behind the user. The positions this hands back are the cards that made way, so
+ * the caller can hold them there instead of letting the next rebuild drop them
+ * back on top of the card they cleared.
  */
-export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, { x: number; y: number }>, fresh = new Set<string>()) {
-  const moved = new Map<string, { x: number; y: number }>();
+export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, ManualPosition>, fresh = new Set<string>()) {
+  const moved = new Map<string, ManualPosition>();
   const byId = new Map(nodes.map(node => [node.id, node]));
   if (!manual.size) return moved;
   const offsets = new Map(nodes.filter(node => manual.has(node.id)).map(node => {
     const pin = manual.get(node.id)!;
     return [node.id, { x: pin.x - node.x, y: pin.y - node.y }];
   }));
-  // Cards under a pin already sit where the user put them, directly or by following.
+  // A card is placed already when the user put it there, or when the nearest
+  // manual ancestor above it is dragging its branch along.
   const fixed = new Set(manual.keys());
   for (const node of nodes) {
-    let parent = node.parentId ? byId.get(node.parentId) : undefined;
-    while (parent) {
-      if (manual.has(parent.id)) { fixed.add(node.id); break; }
-      parent = parent.parentId ? byId.get(parent.parentId) : undefined;
-    }
-  }
-  for (const node of nodes) {
     const pin = manual.get(node.id);
-    if (pin) { Object.assign(node, pin); continue; }
-    // A continuation follows its nearest manually positioned ancestor.
+    if (pin) { node.x = pin.x; node.y = pin.y; continue; }
     let parent = node.parentId ? byId.get(node.parentId) : undefined;
     while (parent && !manual.has(parent.id)) parent = parent.parentId ? byId.get(parent.parentId) : undefined;
-    const offset = parent ? offsets.get(parent.id) : undefined;
-    if (offset) { node.x += offset.x; node.y += offset.y; }
+    const offset = parent && manual.get(parent.id)!.branch ? offsets.get(parent.id) : undefined;
+    if (!offset) continue;
+    fixed.add(node.id);
+    node.x += offset.x; node.y += offset.y;
   }
   const blocks = new Map<string, LayoutBox[]>();
   for (const node of nodes) {
@@ -79,7 +78,8 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, {
     if (offset === undefined) continue;
     for (const node of block) node.y += offset;
     const root = byId.get(rootId)!;
-    moved.set(rootId, { x: root.x, y: root.y });
+    // The whole block moved together, so holding its root must hold its cards too.
+    moved.set(rootId, { x: root.x, y: root.y, branch: true });
     // A branch reads as one shape, so a parent follows the room its child needed.
     // Only the parent moves, only while it lands on nothing, and never off a pin.
     let cursor = root.parentId ? byId.get(root.parentId) : undefined;
