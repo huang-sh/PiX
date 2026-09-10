@@ -261,7 +261,10 @@ const filteredSkills = computed(() => queriedSkills.value
   .sort((a, b) => a.name.localeCompare(b.name)));
 const skillSections = computed(() => {
   // Filters and search narrow the rows; they never hide a folder that exists,
-  // because the folder header is where a new skill or an import lands.
+  // because the folder header is where a new skill or an import lands. While
+  // searching there is nothing to land in, so a folder with no match is noise
+  // — and its "no skills here yet" line would be a lie.
+  const searching = !!skillQuery.value.trim();
   const scopes = skillScope.value === "all"
     ? (["project", "user", "temporary"] as const)
     : ([skillScope.value] as const);
@@ -272,7 +275,7 @@ const skillSections = computed(() => {
       root: scope === "project" ? projectSkillsRoot.value : t(`settings.skillScopePaths.${scope}`),
       skills: filteredSkills.value.filter((skill) => skill.scope === scope),
     }))
-    .filter((section) => section.scope !== "temporary" || section.skills.length);
+    .filter((section) => searching ? section.skills.length > 0 : section.scope !== "temporary" || section.skills.length > 0);
 });
 const skillFilters = computed(() => (["all", "project", "user", "temporary"] as const)
   .map((scope) => ({ scope, count: queriedSkills.value.filter((skill) => scope === "all" || skill.scope === scope).length })));

@@ -26,6 +26,9 @@ const draft = reactive({
 // placeholder, so only what the user must write decides whether it is empty.
 const pristine = computed(() => !props.skill && !draft.name.trim() && !draft.description.trim());
 const slug = computed(() => slugifySkillName(draft.name));
+// The folder an existing skill lives in, taken from its own path: a skill can
+// sit in `.agents/skills` or a package, so naming a root here would lie.
+const skillFolder = computed(() => props.skill ? props.skill.path.replace(/[\\/][^\\/]*$/, "") : "");
 const bytes = computed(() => new TextEncoder().encode(draft.body).length);
 // The counter exists to warn about the cap, so it never reports a non-empty
 // body as "0 KB": under a kilobyte it says so, and small sizes keep a decimal.
@@ -134,8 +137,11 @@ async function save() {
             <span class="skill-field-label">{{ t("settings.skillScope") }}</span>
             <div class="skill-tile">
               <div class="skill-tile-copy">
-                <span class="skill-tile-label">{{ scope === "project" ? t("settings.skillScopeProject") : t("settings.skillScopeUser") }}</span>
-                <span class="skill-tile-hint" :class="{ 'is-path': skill }" :title="skill ? skill.path : undefined">{{ skill ? skill.path : t("settings.skillScopeDecided") }}</span>
+                <span v-if="skill" class="skill-tile-label is-path" :title="skill.path">{{ skillFolder }}</span>
+                <template v-else>
+                  <span class="skill-tile-label">{{ scope === "project" ? t("settings.skillScopeProject") : t("settings.skillScopeUser") }}</span>
+                  <span class="skill-tile-hint">{{ t("settings.skillScopeDecided") }}</span>
+                </template>
               </div>
             </div>
           </div>
@@ -191,8 +197,8 @@ async function save() {
 .skill-tile { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--surface-subtle); }
 .skill-tile-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .skill-tile-label { color: var(--text); font-size: var(--font-size-small); font-weight: 500; }
+.skill-tile-label.is-path { display: block; overflow: hidden; font-family: var(--font-mono); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .skill-tile-hint { color: var(--muted); font-size: var(--font-size-caption); line-height: 1.45; }
-.skill-tile-hint.is-path { overflow: hidden; font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .skill-sheet-error { margin: 0 18px 8px; padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--danger); font-size: var(--font-size-small); line-height: 1.5; }
 .skill-sheet-actions { display: flex; align-items: center; gap: 12px; padding: 6px 18px 14px; }
 .skill-sheet-note { max-width: 30ch; color: var(--faint); font-size: var(--font-size-caption); line-height: 1.45; }
