@@ -30,6 +30,7 @@ export const themeColors = {
     "accent-soft": "#eff6ff",
     "ring": "rgba(37, 99, 235, 0.14)",
     "danger": "#b54852",
+    "success": "#16803c",
     // Standalone amber for agent-in-progress states; accents stay blue so a
     // running node can contrast instead of reading as another accent shade.
     "running": "#d97706",
@@ -57,6 +58,7 @@ export const themeColors = {
     "accent-soft": "#e5f4ee",
     "ring": "rgba(50, 157, 120, 0.24)",
     "danger": "#b54852",
+    "success": "#16803c",
     "running": "#d97706",
     "warn": "#d97706",
     "shadow": "0 18px 55px rgba(21, 49, 41, 0.14)",
@@ -77,11 +79,12 @@ export const themeColors = {
     "muted": "#6f6057",
     "faint": "#9a8b82",
     // Deep peach for filled controls so white labels stay readable on it.
-    "accent": "#bd5329",
+    "accent": "#b04a22",
     "accent-strong": "#a8481f",
     "accent-soft": "#ffe3d4",
     "ring": "rgba(255, 138, 92, 0.28)",
-    "danger": "#c94836",
+    "danger": "#b3402c",
+    "success": "#16803c",
     "running": "#d97706",
     "warn": "#d97706",
     "shadow": "0 12px 36px rgba(196, 138, 92, 0.14), 0 2px 6px rgba(196, 138, 92, 0.08)",
@@ -105,11 +108,18 @@ export const themeColors = {
     "accent-strong": "#b2c6e5",
     "accent-soft": "#202e43",
     "ring": "rgba(141,166,206,.2)",
-    "danger": "#b54852",
+    // A token feeds both a text role and a fill role, which need opposite
+    // values: light enough to read on this scheme's surfaces, dark enough that
+    // the fill keeps its foreground legible. Dark therefore flips accent and
+    // danger foregrounds to the dark ink instead of inheriting the light
+    // scheme's white. danger and success stay in one contrast band so added and
+    // removed diff lines read as equals.
+    "danger": "#f2777a",
+    "success": "#3fb950",
     "running": "#f59e0b",
     "warn": "#f59e0b",
     "shadow": "0 18px 58px rgba(0,0,0,.34)",
     "accent-foreground": "#172238",
-    "danger-foreground": "#ffffff"
+    "danger-foreground": "#172238"
   }
 } as const;

@@ -66,6 +66,9 @@ export function durableWrite(file: string, text: string) {
   renameSync(temp, file);
 }
 
+/** Branch sidecar next to the session file; removed together with it. */
+export const graphDir = (main: string) => `${resolve(main)}.pix-tree`;
+
 export class GraphFiles {
   readonly dir: string;
   readonly records = new Map<string, BranchRecord>();
@@ -76,7 +79,7 @@ export class GraphFiles {
   readonly recoveryMessages: string[] = [];
   readonly recoveredInputs: Array<{ requestId: string; text: string; nodeId?: string | null; images?: PromptImage[] }> = [];
   constructor(readonly main: string) {
-    this.dir = `${resolve(main)}.pix-tree`;
+    this.dir = graphDir(main);
   }
   path(id: string) {
     if (!/^[a-zA-Z0-9-]+$/.test(id)) throw new Error("Invalid branch ID");

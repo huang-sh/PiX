@@ -5,6 +5,8 @@ import type { BranchMessage } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import FileChanges from "./FileChanges.vue";
+import type { FileChange } from "../../../shared/file-changes";
 
 export interface HistoryTurn {
   id: string;
@@ -13,10 +15,12 @@ export interface HistoryTurn {
   final?: BranchMessage;
   error?: BranchMessage;
   running?: boolean;
+  fileChanges?: FileChange[];
 }
 
 defineProps<{
   viewKey: string;
+  sessionPath?: string;
   turns: HistoryTurn[];
   processMessages: Map<string, BranchMessage[]>;
   expandedProcesses: Set<string>;
@@ -85,6 +89,7 @@ const { t } = useI18n();
           />
           <CopyButton :text="turn.final.text" />
         </article>
+        <FileChanges v-if="!turn.running && turn.fileChanges?.length && sessionPath" :changes="turn.fileChanges" :session-path="sessionPath" />
       </section>
   </div>
 </template>

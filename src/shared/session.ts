@@ -8,6 +8,7 @@ import type {
   SessionSummary,
 } from "./types.js";
 import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
+import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
 
 const entryIndexes = new WeakMap<RawSessionEntry[], Map<string, RawSessionEntry>>();
@@ -253,6 +254,7 @@ export function projectSession(
       hasError: finalAssistantReply ? error(finalAssistantReply) : false,
       depth: context(e.id).depth,
       footer: footerState(owned, context(e.parentId).settings),
+      fileChanges: turnFileChanges(owned),
     };
   });
   const edges: GraphEdge[] = nodes

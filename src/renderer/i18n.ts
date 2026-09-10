@@ -2,6 +2,14 @@ import { createI18n } from "vue-i18n";
 
 export const messages = {
   en: {
+    fileChanges: {
+      oldLine: "Original line {n}", newLine: "Updated line {n}",
+      count: "1 file changed | {n} files changed", review: "View diff", more: "Show more lines",
+      partialLabel: "Partial", partial: "Some files are excluded from the line totals.",
+      added: "Added", modified: "Modified", deleted: "Deleted",
+      binary: "Binary file", large: "Too large to compare", unavailable: "Snapshot unavailable",
+      conflict: "Interleaved changes; totals unavailable",
+    },
     common: {
       copy: "Copy",
       copied: "Copied",
@@ -591,6 +599,14 @@ export const messages = {
     },
   },
   "zh-CN": {
+    fileChanges: {
+      oldLine: "修改前第 {n} 行", newLine: "修改后第 {n} 行",
+      count: "{n} 个文件已更改", review: "查看差异", more: "显示更多行",
+      partialLabel: "部分统计", partial: "部分文件未计入增删行数。",
+      added: "新增", modified: "修改", deleted: "删除",
+      binary: "二进制文件", large: "内容过大，未计算差异", unavailable: "快照不可用",
+      conflict: "检测到交错修改，未统计行数",
+    },
     common: {
       copy: "复制",
       copied: "已复制",

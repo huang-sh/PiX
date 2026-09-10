@@ -40,3 +40,19 @@ header `cwd` to the validation workspace. When attachment bytes are unavailable,
 it creates a documented Pi v3 fallback session with the same ID and a branched
 entry tree. `artifacts/session-manifest.json` records the actual source, SHA-256,
 size, and entry count used by the verification run.
+
+## Running multiple development worktrees
+
+Use a separate terminal in each worktree. Give each process its own PiX profile
+and Electron user-data directory to keep settings, sessions and browser storage
+independent. The Vite renderer selects another port if its default is occupied.
+
+```powershell
+$env:PIX_HOME = Join-Path $PWD 'artifacts/dev-profile'
+$env:PI_CODING_AGENT_DIR = Join-Path $env:PIX_HOME '.pi/agent'
+$env:PIX_PROJECT = $PWD.Path
+npm run dev -- -- --user-data-dir="$env:PIX_HOME/electron"
+```
+
+A new profile needs its own model credentials/configuration. Install dependencies
+with `npm ci` in a fresh worktree; run `npm run fixtures` before the full test suite.

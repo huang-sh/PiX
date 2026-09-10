@@ -403,7 +403,9 @@ test("factory loads bundled packages as additional extension paths", async () =>
 
   // The user's own install suppresses the bundled copy.
   await create();
-  assert.deepEqual(servicesOptions.resourceLoaderOptions, { additionalExtensionPaths: [] });
+  assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
+  assert.equal(servicesOptions.resourceLoaderOptions.extensionFactories[0].name, "pix-file-changes");
+  assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories[0].factory, "function");
 
   // The bundled copy loads once no user install is configured. Factory
   // resolves relative to pi-runtime's compiled location (out-test/src/main),

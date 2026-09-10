@@ -22,6 +22,7 @@ import { sessionEventEncoder } from "../shared/session-updates.js";
 import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
 import { brokerOptions } from "./model-broker.js";
 import { listSshHosts } from "./ssh-host-installer.js";
@@ -594,6 +595,7 @@ export class MainController {
         "workspace.write",
         "git.status",
         "git.diff",
+        "changes.read",
         "shell.run",
         "shell.abort",
         "terminal.create",
@@ -748,6 +750,11 @@ export class MainController {
         return this.git.status();
       case "git.diff":
         return this.git.diff(v.path as string | undefined, Boolean(v.staged));
+      case "changes.read": {
+        const snapshot = this.pi.snapshot();
+        if (snapshot.session.path !== v.session) throw new Error("Session changed; reopen the file change");
+        return readFileChange(snapshot.session.path, snapshot.entries, String(v.ref));
+      }
       case "shell.run": {
         const command = String(v.command);
         const trust =

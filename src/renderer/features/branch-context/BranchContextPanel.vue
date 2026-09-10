@@ -155,6 +155,7 @@ const visibleTurns = computed<Turn[]>(() =>
       : [...body].reverse().find((message) => message.role === "assistant" && message.isError);
     return {
       id,
+      fileChanges: session.current?.projection.nodes.find(node => node.id === id)?.fileChanges,
       user,
       final,
       error,
@@ -355,6 +356,7 @@ onBeforeUnmount(() => {
            no live session updates; the cache is bounded independently of nodes. -->
       <KeepAlive :key="readingScope" :max="4">
         <BranchHistory :key="historyKey" :view-key="historyKey" :turns="visibleTurns"
+          :session-path="session.current?.session.path"
           :process-messages="processMessages" :expanded-processes="expandedProcesses"
           :duration="duration" :error-text="errorText" @toggle="toggleProcess" />
       </KeepAlive>

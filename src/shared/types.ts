@@ -1,5 +1,6 @@
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
+import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
 
 export type PromptImage = ImageContent;
@@ -78,6 +79,7 @@ export interface NodeFooterState {
   thinkingLevel: string;
 }
 export interface GraphNode {
+  fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
   parentId: string | null;
@@ -467,6 +469,7 @@ export type DesktopRoute =
   | "workspace.write"
   | "git.status"
   | "git.diff"
+  | "changes.read"
   | "shell.run"
   | "shell.abort"
   | "terminal.create"

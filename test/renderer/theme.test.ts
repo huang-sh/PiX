@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { activeTheme, applyTheme, colorScheme, startTheme } from "../../src/renderer/theme";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { desktop } from "../../src/renderer/api";
-import { normalizeTheme, themeColors } from "../../src/shared/theme";
+import { normalizeTheme, themeColors, type ThemeId } from "../../src/shared/theme";
 import { validateRouteInput } from "../../src/shared/contracts";
 import type { SettingsBundle } from "../../src/shared/types";
 import { mount, flushPromises } from "@vue/test-utils";
@@ -135,15 +135,36 @@ describe("theme lifecycle", () => {
     expect(validateRouteInput("settings.update", { scope: "global", patch: { theme: "custom-tui" } }).patch).toEqual({ theme: "custom-tui" });
   });
 
-  it("keeps button labels readable in every palette, including hover", () => {
+  it("keeps every palette token readable in both of its roles", () => {
+    type Palette = (typeof themeColors)[ThemeId];
+    type Token = keyof Palette & string;
     const luminance = (hex: string) => hex.slice(1).match(/../g)!.map(v => parseInt(v, 16) / 255)
       .map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
       .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i]!, 0);
-    for (const colors of Object.values(themeColors)) {
-      for (const background of [colors.accent, colors["accent-strong"]]) {
-        const levels = [luminance(background), luminance(colors["accent-foreground"])].sort((a, b) => b - a);
-        expect((levels[0]! + .05) / (levels[1]! + .05)).toBeGreaterThanOrEqual(4.5);
-      }
+    const ratio = (a: string, b: string) => {
+      const levels = [luminance(a), luminance(b)].sort((x, y) => y - x);
+      return (levels[0]! + .05) / (levels[1]! + .05);
+    };
+    // One value serves two roles pulling in opposite directions: it is read as
+    // text on a surface, and it is a fill behind its own foreground. A scheme
+    // that keeps the light palette's value satisfies the fill pair while failing
+    // as text, so both roles are pinned here. De-emphasized metadata keeps a 3:1
+    // floor instead of the body-text threshold.
+    const text: Array<[Token, number]> = [["text", 4.5], ["accent", 4.5], ["accent-strong", 4.5],
+      ["danger", 4.5], ["success", 4.5], ["muted", 3], ["faint", 3]];
+    const fill: Array<[Token, Token]> = [["accent", "accent-foreground"],
+      ["accent-strong", "accent-foreground"], ["danger", "danger-foreground"]];
+    const failures: string[] = [];
+    for (const theme of Object.keys(themeColors) as ThemeId[]) {
+      const colors: Palette = themeColors[theme];
+      for (const [token, minimum] of text)
+        for (const surface of ["surface", "surface-subtle"] as Token[])
+          if (ratio(colors[token], colors[surface]) < minimum)
+            failures.push(`${theme}: ${token} ${colors[token]} on ${surface} is ${ratio(colors[token], colors[surface]).toFixed(2)}:1, needs ${minimum}:1`);
+      for (const [token, foreground] of fill)
+        if (ratio(colors[token], colors[foreground]) < 4.5)
+          failures.push(`${theme}: ${foreground} ${colors[foreground]} on ${token} ${colors[token]} is ${ratio(colors[token], colors[foreground]).toFixed(2)}:1, needs 4.5:1`);
     }
+    expect(failures).toEqual([]);
   });
 });

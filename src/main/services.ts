@@ -5,6 +5,7 @@ import {
   realpathSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -42,6 +43,8 @@ import { projectId } from "../shared/types.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
+import { fileChangeDir } from "./file-changes.js";
+import { graphDir } from "./graph-files.js";
 const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
     const v = JSON.parse(readFileSync(p, "utf8"));
@@ -638,7 +641,15 @@ export class SessionFiles {
     );
   }
   delete(p: string) {
-    unlinkSync(this.managed(p));
+    const path = this.managed(p);
+    unlinkSync(path);
+    // The sidecars keep file contents and branch records that nothing can reach
+    // once the session file is gone, so they go with it. Cleanup stays
+    // best-effort: a locked snapshot must not report a finished deletion as a
+    // failure after the session file itself is already unlinked.
+    for (const dir of [fileChangeDir(path), graphDir(path)]) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    }
   }
 }
 export function configuredSessionDir(

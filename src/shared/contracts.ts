@@ -81,6 +81,8 @@ export function validateRouteInput(
       };
     case "git.diff":
       return { path: str(v.path, "path", true), staged: v.staged === true };
+    case "changes.read":
+      return { session: str(v.session, "session"), ref: str(v.ref, "ref") };
     case "shell.run":
       return { command: str(v.command, "command") };
     case "shell.abort":

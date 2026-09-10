@@ -1,6 +1,6 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-export const PIX_REMOTE_PROTOCOL = 9;
+export const PIX_REMOTE_PROTOCOL = 10;
 export const PIX_HOST_VERSION = "0.0.12";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
@@ -19,6 +19,7 @@ export const PROJECT_ROUTES = [
   "workspace.write",
   "git.status",
   "git.diff",
+  "changes.read",
   "shell.run",
   "shell.abort",
   "terminal.create",
