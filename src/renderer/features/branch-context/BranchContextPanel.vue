@@ -147,20 +147,17 @@ const turns = computed(() => {
 
 const visibleTurns = computed<Turn[]>(() =>
   turns.value.slice(-visibleTurnCount.value).map(({ id, user, body }) => {
-    const final = [...body].reverse().find(
-      (message) => message.role === "assistant" && message.text,
-    );
-    const error = final
-      ? undefined
-      : [...body].reverse().find((message) => message.role === "assistant" && message.isError);
+    // A turn ends at its last assistant message, whatever it carries — the same
+    // message the projection reads for node.hasError. An empty final reply is a
+    // failure, never the earlier text that happened to precede it.
+    const terminal = [...body].reverse().find((message) => message.role === "assistant");
     return {
       id,
       fileChanges: session.current?.projection.nodes.find(node => node.id === id)?.fileChanges,
       user,
-      final,
-      error,
+      terminal,
       running: selectedRun.value?.status === "running" && id === selectedRun.value.nodeId,
-      process: body.filter((message) => message !== final && message !== error),
+      process: body.filter((message) => message !== terminal),
     };
   }),
 );
@@ -189,7 +186,7 @@ async function showEarlierTurns() {
 
 function duration(turn: Turn) {
   const start = new Date(turn.user?.timestamp ?? "").getTime();
-  const end = new Date(turn.final?.timestamp ?? turn.error?.timestamp ?? turn.process.at(-1)?.timestamp ?? "").getTime();
+  const end = new Date(turn.terminal?.timestamp ?? turn.process.at(-1)?.timestamp ?? "").getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end)) return t("time.aMoment");
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   return seconds >= 60

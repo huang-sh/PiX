@@ -12,8 +12,8 @@ export interface HistoryTurn {
   id: string;
   user?: BranchMessage;
   process: BranchMessage[];
-  final?: BranchMessage;
-  error?: BranchMessage;
+  /** The turn's last assistant message: its text is the answer, its isError the failure. */
+  terminal?: BranchMessage;
   running?: boolean;
   fileChanges?: FileChange[];
 }
@@ -40,11 +40,11 @@ const { t } = useI18n();
           <CopyButton :text="turn.user.text" />
         </article>
 
-        <details v-if="turn.process.length || turn.final?.thinking" class="agent-process"
+        <details v-if="turn.process.length || turn.terminal?.thinking" class="agent-process"
           :open="expandedProcesses.has(turn.id)" @toggle="emit('toggle', turn.id, $event, viewKey)">
           <summary>
             <template v-if="turn.running"><LoaderCircle :size="14" class="spin" /> {{ t('branch.running') }}</template>
-            <template v-else>{{ t("branch.worked", { duration: duration(turn), n: turn.process.length + (turn.final?.thinking ? 1 : 0) }) }}</template>
+            <template v-else>{{ t("branch.worked", { duration: duration(turn), n: turn.process.length + (turn.terminal?.thinking ? 1 : 0) }) }}</template>
             <ChevronRight class="disclosure" :size="13" />
           </summary>
           <div v-if="expandedProcesses.has(turn.id)" class="process-items">
@@ -70,24 +70,22 @@ const { t } = useI18n();
                 <CopyButton :text="message.text" />
               </div>
             </template>
-            <details v-if="turn.final?.thinking" class="process-item process-thinking">
+            <details v-if="turn.terminal?.thinking" class="process-item process-thinking">
               <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
-              <p>{{ turn.final.thinking }}</p>
+              <p>{{ turn.terminal.thinking }}</p>
             </details>
           </div>
         </details>
 
-        <article v-if="turn.error" class="branch-message assistant error-response">
-          <p class="error-message">{{ errorText(turn.error) }}</p>
-          <CopyButton :text="errorText(turn.error)" />
+        <article v-if="turn.terminal?.isError" class="branch-message assistant error-response">
+          <p class="error-message">{{ errorText(turn.terminal) }}</p>
+          <CopyButton :text="errorText(turn.terminal)" />
         </article>
 
-        <article v-if="turn.final" class="branch-message assistant" :class="turn.running ? 'progress-response' : 'final-response'">
-          <MarkdownRenderer
-            :content="turn.final.text || t('common.empty')"
-            :custom-id="turn.final.entryId"
-          />
-          <CopyButton :text="turn.final.text" />
+        <article v-if="turn.terminal?.text" class="branch-message assistant"
+          :class="turn.running || turn.terminal.isError ? 'progress-response' : 'final-response'">
+          <MarkdownRenderer :content="turn.terminal.text" :custom-id="turn.terminal.entryId" />
+          <CopyButton :text="turn.terminal.text" />
         </article>
         <FileChanges v-if="!turn.running && turn.fileChanges?.length && sessionPath" :changes="turn.fileChanges" :session-path="sessionPath" />
       </section>

@@ -49,8 +49,8 @@ it("places each card after its final answer, including stopped turns, and hides 
   const wrapper = mount(BranchHistory, { props: {
     viewKey: "one", sessionPath: "/sessions/one.jsonl", processMessages: new Map(), expandedProcesses: new Set<string>(),
     duration: () => "1s", errorText: () => "stopped", turns: [
-      { id: "one", process: [], final: { entryId: "a", turnId: "one", text: "done", role: "assistant", timestamp: "" }, fileChanges: [change] },
-      { id: "two", process: [], error: { entryId: "b", turnId: "two", text: "", role: "assistant", timestamp: "" }, fileChanges: [change] },
+      { id: "one", process: [], terminal: { entryId: "a", turnId: "one", text: "done", role: "assistant", timestamp: "" }, fileChanges: [change] },
+      { id: "two", process: [], terminal: { entryId: "b", turnId: "two", text: "", role: "assistant", timestamp: "", isError: true }, fileChanges: [change] },
       { id: "three", process: [], running: true, fileChanges: [change] },
       { id: "four", process: [], fileChanges: [] },
     ],
