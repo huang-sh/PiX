@@ -6,7 +6,7 @@ import type { DesktopEvent, DesktopRoute } from "./types.js";
 // The product version stays with the release chore: installers compare both,
 // so a protocol change alone triggers the reinstall.
 export const PIX_REMOTE_PROTOCOL = 11;
-export const PIX_HOST_VERSION = "0.0.13";
+export const PIX_HOST_VERSION = "0.0.14";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
