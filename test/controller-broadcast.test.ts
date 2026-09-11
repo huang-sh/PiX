@@ -11,6 +11,14 @@ import { projectSession } from "../src/shared/session.js";
 import { sessionEventDecoder } from "../src/shared/session-updates.js";
 import { agentMessageContent } from "../src/shared/agent-stream.js";
 
+// Settled sessions are remembered into PIX_HOME's settings.json (rememberSnapshot),
+// so without an isolated home these tests would enroll their temp workspaces in
+// the developer's real session panel.
+const home = mkdtempSync(join(tmpdir(), "pix-broadcast-home-"));
+process.env.PIX_HOME = home;
+process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
+process.on("exit", () => rmSync(home, { recursive: true, force: true }));
+
 const root = resolve(process.cwd(), "test", "workspace");
 const platform: Platform = {
   async pickProject() {
