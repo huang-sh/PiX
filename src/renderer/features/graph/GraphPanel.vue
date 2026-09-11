@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Focus, Map as MapIcon, Network } from "@lucide/vue";
+import { Focus, Map as MapIcon, Network, Search } from "@lucide/vue";
 import {
   VueFlow,
   type Edge,
@@ -20,6 +20,7 @@ import { projectSession, sessionEntryIndex, clipText } from "../../../shared/ses
 import { layoutGraph, reserveManualPositions, type BranchDirection } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
+import { searchGraphNodeIds } from "../../lib/graph-search";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
@@ -63,6 +64,11 @@ let activeSession: string | undefined;
 const readableZoom = 0.9;
 const booted = ref(false);
 const deleteError = ref("");
+const searchOpen = ref(false);
+const searchQuery = ref("");
+const searchInput = ref<HTMLInputElement>();
+// -1 = no hit visited yet, so the first Enter lands on the first hit.
+const searchPosition = ref(-1);
 const recoveringDeletion = ref(false);
 const deletionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
 const promptCache = new Map<string, PromptNodeData>();
@@ -79,6 +85,18 @@ function stablePrompt(data: PromptNodeData) {
 let autoPositions: Map<string, { x: number; y: number; width: number; height: number }> | undefined;
 
 const projection = computed(() => session.current?.projection);
+const searchHits = computed<string[]>(() => {
+  const value = projection.value;
+  if (!searchOpen.value || !value || !session.current) return [];
+  return searchGraphNodeIds(value, session.current.entries, searchQuery.value);
+});
+const searchHitIds = computed(() => new Set(searchHits.value));
+const searchCount = computed(() => {
+  if (!searchOpen.value || !searchQuery.value.trim()) return "";
+  const n = searchHits.value.length;
+  if (!n) return t("graph.searchNoHits");
+  return n === 1 ? t("graph.searchHitOne") : t("graph.searchHits", { n });
+});
 function rememberBranchOrder(id: string, order: number, pendingId?: string) {
   if (!pendingId && branchOrder.get(id) === order) return;
   if (pendingId) branchOrder.delete(pendingId);
@@ -210,7 +228,11 @@ function rebuild() {
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
+      searchHit: searchHitIds.value.has(node.id),
       onCompose: direction => compose(node.id, direction),
+      onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
+        ? () => { void retryTurn(node.id); }
+        : undefined,
       onDelete: () => { void deleteNode(node.id); },
       deleteBlockedReason: session.deleteBlockedReason,
     }),
@@ -439,6 +461,46 @@ async function compose(id: string, direction?: BranchDirection) {
   await center(`draft:${id}`, true);
 }
 
+// Retry reopens the failed turn's prompt as a draft attached to its parent, so
+// submitting grows a sibling branch and the failed turn stays untouched. A
+// failed root turn has no earlier parent; its draft attaches to itself, which
+// continues that branch — the failure remains visible in the history either way.
+async function retryTurn(id: string) {
+  const node = projection.value?.nodes.find((item) => item.id === id);
+  if (!node) return;
+  const content = nodeContent(id);
+  if (!content.user.trim() && !content.images?.length) return;
+  const parent = node.parentId ?? node.id;
+  const parentNode = projection.value?.nodes.find((item) => item.id === parent);
+  resetDraft();
+  draftParent.value = parent;
+  draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
+  draftThinking.value = undefined;
+  draftState.value = { ...emptyDraft(), text: content.user, images: [...(content.images ?? [])] };
+  rebuild();
+  await center(`draft:${parent}`, true);
+}
+
+async function toggleSearch() {
+  searchOpen.value = !searchOpen.value;
+  if (!searchOpen.value) {
+    searchQuery.value = "";
+    searchPosition.value = -1;
+  } else {
+    await nextTick();
+    searchInput.value?.focus({ preventScroll: true });
+  }
+}
+
+async function stepSearch(back: boolean) {
+  const hits = searchHits.value;
+  if (!hits.length) return;
+  searchPosition.value = (searchPosition.value + (back ? -1 : 1) + hits.length) % hits.length;
+  await select(hits[searchPosition.value]!, true);
+}
+
+watch(searchQuery, () => { searchPosition.value = -1; });
+
 function cancelDraft() {
   resetDraft();
   rebuild();
@@ -638,7 +700,8 @@ watch(
   [() => sessionKey.value, () => projection.value?.nodes, () => projection.value?.edges,
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
-    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns],
+    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns,
+    searchHitIds],
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
@@ -703,10 +766,31 @@ watch(
         :aria-label="t('graph.minimapLabel')"
         @click="navigateMinimap"
       />
-      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" />
+      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" :highlight="searchHitIds.size ? searchHitIds : undefined" />
     </VueFlow>
 
     <nav class="graph-controls">
+      <div v-if="searchOpen" class="graph-search nodrag nowheel" @mousedown.stop @wheel.stop>
+        <input
+          ref="searchInput"
+          v-model="searchQuery"
+          type="text"
+          data-action="graph-search-input"
+          :placeholder="t('graph.searchPlaceholder')"
+          :title="t('graph.searchNavigate')"
+          @keydown.enter.prevent="stepSearch($event.shiftKey)"
+          @keydown.esc.stop.prevent="toggleSearch"
+        />
+        <span class="graph-search-count">{{ searchCount }}</span>
+      </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        :aria-expanded="searchOpen"
+        :aria-label="t('graph.searchLabel')"
+        :title="t('graph.searchLabel')"
+        @click="toggleSearch"
+      ><Search :size="15" /></Button>
       <Button
         variant="ghost"
         size="icon"

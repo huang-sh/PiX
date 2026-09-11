@@ -99,6 +99,11 @@ function errorMessageText(e: RawSessionEntry) {
   const value = msg(e)?.errorMessage;
   return typeof value === "string" && value.trim() ? value : undefined;
 }
+/** Searchable text of one raw entry: prompt/reply prose plus the tool name. */
+export function entrySearchText(e: RawSessionEntry): string {
+  const name = tool(e);
+  return name ? `${text(e)}\n${name}` : text(e);
+}
 function modelState(current: NodeFooterState["model"], provider: string, id: string) {
   return current?.provider === provider && current.id === id ? current : { provider, id };
 }
