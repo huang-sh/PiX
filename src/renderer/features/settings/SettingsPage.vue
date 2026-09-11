@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Download, Folder, History, Info, Keyboard, KeyRound, Lock, Palette, Pencil, Plus, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Trash2, Wrench, X } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, Download, Eye, Folder, History, Info, Keyboard, KeyRound, Lock, Palette, Pencil, Plus, Puzzle, RefreshCw, Save, Search, SlidersHorizontal, Sparkles, Terminal, Trash2, Wrench, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, toRaw, watch } from "vue";
 import { normalizeTheme } from "../../../shared/theme";
 import { applyAppearance } from "../../theme";
@@ -73,7 +73,7 @@ const skillError = ref("");
 const skillActionPath = ref("");
 const skillImport = ref<HTMLInputElement>();
 const confirmingSkillPath = ref("");
-const skillEditor = ref<{ document?: RuntimeSkillDocument; scope: "user" | "project" }>();
+const skillEditor = ref<{ document?: RuntimeSkillDocument; scope: "user" | "project"; readonly?: boolean }>();
 const canUseProjectSkills = computed(() => !!workspace.project);
 const extensions = ref<RuntimeExtension[]>([]);
 const extensionQuery = ref("");
@@ -260,7 +260,7 @@ const skillSections = computed(() => {
   // — and its "no skills here yet" line would be a lie.
   const searching = !!skillQuery.value.trim();
   const scopes = skillScope.value === "all"
-    ? (["project", "user", "temporary"] as const)
+    ? (["project", "user", "builtin", "temporary"] as const)
     : ([skillScope.value] as const);
   return scopes
     .map((scope) => ({
@@ -268,9 +268,12 @@ const skillSections = computed(() => {
       label: t(`settings.skillScopes.${scope}`),
       skills: filteredSkills.value.filter((skill) => skill.scope === scope),
     }))
-    .filter((section) => searching ? section.skills.length > 0 : section.scope !== "temporary" || section.skills.length > 0);
+    // Only the writable folders stay visible while empty: their headers are
+    // where a new skill or an import lands. Built-in and additional-path
+    // folders cannot receive one, so an empty one is noise.
+    .filter((section) => searching || section.scope === "project" || section.scope === "user" || section.skills.length > 0);
 });
-const skillFilters = computed(() => (["all", "project", "user", "temporary"] as const)
+const skillFilters = computed(() => (["all", "project", "user", "builtin", "temporary"] as const)
   .map((scope) => ({ scope, count: queriedSkills.value.filter((skill) => scope === "all" || skill.scope === scope).length })));
 const filteredExtensions = computed(() => {
   const query = extensionQuery.value.trim().toLowerCase();
@@ -427,9 +430,14 @@ async function openEditSkill(skill: RuntimeSkill) {
   skillError.value = "";
   try {
     const document = await session.control<RuntimeSkillDocument>({ action: "getSkill", path: skill.path });
-    skillEditor.value = { document, scope: skill.scope === "project" ? "project" : "user" };
+    // Read-only skills (bundled, packaged) open the same sheet as a viewer.
+    skillEditor.value = { document, scope: skill.scope === "project" ? "project" : "user", readonly: !skill.editable };
   } catch (error) {
-    skillError.value = error instanceof Error ? error.message : String(error);
+    // Reload so a stale row (the file moved or the loader changed since the
+    // list loaded) disappears instead of failing on every click.
+    const message = error instanceof Error ? error.message : String(error);
+    await loadSkills();
+    skillError.value = message;
   } finally {
     skillActionPath.value = "";
   }
@@ -937,13 +945,15 @@ async function logout(provider: RuntimeProvider) {
                       <span class="skill-badge is-level">{{ t(`settings.skillFilters.${skill.scope}`) }}</span>
                       <span v-if="skill.disableModelInvocation && !skill.editable" class="skill-badge is-manual">{{ t("settings.manualSkill") }}</span>
                       <span v-if="!skill.editable" class="skill-badge"><Lock :size="10" />{{ t("settings.skillReadOnly") }}</span>
+                      <span v-if="skill.shadowsBuiltin" class="skill-badge" :title="skill.shadowsBuiltin">{{ t("settings.skillShadowsBuiltin") }}</span>
                     </div>
                     <p class="skill-description" :title="skill.description">{{ skill.description }}</p>
                   </div>
                   <div class="skill-actions">
-                    <button v-if="skill.editable" type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="skill.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" :title="t('settings.skillManualOnlyHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">
+                    <button v-if="skill.editable || skill.scope === 'builtin'" type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="!skill.disableModelInvocation" :aria-label="t('settings.skillAuto')" :title="t(skill.disableModelInvocation ? 'settings.skillManualOnlyHint' : 'settings.skillAutoHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">
                       <span class="skill-switch-thumb" />
                     </button>
+                    <Button v-if="!skill.editable" class="skill-action" variant="ghost" size="icon" data-skill-view :title="t('settings.viewSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Eye :size="15" /></Button>
                     <Button v-if="skill.editable" class="skill-action" variant="ghost" size="icon" :title="t('settings.editSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Pencil :size="15" /></Button>
                     <Button v-if="skill.editable" class="skill-action skill-action-delete" :class="confirmingSkillPath === skill.path ? 'is-arming' : undefined" variant="ghost" size="icon" :title="t(confirmingSkillPath === skill.path ? 'settings.skillDeleteConfirm' : 'settings.deleteSkill')" :disabled="!!skillActionPath" @click="removeSkill(skill)"><Trash2 :size="15" /></Button>
                   </div>
@@ -1024,7 +1034,7 @@ async function logout(provider: RuntimeProvider) {
           <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @input="setValue(row, $event)" />
         </label>
       </section>
-      <SkillEditorForm v-if="skillEditor" :key="skillEditor.document?.path ?? `new:${skillEditor.scope}`" :skill="skillEditor.document" :scope="skillEditor.scope" @saved="skillSaved" @cancel="skillEditor = undefined" />
+      <SkillEditorForm v-if="skillEditor" :key="skillEditor.document?.path ?? `new:${skillEditor.scope}`" :skill="skillEditor.document" :scope="skillEditor.scope" :readonly="skillEditor.readonly" @saved="skillSaved" @cancel="skillEditor = undefined" />
     </main>
     <aside v-if="layout.settingsCategory === 'models' && selectedProvider" id="model-details-panel" class="settings-inspector model-inspector" aria-labelledby="model-details-title" @keydown.esc.stop="closeDetailsPanel">
       <header class="settings-inspector-header">

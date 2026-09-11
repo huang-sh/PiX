@@ -6,7 +6,7 @@
 // Only the host platform's binary is ever spawned.
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { checkPackagedFiles, checkPackagedFff } from "./check-packaged-files.mjs";
+import { checkPackagedFiles, checkPackagedFff, checkPackagedSkills } from "./check-packaged-files.mjs";
 import { bundlePiPackage } from "./bundle-pi-package.mjs";
 
 // electron-builder's context.arch is the numeric Arch enum (builder-util).
@@ -86,6 +86,7 @@ export default async function afterPack(context) {
   const pruned = pruneDevArtifacts(join(resources, "pi-builtin"));
   console.log(`  • pruned ${pruned} dev artifacts (declarations, maps, docs) from pi-builtin`);
   checkPackagedFiles(join(resources, "app.asar"), context.packager.info.appDir);
+  checkPackagedSkills(resources);
   if (["win32", "darwin"].includes(context.electronPlatformName))
     checkPackagedFff(resources, context.electronPlatformName, ARCH_NAMES[context.arch]);
   const keep = new Set(hostDirectories(context.electronPlatformName, context.arch));
