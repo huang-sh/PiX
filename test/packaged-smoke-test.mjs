@@ -243,6 +243,33 @@ try {
     throw new Error(
       `Packaged PTY did not execute input: ${JSON.stringify(terminal)}\n${stderr}`,
     );
+  // Bundled skills in their packaged form (<resources>/skills): listed with
+  // the read-only builtin badge, openable in the viewer, and toggleable via
+  // the override table — all through the real IPC channel.
+  const bundled = await retry(async () => {
+    const meta = await cdp.evaluate(`(async () => {
+      const skills = await window.pix.invoke("agent.control", { action: "getSkills" });
+      const zotero = skills.find((skill) => skill.name === "zotero-cli");
+      if (!zotero) throw new Error("bundled zotero-cli not listed");
+      return { scope: zotero.scope, editable: zotero.editable, path: zotero.path };
+    })()`);
+    if (meta.scope !== "builtin" || meta.editable !== false || !/[\\/]skills[\\/]zotero-cli[\\/]SKILL\.md$/.test(meta.path))
+      throw new Error(`bundled skill metadata wrong: ${JSON.stringify(meta)}`);
+    return meta;
+  });
+  const viewed = await cdp.evaluate(`(async () => {
+    const document = await window.pix.invoke("agent.control", { action: "getSkill", path: ${JSON.stringify(bundled.path)} });
+    return { name: document.name, hasBody: /zotero-cli/.test(document.body) };
+  })()`);
+  if (viewed.name !== "zotero-cli" || !viewed.hasBody)
+    throw new Error(`bundled skill not viewable: ${JSON.stringify(viewed)}`);
+  const manualOnly = await cdp.evaluate(`(async () => {
+    await window.pix.invoke("agent.control", { action: "setSkillManualOnly", path: ${JSON.stringify(bundled.path)}, manualOnly: true });
+    const skills = await window.pix.invoke("agent.control", { action: "getSkills" });
+    return skills.find((skill) => skill.name === "zotero-cli").disableModelInvocation;
+  })()`);
+  if (manualOnly !== true)
+    throw new Error("bundled skill manual-only toggle did not take effect");
   const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(
     join(artifacts, "packaged-smoke.png"),
@@ -253,6 +280,7 @@ try {
     rendererReady: true,
     sessions: session.sessions,
     terminal: true,
+    bundledSkills: true,
     fffind: bundledChecks,
     ffgrep: bundledChecks,
     webFetch: bundledChecks,

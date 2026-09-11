@@ -5,7 +5,7 @@
 // directory and delete the rest after the app is packed.
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { checkPackagedFiles, checkPackagedFff } from "./check-packaged-files.mjs";
+import { checkPackagedFiles, checkPackagedFff, checkPackagedSkills } from "./check-packaged-files.mjs";
 import { bundlePiPackage } from "./bundle-pi-package.mjs";
 
 // electron-builder's context.arch is the numeric Arch enum (builder-util).
@@ -59,6 +59,7 @@ export default async function afterPack(context) {
   const webPackages = bundlePiPackage(context.packager.info.appDir, resources, "pi-web-access");
   console.log(`  • bundled pi-web-access with ${webPackages - 1} runtime dependencies`);
   checkPackagedFiles(join(resources, "app.asar"), context.packager.info.appDir);
+  checkPackagedSkills(resources);
   if (["win32", "darwin"].includes(context.electronPlatformName))
     checkPackagedFff(resources, context.electronPlatformName, ARCH_NAMES[context.arch]);
   const keep = new Set(hostDirectories(context.electronPlatformName, context.arch));
