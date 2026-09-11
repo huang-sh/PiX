@@ -22,6 +22,15 @@ export function validateSshHost(host: string) {
 
 const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
+/**
+ * What gets copied from the local server bundle to the remote staging
+ * directory. Skills ship as a sibling of the server bundle (repo/skills in
+ * dev runs, resources/skills in the packaged app) so remote hosts load the
+ * same built-in skills via src/main/builtin-skills.ts (server/dist/main ->
+ * ../../skills).
+ */
+const HOST_BUNDLE_ENTRIES = ["dist", "bin", "package.json", "package-lock.json", "../skills"];
+
 export function sshProjectPath(cwd: string) {
   if (
     /[\r\n]/u.test(cwd) ||
@@ -113,7 +122,7 @@ export async function ensureSshHostInstalled(hostInput: string, force = false, o
     exec: (command, timeoutMs) => run("ssh", sshArgs(host, command), timeoutMs, options.signal),
     upload: async (source, stage) => {
       await run("scp", ["-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-        ...["dist", "bin", "package.json", "package-lock.json"].map((path) => resolve(source, path)),
+        ...HOST_BUNDLE_ENTRIES.map((path) => resolve(source, path)),
         `${host}:${stage}/`], 120_000, options.signal);
     },
   }, force, options);
@@ -127,7 +136,7 @@ export async function ensureWslHostInstalled(distro: string, force = false, opti
     exec: (command, timeoutMs) => wsl(["sh", "-lc", command], timeoutMs),
     upload: async (source, stage) => {
       const linuxSource = await wsl(["wslpath", "-a", "-u", source]);
-      await wsl(["cp", "-R", ...["dist", "bin", "package.json", "package-lock.json"].map((path) => `${linuxSource}/${path}`), `${stage}/`]);
+      await wsl(["cp", "-R", ...HOST_BUNDLE_ENTRIES.map((path) => `${linuxSource}/${path}`), `${stage}/`]);
     },
   }, force, options);
 }
@@ -172,6 +181,7 @@ async function ensureHostInstalled(transport: {
     resolve(source, "bin/check-runtime.mjs"),
     resolve(source, "package.json"),
     resolve(source, "package-lock.json"),
+    resolve(source, "..", "skills"),
   ]) {
     if (!existsSync(path))
       throw new Error(`PiX server bundle is missing: ${path}`);

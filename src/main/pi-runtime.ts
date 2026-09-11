@@ -14,6 +14,7 @@ import {
   withDetectedBashShell,
 } from "./bash-resolution.js";
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
+import { resolveBuiltinSkills } from "./builtin-skills.js";
 import {
   SKILL_BODY_MESSAGES,
   SKILL_DESCRIPTION_MESSAGES,
@@ -42,7 +43,7 @@ import type {
   SessionSnapshot,
   SessionSummary,
 } from "../shared/types.js";
-import type { ExtensionFactory, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type { CreateAgentSessionServicesOptions, ExtensionFactory, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 
@@ -202,7 +203,7 @@ export class PiRuntime {
    * Options shared by every createAgentSessionServices call, so session and
    * session-less services behave the same.
    */
-  private sessionServicesOptions(pi: any, cwd: string) {
+  private sessionServicesOptions(pi: any, cwd: string): CreateAgentSessionServicesOptions {
     const agentDir = this.agentDir(pi);
     // Pi's bash tool otherwise only finds Git Bash under Program Files or
     // directly on PATH; derive it from git.exe so custom install roots
@@ -225,6 +226,12 @@ export class PiRuntime {
         additionalExtensionPaths: resolveBuiltinPackages(
           dirname(fileURLToPath(import.meta.url)),
           settingsManager,
+        ),
+        // Built-in skills load as plain markdown via the same layout
+        // resolution (extraResources skills/ beside the app or server);
+        // pi ranks them below user skills, so same-named user copies win.
+        additionalSkillPaths: resolveBuiltinSkills(
+          dirname(fileURLToPath(import.meta.url)),
         ),
       },
     };
