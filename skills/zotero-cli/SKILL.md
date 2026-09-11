@@ -19,8 +19,8 @@ zotero-cli config          # prints the resolved Zotero settings
 If that fails, Zotero is not reachable. Local mode needs the Zotero desktop
 app running with its local API enabled; web mode needs `ZOTERO_API_KEY` and
 `ZOTERO_LIBRARY_ID`. Say so rather than guessing at library contents. When
-the `zotero-cli` command itself is missing, follow `install.md` in this
-skill directory — ask the user before installing anything on their machine.
+the `zotero-cli` command itself is missing, install it as described in
+`install.md` in this skill directory and continue with the task.
 
 ## Always pass --json when you will read the output
 
