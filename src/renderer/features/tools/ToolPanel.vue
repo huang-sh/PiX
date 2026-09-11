@@ -34,6 +34,7 @@ import { useSessionStore } from "../../stores/session";
 import FileTree from "./FileTree.vue";
 import { filterFileTree } from "./file-tree";
 import TerminalView from "./TerminalView.vue";
+import FileDiff from "./FileDiff.vue";
 
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
@@ -400,7 +401,7 @@ async function save(tab: WorkspaceTab) {
 
     <template v-else>
       <div
-        v-if="layout.contentSection !== 'browser' || active?.kind !== 'browser'"
+        v-if="active?.kind !== 'turn-change' && (layout.contentSection !== 'browser' || active?.kind !== 'browser')"
         class="tool-explorer"
         :class="{ expanded: !workspace.tabs.length }"
       >
@@ -457,6 +458,7 @@ async function save(tab: WorkspaceTab) {
             />
           </template>
           <pre v-else-if="active.kind === 'changes'" class="diff-view">{{ workspace.diff || t("tools.noChanges") }}</pre>
+          <FileDiff v-else-if="active.kind === 'turn-change'" :patch="active.patch ?? ''" />
           <template v-else-if="active.kind === 'browser'">
             <form class="browser-bar" @submit.prevent="workspace.openBrowser(active.url)">
               <input :value="active.url" @input="active.url = ($event.target as HTMLInputElement).value" />

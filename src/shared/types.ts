@@ -1,5 +1,6 @@
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
+import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
 import type { WikiAppSettings } from "./wiki.js";
 
@@ -79,6 +80,7 @@ export interface NodeFooterState {
   thinkingLevel: string;
 }
 export interface GraphNode {
+  fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
   parentId: string | null;
@@ -336,6 +338,9 @@ export interface AppSettings {
   openLinksInApp: boolean;
   closeToTray: boolean;
   wiki?: WikiAppSettings;
+  canvasDotGrid: boolean;
+  canvasDotGridSpacing: number;
+  canvasDotGridDotSize: number;
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -372,6 +377,15 @@ export interface RuntimeSkill {
   path: string;
   source: string;
   scope: "user" | "project" | "temporary";
+  disableModelInvocation: boolean;
+  /** True when the file sits in a skills folder PiX may rewrite. */
+  editable: boolean;
+}
+export interface RuntimeSkillDocument {
+  path: string;
+  name: string;
+  description: string;
+  body: string;
   disableModelInvocation: boolean;
 }
 export interface RuntimeExtension {
@@ -412,6 +426,32 @@ export type AgentControl =
         | "reload";
     }
   | { action: "getSkills"; reload?: boolean }
+  | { action: "getSkill"; path: string }
+  | {
+      action: "createSkill";
+      scope: "user" | "project";
+      name: string;
+      description: string;
+      body: string;
+      disableModelInvocation: boolean;
+    }
+  | {
+      action: "importSkill";
+      scope: "user" | "project";
+      /** Fallback name when the document has no frontmatter name. */
+      name: string;
+      content: string;
+    }
+  | {
+      action: "updateSkill";
+      path: string;
+      name: string;
+      description: string;
+      body: string;
+      disableModelInvocation: boolean;
+    }
+  | { action: "deleteSkill"; path: string }
+  | { action: "setSkillManualOnly"; path: string; manualOnly: boolean }
   | { action: "getModels"; broker?: boolean }
   | { action: "getExtensions"; reload?: boolean }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }
@@ -466,6 +506,7 @@ export type DesktopRoute =
   | "workspace.write"
   | "git.status"
   | "git.diff"
+  | "changes.read"
   | "shell.run"
   | "shell.abort"
   | "terminal.create"

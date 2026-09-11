@@ -8,6 +8,7 @@ import type {
   SessionSummary,
 } from "./types.js";
 import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
+import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
 
 const entryIndexes = new WeakMap<RawSessionEntry[], Map<string, RawSessionEntry>>();
@@ -98,6 +99,11 @@ function errorMessageText(e: RawSessionEntry) {
   if (!error(e)) return undefined;
   const value = msg(e)?.errorMessage;
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+/** Searchable text of one raw entry: prompt/reply prose plus the tool name. */
+export function entrySearchText(e: RawSessionEntry): string {
+  const name = tool(e);
+  return name ? `${text(e)}\n${name}` : text(e);
 }
 function modelState(current: NodeFooterState["model"], provider: string, id: string) {
   return current?.provider === provider && current.id === id ? current : { provider, id };
@@ -253,6 +259,7 @@ export function projectSession(
       hasError: finalAssistantReply ? error(finalAssistantReply) : false,
       depth: context(e.id).depth,
       footer: footerState(owned, context(e.parentId).settings),
+      fileChanges: turnFileChanges(owned),
     };
   });
   const edges: GraphEdge[] = nodes

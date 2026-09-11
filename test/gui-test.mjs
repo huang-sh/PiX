@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronBinary } from "./lib/electron-binary.mjs";
@@ -1042,6 +1042,59 @@ try {
   await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings-models.png"), Buffer.from(screenshot.data, "base64"));
+
+  // Skills are real SKILL.md files under the Pi agent dir; the settings page
+  // creates, toggles, and deletes them through the host, so assert the disk.
+  const guiSkillDir = join(testHome, ".pi", "agent", "skills", "pix-gui-skill");
+  const guiSkillFile = join(guiSkillDir, "SKILL.md");
+  rmSync(guiSkillDir, { recursive: true, force: true });
+  await cdp.evaluate("document.querySelector('[data-settings-category=skills]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('.skill-card [data-skill-search]'))")))
+      throw new Error("Skills settings did not render");
+  });
+  await cdp.evaluate("document.querySelector('[data-skill-new]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('form[data-skill-form]'))")))
+      throw new Error("Skill editor did not open");
+  });
+  await cdp.evaluate(`(() => {
+    const name = document.querySelector('[data-skill-name]');
+    name.value = 'pix-gui-skill';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    const description = document.querySelector('[data-skill-description]');
+    description.value = 'Created by the PiX GUI test.';
+    description.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await retry(async () => {
+    if (await cdp.evaluate("document.querySelector('[data-skill-save]').disabled"))
+      throw new Error("Skill save did not enable");
+  });
+  await cdp.evaluate("document.querySelector('form[data-skill-form]').requestSubmit()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-skill=\"pix-gui-skill\"]'))")))
+      throw new Error("Created skill did not appear in the list");
+  });
+  if (!readFileSync(guiSkillFile, "utf8").includes("Created by the PiX GUI test."))
+    throw new Error("Skill file did not keep its description");
+  await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] [data-skill-manual]').click()");
+  await retry(async () => {
+    if (!readFileSync(guiSkillFile, "utf8").includes("disable-model-invocation"))
+      throw new Error("Manual-only toggle was not written to the skill file");
+  });
+  const guiSkillRemove = "document.querySelector('[data-skill=\"pix-gui-skill\"] .skill-actions button:last-child')";
+  await cdp.evaluate(`${guiSkillRemove}.click()`);
+  await retry(async () => {
+    if (!(await cdp.evaluate(`Boolean(${guiSkillRemove}?.classList.contains('is-arming'))`)))
+      throw new Error("Skill delete did not arm on the first press");
+  });
+  await cdp.evaluate(`${guiSkillRemove}.click()`);
+  await retry(async () => {
+    if (await cdp.evaluate("Boolean(document.querySelector('[data-skill=\"pix-gui-skill\"]'))"))
+      throw new Error("Deleted skill is still listed");
+  });
+  if (existsSync(guiSkillDir)) throw new Error("Deleted skill directory is still on disk");
+
   await cdp.evaluate("document.querySelector('.settings-page > aside > button').click()");
   await retry(async () => {
     if (!(await cdp.evaluate("Boolean(document.querySelector('.shell'))")))

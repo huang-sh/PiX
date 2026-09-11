@@ -131,10 +131,10 @@ describe("draft placement", () => {
     expect(savedOrders.some(([id]) => id === "pending:new")).toBe(false);
   });
 
-  it("keeps a continuation to the right of a manually moved parent before and after submitting", async () => {
+  it("carries a continuation along when a parent is moved with the branch modifier", async () => {
     const { graph, session } = setup();
     const manual = { x: 1400, y: 800 };
-    graph.rememberDrag({ node: { id: "turn:a", position: manual } });
+    graph.rememberDrag({ node: { id: "turn:a", position: manual }, event: { shiftKey: true } });
     await graph.compose("turn:a"); await flushPromises();
     const parent = graph.nodes.find((node: any) => node.id === "turn:a");
     const draft = graph.nodes.find((node: any) => node.type === "draft");
@@ -164,6 +164,7 @@ describe("draft placement", () => {
     await graph.compose("turn:a"); await flushPromises();
     expectClear(graph, "draft:turn:a");
     expect(graph.nodes.find((node: any) => node.id === "turn:c").position).toEqual(manual);
+    const settled = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
     const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
       const next = [...entries, { type: "message", id: "a2", parentId: "a", timestamp: "5",
         message: { role: "user", content: "second child" } }];
@@ -180,9 +181,49 @@ describe("draft placement", () => {
     const second = graph.nodes.find((node: any) => node.id === "turn:a2");
     const parent = graph.nodes.find((node: any) => node.id === "turn:a");
     expect(first.position.y).toBeLessThan(second.position.y);
-    expect(second.position.y + second.dimensions.height + 28).toBeLessThanOrEqual(manual.y);
-    expect(parent.position.y).toBe((first.position.y + second.position.y) / 2);
     expect(second.position.x).toBe(parent.position.x + parent.dimensions.width + 92);
+    // The parent follows the room its child needed as far as its column allows, so
+    // the branch still reads as one shape. Only the first drop leaves that lane free.
+    if (manual.x === 1200) expect(parent.position.y).toBe((first.position.y + second.position.y) / 2);
+    expect(parent.position.y + parent.dimensions.height / 2)
+      .toBeGreaterThanOrEqual(first.position.y + first.dimensions.height / 2);
+    // Submitting only adds a card, so the sibling already on screen is not pushed
+    // anywhere: the new child yields to the pin instead.
+    expect(graph.nodes.find((node: any) => node.id === "turn:a1").position).toEqual(settled.get("turn:a1"));
+  });
+
+  it("tidies every card back into its automatic lane", async () => {
+    const { graph } = setup();
+    graph.rebuild(); await flushPromises();
+    const auto = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
+    graph.rememberDrag({ node: { id: "turn:b", position: { x: 1400, y: 800 } }, event: { shiftKey: false } });
+    await flushPromises();
+    expect(graph.nodes.find((node: any) => node.id === "turn:b").position).toEqual({ x: 1400, y: 800 });
+    await graph.tidy();
+    await flushPromises();
+    for (const node of graph.nodes) expect(node.position).toEqual(auto.get(node.id), `card ${node.id} back in its lane`);
+    expectClear(graph, "turn:b");
+  });
+
+  it("moves only the card itself unless the branch modifier is held", async () => {
+    const { graph } = setup();
+    const before = new Map(graph.nodes.map((node: any) => [node.id, { ...node.position }]));
+    const plain = { x: 1400, y: 800 };
+    graph.rememberDrag({ node: { id: "turn:b", position: plain }, event: { shiftKey: false } });
+    await flushPromises();
+    const at = (id: string) => graph.nodes.find((node: any) => node.id === id).position;
+    expect(at("turn:b")).toEqual(plain);
+    expect(at("turn:c")).toEqual(before.get("turn:c"));
+    const shifted = { x: 1000, y: 300 };
+    graph.rememberDrag({ node: { id: "turn:b", position: shifted }, event: { shiftKey: true } });
+    await flushPromises();
+    expect(at("turn:b")).toEqual(shifted);
+    // The card after it follows by the delta the card itself moved away from where
+    // the layout had placed it.
+    expect(at("turn:c")).toEqual({
+      x: before.get("turn:c").x + shifted.x - before.get("turn:b").x,
+      y: before.get("turn:c").y + shifted.y - before.get("turn:b").y,
+    });
   });
 
   it.each(["cancel", "submit"])("restores manual positions after draft %s and removes temporary spacing", async (action) => {

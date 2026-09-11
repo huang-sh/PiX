@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Focus, Map as MapIcon, Network } from "@lucide/vue";
+import { Focus, Map as MapIcon, Network, Search } from "@lucide/vue";
 import {
   VueFlow,
   type Edge,
@@ -17,9 +17,10 @@ import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
 import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
-import { layoutGraph, reserveManualPositions, type BranchDirection } from "../../graph-layout";
+import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualPosition } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
+import { searchGraphNodeIds } from "../../lib/graph-search";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
@@ -46,7 +47,9 @@ watch(nodes, items => {
   }
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
-const dragged = new Map<string, { x: number; y: number }>();
+const dragged = new Map<string, ManualPosition>();
+// Holding the branch modifier at any point of a drag carries the cards after it too.
+let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
 const branchOrder = new Map<string, number>();
@@ -63,6 +66,11 @@ let activeSession: string | undefined;
 const readableZoom = 0.9;
 const booted = ref(false);
 const deleteError = ref("");
+const searchOpen = ref(false);
+const searchQuery = ref("");
+const searchInput = ref<HTMLInputElement>();
+// -1 = no hit visited yet, so the first Enter lands on the first hit.
+const searchPosition = ref(-1);
 const recoveringDeletion = ref(false);
 const deletionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
 const promptCache = new Map<string, PromptNodeData>();
@@ -79,6 +87,18 @@ function stablePrompt(data: PromptNodeData) {
 let autoPositions: Map<string, { x: number; y: number; width: number; height: number }> | undefined;
 
 const projection = computed(() => session.current?.projection);
+const searchHits = computed<string[]>(() => {
+  const value = projection.value;
+  if (!searchOpen.value || !value || !session.current) return [];
+  return searchGraphNodeIds(value, session.current.entries, searchQuery.value);
+});
+const searchHitIds = computed(() => new Set(searchHits.value));
+const searchCount = computed(() => {
+  if (!searchOpen.value || !searchQuery.value.trim()) return "";
+  const n = searchHits.value.length;
+  if (!n) return t("graph.searchNoHits");
+  return n === 1 ? t("graph.searchHitOne") : t("graph.searchHits", { n });
+});
 function rememberBranchOrder(id: string, order: number, pendingId?: string) {
   if (!pendingId && branchOrder.get(id) === order) return;
   if (pendingId) branchOrder.delete(pendingId);
@@ -176,9 +196,12 @@ function rebuild() {
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
   // Only deletions invalidate moved manual slots to close gaps. Adding a
   // branch must preserve the user's coordinates even when its auto slots move.
+  // Transient cards (composer, pending) are never in the projection, so they keep a
+  // slot made for them until they leave the screen.
   for (const id of dragged.keys()) {
     const before = autoPositions?.get(id);
     const after = positions.get(id);
+    if (!after && !before && nodes.value.some(node => node.id === id)) continue;
     if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
   }
   autoPositions = positions;
@@ -210,7 +233,11 @@ function rebuild() {
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
+      searchHit: searchHitIds.value.has(node.id),
       onCompose: direction => compose(node.id, direction),
+      onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
+        ? () => { void retryTurn(node.id); }
+        : undefined,
       onDelete: () => { void deleteNode(node.id); },
       deleteBlockedReason: session.deleteBlockedReason,
     }),
@@ -378,7 +405,13 @@ function layoutBranches(items: RenderNode[]) {
   const pending = session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
   const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
-  reserveManualPositions(placed.nodes, dragged);
+  // Cards that were not on screen yet may be moved out of a pinned card's way;
+  // the ones the user can already see keep the position they have.
+  const known = new Set(nodes.value.map(node => node.id));
+  // A card that made way for a pin is held there, so the next rebuild cannot drop
+  // it back on top of the pin it just cleared.
+  for (const [id, position] of reserveManualPositions(placed.nodes, dragged, new Set(visible.filter(node => !known.has(node.id)).map(node => node.id))))
+    dragged.set(id, position);
   let moved = false;
   for (let i = 0; i < visible.length; i++) {
     const node = visible[i]!, position = placed.nodes[i]!;
@@ -439,6 +472,46 @@ async function compose(id: string, direction?: BranchDirection) {
   await center(`draft:${id}`, true);
 }
 
+// Retry reopens the failed turn's prompt as a draft attached to its parent, so
+// submitting grows a sibling branch and the failed turn stays untouched. A
+// failed root turn has no earlier parent; its draft attaches to itself, which
+// continues that branch — the failure remains visible in the history either way.
+async function retryTurn(id: string) {
+  const node = projection.value?.nodes.find((item) => item.id === id);
+  if (!node) return;
+  const content = nodeContent(id);
+  if (!content.user.trim() && !content.images?.length) return;
+  const parent = node.parentId ?? node.id;
+  const parentNode = projection.value?.nodes.find((item) => item.id === parent);
+  resetDraft();
+  draftParent.value = parent;
+  draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
+  draftThinking.value = undefined;
+  draftState.value = { ...emptyDraft(), text: content.user, images: [...(content.images ?? [])] };
+  rebuild();
+  await center(`draft:${parent}`, true);
+}
+
+async function toggleSearch() {
+  searchOpen.value = !searchOpen.value;
+  if (!searchOpen.value) {
+    searchQuery.value = "";
+    searchPosition.value = -1;
+  } else {
+    await nextTick();
+    searchInput.value?.focus({ preventScroll: true });
+  }
+}
+
+async function stepSearch(back: boolean) {
+  const hits = searchHits.value;
+  if (!hits.length) return;
+  searchPosition.value = (searchPosition.value + (back ? -1 : 1) + hits.length) % hits.length;
+  await select(hits[searchPosition.value]!, true);
+}
+
+watch(searchQuery, () => { searchPosition.value = -1; });
+
 function cancelDraft() {
   resetDraft();
   rebuild();
@@ -483,6 +556,14 @@ function acceptSubmittedNode() {
   if (id && draftOrder && activeSession === sessionKey.value) rememberBranchOrder(id, draftOrder);
   if (id) resetDraft();
   return id;
+}
+
+// One click discards every manual slot: the automatic layout then puts each
+// branch back into its own lane, and the current card comes back into view.
+async function tidy() {
+  dragged.clear();
+  rebuild();
+  await center(defaultFocusId(), true);
 }
 
 function defaultFocusId() {
@@ -605,13 +686,29 @@ async function ready(store: VueFlowStore) {
   }
 }
 
+function holdsBranchModifier(event: NodeMouseEvent) {
+  return Boolean((event as { event?: { shiftKey?: boolean } }).event?.shiftKey);
+}
+
+function startDrag(event: NodeMouseEvent) {
+  dragFollowsBranch = holdsBranchModifier(event);
+}
+
+function trackDragModifier(event: NodeMouseEvent) {
+  if (holdsBranchModifier(event)) dragFollowsBranch = true;
+}
+
 function rememberDrag(event: NodeMouseEvent) {
-  dragged.set(event.node.id, { ...event.node.position });
+  const branch = dragFollowsBranch || holdsBranchModifier(event);
+  dragFollowsBranch = false;
+  dragged.set(event.node.id, { ...event.node.position, branch });
   const node = nodes.value.find(node => node.id === event.node.id);
-  if (node) {
-    node.position = { ...event.node.position };
-    nodes.value = [...nodes.value];
-  }
+  if (!node) return;
+  node.position = { ...event.node.position };
+  // Lay out from the drop at once, so a branch dragged along moves with its card
+  // instead of following on some later rebuild.
+  layoutBranches(nodes.value);
+  nodes.value = [...nodes.value];
 }
 
 function syncNodeDimensions(changes: NodeChange[]) {
@@ -638,7 +735,8 @@ watch(
   [() => sessionKey.value, () => projection.value?.nodes, () => projection.value?.edges,
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
-    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns],
+    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns,
+    searchHitIds],
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
@@ -684,6 +782,8 @@ watch(
       @pane-ready="ready"
       @node-click="({ node }: NodeMouseEvent) => select(node.id)"
       @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
+      @node-drag-start="startDrag"
+      @node-drag="trackDragModifier"
       @node-drag-stop="rememberDrag"
       @nodes-change="syncNodeDimensions"
     >
@@ -703,10 +803,31 @@ watch(
         :aria-label="t('graph.minimapLabel')"
         @click="navigateMinimap"
       />
-      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" />
+      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" :highlight="searchHitIds.size ? searchHitIds : undefined" />
     </VueFlow>
 
     <nav class="graph-controls">
+      <div v-if="searchOpen" class="graph-search nodrag nowheel" @mousedown.stop @wheel.stop>
+        <input
+          ref="searchInput"
+          v-model="searchQuery"
+          type="text"
+          data-action="graph-search-input"
+          :placeholder="t('graph.searchPlaceholder')"
+          :title="t('graph.searchNavigate')"
+          @keydown.enter.prevent="stepSearch($event.shiftKey)"
+          @keydown.esc.stop.prevent="toggleSearch"
+        />
+        <span class="graph-search-count">{{ searchCount }}</span>
+      </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        :aria-expanded="searchOpen"
+        :aria-label="t('graph.searchLabel')"
+        :title="t('graph.searchLabel')"
+        @click="toggleSearch"
+      ><Search :size="15" /></Button>
       <Button
         variant="ghost"
         size="icon"
@@ -715,7 +836,7 @@ watch(
         :title="t('graph.toggleMinimap')"
         @click="layout.toggleMinimap()"
       ><MapIcon :size="15" /></Button>
-      <Button variant="ghost" size="icon" :aria-label="t('graph.centerCurrent')" :title="t('graph.centerCurrent')" @click="center(defaultFocusId(), true)"><Focus :size="15" /></Button>
+      <Button variant="ghost" size="icon" :aria-label="t('graph.tidyLayout')" :title="t('graph.tidyLayout')" @click="tidy()"><Focus :size="15" /></Button>
     </nav>
 
     <footer class="graph-footer">

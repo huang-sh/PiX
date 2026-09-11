@@ -53,3 +53,24 @@ test("merged snapshots match full projection while unchanged branches never re-r
   branches.delete("branch1"); graph.records.delete("branch1"); cache.update(graph, main, branches);
   assert.ok(!cache.view(main, new Set()).entries.some(e => e.id.startsWith("branch1:")));
 });
+
+test("a node whose parent link no longer resolves attaches to the nearest surviving ancestor", () => {
+  const graph = new GraphFiles("main");
+  const main = snapshot([entry("root", null), entry("answer", "root", "assistant")]);
+  const branch = (id: string, parentId: string, forkEntryId: string, inherited: Record<string, string>, baseline: RawSessionEntry[]): BranchRecord =>
+    ({ id, parentId, forkEntryId, inherited, baseline: structuredClone(baseline), header: {}, request: { text: id },
+      requestId: id, runId: id, status: "idle" });
+  const first = [...main.entries, entry("u1", "answer"), entry("a1", "u1", "assistant")];
+  const second = [...first, entry("u2", "a1"), entry("a2", "u2", "assistant")];
+  graph.records.set("first", branch("first", "main", "answer", { root: "root", answer: "answer" }, main.entries));
+  // "second" forked from "first", but its record disagrees about the entry the fork
+  // point names, so the link it derives points at a node that does not exist.
+  graph.records.set("second", branch("second", "first", "first:a1",
+    { root: "root", answer: "answer", u1: "first:gone", a1: "first:a1" }, first));
+  const cache = new GraphSnapshotCache();
+  cache.update(graph, main, new Map([["first", { snapshot: snapshot(first) }], ["second", { snapshot: snapshot(second) }]]));
+  const projection = cache.view(main, new Set()).projection;
+  assert.equal(projection.nodes.find(node => node.id === "turn:second:u2")?.parentId, "turn:first:u1");
+  const ids = new Set(projection.nodes.map(node => node.id));
+  for (const edge of projection.edges) assert.ok(ids.has(edge.source) && ids.has(edge.target), `dangling edge ${edge.id}`);
+});

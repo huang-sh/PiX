@@ -9,14 +9,16 @@ import type {
   SessionSnapshot,
 } from "../../shared/types";
 import { desktop } from "../api";
+import type { FileChange } from "../../shared/file-changes";
 
 export interface WorkspaceTab {
   id: string;
-  kind: "file" | "browser" | "changes";
+  kind: "file" | "browser" | "changes" | "turn-change";
   title: string;
   path?: string;
   url?: string;
   document?: FileDocument;
+  patch?: string;
 }
 
 const unavailableGit = (): GitStatus => ({
@@ -123,7 +125,9 @@ export const useWorkspaceStore = defineStore("workspace", {
     async openFile(path: string) {
       const old = this.tabs.find((tab) => tab.kind === "file" && tab.path === path);
       if (old) return void (this.activeTab = old.id);
+      const project = this.project;
       const document = await desktop.invoke<FileDocument>("workspace.read", { path });
+      if (this.project !== project) return;
       const tab: WorkspaceTab = {
         id: `file:${path}`,
         kind: "file",
@@ -150,6 +154,16 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
       tab.path = path;
       this.activeTab = tab.id;
+    },
+    async openTurnChange(session: string, change: FileChange) {
+      const id = `change:${session}:${change.ref}`;
+      const old = this.tabs.find(tab => tab.id === id);
+      if (old) return void (this.activeTab = id);
+      const project = this.project;
+      const patch = await desktop.invoke<string>("changes.read", { session, ref: change.ref });
+      if (this.project !== project) return;
+      this.tabs.push({ id, kind: "turn-change", title: change.path.split("/").at(-1) ?? change.path, path: change.path, patch });
+      this.activeTab = id;
     },
     openBrowser(raw?: string) {
       let url = (raw ?? this.browserUrl).trim() || "https://pi.dev";

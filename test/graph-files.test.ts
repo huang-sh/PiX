@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "../src/main/graph-files.js";
+import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, type BranchRecord, type SessionData } from "../src/main/graph-files.js";
 
 const header = { type: "session", version: 3, id: "test", cwd: "/test", timestamp: "2026-01-01" };
 const user = (id: string, parentId: string | null) => ({ type: "message", id, parentId, timestamp: "2026-01-01", message: { role: "user", content: id, timestamp: 1 } });
@@ -91,6 +91,53 @@ test("deleting a main-tree fork removes dangling metadata while preserving the s
     assert.equal(readFileSync(graph.main, "utf8"), original);
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
+test("deleting a fork point reparents a surviving branch without breaking its parent links", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-fork-reparent-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const at = user("t1", "root");
+    graph.create(a, { header: a.header, entries: [...initial.entries, at, user("t2", "t1")] });
+    graph.save(a);
+    // B forked from A at t1 and also holds a turn off the inherited root, so it
+    // outlives the fork point.
+    const b = { ...record("B", "A", "A:t1"), baseline: [...initial.entries, at], inherited: { root: "root", t1: "A:t1" } };
+    graph.create(b, { header: b.header, entries: [...b.baseline, user("b1", "t1"), user("b2", "root")] });
+    graph.save(b);
+    graph.deleteNode("A:t1", "root");
+    graph.records.clear(); graph.load();
+    assert.deepEqual(graph.recoveryMessages, [], "a rewritten record still satisfies the inherited invariants");
+    assert.equal(graph.records.has("A"), false);
+    assert.equal(graph.records.get("B")?.forkEntryId, "root", "the fork point reparented to the surviving ancestor");
+    assert.deepEqual(graph.records.get("B")?.inherited, { root: "root" });
+    // Every merged parent link resolves inside the merged graph, or names no parent.
+    const entries = new Map(readStrict(graph.main).entries.map(entry => [entry.id, entry]));
+    for (const record of graph.records.values())
+      for (const entry of graph.delta(record, readStrict(graph.path(record.id))))
+        entries.set(entry.id, entry);
+    for (const entry of entries.values())
+      assert.ok(!entry.parentId || entries.has(entry.parentId), `${entry.id} points at missing ${entry.parentId}`);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an origin that collapses two entries onto one id is refused instead of corrupting the graph", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-origin-alias-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const entries = [...initial.entries, user("t1", "root")];
+    graph.create(a, { header: a.header, entries });
+    graph.save({ ...a, baseline: entries, inherited: { root: "root", t1: "root" } });
+    graph.records.clear(); graph.load();
+    assert.equal(graph.records.has("A"), false);
+    assert.ok(graph.recoveryMessages.some(message => message.includes("A.jsonl.origin.json")));
+    assert.equal(readFileSync(graph.path("A"), "utf8"), encodeSession({ header: a.header, entries }));
+    assert.equal(readFileSync(graph.main, "utf8"), encodeSession(initial));
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("strict validation rejects malformed lines, duplicates, orphans and broken compaction refs", () => {
   for (const raw of [encodeSession(initial) + "{broken\n", encodeSession({ header, entries: [user("x", "missing")] }),
     encodeSession({ header, entries: [user("root", null), user("root", null)] }),

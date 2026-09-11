@@ -267,6 +267,80 @@ describe("BranchContextPanel model failures", () => {
     expect(wrapper.get(".process-item.error").text())
       .toBe("401: Authentication Fails, Your api key: ****20e8 is invalid");
   });
+
+  it("renders a failed final reply even when earlier replies had text", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia); useLayoutStore().layout.collapsed.chat = false;
+    const session = useSessionStore();
+    const entries: RawSessionEntry[] = [
+      { type: "message", id: "u1", parentId: null, timestamp: "2026-09-03T17:31:08Z", message: { role: "user", content: "finish it" } },
+      {
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-09-03T17:31:09Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Let me add an end-to-end check" }] },
+      },
+      {
+        type: "message",
+        id: "a2",
+        parentId: "a1",
+        timestamp: "2026-09-03T17:31:11Z",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: failure },
+      },
+    ];
+    session.current = {
+      session: { id: "s", path: "s.jsonl", cwd: ".", created: "", modified: "", messageCount: 3, firstMessage: "" },
+      entries,
+      projection: projectSession(entries, "a2"),
+      runtime: { isStreaming: false },
+    } as unknown as SessionSnapshot;
+
+    const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true } } });
+
+    // Earlier text in the turn belongs to the process, never to the answer.
+    expect(wrapper.get(".error-response .error-message").text())
+      .toBe("401: Authentication Fails, Your api key: ****20e8 is invalid");
+    expect(wrapper.find(".final-response").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("shows a reply cut off mid-stream together with its failure", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia); useLayoutStore().layout.collapsed.chat = false;
+    const session = useSessionStore();
+    const entries: RawSessionEntry[] = [
+      { type: "message", id: "u1", parentId: null, timestamp: "2026-09-03T17:31:08Z", message: { role: "user", content: "finish it" } },
+      {
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-09-03T17:31:09Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "half an answer" }],
+          stopReason: "error",
+          errorMessage: "Connection closed by proxy server before the response completed",
+        },
+      },
+    ];
+    session.current = {
+      session: { id: "s", path: "s.jsonl", cwd: ".", created: "", modified: "", messageCount: 2, firstMessage: "" },
+      entries,
+      projection: projectSession(entries, "a1"),
+      runtime: { isStreaming: false },
+    } as unknown as SessionSnapshot;
+
+    const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true } } });
+
+    // A truncated partial is progress, not the turn's answer.
+    expect(wrapper.get(".error-response .error-message").text())
+      .toBe("Connection closed by proxy server before the response completed");
+    expect(wrapper.get(".progress-response").findComponent({ name: "MarkdownRenderer" }).props("content"))
+      .toBe("half an answer");
+    expect(wrapper.find(".final-response").exists()).toBe(false);
+    wrapper.unmount();
+  });
 });
 describe("BranchContextPanel process summary", () => {
   it("shows a disclosure chevron instead of the brain icon on the worked summary", () => {

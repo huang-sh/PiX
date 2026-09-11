@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -89,6 +90,36 @@ test("session file service persists renamed sessions", () => {
     sessions.rename(path, "Renamed");
 
     assert.equal(sessions.list()[0]?.name, "Renamed");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("session file service removes content sidecars with the session", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-session-"));
+  try {
+    const path = join(temp, "session.jsonl");
+    writeFileSync(path, `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "session",
+      timestamp: "2026-09-03T00:00:00.000Z",
+      cwd: temp,
+    })}\n`);
+    // Saved diffs and branch records keep file contents that nothing can reach
+    // once the session file itself is unlinked.
+    const snapshots = `${path}.file-changes`;
+    const branches = `${path}.pix-tree`;
+    mkdirSync(snapshots, { recursive: true });
+    writeFileSync(join(snapshots, "snapshot.json"), "{}\n");
+    mkdirSync(branches, { recursive: true });
+    writeFileSync(join(branches, "main.jsonl"), "{}\n");
+    const sessions = new SessionFiles(temp, temp);
+
+    sessions.delete(path);
+
+    assert.equal(existsSync(path), false);
+    assert.equal(existsSync(snapshots), false);
+    assert.equal(existsSync(branches), false);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

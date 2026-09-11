@@ -1,6 +1,7 @@
 import type { DesktopRoute } from "./types.js";
 import { CUSTOM_MODEL_APIS } from "./types.js";
 import { validatePromptImages } from "./images.js";
+import { MAX_SKILL_BYTES } from "./skills.js";
 const obj = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected object payload");
@@ -81,6 +82,8 @@ export function validateRouteInput(
       };
     case "git.diff":
       return { path: str(v.path, "path", true), staged: v.staged === true };
+    case "changes.read":
+      return { session: str(v.session, "session"), ref: str(v.ref, "ref") };
     case "shell.run":
       return { command: str(v.command, "command") };
     case "shell.abort":
@@ -106,8 +109,8 @@ export function validateRouteInput(
     case "settings.update": {
       const patch = obj(v.patch);
       if (v.scope !== "project" && v.scope !== "global" && Object.hasOwn(patch, "theme") &&
-          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal")
-        throw new Error("theme must be light, dark, teal or system");
+          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach")
+        throw new Error("theme must be light, dark, teal, peach or system");
       return {
         scope:
           v.scope === "project"
@@ -233,6 +236,36 @@ export function validateRouteInput(
         };
       if (action === "getSkills" || action === "getExtensions")
         return { action, reload: v.reload === true };
+      if (action === "getSkill" || action === "deleteSkill")
+        return { action, path: str(v.path, "path") };
+      if (action === "setSkillManualOnly")
+        return { action, path: str(v.path, "path"), manualOnly: v.manualOnly === true };
+      if (action === "createSkill" || action === "updateSkill") {
+        const body = str(v.body, "body")!;
+        if (new TextEncoder().encode(body).length > MAX_SKILL_BYTES)
+          throw new Error("body exceeds the skill size limit");
+        const skill = {
+          action,
+          name: str(v.name, "name")!,
+          description: str(v.description, "description")!,
+          body,
+          disableModelInvocation: v.disableModelInvocation === true,
+        };
+        return action === "createSkill"
+          ? { ...skill, scope: v.scope === "project" ? "project" : "user" }
+          : { ...skill, path: str(v.path, "path")! };
+      }
+      if (action === "importSkill") {
+        const content = str(v.content, "content")!;
+        if (new TextEncoder().encode(content).length > MAX_SKILL_BYTES)
+          throw new Error("content exceeds the skill size limit");
+        return {
+          action,
+          scope: v.scope === "project" ? "project" : "user",
+          name: str(v.name, "name")!,
+          content,
+        };
+      }
       if (action === "loginApiKey")
         return {
           action,

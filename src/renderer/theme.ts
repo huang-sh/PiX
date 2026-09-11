@@ -31,3 +31,18 @@ export function startTheme(initial: ThemePreference) {
     if (systemTheme === media) systemTheme = undefined;
   };
 }
+
+// Root-level appearance controls beyond theme: UI density and the canvas dot
+// grid drawn by .session-flow/.welcome/.graph-empty in app.css. Fallbacks
+// there must match the defaults used here.
+export function applyAppearance(app: { density?: "comfortable" | "compact"; canvasDotGrid?: boolean; canvasDotGridSpacing?: number; canvasDotGridDotSize?: number }) {
+  const root = document.documentElement;
+  root.dataset.density = app.density ?? "comfortable";
+  if (app.canvasDotGrid === false) root.dataset.dotGrid = "off";
+  else delete root.dataset.dotGrid;
+  const spacing = Math.min(96, Math.max(8, Math.round(Number(app.canvasDotGridSpacing) || 24)));
+  root.style.setProperty("--dot-grid-size", `${spacing}px`);
+  // The setting is a diameter in px; the gradient stop is a radius.
+  const dot = Math.min(6, Math.max(1, Math.round(Number(app.canvasDotGridDotSize) || 4)));
+  root.style.setProperty("--dot-grid-dot", `${dot / 2}px`);
+}
