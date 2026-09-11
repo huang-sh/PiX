@@ -156,9 +156,9 @@ async function save() {
             <div class="skill-tile">
               <div class="skill-tile-copy">
                 <span class="skill-tile-label">{{ t(draft.disableModelInvocation ? "settings.manualSkill" : "settings.skillAuto") }}</span>
-                <span class="skill-tile-hint">{{ t("settings.skillManualOnlyHint") }}</span>
+                <span class="skill-tile-hint">{{ t(draft.disableModelInvocation ? "settings.skillManualOnlyHint" : "settings.skillAutoHint") }}</span>
               </div>
-              <button type="button" class="skill-switch" role="switch" data-skill-invocation :aria-checked="draft.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" :disabled="props.readonly" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
+              <button type="button" class="skill-switch" role="switch" data-skill-invocation :aria-checked="!draft.disableModelInvocation" :aria-label="t('settings.skillAuto')" :disabled="props.readonly" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
                 <span class="skill-switch-thumb" />
               </button>
             </div>

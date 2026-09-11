@@ -950,7 +950,7 @@ async function logout(provider: RuntimeProvider) {
                     <p class="skill-description" :title="skill.description">{{ skill.description }}</p>
                   </div>
                   <div class="skill-actions">
-                    <button v-if="skill.editable || skill.scope === 'builtin'" type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="skill.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" :title="t('settings.skillManualOnlyHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">
+                    <button v-if="skill.editable || skill.scope === 'builtin'" type="button" class="skill-switch" role="switch" data-skill-manual :aria-checked="!skill.disableModelInvocation" :aria-label="t('settings.skillAuto')" :title="t(skill.disableModelInvocation ? 'settings.skillManualOnlyHint' : 'settings.skillAutoHint')" :disabled="!!skillActionPath" @click="toggleManualOnly(skill)">
                       <span class="skill-switch-thumb" />
                     </button>
                     <Button v-if="!skill.editable" class="skill-action" variant="ghost" size="icon" data-skill-view :title="t('settings.viewSkill')" :disabled="!!skillActionPath" @click="openEditSkill(skill)"><Eye :size="15" /></Button>

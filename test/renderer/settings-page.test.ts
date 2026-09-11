@@ -526,10 +526,12 @@ describe("SettingsPage save", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-skill="docx"]').text()).toContain("Create Word documents");
-    expect(wrapper.get('[data-skill="docx"] [data-skill-manual]').attributes("aria-checked")).toBe("false");
+    // The switch states auto-invocation: ON means the skill stays in the
+    // model prompt, OFF means manual only.
+    expect(wrapper.get('[data-skill="docx"] [data-skill-manual]').attributes("aria-checked")).toBe("true");
+    expect(wrapper.get('[data-skill="project-review"] [data-skill-manual]').attributes("aria-checked")).toBe("false");
     // The switch is the only place an editable skill states this, so no chip
     // repeats it next to it.
-    expect(wrapper.get('[data-skill="project-review"] [data-skill-manual]').attributes("aria-checked")).toBe("true");
     expect(wrapper.get('[data-skill="project-review"]').text()).not.toContain("manual only");
     await wrapper.get("[data-skill-search]").setValue("Word");
     expect(wrapper.find('[data-skill="project-review"]').exists()).toBe(false);
