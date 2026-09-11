@@ -3,7 +3,7 @@ import { useVueFlow, type Node } from "@vue-flow/core";
 import { onBeforeUnmount, ref, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 
-const props = defineProps<{ nodes: Node[] }>();
+const props = defineProps<{ nodes: Node[]; highlight?: Set<string> }>();
 const { t } = useI18n();
 const { viewport, dimensions, setCenter, zoomIn, zoomOut } = useVueFlow();
 const canvas = ref<HTMLCanvasElement>();
@@ -27,8 +27,13 @@ watchEffect(() => {
     transform = { x: minX - 8 / scale, y: minY - 8 / scale, scale };
     ctx.clearRect(0, 0, 200, 140);
     ctx.fillStyle = getComputedStyle(element).color;
-    for (const node of nodes) ctx.fillRect((node.position.x - transform.x) * scale,
-      (node.position.y - transform.y) * scale, Math.max(1, 280 * scale), Math.max(1, 146 * scale));
+    for (const node of nodes) {
+      // With an active search, only hits stay opaque so they read as a cluster.
+      ctx.globalAlpha = !props.highlight || props.highlight.has(node.id) ? 1 : 0.3;
+      ctx.fillRect((node.position.x - transform.x) * scale,
+        (node.position.y - transform.y) * scale, Math.max(1, 280 * scale), Math.max(1, 146 * scale));
+    }
+    ctx.globalAlpha = 1;
     ctx.strokeStyle = ctx.fillStyle;
     ctx.lineWidth = 2;
     ctx.strokeRect((left - transform.x) * scale, (top - transform.y) * scale,
