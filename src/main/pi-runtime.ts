@@ -14,7 +14,7 @@ import {
   withDetectedBashShell,
 } from "./bash-resolution.js";
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
-import { resolveBuiltinSkills } from "./builtin-skills.js";
+import { applyBuiltinSkillOverrides, isBundledSkillPath, resolveBuiltinSkills, setBuiltinSkillManualOnly } from "./builtin-skills.js";
 import {
   SKILL_BODY_MESSAGES,
   SKILL_DESCRIPTION_MESSAGES,
@@ -233,6 +233,12 @@ export class PiRuntime {
         additionalSkillPaths: resolveBuiltinSkills(
           dirname(fileURLToPath(import.meta.url)),
         ),
+        // The manual-only overrides for those read-only files are applied
+        // here. Re-read on every invocation: reload() and new loaders call
+        // this closure again, so a toggled built-in takes effect without
+        // recreating services.
+        skillsOverride: (base) =>
+          applyBuiltinSkillOverrides(dirname(fileURLToPath(import.meta.url)), base),
       },
     };
   }
@@ -690,20 +696,54 @@ export class PiRuntime {
         const loader = s?.resourceLoader ?? this.modelServices.resourceLoader;
         if (input.reload) await loader.reload();
         const { editable } = await this.skillFileRoots();
-        return loader.getSkills().skills.map(
+        const moduleDir = dirname(fileURLToPath(import.meta.url));
+        const { skills: loaded, diagnostics } = loader.getSkills();
+        // A user copy hiding a bundled skill of the same name leaves the
+        // bundled row simply absent; badge the winner so the list explains
+        // itself. Pi reports these as collision diagnostics.
+        const shadowsBuiltin = new Map<string, string>();
+        for (const diagnostic of (diagnostics ?? []) as any[]) {
+          const collision = diagnostic?.collision;
+          if (collision?.resourceType !== "skill") continue;
+          const loser = String(collision.loserPath ?? "");
+          if (isBundledSkillPath(moduleDir, loser))
+            shadowsBuiltin.set(String(collision.winnerPath ?? ""), loser);
+        }
+        return loaded.map(
           (skill: any): RuntimeSkill => ({
             name: String(skill.name),
             description: String(skill.description),
             path: String(skill.filePath),
             source: String(skill.sourceInfo?.source ?? "local"),
-            scope: skill.sourceInfo?.scope ?? "project",
+            // Bundled skills carry no pi scope of their own; show them as a
+            // read-only category instead of a misleading "project" badge.
+            scope: isBundledSkillPath(moduleDir, String(skill.filePath))
+              ? "builtin"
+              : skill.sourceInfo?.scope ?? "project",
             disableModelInvocation: Boolean(skill.disableModelInvocation),
             editable: isEditableSkillPath(String(skill.filePath), editable),
+            ...(shadowsBuiltin.has(String(skill.filePath))
+              ? { shadowsBuiltin: shadowsBuiltin.get(String(skill.filePath)) }
+              : {}),
           }),
         );
       }
       case "getSkill": {
-        const { file } = await this.skillTarget(input.path);
+        // Reading follows the loaded list: anything the settings page shows
+        // can be opened in the read-only viewer, packaged skills included.
+        // Writes (and paths the loader never listed) stay behind the
+        // editable-roots assertion in skillTarget. The listed entry also
+        // supplies the effective invocation flag, which for a bundled skill
+        // is the override table's value rather than the file's frontmatter.
+        if (!s) await this.modelRuntime();
+        const loader = s?.resourceLoader ?? this.modelServices.resourceLoader;
+        const requested = resolve(input.path);
+        const listed = loader
+          .getSkills()
+          .skills.find((skill: any) => resolve(String(skill.filePath)) === requested);
+        const file = listed || isBundledSkillPath(dirname(fileURLToPath(import.meta.url)), requested)
+          ? requested
+          : (await this.skillTarget(input.path)).file;
         const document = parseSkillDocument(await readFile(file, "utf8"));
         // A skill file may omit the frontmatter name. Pi then falls back to the
         // containing folder for a SKILL.md, or to the file name for a root .md
@@ -717,7 +757,10 @@ export class PiRuntime {
           name: document.name || fallback,
           description: document.description,
           body: document.body,
-          disableModelInvocation: document.disableModelInvocation,
+          // The loader's value is the effective one (post override table).
+          disableModelInvocation: listed
+            ? Boolean(listed.disableModelInvocation)
+            : document.disableModelInvocation,
         } satisfies RuntimeSkillDocument;
       }
       case "createSkill": {
@@ -781,6 +824,22 @@ export class PiRuntime {
         return { ok: true };
       }
       case "setSkillManualOnly": {
+        // A bundled skill's file is read-only (replaced on upgrade, possibly
+        // unwritable), so its manual-only preference goes to the override
+        // table that skillsOverride applies at load time. Only paths inside
+        // the bundled roots take this branch; everything else still has to
+        // be an editable skill file.
+        const moduleDir = dirname(fileURLToPath(import.meta.url));
+        const requested = resolve(input.path);
+        if (isBundledSkillPath(moduleDir, requested)) {
+          const document = parseSkillDocument(await readFile(requested, "utf8"));
+          const fallback = basename(requested).toLowerCase() === "skill.md"
+            ? basename(dirname(requested))
+            : basename(requested).replace(/\.md$/i, "");
+          setBuiltinSkillManualOnly(document.name || fallback, input.manualOnly);
+          await this.reloadSkills();
+          return { ok: true };
+        }
         const { file } = await this.skillTarget(input.path);
         const document = parseSkillDocument(await readFile(file, "utf8"));
         await writeFile(file, serializeSkillDocument({

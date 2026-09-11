@@ -541,8 +541,9 @@ describe("SettingsPage save", () => {
 
   it("creates, edits, toggles, and deletes editable skills", async () => {
     const skills: RuntimeSkill[] = [
-      { name: "docx", description: "Create Word documents", path: "/home/me/.pi/agent/skills/docx/SKILL.md", source: "local", scope: "user", disableModelInvocation: false, editable: true },
+      { name: "docx", description: "Create Word documents", path: "/home/me/.pi/agent/skills/docx/SKILL.md", source: "local", scope: "user", disableModelInvocation: false, editable: true, shadowsBuiltin: "/app/resources/skills/docx/SKILL.md" },
       { name: "bundled", description: "Ships with a package", path: "/app/pkg/skills/bundled/SKILL.md", source: "cli", scope: "temporary", disableModelInvocation: false, editable: false },
+      { name: "zotero-cli", description: "Read and write a Zotero library", path: "/app/resources/skills/zotero-cli/SKILL.md", source: "local", scope: "builtin", disableModelInvocation: false, editable: false },
     ];
     const calls: Record<string, unknown>[] = [];
     vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
@@ -565,15 +566,35 @@ describe("SettingsPage save", () => {
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
     await flushPromises();
 
-    // A skill outside the editable folders offers no edit, delete, or switch.
+    // A skill outside the editable folders offers a read-only viewer, never
+    // an edit or delete; a packaged (temporary) one has no manual switch.
     const bundled = wrapper.get('[data-skill="bundled"]');
-    expect(bundled.find(".skill-action").exists()).toBe(false);
+    expect(bundled.find(".skill-action-delete").exists()).toBe(false);
     expect(bundled.find("[data-skill-manual]").exists()).toBe(false);
     expect(bundled.text()).toContain("Read-only");
+    // A row shadowing a same-named bundled skill says so, path on hover.
+    expect(wrapper.get('[data-skill="docx"]').text()).toContain("Shadows built-in");
+    // A builtin skill is read-only but its manual-only switch works.
+    const builtin = wrapper.get('[data-skill="zotero-cli"]');
+    expect(builtin.find("[data-skill-manual]").exists()).toBe(true);
+    await builtin.get("[data-skill-manual]").trigger("click");
+    await flushPromises();
+    expect(calls.find((call) => call.action === "setSkillManualOnly")).toMatchObject({
+      path: "/app/resources/skills/zotero-cli/SKILL.md",
+      manualOnly: true,
+    });
+    // The viewer opens the shared sheet without a save control.
+    await bundled.get("[data-skill-view]").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-skill-form]").exists()).toBe(true);
+    expect(wrapper.find("[data-skill-save]").exists()).toBe(false);
+    await wrapper.find("[data-skill-form] button[type=button]").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-skill-form]").exists()).toBe(false);
 
     await wrapper.get('[data-skill="docx"] [data-skill-manual]').trigger("click");
     await flushPromises();
-    expect(calls.find((call) => call.action === "setSkillManualOnly")).toMatchObject({
+    expect(calls.filter((call) => call.action === "setSkillManualOnly").at(-1)).toMatchObject({
       path: "/home/me/.pi/agent/skills/docx/SKILL.md",
       manualOnly: true,
     });

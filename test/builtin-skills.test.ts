@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
+import { applyBuiltinSkillOverrides, resolveBuiltinSkills, setBuiltinSkillManualOnly } from "../src/main/builtin-skills.js";
 import { parseSkillDocument } from "../src/main/skill-files.js";
 import { skillBodyError, skillDescriptionError, skillNameError } from "../src/shared/skills.js";
 
@@ -75,6 +75,106 @@ test("every bundled skill directory is a spec-valid document pi can load", () =>
     assert.equal(skillNameError(document.name), undefined);
     assert.equal(skillDescriptionError(document.description), undefined);
     assert.equal(skillBodyError(document.body), undefined);
+  }
+});
+
+test("manual-only overrides apply to bundled paths only, by name and file", () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-skill-overrides-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = home;
+  try {
+    const [bundledRoot] = resolveBuiltinSkills(dirname(fileURLToPath(import.meta.url)));
+    assert.ok(bundledRoot);
+    const bundled = { name: "marker", filePath: join(bundledRoot, "zotero-cli", "SKILL.md"), disableModelInvocation: false };
+    const sameNameUser = { name: "marker", filePath: join(home, ".pi", "agent", "skills", "zotero-cli", "SKILL.md"), disableModelInvocation: false };
+    const untouched = { name: "other", filePath: join(bundledRoot, "other", "SKILL.md"), disableModelInvocation: false };
+    const diagnostics = [{ type: "collision" }];
+
+    // An empty override table leaves the list untouched, diagnostics and all.
+    const before = { skills: [bundled, sameNameUser, untouched], diagnostics };
+    assert.equal(applyBuiltinSkillOverrides(dirname(fileURLToPath(import.meta.url)), before), before);
+
+    setBuiltinSkillManualOnly("marker", true);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(home, ".pix", "skill-overrides.json"), "utf8")),
+      { marker: true },
+    );
+    const after = applyBuiltinSkillOverrides(
+      dirname(fileURLToPath(import.meta.url)),
+      { skills: [bundled, sameNameUser, untouched], diagnostics },
+    );
+    assert.equal(after.diagnostics, diagnostics);
+    const [flipped, userCopy, noEntry] = after.skills;
+    assert.ok(flipped && userCopy && noEntry);
+    assert.equal(flipped.disableModelInvocation, true);
+    // Same-named user file is not the bundled one: untouched.
+    assert.equal(userCopy.disableModelInvocation, false);
+    // No table entry for this name: untouched.
+    assert.equal(noEntry.disableModelInvocation, false);
+
+    setBuiltinSkillManualOnly("marker", false);
+    const [restored] = applyBuiltinSkillOverrides(
+      dirname(fileURLToPath(import.meta.url)),
+      { skills: [bundled], diagnostics: [] },
+    ).skills;
+    assert.ok(restored);
+    assert.equal(restored.disableModelInvocation, false);
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a manual-only override keeps the bundled skill loadable but out of the prompt", async () => {
+  const pi = await import("@earendil-works/pi-coding-agent");
+  // Sandbox outside the real user profile: pi trusts projects by default and
+  // scans .agents folders from the cwd upward, and the user-level ~/.agents
+  // ranks above additionalSkillPaths. Redirecting HOME into a sandbox on
+  // another tree keeps both away, so the bundled copy is the one in play.
+  const root = mkdtempSync(join(dirname(fileURLToPath(import.meta.url)), "pix-builtin-manual-"));
+  const previousHome = process.env.HOME;
+  const previousPixHome = process.env.PIX_HOME;
+  process.env.HOME = root;
+  process.env.PIX_HOME = root;
+  try {
+    setBuiltinSkillManualOnly("zotero-cli", true);
+    const agentDir = join(root, "agent");
+    mkdirSync(agentDir, { recursive: true });
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    const [builtinRoot] = resolveBuiltinSkills(moduleDir);
+    assert.ok(builtinRoot, "bundled skills tree not found beside the test output");
+    const services = await pi.createAgentSessionServices({
+      cwd: root,
+      agentDir,
+      settingsManager: pi.SettingsManager.create(root, agentDir),
+      resourceLoaderOptions: {
+        additionalSkillPaths: resolveBuiltinSkills(moduleDir),
+        skillsOverride: (base) => applyBuiltinSkillOverrides(moduleDir, base),
+      },
+    });
+    const { skills } = services.resourceLoader.getSkills();
+    const zotero = skills.find((skill) => skill.name === "zotero-cli");
+    assert.ok(zotero, "bundled skill not discovered");
+    assert.equal(zotero.filePath, join(builtinRoot, "zotero-cli", "SKILL.md"));
+    assert.equal(zotero.disableModelInvocation, true);
+    const { session } = await pi.createAgentSessionFromServices({
+      services,
+      sessionManager: pi.SessionManager.inMemory(root),
+    });
+    try {
+      // Manual-only skills stay out of the advertisement; the /skill:name
+      // command surface is built from the same list, which still has it.
+      assert.doesNotMatch(session.systemPrompt, /Read and write a Zotero library/);
+    } finally {
+      session.dispose();
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousPixHome === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previousPixHome;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

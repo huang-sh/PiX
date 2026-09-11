@@ -374,10 +374,12 @@ export interface RuntimeSkill {
   description: string;
   path: string;
   source: string;
-  scope: "user" | "project" | "temporary";
+  scope: "user" | "project" | "temporary" | "builtin";
   disableModelInvocation: boolean;
   /** True when the file sits in a skills folder PiX may rewrite. */
   editable: boolean;
+  /** Path of the bundled skill this one shadows by name, when it does. */
+  shadowsBuiltin?: string;
 }
 export interface RuntimeSkillDocument {
   path: string;
