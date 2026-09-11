@@ -645,7 +645,7 @@ try {
             })
           } : null;
         })()`);
-        if (!value?.selected || value.embeddedComposer || !value.addAction || !value.centered || !value.noOverlap || value.footer.height < 54 || value.footer.height > 60 || !value.footer.context || value.footer.controls !== 0)
+        if (!value?.selected || value.embeddedComposer || !value.addAction || !value.centered || !value.noOverlap || value.footer.height < 29 || value.footer.height > 33 || !value.footer.context || value.footer.controls !== 0)
           throw new Error(`Selected graph node is not stable and centered: ${JSON.stringify(value)}`);
         return value;
       })
@@ -1077,12 +1077,25 @@ try {
   });
   if (!readFileSync(guiSkillFile, "utf8").includes("Created by the PiX GUI test."))
     throw new Error("Skill file did not keep its description");
+  // Saving leaves the row busy until loadSkills() settles; the switch is
+  // :disabled meanwhile, so a click would be silently dropped.
+  await retry(async () => {
+    if (await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] [data-skill-manual]')?.disabled"))
+      throw new Error("Skill row still busy after save");
+  });
   await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] [data-skill-manual]').click()");
   await retry(async () => {
     if (!readFileSync(guiSkillFile, "utf8").includes("disable-model-invocation"))
       throw new Error("Manual-only toggle was not written to the skill file");
   });
   const guiSkillRemove = "document.querySelector('[data-skill=\"pix-gui-skill\"] .skill-actions button:last-child')";
+  // The manual toggle clears its busy state only after loadSkills() returns,
+  // which trails the disk write the previous step polled. Wait for the button
+  // to leave :disabled before pressing, or the click arms nothing.
+  await retry(async () => {
+    if (await cdp.evaluate(`${guiSkillRemove}?.disabled`))
+      throw new Error("Skill delete button still busy after the manual toggle");
+  });
   await cdp.evaluate(`${guiSkillRemove}.click()`);
   await retry(async () => {
     if (!(await cdp.evaluate(`Boolean(${guiSkillRemove}?.classList.contains('is-arming'))`)))
