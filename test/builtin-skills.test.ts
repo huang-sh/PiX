@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,6 +75,14 @@ test("every bundled skill directory is a spec-valid document pi can load", () =>
     assert.equal(skillNameError(document.name), undefined);
     assert.equal(skillDescriptionError(document.description), undefined);
     assert.equal(skillBodyError(document.body), undefined);
+    // Companion files the body points to (reference.md, install.md, ...) must
+    // ship with the skill, or the model follows a dead pointer.
+    for (const mention of document.body.matchAll(/[A-Za-z0-9_-]+\.md/g)) {
+      assert.ok(
+        existsSync(join(skillDir, mention[0])),
+        `${name} references missing companion file ${mention[0]}`,
+      );
+    }
   }
 });
 
