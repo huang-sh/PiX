@@ -189,7 +189,7 @@ test("a diff too expensive to compute is reported without totals and is not kept
 test("real graph workers preserve root snapshot references across forks and restart", { timeout: 30000 }, async t => {
   const home = mkdtempSync(join(tmpdir(), "pix-graph-changes-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
-  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
   const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
   t.after(async () => {
     await runtime.close();

@@ -41,14 +41,13 @@ if (bundledChecks) {
 }
 const artifacts = join(root, "artifacts");
 const testHome = join(artifacts, "packaged-home");
-mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
-mkdirSync(join(testHome, ".pix"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
 writeFileSync(
-  join(testHome, ".pix", "settings.json"),
+  join(testHome, ".pix", "gui.settings.json"),
   JSON.stringify({
     openLastSessionOnStartup: true,
     layout: {

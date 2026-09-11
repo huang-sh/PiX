@@ -48,7 +48,7 @@ async function until(condition, timeout = 10_000) {
 
 const localHome = mkdtempSync(join(tmpdir(), "pix-live-local-"));
 process.env.PIX_HOME = localHome;
-process.env.PI_CODING_AGENT_DIR = join(localHome, ".pi", "agent");
+process.env.PI_CODING_AGENT_DIR = join(localHome, ".pix", "agent");
 process.env.PI_OFFLINE = "1";
 const controller = new MainController(localHome, {
   async pickProject() {}, async pickSession() {},

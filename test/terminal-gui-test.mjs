@@ -12,9 +12,9 @@ const electron = process.env.ELECTRON_BINARY ?? electronBinary(root);
 
 if (!existsSync(electron)) throw new Error("Electron binary not found");
 mkdirSync(artifacts, { recursive: true });
-mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
 

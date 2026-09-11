@@ -421,11 +421,10 @@ export class MainController {
         const local =
           route === "settings.update"
             ? this.settings.update(
-                "app",
                 v.patch as Record<string, unknown>,
                 v.replace === true,
               )
-            : this.settings.reset("app");
+            : this.settings.reset();
         return this.wslSettings
           ? { ...this.mergedWslSettings(this.wslSettings), app: local.app }
           : local;
@@ -797,11 +796,17 @@ export class MainController {
         const previousDir = this.project
           ? configuredSessionDir(this.project.path, this.settings.bundle())
           : null;
-        const b = this.settings.update(
-          v.scope as "app" | "global" | "project",
-          v.patch as Record<string, unknown>,
-          v.replace === true,
-        );
+        const b =
+          v.scope === "app"
+            ? this.settings.update(
+                v.patch as Record<string, unknown>,
+                v.replace === true,
+              )
+            : await this.settings.updatePi(
+                v.scope as "global" | "project",
+                v.patch as Record<string, unknown>,
+                v.replace === true,
+              );
         if (v.scope === "project" && this.project) {
           const d = configuredSessionDir(this.project.path, b);
           this.files.set(this.project.path, d);
@@ -813,7 +818,9 @@ export class MainController {
         return b;
       }
       case "settings.reset":
-        return this.settings.reset(v.scope as "app" | "global" | "project");
+        return v.scope === "app"
+          ? this.settings.reset()
+          : await this.settings.resetPi(v.scope as "global" | "project");
       case "layout.save":
         this.settings.saveLayout(v.layout as unknown as any);
         return { ok: true };

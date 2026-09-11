@@ -1,4 +1,5 @@
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -20,7 +21,6 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { homedir } from "node:os";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -45,6 +45,8 @@ import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
+import { pixAgentDir, pixHome } from "./paths.js";
+import { piSettingsSdk } from "./pi-runtime.js";
 const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
     const v = JSON.parse(readFileSync(p, "utf8"));
@@ -93,15 +95,99 @@ export const DEFAULT_LAYOUT: LayoutState = {
     activeTab: "terminal",
   },
 };
+/** A settings file is readable only if it parses to a JSON object. */
+function readableSettings(path: string): boolean {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  } catch {
+    return false;
+  }
+}
+/**
+ * A missing settings file is fine (defaults apply); a corrupt one is parked
+ * beside the fresh file as `<name>.corrupt-<timestamp>` so the next write
+ * starts clean without silently destroying what was there.
+ */
+function quarantineCorruptSettings(path: string) {
+  if (!existsSync(path) || readableSettings(path)) return;
+  try {
+    renameSync(
+      path,
+      `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "")}`,
+    );
+  } catch {}
+}
+/**
+ * One-time bootstrap of a profile: park a corrupt GUI settings file, and on
+ * first launch copy an existing pi CLI agent profile — logins, custom models,
+ * skills — into the profile's own agent dir so they carry over once.
+ */
+export function bootstrapPixProfile(home: string) {
+  quarantineCorruptSettings(join(home, ".pix", "gui.settings.json"));
+  const source = join(home, ".pi", "agent");
+  const target = join(home, ".pix", "agent");
+  if (
+    !existsSync(source) ||
+    existsSync(join(target, "auth.json")) ||
+    existsSync(join(target, "models.json"))
+  )
+    return;
+  mkdirSync(target, { recursive: true });
+  cpSync(source, target, {
+    recursive: true,
+    force: false,
+    // Sessions live in each project's .pi/sessions; CLI history stays there.
+    filter: (src) => basename(src) !== "sessions",
+  });
+}
+/**
+ * Value-level fault tolerance for the GUI settings: known keys with a wrong
+ * type or out-of-range value are dropped so the defaults apply, while unknown
+ * keys (a newer version wrote them) survive untouched. Runs on every read
+ * and before every write, so neither a hand-edited file nor a bad patch can
+ * push an unusable value into the app.
+ */
+function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...raw };
+  const drop = (key: string) => delete out[key];
+  const expectBoolean = (key: string) => {
+    if (typeof out[key] !== "boolean") drop(key);
+  };
+  const expectNumber = (key: string, min: number, max: number) => {
+    const value = out[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max)
+      drop(key);
+  };
+  if (out.language !== "system" && out.language !== "zh-CN" && out.language !== "en")
+    drop("language");
+  if (out.density !== "comfortable" && out.density !== "compact") drop("density");
+  out.theme = normalizeTheme(out.theme);
+  if (typeof out.browserHome !== "string" || !out.browserHome) drop("browserHome");
+  if (out.lastProject !== undefined && typeof out.lastProject !== "string") drop("lastProject");
+  for (const key of [
+    "confirmDestructiveActions",
+    "openLastSessionOnStartup",
+    "enterToSend",
+    "openLinksInApp",
+    "closeToTray",
+    "canvasDotGrid",
+  ])
+    expectBoolean(key);
+  expectNumber("canvasDotGridSpacing", 8, 96);
+  expectNumber("canvasDotGridDotSize", 1, 6);
+  try {
+    if (out.keyboardShortcuts !== undefined) validateShortcutOverrides(out.keyboardShortcuts);
+  } catch {
+    drop("keyboardShortcuts");
+  }
+  return out;
+}
+
 export class SettingsService {
   project: string | null;
-  appPath = join(process.env.PIX_HOME ?? homedir(), ".pix", "settings.json");
-  globalPath = join(
-    process.env.PIX_HOME ?? homedir(),
-    ".pi",
-    "agent",
-    "settings.json",
-  );
+  appPath = join(pixHome(), ".pix", "gui.settings.json");
+  globalPath = join(pixAgentDir(), "settings.json");
   constructor(project: string | null) {
     this.project = project ? resolve(project) : null;
   }
@@ -127,7 +213,7 @@ export class SettingsService {
       ["delete", "HKCU\\Software\\PiX", "/v", "installerLanguage", "/f"],
       { windowsHide: true },
     );
-    this.update("app", { language });
+    this.update({ language });
   }
   get projectPath() {
     return this.project ? join(this.project, ".pi", "settings.json") : null;
@@ -147,11 +233,12 @@ export class SettingsService {
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
     };
+    // Normalize the raw file before the defaults merge, so a dropped key is
+    // filled by its default instead of surfacing as undefined.
     const app = merge(
       defaults as unknown as Record<string, unknown>,
-      readJson(this.appPath),
+      normalizeAppSettings(readJson(this.appPath)),
     ) as unknown as AppSettings;
-    app.theme = normalizeTheme(app.theme);
     const piGlobal = readJson<PiSettings>(this.globalPath),
       piProject = this.project && this.projectPath
         ? readJson<PiSettings>(this.projectPath)
@@ -168,36 +255,71 @@ export class SettingsService {
       },
     };
   }
-  update(
-    scope: "app" | "global" | "project",
-    patch: Record<string, unknown>,
-    replace = false,
-  ) {
-    const p =
-      scope === "app"
-        ? this.appPath
-        : scope === "global"
-          ? this.globalPath
-          : this.projectPath;
-    if (!p) throw new Error("Open a project first");
-    const next = replace ? { ...patch } : merge(readJson(p), patch);
-    if (scope === "app" && Object.hasOwn(patch, "keyboardShortcuts")) {
+  update(patch: Record<string, unknown>, replace = false) {
+    const next = replace ? { ...patch } : merge(readJson(this.appPath), patch);
+    if (Object.hasOwn(patch, "keyboardShortcuts")) {
       validateShortcutOverrides(patch.keyboardShortcuts);
       // This map is a complete set of overrides: merging would resurrect reset bindings.
       next.keyboardShortcuts = patch.keyboardShortcuts;
     }
-    atomic(p, next);
+    // App writes persist only values the app can read back.
+    atomic(this.appPath, normalizeAppSettings(next));
     return this.bundle();
   }
-  reset(scope: "app" | "global" | "project") {
-    const p =
-      scope === "app"
-        ? this.appPath
-        : scope === "global"
-          ? this.globalPath
-          : this.projectPath;
-    if (!p) throw new Error("Open a project first");
-    atomic(p, {});
+  reset() {
+    atomic(this.appPath, {});
+    return this.bundle();
+  }
+  /**
+   * Pi agent settings files belong to the pi SDK: reads for display stay in
+   * bundle(), but writes go through the SDK's own storage so they take the
+   * same file lock the CLI uses, a corrupt file freezes saves instead of
+   * being overwritten, and loaded values keep the SDK's format migrations.
+   */
+  async updatePi(
+    scope: "global" | "project",
+    patch: Record<string, unknown>,
+    replace = false,
+  ) {
+    if (scope === "project" && !this.project)
+      throw new Error("Open a project first");
+    const { FileSettingsStorage, SettingsManager } = await piSettingsSdk();
+    const cwd = this.project ?? join(pixHome(), ".pix");
+    const agentDir = pixAgentDir();
+    // Freeze: a file the SDK cannot load is never overwritten. The user gets
+    // the path and can fix it, remove it, or reset it from Settings.
+    const probe = SettingsManager.create(cwd, agentDir);
+    const loadError = probe.drainErrors().find((e) => e.scope === scope);
+    if (loadError)
+      throw new Error(
+        `The ${scope} settings file at ${loadError.path ?? "?"} is unreadable (${loadError.error.message}); fix or remove it, or reset it in Settings`,
+      );
+    new FileSettingsStorage(cwd, agentDir).withLock(scope, (current) => {
+      let base: Record<string, unknown> = {};
+      if (current !== undefined) {
+        try {
+          const parsed = JSON.parse(current.replace(/^\uFEFF/, ""));
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+            base = parsed as Record<string, unknown>;
+        } catch {
+          // The probe above already rejects a corrupt file; this guards the
+          // tiny window where the file changed between probe and lock.
+          throw new Error(
+            `The ${scope} settings file changed and is unreadable; retry after fixing it`,
+          );
+        }
+      }
+      return JSON.stringify(replace ? { ...patch } : merge(base, patch), null, 2);
+    });
+    return this.bundle();
+  }
+  /** Reset is the remedy a frozen (corrupt) file needs, so it bypasses the save freeze. */
+  async resetPi(scope: "global" | "project") {
+    if (scope === "project" && !this.project)
+      throw new Error("Open a project first");
+    const { FileSettingsStorage } = await piSettingsSdk();
+    const cwd = this.project ?? join(pixHome(), ".pix");
+    new FileSettingsStorage(cwd, pixAgentDir()).withLock(scope, () => "{}");
     return this.bundle();
   }
   layout() {
@@ -210,7 +332,7 @@ export class SettingsService {
     atomic(this.appPath, merge(readJson(this.appPath), { layout }));
   }
   lastProject(p: string) {
-    this.update("app", { lastProject: resolve(p) });
+    this.update({ lastProject: resolve(p) });
   }
   projectHistory() {
     const value = readJson(this.appPath).recentProjects;
@@ -238,12 +360,12 @@ export class SettingsService {
       record,
       ...this.projectHistory().filter((item) => item.id !== id),
     ];
-    this.update("app", { recentProjects });
+    this.update({ recentProjects });
     return recentProjects;
   }
   forgetProject(id: string) {
     const recentProjects = this.projectHistory().filter((item) => item.id !== id);
-    this.update("app", { recentProjects });
+    this.update({ recentProjects });
     return recentProjects;
   }
 }

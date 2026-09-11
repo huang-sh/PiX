@@ -11,10 +11,10 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const home = mkdtempSync(join(tmpdir(), "pix-typography-"));
 const workspace = join(home, "workspace");
 const artifacts = join(root, "artifacts");
-for (const path of [artifacts, join(home, ".pi", "agent"), join(home, ".pix"), join(workspace, ".pi", "sessions")])
+for (const path of [artifacts, join(home, ".pix", "agent"), join(home, ".pix"), join(workspace, ".pi", "sessions")])
   mkdirSync(path, { recursive: true });
-writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
-writeFileSync(join(home, ".pix", "settings.json"), JSON.stringify({ language: "zh-CN", openLastSessionOnStartup: false }));
+writeFileSync(join(home, ".pix", "agent", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
+writeFileSync(join(home, ".pix", "gui.settings.json"), JSON.stringify({ language: "zh-CN", openLastSessionOnStartup: false }));
 const text = "中文阅读应该清晰舒适，English text should feel natural. PiX 支持分支会话、文件编辑和工具调用。";
 const sessionFile = join(workspace, ".pi", "sessions", "typography.jsonl");
 const timestamp = new Date().toISOString();

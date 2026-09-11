@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { pixHome } from "./paths.js";
 import { isPathInside } from "./skill-files.js";
 
 /**
  * Built-in skills PiX bundles with the app so they work without user setup.
  * Loaded through resourceLoaderOptions.additionalSkillPaths, which pi ranks
  * below every user-discovered skill: a same-named skill the user writes to
- * ~/.pi/agent/skills or a project root always wins, and pi's package
+ * ~/.pix/agent/skills or a project root always wins, and pi's package
  * management never touches the bundled files.
  *
  * Directories are plain markdown, unlike bundled packages: no npm install is
@@ -40,8 +40,7 @@ export function isBundledSkillPath(moduleDir: string, path: string): boolean {
  * settings.json under the PiX home, per machine: the remote host keeps its
  * own, exactly where its sessions are created.
  */
-const overridePath = () =>
-  join(process.env.PIX_HOME ?? homedir(), ".pix", "skill-overrides.json");
+const overridePath = () => join(pixHome(), ".pix", "skill-overrides.json");
 
 /** Map of skill name -> disable-model-invocation. */
 function readBuiltinSkillOverrides(): Record<string, boolean> {
