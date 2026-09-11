@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
@@ -24,8 +24,12 @@ export interface PromptNodeData {
   blockedReason: string;
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
+  /** True while the node matches the active graph search query. */
+  searchHit?: boolean;
   content: () => NodeContent;
   onCompose: (direction?: BranchDirection) => void;
+  /** Present only on failed turns: reopens the prompt as an editable draft. */
+  onRetry?: () => void;
   onDelete?: () => void;
   deleteBlockedReason?: string;
 }
@@ -149,7 +153,7 @@ function relative(value: string) {
   <article
     ref="root"
     class="prompt-node"
-    :class="{ active: data.active, current: data.current, running: data.running, selected }"
+    :class="{ active: data.active, current: data.current, running: data.running, selected, 'search-hit': data.searchHit }"
     @mouseenter="showPreview"
     @mouseleave="hidePreview"
     @pointerdown="suppressPreview"
@@ -166,6 +170,11 @@ function relative(value: string) {
         <span v-if="data.current" :title="t('graph.currentTurn')" :aria-label="t('graph.currentTurn')"><Check :size="11" /></span>
         <span v-if="data.node.hasError" class="node-error" :title="t('graph.responseError')" :aria-label="t('graph.responseError')"><AlertCircle :size="12" /></span>
         <span v-else-if="data.node.toolCallCount" :title="t('graph.toolCalls', { n: data.node.toolCallCount })"><Wrench :size="11" />{{ data.node.toolCallCount }}</span>
+        <button v-if="data.onRetry" type="button" class="node-retry nodrag nowheel"
+          :title="t('graph.retryTurnHint')" :aria-label="t('graph.retryTurn')"
+          @mouseenter="suppressPreview" @focus="suppressPreview"
+          @click.stop="data.onRetry()"
+        ><RotateCcw :size="12" /></button>
         <time>{{ relative(data.node.timestamp) }}</time>
       </aside>
       <span class="turn-role pi" title="Pi" aria-label="Pi"><Sparkles :size="13" /></span>
@@ -226,6 +235,14 @@ function relative(value: string) {
   </ContextMenuTrigger>
   <ContextMenuPortal>
     <ContextMenuContent class="menu-content nodrag nowheel" :side-offset="4" @close-auto-focus.prevent>
+      <ContextMenuItem
+        v-if="data.node.hasError"
+        class="menu-item"
+        data-action="node-retry"
+        :disabled="!data.onRetry"
+        :title="t('graph.retryTurnHint')"
+        @select="data.onRetry?.()"
+      ><RotateCcw :size="14" />{{ t('graph.retryTurn') }}</ContextMenuItem>
       <ContextMenuItem
         class="menu-item danger"
         data-action="node-delete"
