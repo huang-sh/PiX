@@ -26,6 +26,7 @@ import {
   skillRoots,
 } from "./skill-files.js";
 import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../shared/skills.js";
+import { pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
@@ -48,6 +49,36 @@ import { projectSession, summarizeSession } from "../shared/session.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+
+/** The SDK's settings surface the settings service writes through. */
+export interface PiSettingsSdk {
+  FileSettingsStorage: new (cwd: string, agentDir: string) => {
+    withLock: (
+      scope: "global" | "project",
+      fn: (current: string | undefined) => string | undefined,
+    ) => void;
+  };
+  SettingsManager: {
+    create: (cwd: string, agentDir: string) => {
+      drainErrors: () => Array<{
+        scope: "global" | "project";
+        path?: string;
+        error: Error;
+      }>;
+    };
+  };
+}
+/**
+ * The SDK's settings storage, for the settings service to write pi settings
+ * with the SDK's locking and its corrupt-file freeze. The SDK stays behind
+ * this adapter (the architecture test pins its import to this file);
+ * FileSettingsStorage is not re-exported by the package entry, hence the
+ * same version-specific deep import as exportSnapshotHtml.
+ */
+export async function piSettingsSdk(): Promise<PiSettingsSdk> {
+  const moduleUrl = new URL("./core/settings-manager.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+  return import(moduleUrl.href);
+}
 
 export class PiRuntime {
   mod: any;
@@ -93,15 +124,13 @@ export class PiRuntime {
     const exporter = await import(moduleUrl.href);
     return exporter.exportSessionToHtml(manager, undefined, { outputPath });
   }
-  agentDir(pi: any) {
-    return process.env.PIX_HOME
-      ? join(process.env.PIX_HOME, ".pi", "agent")
-      : pi.getAgentDir();
+  agentDir() {
+    return pixAgentDir();
   }
   /** Skill roots PiX may create or rewrite for the active project. */
   private async skillFileRoots() {
     const pi = await this.pi();
-    return skillRoots(this.agentDir(pi), this.cwd ?? homedir(), pi.CONFIG_DIR_NAME, homedir());
+    return skillRoots(this.agentDir(), this.cwd ?? homedir(), pi.CONFIG_DIR_NAME, homedir());
   }
   /**
    * Reloads discovery after a skill file changes so the settings list and the
@@ -203,7 +232,7 @@ export class PiRuntime {
    * session-less services behave the same.
    */
   private sessionServicesOptions(pi: any, cwd: string) {
-    const agentDir = this.agentDir(pi);
+    const agentDir = this.agentDir();
     // Pi's bash tool otherwise only finds Git Bash under Program Files or
     // directly on PATH; derive it from git.exe so custom install roots
     // (e.g. D:\software\Git) get a POSIX shell without user setup.
@@ -320,7 +349,7 @@ export class PiRuntime {
     if (leafId === null) manager.resetLeaf();
     else manager.branch(leafId);
     this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
-      cwd: this.cwd, agentDir: this.agentDir(pi), sessionManager: manager,
+      cwd: this.cwd, agentDir: this.agentDir(), sessionManager: manager,
     });
     this.bind();
   }
@@ -347,7 +376,7 @@ export class PiRuntime {
       const manager = pi.SessionManager.open(path, this.dir, this.cwd);
       this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
         cwd: this.cwd,
-        agentDir: this.agentDir(pi),
+        agentDir: this.agentDir(),
         sessionManager: manager,
       });
     }
@@ -362,7 +391,7 @@ export class PiRuntime {
       const manager = pi.SessionManager.create(this.cwd, this.dir);
       this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
         cwd: this.cwd,
-        agentDir: this.agentDir(pi),
+        agentDir: this.agentDir(),
         sessionManager: manager,
       });
     }
@@ -570,7 +599,7 @@ export class PiRuntime {
       }
       case "getCustomModels": {
         const pi = await this.pi();
-        return getCustomModels(join(this.agentDir(pi), "models.json"));
+        return getCustomModels(join(this.agentDir(), "models.json"));
       }
       case "addCustomModel":
       case "updateCustomModel": {
@@ -581,7 +610,7 @@ export class PiRuntime {
         if (!update && modelRuntime.getModel(input.provider, input.modelId))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
         if (!update && modelRuntime.getError()) throw new Error(modelRuntime.getError());
-        addCustomModel(join(this.agentDir(pi), "models.json"), input, update);
+        addCustomModel(join(this.agentDir(), "models.json"), input, update);
         await modelRuntime.refresh({ allowNetwork: false });
         if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
         if (input.apiKey?.trim()) {

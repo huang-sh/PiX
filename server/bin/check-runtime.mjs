@@ -34,7 +34,7 @@ async function smoke() {
   const { default: WebSocket } = await import("ws");
   const home = mkdtempSync(join(tmpdir(), "pix-runtime-check-"));
   const child = spawn(process.execPath, [join(root, "dist/server/index.js"), "serve", "--cwd", home, "--exit-on-disconnect"], {
-    env: { ...process.env, PIX_HOME: home, PI_CODING_AGENT_DIR: join(home, ".pi"), PI_OFFLINE: "1" },
+    env: { ...process.env, PIX_HOME: home, PI_CODING_AGENT_DIR: join(home, ".pix", "agent"), PI_OFFLINE: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const exited = once(child, "close").catch(() => undefined);

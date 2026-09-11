@@ -74,7 +74,7 @@ export interface SkillRoots {
 }
 
 /**
- * Pi discovers `~/.pi/agent/skills` and `<cwd>/.pi/skills` by default and
+ * Pi discovers `<agentDir>/skills` and `<cwd>/.pi/skills` by default and
  * `.agents/skills` through the package manager; both are real user-owned skill
  * directories, so both are editable while only the Pi-native ones are targets
  * for new skills.

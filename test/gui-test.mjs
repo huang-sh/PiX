@@ -52,14 +52,14 @@ if (verifyHmr) {
   });
   await devServer.listen();
 }
-mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
 writeFileSync(
-  join(testHome, ".pix", "settings.json"),
+  join(testHome, ".pix", "gui.settings.json"),
   JSON.stringify({
     // The graph assertions below need a session opened at boot.
     openLastSessionOnStartup: true,
@@ -1010,7 +1010,7 @@ try {
       tuiTheme: Boolean(document.querySelector('[data-setting-path=tuiMode], [data-setting-path="terminal.showTerminalProgress"]')),
       advanced: Boolean(document.querySelector('[data-settings-category=advanced]'))
     })`);
-    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "settings.json"), "utf8"));
+    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "gui.settings.json"), "utf8"));
     if (value.theme !== themePreview.preview || value.savingTheme || saved.theme !== themePreview.preview || value.tuiTheme || value.advanced)
       throw new Error(`GUI appearance settings are not effective: ${JSON.stringify(value)}`);
   });
@@ -1022,7 +1022,7 @@ try {
   await retry(async () => {
     if (await cdp.evaluate("document.querySelector('[data-setting-path=theme] select').disabled"))
       throw new Error("Theme restore is still saving");
-    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "settings.json"), "utf8"));
+    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "gui.settings.json"), "utf8"));
     if (saved.theme !== themePreview.original) throw new Error("Theme restore was not persisted");
   });
   for (const [category, setting] of [
@@ -1045,7 +1045,7 @@ try {
 
   // Skills are real SKILL.md files under the Pi agent dir; the settings page
   // creates, toggles, and deletes them through the host, so assert the disk.
-  const guiSkillDir = join(testHome, ".pi", "agent", "skills", "pix-gui-skill");
+  const guiSkillDir = join(testHome, ".pix", "agent", "skills", "pix-gui-skill");
   const guiSkillFile = join(guiSkillDir, "SKILL.md");
   rmSync(guiSkillDir, { recursive: true, force: true });
   await cdp.evaluate("document.querySelector('[data-settings-category=skills]').click()");

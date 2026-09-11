@@ -24,13 +24,16 @@ the active project. Browser content uses an isolated webview partition.
 
 ## Settings precedence
 
-PiX reads:
+PiX keeps its own profile under `~/.pix` — separate from the pi CLI's `~/.pi`.
+On first launch an existing `~/.pi/agent` (logins, custom models, skills) is
+copied into `~/.pix/agent` once; afterwards the two profiles evolve
+independently. PiX reads:
 
-1. `~/.pi/agent/settings.json`
+1. `~/.pix/agent/settings.json`
 2. `<project>/.pi/settings.json`
 
 Project settings override global settings. PiX-specific layout and appearance
-are stored in `~/.pix/settings.json`.
+are stored in `~/.pix/gui.settings.json`.
 
 ## Session fixture provenance
 
@@ -49,7 +52,7 @@ independent. The Vite renderer selects another port if its default is occupied.
 
 ```powershell
 $env:PIX_HOME = Join-Path $PWD 'artifacts/dev-profile'
-$env:PI_CODING_AGENT_DIR = Join-Path $env:PIX_HOME '.pi/agent'
+$env:PI_CODING_AGENT_DIR = Join-Path $env:PIX_HOME '.pix/agent'
 $env:PIX_PROJECT = $PWD.Path
 npm run dev -- -- --user-data-dir="$env:PIX_HOME/electron"
 ```

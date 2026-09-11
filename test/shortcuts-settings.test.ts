@@ -11,19 +11,19 @@ test("shortcut overrides persist atomically, reset independently, and reject inv
     const service = new SettingsService(null);
     service.appPath = join(directory, "settings.json");
     service.globalPath = join(directory, "pi-settings.json");
-    service.update("app", { theme: "dark", keyboardShortcuts: { navigator: [] } });
+    service.update({ theme: "dark", keyboardShortcuts: { navigator: [] } });
     const reopened = new SettingsService(null);
     reopened.appPath = service.appPath;
     reopened.globalPath = service.globalPath;
     assert.deepEqual(reopened.bundle().app.keyboardShortcuts, { navigator: [] });
-    service.update("app", { keyboardShortcuts: { commands: ["Mod+m"] } });
+    service.update({ keyboardShortcuts: { commands: ["Mod+m"] } });
     assert.deepEqual(reopened.bundle().app.keyboardShortcuts, { commands: ["Mod+m"] });
-    service.update("app", { keyboardShortcuts: {} });
+    service.update({ keyboardShortcuts: {} });
     assert.deepEqual(reopened.bundle().app.keyboardShortcuts, {});
     assert.equal(reopened.bundle().app.theme, "dark");
     const before = readFileSync(service.appPath, "utf8");
-    assert.throws(() => service.update("app", { keyboardShortcuts: { commands: ["Mod+b"] } }));
-    assert.throws(() => service.update("app", { keyboardShortcuts: { commands: ["Mod+c"] } }, true));
+    assert.throws(() => service.update({ keyboardShortcuts: { commands: ["Mod+b"] } }));
+    assert.throws(() => service.update({ keyboardShortcuts: { commands: ["Mod+c"] } }, true));
     assert.equal(readFileSync(service.appPath, "utf8"), before);
   } finally {
     rmSync(directory, { recursive: true, force: true });

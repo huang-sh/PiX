@@ -858,7 +858,7 @@ async function logout(provider: RuntimeProvider) {
           </template>
           <details class="credential-note">
             <summary><KeyRound :size="14" />{{ t("settings.credentialStorage") }}<ChevronDown :size="13" /></summary>
-            <span>{{ t("settings.apiKeysNotePrefix") }}<code>~/.pi/agent/auth.json</code>{{ t("settings.apiKeysNoteSuffix") }}</span>
+            <span>{{ t("settings.apiKeysNotePrefix") }}<code>~/.pix/agent/auth.json</code>{{ t("settings.apiKeysNoteSuffix") }}</span>
           </details>
         </section>
         <section id="model-preferences" class="settings-card model-options">
