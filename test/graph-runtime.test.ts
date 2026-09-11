@@ -16,7 +16,7 @@ async function until(check: () => boolean) {
 test("permanent node deletion preserves tools and deduplication, and recovers failed commits", { timeout: 30000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "pix-delete-runtime-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
-  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
   const cwd = join(home, "workspace"); mkdirSync(cwd);
   let broadcast: SessionSnapshot | undefined;
   const runtime = new GraphRuntime(cwd, join(home, "sessions"), event => {
@@ -138,7 +138,7 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
 test("independent branches persist without merging; export during a run preserves the live runtime", { timeout: 30000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-parallel-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
-  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
   const cwd = join(home, "workspace"); mkdirSync(cwd);
   const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
   const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });

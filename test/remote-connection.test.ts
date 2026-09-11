@@ -14,6 +14,14 @@ import type { SessionSnapshot } from "../src/shared/types.js";
 import { projectSession } from "../src/shared/session.js";
 import { sessionEventEncoder, type SessionUpdate } from "../src/shared/session-updates.js";
 
+// The controller rewrites the project history in the app settings, so without
+// an isolated home these tests would enroll their temp workspaces in the
+// developer's real session panel.
+const settingsHome = mkdtempSync(join(tmpdir(), "pix-remote-home-"));
+process.env.PIX_HOME = settingsHome;
+process.env.PI_CODING_AGENT_DIR = join(settingsHome, ".pix", "agent");
+process.on("exit", () => rmSync(settingsHome, { recursive: true, force: true }));
+
 class FakeChild extends EventEmitter {
   killed = false;
   exitCode: number | null = null;
@@ -161,7 +169,6 @@ function controllerFixture(t: TestContext) {
     async confirm() { return true; },
     async openExternal() {}, showItemInFolder() {}, quit() {},
   });
-  controller.settings.appPath = join(root, "app.json");
   controller.pi.control = async () => [];
   const project: ProjectInfo = { name: "old", path: "/old", remote: { kind: "ssh", host: "old" } };
   const old = candidate(controller);

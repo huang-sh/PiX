@@ -15,7 +15,7 @@ test("branch layout order persists separately from session and branch contents",
     writeFileSync(main, mainData); writeFileSync(branch, branchData);
     const settings = new SettingsService(directory);
     settings.appPath = join(directory, "app-settings.json");
-    settings.update("app", { theme: "dark" });
+    settings.update({ theme: "dark" });
     const key = JSON.stringify(["project", main, "session"]);
     settings.saveLayout({ ...DEFAULT_LAYOUT, branchOrders: { [key]: [["pending:run", -1]] } });
     settings.saveLayout({ ...DEFAULT_LAYOUT, branchOrders: { [key]: [["turn:child", -1]] } });
