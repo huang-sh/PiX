@@ -165,6 +165,8 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
   out.theme = normalizeTheme(out.theme);
   if (typeof out.browserHome !== "string" || !out.browserHome) drop("browserHome");
   if (out.lastProject !== undefined && typeof out.lastProject !== "string") drop("lastProject");
+  if (out.updateSkippedVersion !== undefined && typeof out.updateSkippedVersion !== "string")
+    drop("updateSkippedVersion");
   for (const key of [
     "confirmDestructiveActions",
     "openLastSessionOnStartup",

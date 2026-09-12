@@ -77,6 +77,7 @@ const compactInstructions = ref("");
 const compactBusy = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
+const updateNotice = ref<{ version: string; url: string } | null>(null);
 
 // The custom titlebar needs platform knowledge only for the macOS traffic
 // lights (see .platform-darwin in app.css); the sandboxed renderer gets it
@@ -469,7 +470,26 @@ function onEvent(wireEvent: DesktopEvent) {
     if (payload.deletedPath && payload.sessions)
       session.applyDeletion(payload.deletedPath, payload.sessions);
     else if (payload.current) session.applySnapshot(payload.current);
+  } else if (event.type === "update.available") {
+    updateNotice.value = event.payload as { version: string; url: string };
   }
+}
+
+async function skipUpdate() {
+  const version = updateNotice.value?.version;
+  updateNotice.value = null;
+  if (!version) return;
+  try {
+    await desktop.invoke("settings.update", { scope: "app", patch: { updateSkippedVersion: version } });
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function openReleaseNotes() {
+  const url = updateNotice.value?.url;
+  if (!url) return;
+  void desktop.invoke("app.openExternal", { url }).catch(() => {});
 }
 
 function keydown(event: KeyboardEvent) {
@@ -550,6 +570,15 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <CommandPalette @run="runCommand" />
+  <div v-if="updateNotice" class="update-banner" role="status">
+    <span>{{ t("update.available", { version: updateNotice.version }) }}</span>
+    <Button data-action="update-release" variant="outline" @click="openReleaseNotes">
+      {{ t("update.viewRelease") }}
+    </Button>
+    <Button data-action="update-skip" variant="ghost" @click="skipUpdate">
+      {{ t("update.skip") }}
+    </Button>
+  </div>
   <div v-if="remoteDisconnected" class="remote-disconnected" role="alert">
     <span>{{ t("remote.connectionLost") }}</span>
     <Button data-action="remote-reconnect" variant="outline" :disabled="session.loading" @click="reconnectRemote">
