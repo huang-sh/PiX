@@ -35,7 +35,11 @@ const { t } = useI18n();
   <div class="branch-history" style="display: contents">
       <section v-for="turn in turns" :key="turn.id" class="chat-turn">
         <article v-if="turn.user" class="branch-message user">
-          <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
+          <MarkdownRenderer
+            v-if="turn.user.text || !turn.user.images?.length"
+            :content="turn.user.text || t('common.empty')"
+            :custom-id="`${turn.id}:user`"
+          />
           <MessageImages :images="turn.user.images" />
           <CopyButton :text="turn.user.text" />
         </article>
