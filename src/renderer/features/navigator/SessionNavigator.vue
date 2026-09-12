@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import {
+  Archive,
+  ArchiveRestore,
   Folder,
   FolderOpen,
   FolderSync,
@@ -11,6 +13,7 @@ import {
   Search,
   Settings,
   SquarePen,
+  Star,
   Upload,
 } from "@lucide/vue";
 import {
@@ -183,6 +186,11 @@ async function revealSession(record: ProjectGroup, path: string) {
                   <DropdownMenuItem class="menu-item" @select="emit('activateProject', record)">
                     {{ t("nav.openProject") }}
                   </DropdownMenuItem>
+                  <DropdownMenuItem data-action="project-archive" class="menu-item" @select="session.archiveProject(record.id, !record.archived)">
+                    <Archive v-if="!record.archived" :size="14" />
+                    <ArchiveRestore v-else :size="14" />
+                    {{ t(record.archived ? "nav.unarchiveProject" : "nav.archiveProject") }}
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     class="menu-item danger"
                     :disabled="record.id === session.activeProjectId"
@@ -212,13 +220,15 @@ async function revealSession(record: ProjectGroup, path: string) {
                 <button
                   type="button"
                   class="session-item"
-                  :class="{ active: record.id === session.activeProjectId && session.current?.session.path === item.path }"
+                  :class="{ active: record.id === session.activeProjectId && session.current?.session.path === item.path, archived: item.archived }"
                   :title="item.name || item.firstMessage || item.id"
                   @click="emit('openProjectSession', record, item.path)"
                 >
                   <span>
                     <strong>{{ item.name || item.firstMessage || item.id }}</strong>
+                    <Star v-if="item.pinned" class="session-pin" :size="12" aria-hidden="true" />
                     <small>{{ relative(item.modified) }}</small>
+                    <small v-if="item.archived" class="archived-tag">{{ t("nav.archived") }}</small>
                   </span>
                   <i
                     :class="{
@@ -230,6 +240,9 @@ async function revealSession(record: ProjectGroup, path: string) {
               </ContextMenuTrigger>
               <ContextMenuPortal>
                 <ContextMenuContent data-navigator-menu class="menu-content" :side-offset="5">
+                  <ContextMenuItem data-action="session-pin" class="menu-item" @select="session.pin(item.path, !item.pinned)">
+                    <Star :size="14" />{{ t(item.pinned ? "nav.unpinSession" : "nav.pinSession") }}
+                  </ContextMenuItem>
                   <ContextMenuItem data-action="session-copy-path" class="menu-item" @select="copy(item.path)">
                     {{ t("nav.copyPath") }}
                   </ContextMenuItem>
@@ -247,6 +260,11 @@ async function revealSession(record: ProjectGroup, path: string) {
                   </ContextMenuItem>
                   <ContextMenuItem data-action="session-rename" class="menu-item" @select="emit('rename', record, item.path, item.name ?? '')">
                     {{ t("common.rename") }}
+                  </ContextMenuItem>
+                  <ContextMenuItem data-action="session-archive" class="menu-item" @select="session.archiveSession(item.path, !item.archived)">
+                    <Archive v-if="!item.archived" :size="14" />
+                    <ArchiveRestore v-else :size="14" />
+                    {{ t(item.archived ? "nav.unarchiveSession" : "nav.archiveSession") }}
                   </ContextMenuItem>
                   <ContextMenuItem data-action="session-delete" class="menu-item danger" @select="emit('removeProjectSession', record, item.path)">
                     {{ t("common.delete") }}
@@ -270,6 +288,16 @@ async function revealSession(record: ProjectGroup, path: string) {
     </nav>
 
     <footer class="navigator-footer">
+      <Button
+        data-action="navigator-show-archived"
+        variant="ghost"
+        class="justify-start"
+        :class="session.showArchived ? 'text-[var(--accent)]' : ''"
+        :aria-pressed="session.showArchived"
+        @click="session.showArchived = !session.showArchived"
+      >
+        <Archive :size="16" />{{ t(session.showArchived ? "nav.hideArchived" : "nav.showArchived") }}
+      </Button>
       <Button variant="ghost" class="justify-start" @click="emit('settings')">
         <Settings :size="16" />{{ t("nav.settings") }}
       </Button>

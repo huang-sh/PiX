@@ -22,6 +22,7 @@ import { sessionEventEncoder } from "../shared/session-updates.js";
 import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
 import { brokerOptions } from "./model-broker.js";
@@ -59,6 +60,7 @@ const unavailable = (): RuntimeState => ({
 export class MainController {
   project: ProjectInfo | null;
   settings: SettingsService;
+  library: LibraryService;
   workspace: WorkspaceService;
   git: GitService;
   shell: ShellService;
@@ -84,6 +86,7 @@ export class MainController {
     this.project = path ? { name: basename(path), path } : null;
     this.platform = platform;
     this.settings = new SettingsService(path);
+    this.library = new LibraryService();
     this.settings.applyInstallerLanguage();
     this.workspace = new WorkspaceService(path);
     this.git = new GitService(path);
@@ -452,11 +455,23 @@ export class MainController {
   }
   projectGroups(): ProjectGroup[] {
     const active = this.project ? projectId(this.project) : "";
+    const marks = this.library.marks();
+    const pinned = new Set(marks.pinned),
+      archivedSessions = new Set(marks.archivedSessions),
+      archivedProjects = new Set(marks.archivedProjects);
     return this.settings.projectHistory().map((record) => ({
       ...record,
       connected: record.project.remote
         ? Boolean(this.wsl?.connected && record.id === active)
         : record.id === active,
+      archived: archivedProjects.has(record.id) || undefined,
+      // History snapshots embed whatever flags were current when remembered;
+      // the library sidecar is the source of truth, so reapply it here.
+      sessions: record.sessions.map((session) => ({
+        ...session,
+        pinned: pinned.has(session.path) || undefined,
+        archived: archivedSessions.has(session.path) || undefined,
+      })),
     }));
   }
   rememberProject(sessions: SessionSummary[]) {
@@ -476,16 +491,22 @@ export class MainController {
     ]);
   }
   async sessions() {
-    try {
-      const s = await this.pi.list();
-      return (s.length ? s : this.files.list()).map((x) => ({
+    const decorate = (list: SessionSummary[]) => {
+      const marks = this.library.marks();
+      const pinned = new Set(marks.pinned),
+        archived = new Set(marks.archivedSessions);
+      return list.map((x) => ({
         ...x,
         active: x.path === this.current?.session.path,
+        pinned: pinned.has(x.path) || undefined,
+        archived: archived.has(x.path) || undefined,
       }));
+    };
+    try {
+      const s = await this.pi.list();
+      return decorate(s.length ? s : this.files.list());
     } catch {
-      return this.files
-        .list()
-        .map((x) => ({ ...x, active: x.path === this.current?.session.path }));
+      return decorate(this.files.list());
     }
   }
   fallback(path: string): SessionSnapshot {
@@ -718,6 +739,17 @@ export class MainController {
         this.rememberProject(sessions);
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
+      }
+      case "library.pin":
+      case "library.archiveSession":
+      case "library.archiveProject": {
+        if (route === "library.pin") this.library.setSessionPinned(String(v.path), v.pinned === true);
+        else if (route === "library.archiveSession") this.library.setSessionArchived(String(v.path), v.archived === true);
+        else this.library.setProjectArchived(String(v.id), v.archived === true);
+        return {
+          sessions: this.project ? await this.sessions() : undefined,
+          projects: this.projectGroups(),
+        };
       }
       case "agent.control": {
         const r = await this.pi.control(v as unknown as AgentControl);

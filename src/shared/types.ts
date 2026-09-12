@@ -38,6 +38,8 @@ export interface ProjectHistory {
 }
 export interface ProjectGroup extends ProjectHistory {
   connected: boolean;
+  /** True when the user archived this project out of the navigator. */
+  archived?: boolean;
 }
 export function projectId(project: ProjectInfo) {
   const remote = project.remote;
@@ -59,6 +61,8 @@ export interface SessionSummary {
   messageCount: number;
   firstMessage: string;
   active?: boolean;
+  pinned?: boolean;
+  archived?: boolean;
 }
 export interface RawSessionEntry {
   type: string;
@@ -500,6 +504,9 @@ export type DesktopRoute =
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "library.pin"
+  | "library.archiveSession"
+  | "library.archiveProject"
   | "agent.control"
   | "workspace.tree"
   | "workspace.directories"

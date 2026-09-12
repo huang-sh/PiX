@@ -71,6 +71,12 @@ export function validateRouteInput(
         // Set when the renderer already collected an in-app confirmation.
         ...(v.confirmed === true ? { confirmed: true } : {}),
       };
+    case "library.pin":
+      return { path: str(v.path, "path"), pinned: v.pinned === true };
+    case "library.archiveSession":
+      return { path: str(v.path, "path"), archived: v.archived === true };
+    case "library.archiveProject":
+      return { id: str(v.id, "id"), archived: v.archived === true };
     case "workspace.read":
       return { path: str(v.path, "path") };
     case "workspace.tree":
