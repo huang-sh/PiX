@@ -387,7 +387,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .node-context-usage em { overflow: hidden; font-size: var(--font-size-caption); font-style: normal; text-overflow: ellipsis; }
 .node-footer-value { display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; color: var(--muted); font-size: var(--font-size-caption); font-weight: 600; text-transform: capitalize; }
 .node-footer-value > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node-thinking-value { justify-content: flex-end; }
+.node-model-value, .node-thinking-value { justify-content: flex-end; }
 .node-thinking-value > svg { flex: 0 0 auto; margin-right: 3px; }
 .node-footer-select { position: relative; display: flex; align-items: center; min-width: 0; height: 25px; padding: 0 4px; border: 1px solid transparent; border-radius: 6px; transition: border-color 120ms ease, background 120ms ease, opacity 120ms ease; }
 .node-footer-select:hover, .node-footer-select:focus-within { border-color: var(--border); background: var(--surface-subtle); }
