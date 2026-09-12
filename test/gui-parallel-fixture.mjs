@@ -71,7 +71,7 @@ writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'gui-loc
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
 } } }));
 writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProvider: 'gui-local', defaultModel: 'gui-model', defaultProjectTrust: 'always' }));
-writeFileSync(join(home, '.pix', 'settings.json'), JSON.stringify({ language: 'en', openLastSessionOnStartup: true, closeToTray: false }));
+writeFileSync(join(home, '.pix', 'gui.settings.json'), JSON.stringify({ language: 'en', openLastSessionOnStartup: true, closeToTray: false }));
 const timestamp = new Date().toISOString();
 const header = { type: 'session', version: 3, id: randomUUID(), timestamp, cwd };
 const sessionPath = join(sessions, `gui-parallel.jsonl`);

@@ -22,6 +22,27 @@ import { createBranchMessageCache, reuseGraphProjection } from "../lib/session-v
 
 const messageCaches = new WeakMap<object, ReturnType<typeof createBranchMessageCache>>();
 
+// Per-node lookups shared by the focus getters and per-panel bindings: the
+// primary chat column resolves the focused node, pinned columns their own id.
+function focusId(session: { focusedNode: string | null; current?: SessionSnapshot }) {
+  return session.focusedNode ?? session.current?.projection.activeNodeId ?? null;
+}
+function runForId(current: SessionSnapshot | undefined, id: string | null) {
+  return current?.graph?.runs.find(run => run.nodeId === id || `pending:${run.runId}` === id);
+}
+function activityForId(
+  session: { current?: SessionSnapshot; activity?: AgentActivity; branchActivities: Record<string, { runId: string; activity?: AgentActivity }> },
+  id: string | null,
+): AgentActivity | undefined {
+  if (!session.current?.graph) return session.activity;
+  const run = runForId(session.current, id);
+  const value = run && session.branchActivities[run.branchId];
+  return value && value.runId === run?.runId && run.status === "running" ? value.activity : undefined;
+}
+function nodeForId(current: SessionSnapshot | undefined, id: string | null) {
+  return current?.projection.nodes.find(node => node.id === id);
+}
+
 interface PendingPrompt {
   message: BranchMessage;
   knownEntryIds: string[];
@@ -38,9 +59,18 @@ export const useSessionStore = defineStore("session", {
     activeProjectId: "",
     current: undefined as SessionSnapshot | undefined,
     focusedNode: null as string | null,
+    // Card a plain graph click highlighted: presentation only, but it is the
+    // node commands act on. The primary chat column follows focusedNode.
+    highlightedNode: null as string | null,
     // Last explicit pick, used when a draft has no parent thinking setting.
     userThinking: undefined as string | undefined,
     query: "",
+    // Archived projects and sessions rejoin the lists while this is on.
+    showArchived: false,
+    // Library marks are display metadata: adopted from decorated project
+    // payloads and applied when the lists are read, so surfaces that carry no
+    // marks (remote replies, raw runtime snapshots) can never erase them.
+    marks: { pinned: [] as string[], archivedSessions: [] as string[] },
     commands: [] as RuntimeCommand[],
     commandRequest: 0,
     models: [] as RuntimeModel[],
@@ -60,14 +90,10 @@ export const useSessionStore = defineStore("session", {
       return undefined;
     },
     selectedRun(state) {
-      const id = state.focusedNode ?? state.current?.projection.activeNodeId;
-      return state.current?.graph?.runs.find(run => run.nodeId === id || `pending:${run.runId}` === id);
+      return runForId(state.current, focusId(state));
     },
-    selectedActivity(): AgentActivity | undefined {
-      if (!this.current?.graph) return this.activity;
-      const run = this.selectedRun;
-      const value = run && this.branchActivities[run.branchId];
-      return value && value.runId === run?.runId && run.status === "running" ? value.activity : undefined;
+    selectedActivity(state): AgentActivity | undefined {
+      return activityForId(state, focusId(state));
     },
     filtered(state) {
       const query = state.query.toLowerCase();
@@ -81,6 +107,18 @@ export const useSessionStore = defineStore("session", {
     },
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
+      const pinned = new Set(state.marks.pinned),
+        archived = new Set(state.marks.archivedSessions);
+      const marked = (sessions: SessionSummary[]) =>
+        sessions.map((session) => ({
+          ...session,
+          pinned: pinned.has(session.path) || undefined,
+          archived: archived.has(session.path) || undefined,
+        }));
+      // Pinned sessions top their project group; the sort is stable, so
+      // recency order survives inside each rank.
+      const ranked = (sessions: SessionSummary[]) =>
+        [...sessions].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
       return state.projects
         .map((record) => {
           const projectMatch = !query || `${record.project.name} ${record.project.path} ${
@@ -88,35 +126,57 @@ export const useSessionStore = defineStore("session", {
               ? record.project.remote.host
               : record.project.remote?.distro ?? ""
           }`.toLowerCase().includes(query);
+          const sessions = marked(projectMatch
+            ? record.sessions
+            : record.sessions.filter((session) =>
+                `${session.name ?? ""} ${session.firstMessage} ${session.id}`
+                  .toLowerCase()
+                  .includes(query),
+              ));
           return {
             ...record,
-            sessions: projectMatch
-              ? record.sessions
-              : record.sessions.filter((session) =>
-                  `${session.name ?? ""} ${session.firstMessage} ${session.id}`
-                    .toLowerCase()
-                    .includes(query),
-                ),
+            sessions: ranked(sessions.filter((session) => state.showArchived || !session.archived)),
           };
         })
-        .filter((record) => !query || record.sessions.length || record.project.name.toLowerCase().includes(query));
+        .filter((record) =>
+          (state.showArchived || !record.archived) &&
+          (!query || record.sessions.length || record.project.name.toLowerCase().includes(query)));
     },
     selectedNode(state) {
-      const id = state.focusedNode ?? state.current?.projection.activeNodeId;
-      return state.current?.projection.nodes.find((node) => node.id === id);
+      return nodeForId(state.current, state.highlightedNode ?? focusId(state));
     },
   },
   actions: {
+    runFor(id: string | null) {
+      return runForId(this.current, id);
+    },
+    activityFor(id: string | null): AgentActivity | undefined {
+      return activityForId(this, id);
+    },
+    nodeFor(id: string | null) {
+      return nodeForId(this.current, id);
+    },
+    adoptMarks(projects: ProjectGroup[]) {
+      const pinned: string[] = [], archivedSessions: string[] = [];
+      for (const record of projects)
+        for (const session of record.sessions) {
+          if (session.pinned) pinned.push(session.path);
+          if (session.archived) archivedSessions.push(session.path);
+        }
+      this.marks = { pinned, archivedSessions };
+    },
     hydrate(
       project: ProjectInfo | null,
       sessions: SessionSummary[],
       projects: ProjectGroup[],
       current?: SessionSnapshot,
     ) {
+      this.adoptMarks(projects);
       this.projects = projects;
       this.activeProjectId = project ? projectId(project) : "";
       this.sessions = sessions;
       this.focusedNode = current?.projection.activeNodeId ?? null;
+      this.highlightedNode = null;
       this.activity = undefined;
       this.branchActivities = {};
       this.pendingPrompt = undefined;
@@ -253,11 +313,13 @@ export const useSessionStore = defineStore("session", {
       return result;
     },
     messageWindow(limit: number) {
+      return this.messageWindowFor(focusId(this), limit);
+    },
+    messageWindowFor(id: string | null, limit: number) {
       const current = this.current;
       if (!current) return { messages: [] as BranchMessage[], hasEarlier: false };
       let cached = messageCaches.get(this);
       if (!cached) { cached = createBranchMessageCache(); messageCaches.set(this, cached); }
-      const id = this.focusedNode ?? current.projection.activeNodeId;
       const node = current.projection.nodes.find(item => item.id === id);
       const run = current.graph?.runs.find(run => `pending:${run.runId}` === id && run.pending);
       const pending = run?.pending;
@@ -271,7 +333,7 @@ export const useSessionStore = defineStore("session", {
       }] };
       return optimistic ? { ...history, messages: [...history.messages, optimistic] } : history;
     },
-    async selectNode(id: string) {
+    async selectNode(id: string | null) {
       this.focusedNode = id;
     },
     async deleteNode(id: string) {
@@ -318,7 +380,9 @@ export const useSessionStore = defineStore("session", {
         if (this.pendingPrompt?.message.entryId === id) this.pendingPrompt = undefined;
       }
     },
-    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[]) {
+    // follow: false serves pinned chat columns: the submission starts on its
+    // branch, but the primary column must keep showing the current selection.
+    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean }) {
       const current = this.current;
       if (!current || (!text.trim() && !images?.length)) return;
       if (current.graph) {
@@ -327,7 +391,7 @@ export const useSessionStore = defineStore("session", {
           provider: model?.provider, modelId: model?.id, thinkingLevel, images });
         const run = result.graph?.runs.find(r => r.requestId === requestId);
         const focus = run?.nodeId ?? (run?.status === "running" ? `pending:${run.runId}` : nodeId);
-        if (run) this.focusedNode = focus;
+        if (run && options?.follow !== false) this.focusedNode = focus;
         return focus ?? undefined;
       }
       const node = nodeId ? current.projection.nodes.find((item) => item.id === nodeId) : undefined;
@@ -380,6 +444,7 @@ export const useSessionStore = defineStore("session", {
       if (this.current?.session.path === path) {
         this.current = undefined;
         this.focusedNode = null;
+        this.highlightedNode = null;
         this.activity = undefined;
         this.pendingPrompt = undefined;
         this.userThinking = undefined;
@@ -390,6 +455,29 @@ export const useSessionStore = defineStore("session", {
     async remove(path: string, confirmed = false) {
       const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>("session.delete", confirmed ? { path, confirmed } : { path });
       if (!result.cancelled) this.applyDeletion(path, result.sessions);
+    },
+    async pin(path: string, pinned: boolean) {
+      const result = await desktop.invoke<{ sessions?: SessionSummary[]; projects: ProjectGroup[] }>("library.pin", { path, pinned });
+      this.applyLibrary(result);
+    },
+    async archiveSession(path: string, archived: boolean) {
+      const result = await desktop.invoke<{ sessions?: SessionSummary[]; projects: ProjectGroup[] }>("library.archiveSession", { path, archived });
+      this.applyLibrary(result);
+    },
+    async archiveProject(id: string, archived: boolean) {
+      const result = await desktop.invoke<{ projects: ProjectGroup[] }>("library.archiveProject", { id, archived });
+      this.applyLibrary(result);
+    },
+    // Library marks ride back on the invoke reply: the sessions list only
+    // exists while a locally open project answers, and projects always come
+    // back. Marks are adopted from the decorated project groups.
+    applyLibrary(result: { sessions?: SessionSummary[]; projects: ProjectGroup[] }) {
+      this.adoptMarks(result.projects);
+      this.projects = result.projects;
+      if (result.sessions) {
+        this.sessions = result.sessions;
+        this.syncProject();
+      }
     },
   },
 });

@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
+import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
 import type { DesktopRoute } from "../shared/types.js";
@@ -215,6 +216,13 @@ app.whenReady().then(async () => {
     },
   });
   controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
+  // Release awareness runs only in the desktop main process — a remote host
+  // serves sessions but must not announce desktop updates itself.
+  new UpdateChecker({
+    version: () => app.getVersion(),
+    skipped: () => controller.settings.bundle().app.updateSkippedVersion,
+    emit: (event) => controller.emit(event),
+  }).start();
   nativeTheme.on("updated", syncWindowTheme);
   // Preload needs the current preference before the first paint, including on reload.
   // This one synchronous handshake reads memory only; all persistence stays async over IPC.

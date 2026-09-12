@@ -38,6 +38,8 @@ export interface ProjectHistory {
 }
 export interface ProjectGroup extends ProjectHistory {
   connected: boolean;
+  /** True when the user archived this project out of the navigator. */
+  archived?: boolean;
 }
 export function projectId(project: ProjectInfo) {
   const remote = project.remote;
@@ -59,6 +61,8 @@ export interface SessionSummary {
   messageCount: number;
   firstMessage: string;
   active?: boolean;
+  pinned?: boolean;
+  archived?: boolean;
 }
 export interface RawSessionEntry {
   type: string;
@@ -339,6 +343,8 @@ export interface AppSettings {
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /** Latest release the user chose to stop being notified about. */
+  updateSkippedVersion?: string;
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -353,6 +359,8 @@ export interface LayoutState {
   /** Keep the projects and sessions navigator open instead of auto-hiding it. */
   navigatorPinned?: boolean;
   widths: { navigator: number; chat: number; content: number };
+  /** The width chat pins widened the slot from/to, so a pinless boot restores it. */
+  chatPinWidth?: { from: number; to: number };
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;
   composer: { open: boolean };
@@ -499,6 +507,9 @@ export type DesktopRoute =
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "library.pin"
+  | "library.archiveSession"
+  | "library.archiveProject"
   | "agent.control"
   | "workspace.tree"
   | "workspace.directories"
@@ -519,7 +530,7 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
   payload: unknown;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";

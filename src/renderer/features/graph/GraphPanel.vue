@@ -68,6 +68,10 @@ const booted = ref(false);
 const deleteError = ref("");
 const searchOpen = ref(false);
 const searchQuery = ref("");
+// A plain click highlights a card without rebinding the chat panel — only a
+// double-click, a Ctrl gesture, or a submission moves panel content. The card
+// lives in the session store, so commands on "the selected node" follow it.
+watch(() => session.focusedNode, () => { session.highlightedNode = null; });
 const searchInput = ref<HTMLInputElement>();
 // -1 = no hit visited yet, so the first Enter lands on the first hit.
 const searchPosition = ref(-1);
@@ -157,6 +161,7 @@ function rebuild() {
     edges.value = [];
     return;
   }
+  if (session.highlightedNode && !value.nodes.some(node => node.id === session.highlightedNode)) session.highlightedNode = null;
   if (activeSession !== sessionKey.value) {
     dragged.clear();
     branchOrder.clear();
@@ -235,6 +240,7 @@ function rebuild() {
       content: () => nodeContent(node.id),
       searchHit: searchHitIds.value.has(node.id),
       onCompose: direction => compose(node.id, direction),
+      onOpenPanel: session.current?.graph ? () => openChatColumn(node.id) : undefined,
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
         ? () => { void retryTurn(node.id); }
         : undefined,
@@ -626,8 +632,7 @@ function navigateMinimap({ position }: { position: { x: number; y: number } }) {
   void flow.value.setCenter(position.x, position.y, { zoom: flow.value.getViewport().zoom });
 }
 
-function focusNodeVisible() {
-  const id = defaultFocusId();
+function focusNodeVisible(id = defaultFocusId()) {
   if (!id || !flow.value) return true;
   const node = flow.value.findNode(id);
   const cached = nodes.value.find(node => node.id === id);
@@ -688,6 +693,46 @@ async function ready(store: VueFlowStore) {
 
 function holdsBranchModifier(event: NodeMouseEvent) {
   return Boolean((event as { event?: { shiftKey?: boolean } }).event?.shiftKey);
+}
+
+// Ctrl/Cmd held through a double-click pins the node into a side column.
+function holdsPanelModifier(event: NodeMouseEvent) {
+  const raw = (event as { event?: { ctrlKey?: boolean; metaKey?: boolean } }).event;
+  return Boolean(raw?.ctrlKey || raw?.metaKey);
+}
+
+function openChatColumn(id: string) {
+  if (id.startsWith("draft:") || id.startsWith("pending:") || !session.current?.graph) return;
+  // One panel per branch: a column pinned to another node on the same
+  // root-to-node path shows a subset of this node's history, so retarget it
+  // instead of opening a redundant column beside it.
+  const parents = new Map(session.current.projection.nodes.map(node => [node.id, node.parentId ?? null]));
+  const onPath = (from: string, onto: string) => {
+    for (let cur: string | null = from; cur; cur = parents.get(cur) ?? null)
+      if (cur === onto) return true;
+    return false;
+  };
+  const clash = layout.chatColumns.find(pinned => pinned !== id && (onPath(id, pinned) || onPath(pinned, id)));
+  if (clash) {
+    layout.advanceChatColumn(clash, id);
+    void layout.setCollapsed("chat", false);
+  } else {
+    void layout.openChatColumn(id);
+  }
+}
+
+function nodeClicked(event: NodeMouseEvent) {
+  // Any single click, Ctrl held or not, only highlights — the Ctrl gesture
+  // for side columns lives on the double-click.
+  session.highlightedNode = event.node.id;
+  if (!focusNodeVisible(event.node.id)) void center(event.node.id, false, false);
+}
+
+// A plain double-click reveals the node in the primary chat panel; holding
+// Ctrl pins it into a side column instead.
+function nodeDoubleClicked(event: NodeMouseEvent) {
+  if (holdsPanelModifier(event)) openChatColumn(event.node.id);
+  else void select(event.node.id, true);
 }
 
 function startDrag(event: NodeMouseEvent) {
@@ -780,8 +825,8 @@ watch(
       :only-render-visible-elements="true"
       :delete-key-code="null"
       @pane-ready="ready"
-      @node-click="({ node }: NodeMouseEvent) => select(node.id)"
-      @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
+      @node-click="nodeClicked"
+      @node-double-click="nodeDoubleClicked"
       @node-drag-start="startDrag"
       @node-drag="trackDragModifier"
       @node-drag-stop="rememberDrag"
@@ -789,7 +834,7 @@ watch(
     >
       <template #node-prompt="props">
         <!-- Selection is presentation state; changing it must not call Vue Flow's setNodes. -->
-        <PromptNode v-bind="props" :selected="session.focusedNode === props.id" />
+        <PromptNode v-bind="props" :selected="(session.highlightedNode || session.focusedNode) === props.id" />
       </template>
       <template #node-draft="props">
         <DraftNode v-bind="props" />

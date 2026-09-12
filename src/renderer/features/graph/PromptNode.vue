@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -28,6 +28,8 @@ export interface PromptNodeData {
   searchHit?: boolean;
   content: () => NodeContent;
   onCompose: (direction?: BranchDirection) => void;
+  /** Opens this node in a pinned chat column; graph sessions only. */
+  onOpenPanel?: () => void;
   /** Present only on failed turns: reopens the prompt as an editable draft. */
   onRetry?: () => void;
   onDelete?: () => void;
@@ -253,6 +255,13 @@ function relative(value: string) {
   </ContextMenuTrigger>
   <ContextMenuPortal>
     <ContextMenuContent class="menu-content nodrag nowheel" :side-offset="4" @close-auto-focus.prevent>
+      <ContextMenuItem
+        v-if="data.onOpenPanel"
+        class="menu-item"
+        data-action="node-open-chat"
+        :title="t('graph.openInPanelHint')"
+        @select="data.onOpenPanel()"
+      ><MessageSquare :size="14" />{{ t('graph.openInPanel') }}</ContextMenuItem>
       <ContextMenuItem
         v-if="data.node.hasError"
         class="menu-item"

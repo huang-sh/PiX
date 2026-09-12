@@ -599,6 +599,7 @@ try {
     await cdp.evaluate("document.querySelector('.prompt-node').click()");
     if (!(await cdp.evaluate("window.__pixTest.state().layout.collapsed.chat")))
       throw new Error("Single-clicking a graph node unexpectedly opened chat");
+    // A plain double-click reveals the node in the primary chat panel.
     await cdp.evaluate("document.querySelector('.prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
   } else
     await cdp.evaluate("document.querySelector('[data-action=chat-panel]').click()");
@@ -610,6 +611,92 @@ try {
     if (!value.expanded || !value.linkedContext)
       throw new Error(`Graph selection did not reveal matching chat context: ${JSON.stringify(value)}`);
   });
+  // Pinned chat columns: Ctrl+click pins a node beside the primary column, a
+  // node on an already-pinned branch retargets that column, and closing the
+  // last pin restores the layout.
+  if (sessionState.current) {
+    const nodeIds = await cdp.evaluate("window.__pixTest.state().current.projection.nodes.map(node => node.id)");
+    const domNodes = await cdp.evaluate("document.querySelectorAll('.prompt-node').length");
+    if (nodeIds.length >= 3 && domNodes >= 2) {
+      const focusBefore = await cdp.evaluate("window.__pixTest.state().focusedNode");
+      const firstTitle = await cdp.evaluate("document.querySelector('.prompt-node .turn-copy strong').textContent.trim()");
+      await cdp.evaluate("document.querySelector('.prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))");
+      await retry(async () => {
+        if ((await cdp.evaluate("document.querySelectorAll('.chat-columns .chat').length")) !== 2)
+          throw new Error("Ctrl+click did not pin a chat column beside the primary");
+      });
+      if ((await cdp.evaluate("window.__pixTest.state().focusedNode")) !== focusBefore)
+        throw new Error("Pinning a chat column moved the graph selection");
+      const pinnedHeader = await cdp.evaluate(
+        "document.querySelector('.chat-columns .chat:nth-child(2) .branch-title small').textContent.trim()",
+      );
+      if (pinnedHeader !== firstTitle)
+        throw new Error(`Pinned column shows the wrong node: ${pinnedHeader} !== ${firstTitle}`);
+      // The widened slot must drag smoothly: the splitter's own layout has to
+      // follow the store-driven width, or the first drag jumps back.
+      {
+        const storeWidth = await cdp.evaluate("__pixTest.state().layout.widths.chat");
+        await retry(async () => {
+          const width = await cdp.evaluate("Math.round(document.querySelector('#chat-panel').getBoundingClientRect().width)");
+          if (Math.abs(width - storeWidth) > 5)
+            throw new Error(`Pin width transition not settled: ${width} !== ${storeWidth}`);
+        });
+        const handlePoint = () => cdp.evaluate(`(() => {
+          const handle = [...document.querySelectorAll('.resize-handle')].find(h =>
+            !h.classList.contains('navigator-resize') && !h.classList.contains('hidden')
+            && h.nextElementSibling?.id === 'chat-panel');
+          const r = handle.getBoundingClientRect();
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        })()`);
+        const dragBy = async (dx) => {
+          const handle = await handlePoint(); // the handle itself moves with each drag
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...handle });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", ...handle });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", x: handle.x + dx, y: handle.y });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", x: handle.x + dx, y: handle.y });
+        };
+        await dragBy(-40);
+        await retry(async () => {
+          const width = await cdp.evaluate("Math.round(document.querySelector('#chat-panel').getBoundingClientRect().width)");
+          // The handle sits on the chat panel's left edge: dragging left widens it.
+          if (Math.abs(width - (storeWidth + 40)) > 30)
+            throw new Error(`Splitter jumped on the first drag after pinning: ${storeWidth} -> ${width}`);
+        });
+        await dragBy(40);
+        await retry(async () => {
+          const width = await cdp.evaluate("Math.round(document.querySelector('#chat-panel').getBoundingClientRect().width)");
+          if (Math.abs(width - storeWidth) > 30)
+            throw new Error(`Splitter did not drag back: ${width} !== ${storeWidth}`);
+        });
+      }
+      // The fixture session is one linear branch, so Ctrl+clicking another
+      // node must retarget the same column — one panel per branch.
+      const otherTitle = await cdp.evaluate("[...document.querySelectorAll('.prompt-node')].at(-1).querySelector('.turn-copy strong').textContent.trim()");
+      await cdp.evaluate("[...document.querySelectorAll('.prompt-node')].at(-1).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))");
+      await retry(async () => {
+        const value = await cdp.evaluate(`({
+          columns: window.__pixTest.state().chatColumns,
+          domColumns: document.querySelectorAll('.chat-columns .chat').length,
+          header: document.querySelector('.chat-columns .chat:nth-child(2) .branch-title small').textContent.trim(),
+        })`);
+        if (value.columns.length !== 1 || value.domColumns !== 2 || value.header !== otherTitle)
+          throw new Error(`Pinning a same-branch node did not retarget the column: ${JSON.stringify(value)}`);
+      });
+      await cdp.evaluate("[...document.querySelectorAll('[data-action=chat-column-close]')].forEach(button => button.click())");
+      await retry(async () => {
+        const value = await cdp.evaluate(`({
+          columns: window.__pixTest.state().chatColumns.length,
+          width: window.__pixTest.state().layout.widths.chat,
+          pin: window.__pixTest.state().layout.chatPinWidth ?? null,
+        })`);
+        // Closing the last pin restores the startup width (356 in the fixture)
+        // and forgets the memo, so a later boot cannot restore it again. The
+        // drags above may leave a pixel of rounding slack.
+        if (value.columns !== 0 || Math.abs(value.width - 356) > 2 || value.pin !== null)
+          throw new Error(`Pinned columns did not close and restore the chat width: ${JSON.stringify(value)}`);
+      });
+    }
+  }
   // Selection keeps the viewport still when the node is already visible. Center
   // explicitly before checking geometry; readable typography changes card height.
   if (sessionState.current)

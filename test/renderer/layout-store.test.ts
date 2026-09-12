@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toRaw } from "vue";
 import type { LayoutState, SettingsBundle } from "../../src/shared/types";
+import { desktop } from "../../src/renderer/api";
 import { NOTICE_AUTO_DISMISS_MS, useLayoutStore } from "../../src/renderer/stores/layout";
 
 const settings = {
@@ -28,6 +29,23 @@ const settings = {
 describe("layout store", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => vi.useRealTimers());
+
+  it("folds an app-settings write back so the form's full save keeps the key", async () => {
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    vi.spyOn(desktop, "invoke").mockResolvedValue({
+      ...settings,
+      app: { ...settings.app, updateSkippedVersion: "9.9.9" },
+    });
+
+    await layout.updateAppSettings({ updateSkippedVersion: "9.9.9" });
+
+    expect(desktop.invoke).toHaveBeenCalledWith("settings.update", {
+      scope: "app",
+      patch: { updateSkippedVersion: "9.9.9" },
+    });
+    expect(layout.settings?.app.updateSkippedVersion).toBe("9.9.9");
+  });
 
   it("keeps graph outside the collapsible panel state", async () => {
     const layout = useLayoutStore();

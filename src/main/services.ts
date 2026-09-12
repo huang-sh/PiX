@@ -47,7 +47,7 @@ import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
 import { pixAgentDir, pixHome } from "./paths.js";
 import { piSettingsSdk } from "./pi-runtime.js";
-const readJson = <T extends Record<string, unknown>>(p: string): T => {
+export const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
     const v = JSON.parse(readFileSync(p, "utf8"));
     return v && typeof v === "object" && !Array.isArray(v)
@@ -63,6 +63,12 @@ const merge = (
 ): Record<string, unknown> => {
   const out = { ...a };
   for (const [k, v] of Object.entries(b)) {
+    // null is the patch language's "remove this key": settings diffs must
+    // encode removals in a form JSON transports keep (see settingsDiff).
+    if (v === null) {
+      delete out[k];
+      continue;
+    }
     out[k] =
       v &&
       typeof v === "object" &&
@@ -75,7 +81,7 @@ const merge = (
   }
   return out;
 };
-const atomic = (p: string, v: unknown) => {
+export const atomic = (p: string, v: unknown) => {
   mkdirSync(dirname(p), { recursive: true });
   const t = `${p}.tmp`;
   writeFileSync(t, JSON.stringify(v, null, 2) + "\n");
@@ -165,6 +171,8 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
   out.theme = normalizeTheme(out.theme);
   if (typeof out.browserHome !== "string" || !out.browserHome) drop("browserHome");
   if (out.lastProject !== undefined && typeof out.lastProject !== "string") drop("lastProject");
+  if (out.updateSkippedVersion !== undefined && typeof out.updateSkippedVersion !== "string")
+    drop("updateSkippedVersion");
   for (const key of [
     "confirmDestructiveActions",
     "openLastSessionOnStartup",
@@ -255,8 +263,8 @@ export class SettingsService {
       },
     };
   }
-  update(patch: Record<string, unknown>, replace = false) {
-    const next = replace ? { ...patch } : merge(readJson(this.appPath), patch);
+  update(patch: Record<string, unknown>) {
+    const next = merge(readJson(this.appPath), patch);
     if (Object.hasOwn(patch, "keyboardShortcuts")) {
       validateShortcutOverrides(patch.keyboardShortcuts);
       // This map is a complete set of overrides: merging would resurrect reset bindings.
@@ -279,7 +287,6 @@ export class SettingsService {
   async updatePi(
     scope: "global" | "project",
     patch: Record<string, unknown>,
-    replace = false,
   ) {
     if (scope === "project" && !this.project)
       throw new Error("Open a project first");
@@ -309,7 +316,7 @@ export class SettingsService {
           );
         }
       }
-      return JSON.stringify(replace ? { ...patch } : merge(base, patch), null, 2);
+      return JSON.stringify(merge(base, patch), null, 2);
     });
     return this.bundle();
   }

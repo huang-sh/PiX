@@ -14,6 +14,7 @@ import SessionNavigator from "../navigator/SessionNavigator.vue";
 import ToolPanel from "../tools/ToolPanel.vue";
 import { whenMeasured, whenPanelsSettle, whenVisible, type PanelSettleTarget } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
+import { useSessionStore } from "../../stores/session";
 
 const emit = defineEmits<{
   settings: [];
@@ -29,6 +30,7 @@ const emit = defineEmits<{
 
 type PanelHandle = { collapse: () => void; expand: () => void; resize: (size: number) => void };
 const layout = useLayoutStore();
+const session = useSessionStore();
 const { t } = useI18n();
 const shell = ref<HTMLElement>();
 const navigatorElement = ref<HTMLElement>();
@@ -42,6 +44,10 @@ let navigatorMenus = 0;
 let navigatorDrag: { id: number; x: number; width: number } | undefined;
 let navigatorProtectedUntil = 0;
 let restoringLayout = true;
+// The width the splitter itself is at: its own drags report through resized(),
+// so only a store-driven width (restore, pin, close) has to be pushed back —
+// otherwise the next drag resumes from a stale baseline and jumps.
+let syncedChatWidth = -1;
 
 function sync(panel: PanelId, handle?: PanelHandle) {
   if (!handle) return;
@@ -51,7 +57,15 @@ function sync(panel: PanelId, handle?: PanelHandle) {
     handle.expand();
     // Pixel panels may initially measure before the parent has its final size.
     handle.resize(width);
+    if (panel === "chat") syncedChatWidth = width;
   }
+}
+
+// Store-driven width changes (pinning widens the slot, closing restores it)
+// must reach the splitter too: its drag baseline is its own layout, not the
+// rendered flex-basis, so a stale copy makes the first drag jump.
+function reconcileChatWidth() {
+  if (layout.layout.widths.chat !== syncedChatWidth) sync("chat", chatPanel.value);
 }
 
 function resized(panel: PanelId, size: number) {
@@ -60,6 +74,7 @@ function resized(panel: PanelId, size: number) {
   const width = Math.round(size);
   if (width <= 0) return;
   layout.layout.widths[panel] = width;
+  if (panel === "chat") syncedChatWidth = width;
   if (saveTimer.value) clearTimeout(saveTimer.value);
   saveTimer.value = setTimeout(() => void layout.save(), 250);
 }
@@ -155,7 +170,21 @@ watch(() => [layout.layout.collapsed.navigator, layout.layout.navigatorPinned], 
     scheduleNavigatorHide();
   }
 }, { immediate: true });
+
+// Pinned chat columns die with their node or their session, and a column that
+// submitted follows its branch (pending pin → real node, failed run → parent).
+watch(() => session.current?.session.path, () => layout.clearChatColumns());
+watch([() => session.current?.projection.nodes, () => session.current?.graph?.runs], () => {
+  const current = session.current;
+  layout.trackChatColumns(
+    new Set(current?.projection.nodes.map((node) => node.id)),
+    current?.graph?.runs ?? [],
+  );
+});
 watch(() => layout.layout.collapsed.chat, () => sync("chat", chatPanel.value));
+watch(() => layout.layout.widths.chat, () => {
+  if (!restoringLayout) reconcileChatWidth();
+});
 watch(() => layout.layout.collapsed.content, () => sync("content", contentPanel.value));
 onMounted(() => {
   document.addEventListener("pointerdown", outsideNavigator, true);
@@ -201,6 +230,9 @@ watch(() => layout.hydrated, async (hydrated) => {
   await whenPanelsSettle(restoreTargets());
   restoringLayout = false;
   layout.panelsSettled = true;
+  // A pin during the restore window skipped the width watcher: reconcile it now
+  // that the splitter can absorb a resize.
+  reconcileChatWidth();
 }, { immediate: true });
 </script>
 
@@ -273,7 +305,15 @@ watch(() => layout.hydrated, async (hydrated) => {
             @collapse="panelState('chat', true)"
             @expand="panelState('chat', false)"
           >
-            <BranchContextPanel class="chat" />
+            <div class="chat-columns">
+              <BranchContextPanel class="chat" />
+              <BranchContextPanel
+                v-for="id in layout.chatColumns"
+                :key="id"
+                :node-id="id"
+                class="chat"
+              />
+            </div>
           </SplitterPanel>
         </SplitterGroup>
       </SplitterPanel>

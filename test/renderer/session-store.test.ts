@@ -53,6 +53,7 @@ describe("session stream focus", () => {
   it("clears the current session after deletion, including broadcast-only deletion", async () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));
+    session.highlightedNode = "turn:u1";
     session.onAgentEvent({ type: "agent_start" });
     session.userThinking = "high";
     session.commands = [{ name: "test" }];
@@ -63,6 +64,7 @@ describe("session stream focus", () => {
 
     expect(session.current).toBeUndefined();
     expect(session.focusedNode).toBeNull();
+    expect(session.highlightedNode).toBeNull();
     expect(session.activity).toBeUndefined();
     expect(session.pendingPrompt).toBeUndefined();
     expect(session.userThinking).toBeUndefined();

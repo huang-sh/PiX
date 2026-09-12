@@ -81,9 +81,8 @@ test("validates persistent model and API key actions", () => {
     validateRouteInput("settings.update", {
       scope: "global",
       patch: { modelThinkingLevels: {} },
-      replace: true,
     }),
-    { scope: "global", patch: { modelThinkingLevels: {} }, replace: true },
+    { scope: "global", patch: { modelThinkingLevels: {} } },
   );
   assert.deepEqual(
     validateRouteInput("agent.control", {

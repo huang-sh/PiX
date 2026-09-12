@@ -244,6 +244,10 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(persisted.closeToTray, undefined);
     assert.equal(persisted.canvasDotGridDotSize, undefined);
     assert.deepEqual(persisted.futureKey, { keep: true });
+
+    // Settings-form removals ride as null; the merge drops the key.
+    new SettingsService(temp).update({ futureKey: null });
+    assert.equal(JSON.parse(readFileSync(appPath, "utf8")).futureKey, undefined);
   } finally {
     if (previous === undefined) delete process.env.PIX_HOME;
     else process.env.PIX_HOME = previous;
@@ -265,9 +269,11 @@ test("pi settings writes go through the sdk: merge, replace, freeze, reset", asy
     assert.equal(bundle.piGlobal.defaultProvider, "openai");
     assert.equal(bundle.piGlobal.queueMode, "tree");
 
-    // Replace writes exactly the patch.
-    bundle = await settings.updatePi("global", { defaultProvider: "openai" }, true);
-    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { defaultProvider: "openai" });
+    // Removals ride as null, so the JSON hop to a remote host keeps them.
+    await settings.updatePi("global", JSON.parse(JSON.stringify({ queueMode: null })));
+    const cleared = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(Object.hasOwn(cleared, "queueMode"), false);
+    assert.equal(cleared.defaultProvider, "openai");
 
     // A corrupt file freezes saves instead of being silently overwritten.
     writeFileSync(file, "{broken");

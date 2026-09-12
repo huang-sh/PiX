@@ -172,7 +172,7 @@ async function save() {
           <span class="skill-sheet-note">{{ t("settings.skillSheetNote") }}</span>
           <div class="skill-sheet-actions-end">
             <Button type="button" variant="ghost" :disabled="busy" @click="emit('cancel')">{{ t("settings.customCancel") }}</Button>
-            <Button v-if="!props.readonly" type="submit" data-skill-save :disabled="busy || invalid">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
+            <Button v-if="!props.readonly" type="submit" data-skill-save :disabled="busy || invalid">{{ t(busy ? "settings.saving" : "common.save") }}</Button>
           </div>
         </footer>
       </form>

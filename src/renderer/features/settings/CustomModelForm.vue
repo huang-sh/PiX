@@ -61,7 +61,7 @@ async function save() {
     <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
     <footer class="model-options-header">
       <Button type="button" variant="outline" :disabled="busy" @click="emit('cancel')">{{ t("settings.customCancel") }}</Button>
-      <Button type="submit" :disabled="busy">{{ t(busy ? "settings.saving" : props.model ? "settings.saveChanges" : "settings.addCustomModel") }}</Button>
+      <Button type="submit" :disabled="busy">{{ t(busy ? "settings.saving" : props.model ? "common.save" : "settings.addCustomModel") }}</Button>
     </footer>
   </form>
     </DialogContent>

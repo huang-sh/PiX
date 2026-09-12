@@ -141,7 +141,7 @@ defineExpose({ requestClose });
     <div class="shortcut-toolbar">
       <label class="settings-search"><Search :size="17" aria-hidden="true" /><input v-model="query" :placeholder="t('shortcuts.search')" :aria-label="t('shortcuts.search')" /></label>
       <Button variant="outline" :disabled="busy || !Object.keys(draft).length" data-shortcut-reset-all @click="reset()"><RotateCcw :size="15" />{{ t('shortcuts.resetAll') }}</Button>
-      <Button :disabled="busy || !dirty" data-shortcut-save @click="save"><Save :size="15" />{{ t(busy ? 'settings.saving' : 'settings.saveChanges') }}</Button>
+      <Button :disabled="busy || !dirty" data-shortcut-save @click="save"><Save :size="15" />{{ t(busy ? 'settings.saving' : 'common.save') }}</Button>
     </div>
     <p class="shortcut-scope">{{ t('shortcuts.scope') }}</p>
     <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
