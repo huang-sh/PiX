@@ -44,6 +44,10 @@ Switching branches never means re-setting up context — context is part of the 
 - Double-click a node on the graph to open its conversation in the primary chat panel. Ctrl+double-click (or the right-click menu's "Open in chat panel") pins that branch to a second or third side-by-side chat column — up to 3 columns at once for comparing branches. Each branch keeps a single panel: opening another node of an already-pinned branch retargets that column. Every column scrolls and replies independently. Replying from a pinned column grows that branch in place: the column follows the newly created node, and the primary column keeps the current selection. Closing the last pinned column — or the next start — restores the chat width.
 - The **branch context panel** follows the selected node and shows how that turn went: thinking, tool calls, duration, and step count — and you can reply to the selected node right from there.
 
+<p align="center">
+  <img src="assets/images/pix-multi-chat-panels.png" alt="Multi chat panels: Ctrl+double-click nodes on different branches to pin up to three side-by-side chat columns for comparison">
+</p>
+
 ## Remote Node runtime
 
 SSH and WSL share one installer. A working selected Node stays in use; fresh installations prefer Linux Node from PATH or the interactive login environment (such as nvm), with a minimum version of 22.19.0. Dependencies, server startup, WebSocket connectivity and a real terminal must pass checks before the current installation changes.
