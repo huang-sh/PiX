@@ -63,6 +63,12 @@ const merge = (
 ): Record<string, unknown> => {
   const out = { ...a };
   for (const [k, v] of Object.entries(b)) {
+    // null is the patch language's "remove this key": settings diffs must
+    // encode removals in a form JSON transports keep (see settingsDiff).
+    if (v === null) {
+      delete out[k];
+      continue;
+    }
     out[k] =
       v &&
       typeof v === "object" &&
@@ -257,8 +263,8 @@ export class SettingsService {
       },
     };
   }
-  update(patch: Record<string, unknown>, replace = false) {
-    const next = replace ? { ...patch } : merge(readJson(this.appPath), patch);
+  update(patch: Record<string, unknown>) {
+    const next = merge(readJson(this.appPath), patch);
     if (Object.hasOwn(patch, "keyboardShortcuts")) {
       validateShortcutOverrides(patch.keyboardShortcuts);
       // This map is a complete set of overrides: merging would resurrect reset bindings.
@@ -281,7 +287,6 @@ export class SettingsService {
   async updatePi(
     scope: "global" | "project",
     patch: Record<string, unknown>,
-    replace = false,
   ) {
     if (scope === "project" && !this.project)
       throw new Error("Open a project first");
@@ -311,7 +316,7 @@ export class SettingsService {
           );
         }
       }
-      return JSON.stringify(replace ? { ...patch } : merge(base, patch), null, 2);
+      return JSON.stringify(merge(base, patch), null, 2);
     });
     return this.bundle();
   }

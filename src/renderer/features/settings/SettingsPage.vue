@@ -13,6 +13,7 @@ import KeyboardShortcuts from "./KeyboardShortcuts.vue";
 import SkillEditorForm from "./SkillEditorForm.vue";
 import AboutPage from "./AboutPage.vue";
 import { desktop } from "../../api";
+import { settingsDiff } from "../../lib/settings-diff";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -36,6 +37,9 @@ const workspace = useWorkspaceStore();
 const session = useSessionStore();
 const { locale, t, te } = useI18n();
 const draft = ref<SettingsBundle>();
+// The pristine twin of the draft, cloned at the same moment: save() diffs the
+// two, so keys other writers saved while the page is open survive the save.
+let base: SettingsBundle | undefined;
 onBeforeUnmount(() => {
   applyAppearance(layout.settings?.app ?? {});
 });
@@ -131,7 +135,10 @@ function rowHint(row: Row) {
 
 watch(
   () => layout.settings,
-  (settings) => void (draft.value = settings ? structuredClone(toRaw(settings)) : undefined),
+  (settings) => {
+    draft.value = settings ? structuredClone(toRaw(settings)) : undefined;
+    base = settings ? structuredClone(toRaw(settings)) : undefined;
+  },
   { immediate: true },
 );
 
@@ -590,13 +597,17 @@ watch(
   { immediate: true },
 );
 
+function sectionFor(scope: Scope, bundle: SettingsBundle | undefined): Record<string, unknown> | undefined {
+  if (!bundle) return undefined;
+  return (scope === "app"
+    ? bundle.app
+    : scope === "global"
+      ? bundle.piGlobal
+      : bundle.piProject) as unknown as Record<string, unknown>;
+}
+
 function rootFor(row: Row): Record<string, unknown> | undefined {
-  if (!draft.value) return undefined;
-  return (row.scope === "app"
-    ? draft.value.app
-    : row.scope === "global"
-      ? draft.value.piGlobal
-      : draft.value.piProject) as unknown as Record<string, unknown>;
+  return sectionFor(row.scope, draft.value);
 }
 
 function value(row: Row): unknown {
@@ -690,15 +701,14 @@ async function save() {
     const scopes = new Set(rows.value.map((row) => row.scope));
     let settings = layout.settings!;
     for (const scope of scopes) {
-      // The draft is a deeply reactive proxy graph; Electron's IPC serializer
-      // rejects proxies, so clone down to plain values before crossing it.
-      // The draft is a deeply reactive proxy graph; Electron's IPC serializer
-      // rejects proxies, so clone down to plain values before crossing it.
-      const patch = structuredClone(toRaw(
-        scope === "app" ? draft.value.app : scope === "global" ? draft.value.piGlobal : draft.value.piProject,
-      ));
-      if (scope === "app") patch.theme = layout.settings!.app.theme;
-      settings = await desktop.invoke<SettingsBundle>("settings.update", { scope, patch, replace: true });
+      // Save only the keys the draft changed against the opening snapshot:
+      // the draft is a stale full state, and a full write would clobber keys
+      // other writers saved meanwhile (theme picker, update banner, the pi
+      // runtime's own settings). toRaw hands the diff plain values, so the
+      // patch crosses IPC without proxy cloning.
+      const patch = settingsDiff(sectionFor(scope, toRaw(draft.value))!, sectionFor(scope, base)!);
+      if (!Object.keys(patch).length) continue;
+      settings = await desktop.invoke<SettingsBundle>("settings.update", { scope, patch });
     }
     layout.applySettings(settings);
     locale.value = settings.app.language === "system"

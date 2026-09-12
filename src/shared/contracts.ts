@@ -126,7 +126,6 @@ export function validateRouteInput(
               ? "global"
               : "app",
         patch,
-        replace: v.replace === true,
       };
     }
     case "settings.reset":
