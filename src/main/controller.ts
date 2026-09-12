@@ -892,7 +892,7 @@ export class MainController {
         const provider = typeof patch.provider === "string" && patch.provider.trim() ? patch.provider.trim() : undefined;
         const modelId = typeof patch.modelId === "string" && patch.modelId.trim() ? patch.modelId.trim() : undefined;
         const budget = patch.budgetTokens === null || patch.budgetTokens === undefined ? undefined : Number(patch.budgetTokens);
-        this.settings.update("app", {
+        this.settings.update({
           wiki: {
             ...(this.settings.bundle().app.wiki ?? {}),
             ...(patch.enabled !== undefined ? { enabled: patch.enabled === true } : {}),
