@@ -5,6 +5,7 @@ import { normalizeTheme } from "../../../shared/theme";
 import { applyAppearance } from "../../theme";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, RuntimeSkillDocument, SettingsBundle } from "../../../shared/types";
+import { RECOMMENDED_EXTENSIONS, isNpmPackageExtension } from "../../../shared/extensions";
 import { slugifySkillName } from "../../../shared/skills";
 import Button from "../../components/ui/Button.vue";
 import CustomModelForm from "./CustomModelForm.vue";
@@ -292,6 +293,10 @@ const extensionFilters = computed(() => (["all", "project", "user", "temporary"]
   .map((scope) => ({ scope, count: extensions.value.filter((extension) => scope === "all" || extension.scope === scope).length })));
 
 function extensionName(path: string) {
+  // pi identifies inline (factory-registered) extensions by a synthetic
+  // <inline:name> pseudo-path; the card shows the bare name.
+  const inline = /^<inline:(.+)>$/.exec(path);
+  if (inline) return inline[1]!;
   const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
   const modules = parts.lastIndexOf("node_modules");
   if (modules >= 0)
@@ -300,6 +305,17 @@ function extensionName(path: string) {
       : parts[modules + 1] ?? path;
   const name = (parts.pop() ?? path).replace(/\.[^.]+$/, "");
   return name === "index" ? parts.pop() ?? name : name;
+}
+
+/** Inline extensions carry no tool or command descriptions; use their own copy. */
+function extensionSummary(extension: RuntimeExtension) {
+  if (extension.path.startsWith("<inline:")) {
+    const key = `settings.internalExtensions.${extensionName(extension.path)}.description`;
+    if (te(key)) return t(key);
+  }
+  return extension.tools.find(tool => tool.description)?.description
+    || extension.commands.find(command => command.description)?.description
+    || t("settings.extensionNoDescription");
 }
 
 function modelKey(model: RuntimeModel) {
@@ -519,8 +535,9 @@ async function importSkillFile(event: Event) {
   }
 }
 
-async function loadExtensions(reload = false) {
-  if (layout.settingsCategory !== "extensions" || extensionBusy.value) return;
+/** Unconditional fetch; also used after installs so a category switch or an
+ *  in-flight refresh can never leave the card's state stale. */
+async function refreshExtensions(reload: boolean) {
   extensionBusy.value = true;
   extensionError.value = "";
   try {
@@ -529,6 +546,32 @@ async function loadExtensions(reload = false) {
     extensionError.value = error instanceof Error ? error.message : String(error);
   } finally {
     extensionBusy.value = false;
+  }
+}
+
+async function loadExtensions(reload = false) {
+  if (layout.settingsCategory !== "extensions" || extensionBusy.value) return;
+  await refreshExtensions(reload);
+}
+
+const packageBusySource = ref("");
+const packageError = ref<{ source: string; message: string } | undefined>();
+
+function extensionInstalled(name: string) {
+  return extensions.value.some((extension) => isNpmPackageExtension(extension, name));
+}
+
+async function runPackageAction(source: string, action: "installExtension" | "removeExtension") {
+  if (packageBusySource.value) return;
+  packageBusySource.value = source;
+  packageError.value = undefined;
+  try {
+    await session.control({ action, source });
+    await refreshExtensions(true);
+  } catch (error) {
+    packageError.value = { source, message: error instanceof Error ? error.message : String(error) };
+  } finally {
+    packageBusySource.value = "";
   }
 }
 
@@ -1009,12 +1052,43 @@ async function logout(provider: RuntimeProvider) {
             </header>
             <div class="extension-item-body">
               <p v-if="extension.bundled" class="extension-no-capabilities">{{ t("settings.extensionBundledNote") }}</p>
-              <p class="extension-summary">{{ extension.tools.find(tool => tool.description)?.description || extension.commands.find(command => command.description)?.description || t("settings.extensionNoDescription") }}</p>
+              <p class="extension-summary">{{ extensionSummary(extension) }}</p>
               <div class="extension-metrics"><span><Wrench :size="13" />{{ t("settings.extensionTools", { n: extension.tools.length }) }}</span><span><Terminal :size="13" />{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</span></div>
             </div>
             <button type="button" class="extension-details" :aria-expanded="selectedExtension === extension" :aria-controls="selectedExtension === extension ? 'extension-details-panel' : undefined" @click="openExtensionDetails(extension, $event)">{{ t("settings.extensionDetails") }}<ChevronRight :size="15" /></button>
           </article>
         </div>
+        <section class="extension-recommended" :aria-label="t('settings.recommendedTitle')">
+          <div class="extension-recommended-heading">
+            <h3>{{ t("settings.recommendedTitle") }}</h3>
+            <p>{{ t("settings.recommendedHint") }}</p>
+          </div>
+          <div class="extension-grid">
+            <article v-for="item in RECOMMENDED_EXTENSIONS" :key="item.source" class="extension-item" :data-recommended="item.name">
+              <header class="extension-item-header">
+                <span class="extension-item-icon"><Download :size="21" aria-hidden="true" /></span>
+                <div class="extension-identity">
+                  <h3>{{ item.name }}</h3>
+                  <span>{{ item.source }}</span>
+                </div>
+                <Button v-if="extensionInstalled(item.name)" variant="outline" size="sm" class="extension-install-button" :disabled="!!packageBusySource" @click="runPackageAction(item.source, 'removeExtension')">
+                  <RefreshCw v-if="packageBusySource === item.source" :size="14" class="spin" aria-hidden="true" />
+                  <Trash2 v-else :size="14" aria-hidden="true" />
+                  {{ t(packageBusySource === item.source ? "settings.recommendedRemoving" : "settings.recommendedRemove") }}
+                </Button>
+                <Button v-else size="sm" class="extension-install-button" :disabled="!!packageBusySource" @click="runPackageAction(item.source, 'installExtension')">
+                  <RefreshCw v-if="packageBusySource === item.source" :size="14" class="spin" aria-hidden="true" />
+                  <Download v-else :size="14" aria-hidden="true" />
+                  {{ t(packageBusySource === item.source ? "settings.recommendedInstalling" : "settings.recommendedInstall") }}
+                </Button>
+              </header>
+              <div class="extension-item-body">
+                <p class="extension-summary">{{ t(`settings.recommended.${item.key}.description`) }}</p>
+                <p v-if="packageError?.source === item.source" class="extension-install-error" role="alert">{{ packageError.message }}</p>
+              </div>
+            </article>
+          </div>
+        </section>
         <p class="extension-footnote"><Folder :size="14" aria-hidden="true" />{{ t("settings.extensionDiscoveryNote") }}</p>
       </section>
       <AboutPage v-else-if="layout.settingsCategory === 'about'" />

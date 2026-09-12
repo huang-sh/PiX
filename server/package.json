@@ -13,7 +13,6 @@
     "@injaneity/pi-computer-use": "0.5.1",
     "diff": "8.0.4",
     "node-pty": "^1.2.0-beta.15",
-    "pi-web-access": "0.27.0",
     "ws": "8.21.0"
   },
   "allowScripts": {

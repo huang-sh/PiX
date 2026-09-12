@@ -8,13 +8,13 @@ const walk = (d: string): string[] =>
     const p = join(d, n);
     return statSync(p).isDirectory() ? walk(p) : [p];
   });
-test("Pi SDK is isolated to the main runtime adapter", () => {
+test("Pi SDK is isolated to the main runtime adapter and its internal extensions", () => {
   const hits = walk(root).filter((p) =>
     readFileSync(p, "utf8").includes("@earendil-works/pi-coding-agent"),
   );
   assert.deepEqual(
     hits.map((p) => p.replace(root, "").replaceAll("\\", "/")),
-    ["/main/pi-runtime.ts"],
+    ["/main/extensions/file-changes.ts", "/main/pi-runtime.ts"],
   );
 });
 test("renderer has no Node, Electron, or Pi authority", () => {

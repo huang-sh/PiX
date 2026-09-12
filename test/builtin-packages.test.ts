@@ -134,17 +134,12 @@ test("bundled packages are discovered and user installs suppress only their own 
     ] as const) {
       const computer = packageMarker(modules);
       const fff = packageMarker(modules, "@ff-labs/pi-fff");
-      const web = packageMarker(modules, "pi-web-access");
-      assert.deepEqual(resolveBuiltinPackages(moduleDir), [computer, fff, web]);
-      assert.equal(isBundledExtension(moduleDir, join(web, "index.ts")), true);
-      for (const source of ["npm:pi-web-access", { source: "npm:pi-web-access@0.27.0", autoload: false }]) {
-        assert.deepEqual(resolveBuiltinPackages(moduleDir, { getPackages: () => [source] }), [computer, fff]);
-      }
+      assert.deepEqual(resolveBuiltinPackages(moduleDir), [computer, fff]);
       assert.equal(isBundledExtension(moduleDir, join(fff, "src", "index.ts")), true);
       for (const source of ["npm:@ff-labs/pi-fff", { source: "npm:@ff-labs/pi-fff@0.10.6", autoload: false }]) {
-        assert.deepEqual(resolveBuiltinPackages(moduleDir, { getPackages: () => [source] }), [computer, web]);
+        assert.deepEqual(resolveBuiltinPackages(moduleDir, { getPackages: () => [source] }), [computer]);
       }
-      assert.deepEqual(resolveBuiltinPackages(moduleDir, { getPackages: () => [`npm:${PACKAGE_NAME}`] }), [fff, web]);
+      assert.deepEqual(resolveBuiltinPackages(moduleDir, { getPackages: () => [`npm:${PACKAGE_NAME}`] }), [fff]);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -182,7 +177,6 @@ test("pi loads the bundled packages and registers their tools and commands", asy
       `computer-use tools not registered, got: ${[...tools].join(", ")}`,
     );
     assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
-    assert.ok(tools.has("web_search") && tools.has("fetch_content"));
     assert.ok(services.resourceLoader.getExtensions().extensions.some((extension) => extension.commands.has("fff-mode")));
     const { session } = await pi.createAgentSessionFromServices({
       services,

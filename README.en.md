@@ -53,7 +53,7 @@ Developer checks: `node --test test/remote-runtime.test.mjs` (Windows defaults t
 
 ## Download
 
-PiX includes `@injaneity/pi-computer-use`, `@ff-labs/pi-fff`, and `pi-web-access`, loaded through Pi's extension mechanism. The extensions and their runtime dependencies ship with the app. No separate install is needed; an npm copy you installed through Pi takes precedence. Web search services still use your own configuration and credentials.
+PiX includes `@injaneity/pi-computer-use` and `@ff-labs/pi-fff`, loaded through Pi's extension mechanism. Both carry native binaries, so they and their runtime dependencies ship with the app — no separate install is needed, and an npm copy you installed through Pi takes precedence. `pi-web-access` no longer ships with the installer: install it with one click on the Settings → Extensions page and keep it current with `pi update`. Web search services still use your own configuration and credentials.
 
 Grab the installer for your platform from [GitHub Releases](https://github.com/huang-sh/PiX/releases):
 
@@ -74,6 +74,6 @@ npm run dev
 
 `npm run verify` runs the full typecheck, test, and startup smoke suite.
 
-`npm run test:fff` checks bundled file search; `npm run test:web` checks web dependency packaging and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; CI builds on separate Apple Silicon and Intel runners to include the matching native libraries.
+`npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; CI builds on separate Apple Silicon and Intel runners to include the matching native libraries.
 
 </details>

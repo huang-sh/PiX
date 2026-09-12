@@ -23,21 +23,21 @@ const resources = process.platform === "darwin"
   ? join(dirname(target), "..", "Resources") : join(dirname(target), "resources");
 // A portable launcher extracts resources only after startup; run this direct
 // SDK check for the unpacked executable, where the resources are addressable.
+// pi-web-access is no longer bundled; its install layout is covered by
+// test:web against the dev dependency tree.
 const bundledChecks = existsSync(join(resources, "app.asar"));
 if (bundledChecks) {
-  for (const name of ["fff", "web"]) {
-    const result = spawnSync(target, [
-      join(root, "test", `builtin-${name}-smoke-test.mjs`),
-      join(resources, "pi-builtin", "node_modules"),
-      join(resources, "app.asar", "node_modules"),
-    ], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      encoding: "utf8", timeout: 60_000, windowsHide: true,
-    });
-    if (result.status !== 0)
-      throw new Error(`Packaged ${name} check failed: ${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
-    console.log(result.stdout.trim());
-  }
+  const result = spawnSync(target, [
+    join(root, "test", "builtin-fff-smoke-test.mjs"),
+    join(resources, "pi-builtin", "node_modules"),
+    join(resources, "app.asar", "node_modules"),
+  ], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    encoding: "utf8", timeout: 60_000, windowsHide: true,
+  });
+  if (result.status !== 0)
+    throw new Error(`Packaged fff check failed: ${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
+  console.log(result.stdout.trim());
 }
 const artifacts = join(root, "artifacts");
 const testHome = join(artifacts, "packaged-home");
@@ -282,7 +282,6 @@ try {
     bundledSkills: true,
     fffind: bundledChecks,
     ffgrep: bundledChecks,
-    webFetch: bundledChecks,
     passed: true,
   };
   writeFileSync(

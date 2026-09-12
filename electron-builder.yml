@@ -11,8 +11,7 @@ files:
   - resources/**
 
 # Cross-platform binary pruning (esbuild ships ~230MB of other-platform
-# binaries via pi's chord dependency). The hook also copies pi-web-access
-# and its installed runtime dependency tree outside asar.
+# binaries via pi's chord dependency).
 afterPack: scripts/strip-cross-platform-binaries.mjs
 
 # node-pty ships NAPI prebuilds for every platform (node_modules/node-pty/

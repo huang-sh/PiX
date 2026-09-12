@@ -687,11 +687,33 @@ try {
     await cdp.evaluate(`(() => {
       const node = document.querySelector('.prompt-node.selected');
       node.dispatchEvent(new MouseEvent('mouseenter'));
-      node.querySelector('.node-add').dispatchEvent(new MouseEvent('mouseenter'));
+      node.querySelector('.node-branch-controls').dispatchEvent(new MouseEvent('mouseenter'));
     })()`);
     await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 350))");
     if (await cdp.evaluate("Boolean(document.querySelector('.node-hover-card'))"))
-      throw new Error("Graph node preview opened while hovering the add action");
+      throw new Error("Graph node preview must not open when the pointer lands on the branch pill");
+    await cdp.evaluate("document.querySelector('.prompt-node.selected').dispatchEvent(new MouseEvent('mouseenter'))");
+    await retry(async () => {
+      if (!(await cdp.evaluate("Boolean(document.querySelector('.node-hover-card'))")))
+        throw new Error("Graph node preview did not open on node hover");
+    });
+    await cdp.evaluate(`(() => {
+      const node = document.querySelector('.prompt-node.selected');
+      node.querySelector('.node-branch-controls').dispatchEvent(new MouseEvent('mouseenter', { relatedTarget: node }));
+    })()`);
+    await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 600))");
+    if (!(await cdp.evaluate("Boolean(document.querySelector('.node-hover-card'))")))
+      throw new Error("Graph node preview must stay open when the pointer moves from the node onto the branch pill");
+    await cdp.evaluate(`(() => {
+      const node = document.querySelector('.prompt-node.selected');
+      const card = document.querySelector('.node-hover-card');
+      card.dispatchEvent(new MouseEvent('mouseleave'));
+      node.dispatchEvent(new MouseEvent('mouseenter'));
+      node.querySelector('.node-branch-controls').dispatchEvent(new MouseEvent('mouseenter', { relatedTarget: card }));
+    })()`);
+    await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 600))");
+    if (await cdp.evaluate("Boolean(document.querySelector('.node-hover-card'))"))
+      throw new Error("Graph node preview must close after the pointer moves from the card onto the branch pill");
     await cdp.evaluate("document.querySelector('.prompt-node.selected .node-add').click()");
     await retry(async () => {
       const value = await cdp.evaluate(`({
