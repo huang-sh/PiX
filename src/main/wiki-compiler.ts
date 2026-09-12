@@ -16,6 +16,10 @@ const short = (id: string) => id === "main" ? id : id.slice(0, 8);
 const clip = (value: unknown, max: number) => { const s = String(value ?? ""); return s.length > max ? `${s.slice(0, max)} [省略 ${s.length - max} 字符；按 entry 读取原始 JSONL]` : s; };
 const cell = (value: unknown) => String(value ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 const blocks = (content: unknown) => typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
+// Tool results that read the wiki itself must not become evidence for the
+// wiki: summaries would gradually cite themselves. Detect and skip them.
+const WIKI_SELF_READ = /(?:\.pi[\\/]wiki|\.pix-tree[\\/]wiki)/u;
+const WIKI_SELF_READ_NOTE = "[wiki 读取结果，已跳过以防自引用]";
 const STATUS = /<!-- pix-wiki:status:start -->[\s\S]*?<!-- pix-wiki:status:end -->\s*/g;
 const bodyOf = (value: string) => value.replace(STATUS, "").trim() + "\n";
 const references = (value: string) => [...value.matchAll(/`(turn:[^`\r\n]+)`/g)].map(m => m[1]!);
@@ -49,6 +53,8 @@ export interface WikiReceipt {
   compiledRevision: string;
   coveredTurns: string[];
   evidenceThrough: string | null;
+  /** Topic anchors the model chose; rendered into the index for grep. */
+  keywords?: string[];
   generator: string;
   generatedAt?: string;
   usage: { inputTokens: number | null; outputTokens: number | null; cost?: number | null; reason?: string };
@@ -245,7 +251,10 @@ function renderMessageEntry(e: RawSessionEntry, snap: WikiSnapshot, id: string):
   if (m.role === "assistant") value += `stopReason=${m.stopReason ?? "unknown"}${m.errorMessage ? ` · errorMessage=${clip(m.errorMessage, 400)}` : ""}\n\n`;
   for (const b of blocks(m.content)) {
     if (b.type === "thinking") continue;
-    if (b.type === "text") value += (tool ? clip(b.text, 400) : String(b.text ?? "")) + "\n\n";
+    if (b.type === "text") {
+      if (tool && WIKI_SELF_READ.test(String(b.text ?? ""))) value += `${WIKI_SELF_READ_NOTE}\n\n`;
+      else value += (tool ? clip(b.text, 400) : String(b.text ?? "")) + "\n\n";
+    }
     else if (b.type === "toolCall") value += `工具调用 ${String(b.name ?? "")} · callId=${String(b.id ?? "unknown")}\n\n${clip(JSON.stringify(b.arguments ?? {}), 400)}\n\n`;
     else if (b.type === "image") value += `[图片；${String(b.mimeType ?? "unknown")}；请读原始 entry]\n\n`;
     else value += `[${String(b.type ?? "未知内容块")}；请读原始 entry]\n\n`;
@@ -297,6 +306,15 @@ function renderIndex(manifest: WikiManifest, pages: WikiPages) {
   const usage = manifest.usage;
   let out = `# 工作区 · 轻量 Wiki\n\n> 程序装配，不单独调用模型。${order.length} 个会话 · ${branches} 个存储分支 · ${turns} 轮；最新版本摘要覆盖 ${covered}/${turns} 轮。“已收录”不是“任务已完成”或“当前代码已验证”。\n`;
   if (usage) out += `> 累计后台消耗：input ${usage.input} · output ${usage.output} tokens · ${usage.calls} 次调用${usage.cost !== null ? ` · 约 ${usage.cost.toFixed(4)} 成本单位` : ""}。\n`;
+  // Topic anchors: one grep-able line per branch, straight from the receipts.
+  const anchorLines = order.flatMap(([sid, entry]) => Object.keys(entry.sources).map(branchId => {
+    const rel = sessionPageRel(sid, branchId);
+    const receipt = manifest.pages[rel];
+    const coveredCount = receipt?.coveredTurns.length ?? 0;
+    const keywords = receipt?.keywords?.length ? ` · ${receipt.keywords.join("、")}` : "";
+    return `- ${entry.name}/${short(branchId)} · 覆盖 ${coveredCount}/${entry.sources[branchId]!.turns.length} · ${label(rel)}${keywords}`;
+  }));
+  if (anchorLines.length) out += `\n## 主题锚点（检索起点）\n\n${anchorLines.join("\n")}\n`;
   for (const [sid, entry] of order) {
     out += `\n## ${entry.name} · \`${short(sid)}\`\n\n> 会话文件：${cell(basename(entry.path))}；[树地图](sessions/${sid}/tree.md)。未解决项见各分支摘要页。\n\n| 分支 | 一句话摘要（模型/人） | 轮数 | 新鲜度 |\n|---|---|---|---|\n`;
     for (const branchId of Object.keys(entry.sources)) {
@@ -420,10 +438,12 @@ export function removeSessionWiki(wikiRoot: string, mainPath: string) {
 // ---------------------------------------------------------------------------
 
 export const WIKI_SYSTEM_PROMPT = [
-  "你是工作区 Wiki 的后台摘要器。你只读取给定的旧摘要与新增证据，输出一个 JSON 对象，不执行工具、不写文件、不输出 JSON 以外的内容。",
+  "你是工作区 Wiki 的后台摘要器。读者是之后对话中的模型：它只读这些页面来接续工作，不会重放原始对话，因此摘要要自足、术语稳定、密度优先。",
+  "你只读取给定的旧摘要与新增证据，输出一个 JSON 对象，不执行工具、不写文件、不输出 JSON 以外的内容。",
   "规则：结论必须来自证据中出现的轮次；每条结论/未解决项尽量给出 evidence 数组，元素必须是证据中出现过的完整 turn: 节点 ID。",
+  "keywords 是工作区索引与 grep 的锚点：3~8 个短词，覆盖该分支的主要主题、技术与对象，避免泛词。",
   "不要复述工具输出全文；纠正旧摘要中被新证据推翻的内容，写入 corrections。",
-  "输出格式：{\"summary\":string(一句话),\"goal\":string,\"conclusions\":[{\"text\":string,\"evidence\":string[]}],\"corrections\":[{\"text\":string,\"evidence\":string[]}],\"openQuestions\":[{\"text\":string,\"evidence\":string[]}]}",
+  "输出格式：{\"summary\":string(一句话),\"goal\":string,\"keywords\":string[],\"conclusions\":[{\"text\":string,\"evidence\":string[]}],\"corrections\":[{\"text\":string,\"evidence\":string[]}],\"openQuestions\":[{\"text\":string,\"evidence\":string[]}]}",
 ].join("\n");
 
 export const OLD_SUMMARY_MAX_CHARS = 4000;
@@ -435,6 +455,7 @@ export interface WikiModelSummaryItem { text: string; evidence: string[] }
 export interface WikiModelSummary {
   summary: string;
   goal: string;
+  keywords: string[];
   conclusions: WikiModelSummaryItem[];
   corrections: WikiModelSummaryItem[];
   openQuestions: WikiModelSummaryItem[];
@@ -476,7 +497,8 @@ function renderEvidenceTurn(turn: string, snap: WikiSnapshot, branchId: string):
     } else if (m.role === "user") {
       out += "### user\n\n" + clip(blocks(m.content).filter(b => b.type === "text").map(b => String(b.text ?? "")).join("\n"), USER_CLIP) + "\n\n";
     } else if (m.role === "toolResult") {
-      out += `### 工具结果 ${m.toolName ?? "unknown"}${m.isError ? "（isError）" : ""}\n\n` + clip(blocks(m.content).filter(b => b.type === "text").map(b => String(b.text ?? "")).join("\n"), 400) + "\n\n";
+      const toolText = blocks(m.content).filter(b => b.type === "text").map(b => String(b.text ?? "")).join("\n");
+      out += `### 工具结果 ${m.toolName ?? "unknown"}${m.isError ? "（isError）" : ""}\n\n` + (WIKI_SELF_READ.test(toolText) ? WIKI_SELF_READ_NOTE : clip(toolText, 400)) + "\n\n";
     }
   }
   return out;
@@ -588,7 +610,10 @@ export function parseModelSummary(reply: string): WikiModelSummary {
   const summary = typeof v.summary === "string" ? v.summary.trim() : "";
   const goal = typeof v.goal === "string" ? v.goal.trim() : "";
   if (!summary) throw new WikiPublishError("模型输出缺少 summary");
-  return { summary: clip(summary, 600), goal, conclusions: items(v.conclusions), corrections: items(v.corrections), openQuestions: items(v.openQuestions) };
+  const keywords = [...new Set((Array.isArray(v.keywords) ? v.keywords : [])
+    .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    .map(x => x.trim().slice(0, 24)))].slice(0, 8);
+  return { summary: clip(summary, 600), goal, keywords, conclusions: items(v.conclusions), corrections: items(v.corrections), openQuestions: items(v.openQuestions) };
 }
 
 function renderSummaryBody(sessionName: string, branchId: string, value: WikiModelSummary, validRefs: Set<string>) {
@@ -647,6 +672,7 @@ export function publishSummary(
     compiledRevision,
     coveredTurns: plan.includedTurns,
     evidenceThrough: plan.includedEntries.map(e => e.timestamp).sort().at(-1) ?? null,
+    ...(value.keywords.length ? { keywords: value.keywords } : {}),
     generator: "model",
     generatedAt: new Date().toISOString(),
     usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(usage.cost !== null ? { cost: usage.cost } : {}) },

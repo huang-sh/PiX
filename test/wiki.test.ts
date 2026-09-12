@@ -80,8 +80,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-const summaryJson = (evidence: string[], summary = "一句话总结") => JSON.stringify({
-  summary, goal: "目标描述",
+const summaryJson = (evidence: string[], summary = "一句话总结", keywords: string[] = ["支付", "webhook"]) => JSON.stringify({
+  summary, goal: "目标描述", keywords,
   conclusions: [{ text: "结论内容", evidence }],
   corrections: [], openQuestions: [{ text: "未解决事项", evidence }],
 });
@@ -423,4 +423,39 @@ test("removeSessionWiki is a no-op for unknown sessions", () => {
   refreshSessionWiki(f.wiki, f.main);
   removeSessionWiki(f.wiki, join(f.project, ".pi", "sessions", "missing.jsonl"));
   assert.ok(readManifest(f.wiki)!.sessions[SID_A]);
+});
+
+test("model keywords are normalized, stored as receipt anchors and rendered into the index", () => {
+  const f = fixture(test);
+  refreshSessionWiki(f.wiki, f.main);
+  const plan = prepareCompile(f.wiki, f.main, "main")!;
+  const long = "长".repeat(40);
+  const value = parseModelSummary(summaryJson(["turn:u1", "turn:u2"], "一句话总结", ["登录重构", "登录重构", "", "OAuth", long]));
+  assert.deepEqual(value.keywords, ["登录重构", "OAuth", long.slice(0, 24)]);
+  publishSummary(f.wiki, plan, value, { inputTokens: 1, outputTokens: 1, cost: null });
+  assert.deepEqual(readManifest(f.wiki)!.pages[A_MAIN]!.keywords, ["登录重构", "OAuth", long.slice(0, 24)]);
+  refreshSessionWiki(f.wiki, f.main);
+  const index = read(join(f.wiki, "index.md"));
+  assert.match(index, /主题锚点（检索起点）/);
+  assert.match(index, /登录重构、OAuth/);
+});
+
+test("wiki self-reads never become evidence (recursion guard)", () => {
+  const f = fixture(test);
+  refreshSessionWiki(f.wiki, f.main);
+  // A later turn where the agent read the wiki itself.
+  f.appendMain(msg("u3", "a2", "user", "查一下 wiki"));
+  const selfRead = {
+    type: "message", id: "t9", parentId: "u3", timestamp: "2026-09-01T10:00:00.000Z",
+    message: { role: "toolResult", toolName: "read", toolCallId: "c9",
+      content: [{ type: "text", text: ".pi/wiki/index.md: 支付回调验签机密内容" }] },
+  } as unknown as RawSessionEntry;
+  f.appendMain(selfRead);
+  refreshSessionWiki(f.wiki, f.main);
+  const plan = prepareCompile(f.wiki, f.main, "main")!;
+  assert.match(plan.userPrompt, /wiki 读取结果，已跳过以防自引用/);
+  assert.doesNotMatch(plan.userPrompt, /支付回调验签机密内容/);
+  const exported = read(join(f.wiki, "sessions", SID_A, "sources", "main.md"));
+  assert.match(exported, /wiki 读取结果，已跳过以防自引用/);
+  assert.doesNotMatch(exported, /支付回调验签机密内容/);
 });

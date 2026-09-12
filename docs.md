@@ -43,6 +43,11 @@ range, the page hash, and the session identity so stale output cannot
 overwrite newer summaries or manual edits. Auto-update is opt-in
 (`~/.pix/settings.json` under `app.wiki`: `enabled`, `provider`/`modelId`,
 `budgetTokens`) and remote (WSL/SSH) sessions are explicitly disabled.
+The wiki primarily serves the model: no dedicated tools are added. The panel
+offers a copyable AGENTS.md guide so conversations read `.pi/wiki` with their
+built-in read/grep tools; the index carries model-picked topic-anchor lines
+per branch, and evidence rendering skips tool results that read the wiki
+itself so summaries never cite themselves.
 
 ## Settings precedence
 

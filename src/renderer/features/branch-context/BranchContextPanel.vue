@@ -154,6 +154,16 @@ function setWikiModel(event: Event) {
   const [provider, id] = value.split("\u0000");
   wikiConfigure({ provider, modelId: id });
 }
+// The wiki serves the model as much as people: paste this guide into the
+// project's AGENTS.md so every later conversation knows the wiki exists.
+async function copyAgentsGuide() {
+  try {
+    await navigator.clipboard.writeText(t("wiki.agentsSnippet"));
+    layout.showNotice(t("wiki.agentsCopied"));
+  } catch {
+    layout.showNotice(t("wiki.agentsCopyFailed"), "error");
+  }
+}
 // One workspace wiki at <project>/.pi/wiki; the current session owns the
 // sessions/<sessionKey>/ section. Open pages with the regular workspace
 // viewer (relative path, no extra authority).
@@ -430,6 +440,7 @@ onBeforeUnmount(() => {
           </button>
           <button type="button" @click="openWikiFile('summary')">{{ t("wiki.viewSummary") }}</button>
           <button type="button" @click="openWikiFile('index')">{{ t("wiki.viewIndex") }}</button>
+          <button type="button" @click="copyAgentsGuide">{{ t("wiki.copyGuide") }}</button>
         </div>
       </div>
     </details>
