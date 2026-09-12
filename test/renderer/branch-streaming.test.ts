@@ -42,7 +42,9 @@ it("updates every branch immediately, renders once per frame, and supersedes que
     template: "<div>{{ content }}</div>",
   });
   const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer, PromptComposer: true } } });
-  const displayed = () => wrapper.findComponent({ name: "MarkdownRenderer" }).props("content");
+  // The turn's user prompt also renders as markdown; the streamed assistant
+  // reply is the last renderer in the turn.
+  const displayed = () => wrapper.findAllComponents({ name: "MarkdownRenderer" }).at(-1)!.props("content");
   try {
     await paint(); renders.length = 0;
     for (let i = 1; i <= 100; i++) {
@@ -69,7 +71,9 @@ it("updates every branch immediately, renders once per frame, and supersedes que
     await paint(); expect(displayed()).toBe("A background");
 
     update("A", "A hidden"); layout.layout.collapsed.chat = true; await nextTick();
-    expect(wrapper.findComponent({ name: "MarkdownRenderer" }).exists()).toBe(false);
+    // History stays mounted and hidden; what collapse must tear down at once
+    // is the live streaming view.
+    expect(wrapper.find("details.agent-process.live").exists()).toBe(false);
     await paint();
     layout.layout.collapsed.chat = false; await nextTick();
     expect(displayed()).toBe("A hidden");

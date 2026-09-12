@@ -154,7 +154,8 @@ it("loads older turns and collapsed processes on demand without losing history",
   try {
     expect(wrapper.findAll(".chat-turn")).toHaveLength(40);
     expect(wrapper.findAll(".process-tool pre")).toHaveLength(0);
-    expect(wrapper.findAll("markdown-renderer-stub")).toHaveLength(40);
+    // Each windowed turn mounts two renderers: the user prompt and the reply.
+    expect(wrapper.findAll("markdown-renderer-stub")).toHaveLength(80);
     expect(cleanedOutputs).toBe(0);
     const disclosure = wrapper.find("details.agent-process");
     (disclosure.element as HTMLDetailsElement).open = true;
@@ -174,10 +175,13 @@ it("loads older turns and collapsed processes on demand without losing history",
     await wrapper.get(".load-earlier-turns").trigger("click");
     expect(wrapper.findAll(".chat-turn")).toHaveLength(100);
     expect(wrapper.find(".load-earlier-turns").exists()).toBe(false);
-    expect(wrapper.text()).toContain("prompt 0");
+    // The renderer stub hides its content prop, so assert prompts through props.
+    const rendersPrompt = (text: string) =>
+      wrapper.findAllComponents({ name: "MarkdownRenderer" }).some((c) => c.props("content") === text);
+    expect(rendersPrompt("prompt 0")).toBe(true);
     await session.selectNode("turn:u98"); await nextTick();
     expect(wrapper.findAll(".chat-turn")).toHaveLength(40);
-    expect(wrapper.text()).toContain("prompt 98");
+    expect(rendersPrompt("prompt 98")).toBe(true);
     expect(cleanedOutputs).toBe(beforePaging);
   } finally { spy.mockRestore(); wrapper.unmount(); }
 });
