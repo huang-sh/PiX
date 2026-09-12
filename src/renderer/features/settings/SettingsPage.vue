@@ -5,6 +5,7 @@ import { normalizeTheme } from "../../../shared/theme";
 import { applyAppearance } from "../../theme";
 import { useI18n } from "vue-i18n";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, RuntimeSkillDocument, SettingsBundle } from "../../../shared/types";
+import { RECOMMENDED_EXTENSIONS, isNpmPackageExtension } from "../../../shared/extensions";
 import { slugifySkillName } from "../../../shared/skills";
 import Button from "../../components/ui/Button.vue";
 import CustomModelForm from "./CustomModelForm.vue";
@@ -532,6 +533,27 @@ async function loadExtensions(reload = false) {
   }
 }
 
+const installBusySource = ref("");
+const installError = ref<{ source: string; message: string } | undefined>();
+
+function extensionInstalled(name: string) {
+  return extensions.value.some((extension) => isNpmPackageExtension(extension, name));
+}
+
+async function installRecommended(source: string) {
+  if (installBusySource.value) return;
+  installBusySource.value = source;
+  installError.value = undefined;
+  try {
+    await session.control({ action: "installExtension", source });
+    await loadExtensions(true);
+  } catch (error) {
+    installError.value = { source, message: error instanceof Error ? error.message : String(error) };
+  } finally {
+    installBusySource.value = "";
+  }
+}
+
 watch(
   [() => layout.settingsCategory, () => session.current?.session.id],
   () => {
@@ -1015,6 +1037,35 @@ async function logout(provider: RuntimeProvider) {
             <button type="button" class="extension-details" :aria-expanded="selectedExtension === extension" :aria-controls="selectedExtension === extension ? 'extension-details-panel' : undefined" @click="openExtensionDetails(extension, $event)">{{ t("settings.extensionDetails") }}<ChevronRight :size="15" /></button>
           </article>
         </div>
+        <section class="extension-recommended" :aria-label="t('settings.recommendedTitle')">
+          <div class="extension-recommended-heading">
+            <h3>{{ t("settings.recommendedTitle") }}</h3>
+            <p>{{ t("settings.recommendedHint") }}</p>
+          </div>
+          <div class="extension-grid">
+            <article v-for="item in RECOMMENDED_EXTENSIONS" :key="item.source" class="extension-item" :data-recommended="item.name">
+              <header class="extension-item-header">
+                <span class="extension-item-icon"><Download :size="21" aria-hidden="true" /></span>
+                <div class="extension-identity">
+                  <h3>{{ t(`settings.recommended.${item.key}.title`) }}</h3>
+                  <span>{{ item.source }}</span>
+                </div>
+                <Button v-if="extensionInstalled(item.name)" variant="outline" size="sm" class="extension-install-button" disabled>
+                  <Check :size="14" aria-hidden="true" />{{ t("settings.recommendedInstalled") }}
+                </Button>
+                <Button v-else size="sm" class="extension-install-button" :disabled="!!installBusySource" @click="installRecommended(item.source)">
+                  <RefreshCw v-if="installBusySource === item.source" :size="14" class="spin" aria-hidden="true" />
+                  <Download v-else :size="14" aria-hidden="true" />
+                  {{ t(installBusySource === item.source ? "settings.recommendedInstalling" : "settings.recommendedInstall") }}
+                </Button>
+              </header>
+              <div class="extension-item-body">
+                <p class="extension-summary">{{ t(`settings.recommended.${item.key}.description`) }}</p>
+                <p v-if="installError?.source === item.source" class="extension-install-error" role="alert">{{ installError.message }}</p>
+              </div>
+            </article>
+          </div>
+        </section>
         <p class="extension-footnote"><Folder :size="14" aria-hidden="true" />{{ t("settings.extensionDiscoveryNote") }}</p>
       </section>
       <AboutPage v-else-if="layout.settingsCategory === 'about'" />

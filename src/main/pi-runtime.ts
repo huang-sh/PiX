@@ -507,6 +507,7 @@ export class PiRuntime {
       "deleteSkill",
       "setSkillManualOnly",
       "getExtensions",
+      "installExtension",
       "loginApiKey",
       "loginOAuth",
       "logout",
@@ -902,6 +903,20 @@ export class PiRuntime {
               })).sort((a, b) => a.name.localeCompare(b.name)),
             }),
           );
+      }
+      case "installExtension": {
+        // User scope (no --local), so the package lands in PiX's agentDir and
+        // pi list / pi update / pi remove manage it from here on. Runs on
+        // whichever host owns this session; remote hosts npm-install there.
+        const pi = await this.pi();
+        const cwd = this.cwd ?? homedir();
+        const packageManager = new pi.DefaultPackageManager({
+          cwd,
+          agentDir: this.agentDir(),
+          settingsManager: pi.SettingsManager.create(cwd, this.agentDir()),
+        });
+        await packageManager.installAndPersist(input.source);
+        return { ok: true };
       }
       case "loginApiKey": {
         const modelRuntime = await this.modelRuntime();

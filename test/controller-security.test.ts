@@ -149,8 +149,34 @@ test("remote session rename is forwarded to the remote host", async () => {
   }]);
 });
 
-test("remote OAuth login runs on the desktop and only syncs models", async () => {
+test("recommended extension installs run on the active remote host", async () => {
   const controller = new MainController(root, denied);
+  const localCalls: unknown[] = [];
+  const remoteCalls: Array<{ route: string; input: unknown }> = [];
+  controller.pi.control = async (input) => {
+    localCalls.push(input);
+    return { ok: true };
+  };
+  controller.wsl = {
+    request: async (route: string, input: unknown) => {
+      remoteCalls.push({ route, input });
+      return { ok: true };
+    },
+  } as any;
+
+  await controller.invoke("agent.control", {
+    action: "installExtension",
+    source: "npm:pi-web-access",
+  });
+
+  assert.deepEqual(localCalls, []);
+  assert.deepEqual(remoteCalls, [{
+    route: "agent.control",
+    input: { action: "installExtension", source: "npm:pi-web-access" },
+  }]);
+});
+
+test("remote OAuth login runs on the desktop and only syncs models", async () => {  const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
   controller.pi.control = async (input) => {

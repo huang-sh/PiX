@@ -111,3 +111,17 @@ test("validates persistent model and API key actions", () => {
     { action: "loginOAuth", provider: "openai-codex", method: "device-code" },
   );
 });
+
+test("extension installs are limited to recommended sources", () => {
+  assert.deepEqual(
+    validateRouteInput("agent.control", {
+      action: "installExtension",
+      source: "npm:pi-web-access",
+    }),
+    { action: "installExtension", source: "npm:pi-web-access" },
+  );
+  for (const source of ["", "npm:not-recommended", "git:github.com/user/repo", "./local", "npm:pi-web-access; rm -rf /"])
+    assert.throws(() =>
+      validateRouteInput("agent.control", { action: "installExtension", source }),
+    );
+});

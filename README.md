@@ -53,7 +53,7 @@ SSH 和 WSL 共用安装流程：保留正常的已选 Node；首次安装优先
 
 ## 下载
 
-PiX 内置 `@injaneity/pi-computer-use`、`@ff-labs/pi-fff` 和 `pi-web-access`，均通过 Pi 扩展机制加载。扩展及其运行依赖会随安装包一起分发，无需另行安装；如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本。网页搜索服务仍使用用户自己的配置与凭据。
+PiX 内置 `@injaneity/pi-computer-use` 和 `@ff-labs/pi-fff`，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。`pi-web-access` 不再随安装包分发：在设置 → 扩展页可一键安装到用户配置，之后通过 `pi update` 独立更新；网页搜索服务仍使用用户自己的配置与凭据。
 
 从 [GitHub Releases](https://github.com/huang-sh/PiX/releases) 下载对应平台的安装包：
 

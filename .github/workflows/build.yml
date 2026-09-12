@@ -72,7 +72,7 @@ jobs:
       - name: Test bundled FFF native search
         run: npm run test:fff
 
-      - name: Test bundled web extension
+      - name: Test installable web extension
         run: npm run test:web
 
       - name: Build

@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
+import { pixAgentDir } from "../src/main/paths.js";
 import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
 test("extension commands deliver notifications and errors before and after reload", async () => {
@@ -517,6 +518,29 @@ test("maps visible extensions discovered by the SDK resource loader", async () =
     tools: [{ name: "review", label: "Review", description: "Review changed files" }],
     commands: [{ name: "review", description: "Start a review" }],
   }]);
+});
+
+test("installs recommended extensions with user scope and PiX's agent dir, project optional", async () => {
+  // No project or session open: installs must work from the settings page.
+  const runtime = new PiRuntime(null, null, () => undefined, async () => undefined);
+  const installs: Array<{ source: string; agentDir: string; cwd: string; scopeOptions?: { local?: boolean } }> = [];
+  runtime.mod = {
+    SettingsManager: { create: (cwd: string, agentDir: string) => ({ cwd, agentDir }) },
+    DefaultPackageManager: class {
+      options: { cwd: string; agentDir: string };
+      constructor(options: { cwd: string; agentDir: string }) { this.options = options; }
+      async installAndPersist(source: string, scopeOptions?: { local?: boolean }) {
+        installs.push({ source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
+      }
+    },
+  };
+
+  const result = await runtime.control({ action: "installExtension", source: "npm:pi-web-access" });
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(installs, [
+    { source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
+  ]);
 });
 
 test("factory loads bundled packages as additional extension paths", async () => {
