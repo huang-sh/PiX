@@ -747,7 +747,10 @@ export class MainController {
         else if (route === "library.archiveSession") this.library.setSessionArchived(String(v.path), v.archived === true);
         else this.library.setProjectArchived(String(v.id), v.archived === true);
         return {
-          sessions: this.project ? await this.sessions() : undefined,
+          // Only a locally open project has a live list here; a remote workspace
+          // keeps the list the renderer already holds, and every mark still rides
+          // back on the decorated project groups.
+          sessions: this.project && !this.project.remote ? await this.sessions() : undefined,
           projects: this.projectGroups(),
         };
       }

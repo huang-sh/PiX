@@ -43,6 +43,10 @@ export const useSessionStore = defineStore("session", {
     query: "",
     // Archived projects and sessions rejoin the lists while this is on.
     showArchived: false,
+    // Library marks are display metadata: adopted from decorated project
+    // payloads and applied when the lists are read, so surfaces that carry no
+    // marks (remote replies, raw runtime snapshots) can never erase them.
+    marks: { pinned: [] as string[], archivedSessions: [] as string[] },
     commands: [] as RuntimeCommand[],
     commandRequest: 0,
     models: [] as RuntimeModel[],
@@ -83,6 +87,14 @@ export const useSessionStore = defineStore("session", {
     },
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
+      const pinned = new Set(state.marks.pinned),
+        archived = new Set(state.marks.archivedSessions);
+      const marked = (sessions: SessionSummary[]) =>
+        sessions.map((session) => ({
+          ...session,
+          pinned: pinned.has(session.path) || undefined,
+          archived: archived.has(session.path) || undefined,
+        }));
       // Pinned sessions top their project group; the sort is stable, so
       // recency order survives inside each rank.
       const ranked = (sessions: SessionSummary[]) =>
@@ -94,13 +106,13 @@ export const useSessionStore = defineStore("session", {
               ? record.project.remote.host
               : record.project.remote?.distro ?? ""
           }`.toLowerCase().includes(query);
-          const sessions = projectMatch
+          const sessions = marked(projectMatch
             ? record.sessions
             : record.sessions.filter((session) =>
                 `${session.name ?? ""} ${session.firstMessage} ${session.id}`
                   .toLowerCase()
                   .includes(query),
-              );
+              ));
           return {
             ...record,
             sessions: ranked(sessions.filter((session) => state.showArchived || !session.archived)),
@@ -116,12 +128,22 @@ export const useSessionStore = defineStore("session", {
     },
   },
   actions: {
+    adoptMarks(projects: ProjectGroup[]) {
+      const pinned: string[] = [], archivedSessions: string[] = [];
+      for (const record of projects)
+        for (const session of record.sessions) {
+          if (session.pinned) pinned.push(session.path);
+          if (session.archived) archivedSessions.push(session.path);
+        }
+      this.marks = { pinned, archivedSessions };
+    },
     hydrate(
       project: ProjectInfo | null,
       sessions: SessionSummary[],
       projects: ProjectGroup[],
       current?: SessionSnapshot,
     ) {
+      this.adoptMarks(projects);
       this.projects = projects;
       this.activeProjectId = project ? projectId(project) : "";
       this.sessions = sessions;
@@ -410,11 +432,13 @@ export const useSessionStore = defineStore("session", {
     },
     async archiveProject(id: string, archived: boolean) {
       const result = await desktop.invoke<{ projects: ProjectGroup[] }>("library.archiveProject", { id, archived });
-      this.projects = result.projects;
+      this.applyLibrary(result);
     },
     // Library marks ride back on the invoke reply: the sessions list only
-    // exists while a project is open, and projects always come back.
+    // exists while a locally open project answers, and projects always come
+    // back. Marks are adopted from the decorated project groups.
     applyLibrary(result: { sessions?: SessionSummary[]; projects: ProjectGroup[] }) {
+      this.adoptMarks(result.projects);
       this.projects = result.projects;
       if (result.sessions) {
         this.sessions = result.sessions;

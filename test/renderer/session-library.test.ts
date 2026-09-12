@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProjectGroup, SessionSummary } from "../../src/shared/types";
+import type { ProjectGroup, SessionSnapshot, SessionSummary } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import { useSessionStore } from "../../src/renderer/stores/session";
 
@@ -27,6 +27,27 @@ function group(sessions: SessionSummary[], extra: Partial<ProjectGroup> = {}): P
   };
 }
 
+// A runtime snapshot only carries the raw summary, never the library marks.
+function snapshot(session: SessionSummary): SessionSnapshot {
+  return {
+    session,
+    entries: [],
+    projection: { nodes: [], edges: [], messages: [], activeNodeId: null, leafId: null,
+      activeBranchNodeIds: [], activeBranchEntryIds: [] },
+    runtime: { available: true, isStreaming: false, isCompacting: false, isRetrying: false },
+  } as unknown as SessionSnapshot;
+}
+
+// A remote workspace answers with decorated project groups but a flat list
+// that carries no marks (it never passes through the local sessions() route).
+function seedRemote(session: ReturnType<typeof useSessionStore>) {
+  session.hydrate(
+    { name: "project", path: "/project" },
+    [sessionA("star"), sessionA("kept"), sessionA("gone")],
+    [group([sessionA("star", { pinned: true }), sessionA("kept"), sessionA("gone", { archived: true })])],
+  );
+}
+
 describe("session library marks", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => vi.restoreAllMocks());
@@ -48,10 +69,13 @@ describe("session library marks", () => {
     expect(listed).toEqual(["new", "old"]);
   });
 
-  it("hides archived sessions until showArchived turns on", async () => {
+  it("hides archived sessions until showArchived turns on", () => {
     const session = useSessionStore();
-    session.projects = [group([sessionA("kept"), sessionA("gone", { archived: true })])];
-    session.sessions = session.projects[0]!.sessions;
+    session.hydrate(
+      { name: "project", path: "/project" },
+      [sessionA("kept"), sessionA("gone")],
+      [group([sessionA("kept"), sessionA("gone", { archived: true })])],
+    );
 
     expect(session.filteredProjects[0]!.sessions.map((item) => item.id)).toEqual(["kept"]);
     session.showArchived = true;
@@ -65,6 +89,46 @@ describe("session library marks", () => {
     expect(session.filteredProjects.map((record) => record.id)).toEqual(["local:/a"]);
     session.showArchived = true;
     expect(session.filteredProjects.map((record) => record.id)).toEqual(["local:/a", "local:/b"]);
+  });
+
+  it("keeps the marks of the open session through live snapshots", () => {
+    const session = useSessionStore();
+    seedRemote(session);
+
+    session.applySnapshot(snapshot(sessionA("star")));
+
+    // The archived session stays hidden and the pinned one keeps its rank.
+    expect(session.filteredProjects[0]!.sessions.map((item) => item.id)).toEqual(["star", "kept"]);
+    session.showArchived = true;
+    expect(session.filteredProjects[0]!.sessions.map((item) => item.id)).toEqual(["star", "kept", "gone"]);
+  });
+
+  it("keeps marks for a remote workspace whose session lists carry none", async () => {
+    const session = useSessionStore();
+    seedRemote(session);
+
+    // Every remote surface (bootstrap, refresh, rename, delete) returns the
+    // undecorated list; marks must still decide what the navigator shows.
+    vi.spyOn(desktop, "invoke").mockResolvedValue([sessionA("star"), sessionA("kept"), sessionA("gone")]);
+    await session.refresh();
+
+    expect(session.filteredProjects[0]!.sessions.map((item) => item.id)).toEqual(["star", "kept"]);
+  });
+
+  it("unpins immediately even while the flat list still carries the old mark", async () => {
+    const session = useSessionStore();
+    seedRemote(session);
+    // A previously decorated surface left a stale pin on the flat list.
+    session.sessions = [sessionA("star", { pinned: true }), sessionA("kept"), sessionA("gone")];
+    vi.spyOn(desktop, "invoke").mockResolvedValue({
+      projects: [group([sessionA("star"), sessionA("kept"), sessionA("gone", { archived: true })])],
+    });
+
+    await session.pin("/sessions/star.jsonl", false);
+
+    // The shown entry loses the pin even though the flat list still carries it.
+    expect(session.filteredProjects[0]!.sessions.find((item) => item.id === "star")?.pinned).toBeUndefined();
+    expect(session.sessions.find((item) => item.id === "star")?.pinned).toBe(true);
   });
 
   it("archives and restores a whole project through the library", async () => {
