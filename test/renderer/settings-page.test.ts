@@ -643,6 +643,7 @@ describe("SettingsPage save", () => {
       { path: "/project/.pi/extensions/reviewer/index.ts", resolvedPath: "/project/.pi/extensions/reviewer/index.ts", source: "local", scope: "project", tools: [{ name: "review", description: "Review changed files" }, { name: "summarize" }], commands: [{ name: "review", description: "Start a review" }] },
       { path: "/home/me/.pi/agent/extensions/status.ts", resolvedPath: "/home/me/.pi/agent/extensions/status.ts", source: "local", scope: "user", tools: [], commands: [{ name: "status" }] },
       { path: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", resolvedPath: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", source: "cli", scope: "temporary", bundled: true, tools: [{ name: "observe_ui" }], commands: [{ name: "computer-use" }] },
+      { path: "<inline:pix-file-changes>", resolvedPath: "<inline:pix-file-changes>", source: "sdk", scope: "temporary", tools: [], commands: [] },
     ];
     vi.mocked(desktop.invoke).mockImplementation(async (route) =>
       route === "agent.control" ? extensions : settings,
@@ -656,6 +657,12 @@ describe("SettingsPage save", () => {
     const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
 
+    // Inline extensions show their bare name and their own description copy,
+    // never the generic no-description fallback.
+    expect(wrapper.get('[data-extension="pix-file-changes"] h3').text()).toBe("pix-file-changes");
+    expect(wrapper.get('[data-extension="pix-file-changes"]').text()).toContain("PiX machinery");
+    expect(wrapper.get('[data-extension="pix-file-changes"]').text()).not.toContain("Adds custom behavior");
+
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("2 tools");
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("Review changed files");
     expect(wrapper.find('.extension-inspector').exists()).toBe(false);
@@ -668,7 +675,7 @@ describe("SettingsPage save", () => {
     expect(wrapper.get('[data-extension="reviewer"]').text()).not.toContain("Built into PiX");
     expect(wrapper.find('[data-extension-scope="bundled"]').exists()).toBe(false);
     await wrapper.get('[data-extension-scope="temporary"]').trigger("click");
-    expect(wrapper.findAll('[data-extension]')).toHaveLength(1);
+    expect(wrapper.findAll('[data-extension]')).toHaveLength(2);
     expect(wrapper.get('[data-extension="@injaneity/pi-computer-use"] .extension-identity').text()).toContain("cli");
     await wrapper.get('[data-extension-scope="all"]').trigger("click");
     const reviewerDetails = wrapper.get('[data-extension="reviewer"] .extension-details');
@@ -701,7 +708,7 @@ describe("SettingsPage save", () => {
     await wrapper.get("[data-extension-search]").setValue("does-not-exist");
     expect(wrapper.get('.extension-empty').text()).toContain("No matching extensions");
     await wrapper.get('.extension-empty button').trigger("click");
-    expect(wrapper.findAll('[data-extension]')).toHaveLength(3);
+    expect(wrapper.findAll('[data-extension]')).toHaveLength(4);
     await wrapper.get("[data-extension-search]").setValue("status");
     expect(wrapper.find('[data-extension="reviewer"]').exists()).toBe(false);
 

@@ -483,6 +483,11 @@ export const messages = {
           description: "Web search, URL fetching, PDF extraction and GitHub research for your agent. Search requires your own provider credentials.",
         },
       },
+      internalExtensions: {
+        "pix-file-changes": {
+          description: "PiX machinery: snapshots files around the agent's edits and writes to feed the changes panel.",
+        },
+      },
       searchModels: "Search providers or models",
       addCustomModel: "Add custom model",
       customModels: "Custom models",
@@ -1141,6 +1146,11 @@ export const messages = {
       recommended: {
         webAccess: {
           description: "为智能体提供网页搜索、URL 抓取、PDF 提取与 GitHub 研究能力。搜索功能需配置你自己的服务商凭据。",
+        },
+      },
+      internalExtensions: {
+        "pix-file-changes": {
+          description: "PiX 内部机制：在智能体编辑、写入文件前后拍快照，为“变更”面板提供数据。",
         },
       },
       searchModels: "搜索提供商或模型",

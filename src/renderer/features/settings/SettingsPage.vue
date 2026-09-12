@@ -293,6 +293,10 @@ const extensionFilters = computed(() => (["all", "project", "user", "temporary"]
   .map((scope) => ({ scope, count: extensions.value.filter((extension) => scope === "all" || extension.scope === scope).length })));
 
 function extensionName(path: string) {
+  // pi identifies inline (factory-registered) extensions by a synthetic
+  // <inline:name> pseudo-path; the card shows the bare name.
+  const inline = /^<inline:(.+)>$/.exec(path);
+  if (inline) return inline[1]!;
   const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
   const modules = parts.lastIndexOf("node_modules");
   if (modules >= 0)
@@ -301,6 +305,17 @@ function extensionName(path: string) {
       : parts[modules + 1] ?? path;
   const name = (parts.pop() ?? path).replace(/\.[^.]+$/, "");
   return name === "index" ? parts.pop() ?? name : name;
+}
+
+/** Inline extensions carry no tool or command descriptions; use their own copy. */
+function extensionSummary(extension: RuntimeExtension) {
+  if (extension.path.startsWith("<inline:")) {
+    const key = `settings.internalExtensions.${extensionName(extension.path)}.description`;
+    if (te(key)) return t(key);
+  }
+  return extension.tools.find(tool => tool.description)?.description
+    || extension.commands.find(command => command.description)?.description
+    || t("settings.extensionNoDescription");
 }
 
 function modelKey(model: RuntimeModel) {
@@ -1031,7 +1046,7 @@ async function logout(provider: RuntimeProvider) {
             </header>
             <div class="extension-item-body">
               <p v-if="extension.bundled" class="extension-no-capabilities">{{ t("settings.extensionBundledNote") }}</p>
-              <p class="extension-summary">{{ extension.tools.find(tool => tool.description)?.description || extension.commands.find(command => command.description)?.description || t("settings.extensionNoDescription") }}</p>
+              <p class="extension-summary">{{ extensionSummary(extension) }}</p>
               <div class="extension-metrics"><span><Wrench :size="13" />{{ t("settings.extensionTools", { n: extension.tools.length }) }}</span><span><Terminal :size="13" />{{ t("settings.extensionCommands", { n: extension.commands.length }) }}</span></div>
             </div>
             <button type="button" class="extension-details" :aria-expanded="selectedExtension === extension" :aria-controls="selectedExtension === extension ? 'extension-details-panel' : undefined" @click="openExtensionDetails(extension, $event)">{{ t("settings.extensionDetails") }}<ChevronRight :size="15" /></button>
