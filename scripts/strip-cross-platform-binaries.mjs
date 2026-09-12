@@ -1,13 +1,11 @@
-// electron-builder afterPack hook: bundles pi-web-access with its runtime
-// dependency tree, prunes dev artifacts from pi-builtin, and deletes esbuild's
-// cross-platform binaries. esbuild (a production dependency of pi's chord
-// compiler) installs prebuilt binaries for every platform it supports — over 20
-// directories, ~230MB unpacked — under any nested node_modules/@esbuild scope.
-// Only the host platform's binary is ever spawned.
+// electron-builder afterPack hook: prunes dev artifacts from pi-builtin and
+// deletes esbuild's cross-platform binaries. esbuild (a production dependency
+// of pi's chord compiler) installs prebuilt binaries for every platform it
+// supports — over 20 directories, ~230MB unpacked — under any nested
+// node_modules/@esbuild scope. Only the host platform's binary is ever spawned.
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { checkPackagedFiles, checkPackagedFff, checkPackagedSkills } from "./check-packaged-files.mjs";
-import { bundlePiPackage } from "./bundle-pi-package.mjs";
 
 // electron-builder's context.arch is the numeric Arch enum (builder-util).
 const ARCH_NAMES = { 0: "ia32", 1: "x64", 2: "universal", 3: "arm64" };
@@ -18,8 +16,8 @@ const ARCH_NAMES = { 0: "ia32", 1: "x64", 2: "universal", 3: "arm64" };
 // markdown. They make up ~28% of pi-builtin's files.
 const DEV_ARTIFACT = /\.(?:d\.[cm]?ts|map|md)$/i;
 
-// Delete dev artifacts under dir, covering everything staged into pi-builtin:
-// the bundlePiPackage closure and the extraResources copies alike.
+// Delete dev artifacts under dir, covering everything staged into pi-builtin
+// by the extraResources copies.
 export function pruneDevArtifacts(dir) {
   let removed = 0;
   const visit = (current) => {
@@ -81,8 +79,6 @@ function esbuildScopes(root) {
 
 export default async function afterPack(context) {
   const resources = context.packager.getResourcesDir(context.appOutDir);
-  const webPackages = bundlePiPackage(context.packager.info.appDir, resources, "pi-web-access");
-  console.log(`  • bundled pi-web-access with ${webPackages - 1} runtime dependencies`);
   const pruned = pruneDevArtifacts(join(resources, "pi-builtin"));
   console.log(`  • pruned ${pruned} dev artifacts (declarations, maps, docs) from pi-builtin`);
   checkPackagedFiles(join(resources, "app.asar"), context.packager.info.appDir);

@@ -1,5 +1,6 @@
 import type { DesktopRoute } from "./types.js";
 import { CUSTOM_MODEL_APIS } from "./types.js";
+import { INSTALLABLE_PACKAGE_SOURCES } from "./extensions.js";
 import { validatePromptImages } from "./images.js";
 import { MAX_SKILL_BYTES } from "./skills.js";
 const obj = (value: unknown): Record<string, unknown> => {
@@ -212,6 +213,12 @@ export function validateRouteInput(
         };
       if (action === "getSkills" || action === "getExtensions")
         return { action, reload: v.reload === true };
+      if (action === "installExtension" || action === "removeExtension") {
+        const source = str(v.source, "source")!;
+        if (!INSTALLABLE_PACKAGE_SOURCES.includes(source))
+          throw new Error("Source is not an installable recommended extension");
+        return { action, source };
+      }
       if (action === "getSkill" || action === "deleteSkill")
         return { action, path: str(v.path, "path") };
       if (action === "setSkillManualOnly")

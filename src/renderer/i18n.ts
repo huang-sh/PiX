@@ -472,6 +472,22 @@ export const messages = {
       extensionNoDescription: "Adds custom behavior to your Pi agent.",
       extensionNoCapabilities: "This extension does not expose tools or slash commands.",
       extensionDiscoveryNote: "Extensions are discovered from your project, user configuration and additional paths.",
+      recommendedTitle: "Recommended extensions",
+      recommendedHint: "One-click install into your user configuration; keep them current with \"pi update\".",
+      recommendedInstall: "Install",
+      recommendedInstalling: "Installing…",
+      recommendedRemove: "Remove",
+      recommendedRemoving: "Removing…",
+      recommended: {
+        webAccess: {
+          description: "Web search, URL fetching, PDF extraction and GitHub research for your agent. Search requires your own provider credentials.",
+        },
+      },
+      internalExtensions: {
+        "file-changes": {
+          description: "PiX machinery: snapshots files around the agent's edits and writes to feed the changes panel.",
+        },
+      },
       searchModels: "Search providers or models",
       addCustomModel: "Add custom model",
       customModels: "Custom models",
@@ -1121,6 +1137,22 @@ export const messages = {
       extensionNoDescription: "为 Pi 智能体添加自定义行为。",
       extensionNoCapabilities: "此扩展未提供工具或斜杠命令。",
       extensionDiscoveryNote: "自动发现项目、用户配置及附加路径中的扩展。",
+      recommendedTitle: "推荐扩展",
+      recommendedHint: "一键安装到用户配置，之后可通过“pi update”保持更新。",
+      recommendedInstall: "安装",
+      recommendedInstalling: "安装中…",
+      recommendedRemove: "移除",
+      recommendedRemoving: "移除中…",
+      recommended: {
+        webAccess: {
+          description: "为智能体提供网页搜索、URL 抓取、PDF 提取与 GitHub 研究能力。搜索功能需配置你自己的服务商凭据。",
+        },
+      },
+      internalExtensions: {
+        "file-changes": {
+          description: "PiX 内部机制：在智能体编辑、写入文件前后拍快照，为“变更”面板提供数据。",
+        },
+      },
       searchModels: "搜索提供商或模型",
       addCustomModel: "添加自定义模型",
       customModels: "自定义模型",

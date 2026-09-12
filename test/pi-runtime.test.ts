@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
+import { pixAgentDir } from "../src/main/paths.js";
 import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
 test("extension commands deliver notifications and errors before and after reload", async () => {
@@ -519,6 +520,41 @@ test("maps visible extensions discovered by the SDK resource loader", async () =
   }]);
 });
 
+test("installs and removes recommended extensions with user scope and PiX's agent dir, project optional", async () => {
+  // No project or session open: package actions must work from the settings page.
+  const runtime = new PiRuntime(null, null, () => undefined, async () => undefined);
+  const calls: Array<{ method: string; source: string; agentDir: string; cwd: string; scopeOptions?: { local?: boolean } }> = [];
+  let removeResult = true;
+  runtime.mod = {
+    SettingsManager: { create: (cwd: string, agentDir: string) => ({ cwd, agentDir }) },
+    DefaultPackageManager: class {
+      options: { cwd: string; agentDir: string };
+      constructor(options: { cwd: string; agentDir: string }) { this.options = options; }
+      async installAndPersist(source: string, scopeOptions?: { local?: boolean }) {
+        calls.push({ method: "install", source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
+      }
+      async removeAndPersist(source: string, scopeOptions?: { local?: boolean }) {
+        calls.push({ method: "remove", source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
+        return removeResult;
+      }
+    },
+  };
+
+  assert.deepEqual(await runtime.control({ action: "installExtension", source: "npm:pi-web-access" }), { ok: true });
+  assert.deepEqual(await runtime.control({ action: "removeExtension", source: "npm:pi-web-access" }), { ok: true });
+  assert.deepEqual(calls, [
+    { method: "install", source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
+    { method: "remove", source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
+  ]);
+  // A no-op removal (e.g. only a project-scoped copy exists) must report
+  // instead of pretending success and leaving the card in a remove loop.
+  removeResult = false;
+  await assert.rejects(
+    runtime.control({ action: "removeExtension", source: "npm:pi-web-access" }),
+    /Not installed in user scope/,
+  );
+});
+
 test("factory loads bundled packages as additional extension paths", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   let servicesOptions: any;
@@ -542,7 +578,7 @@ test("factory loads bundled packages as additional extension paths", async () =>
   // The user's own install suppresses the bundled copy.
   await create();
   assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
-  assert.equal(servicesOptions.resourceLoaderOptions.extensionFactories[0].name, "pix-file-changes");
+  assert.equal(servicesOptions.resourceLoaderOptions.extensionFactories[0].name, "file-changes");
   assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories[0].factory, "function");
 
   // The bundled copy loads once no user install is configured. Factory

@@ -643,6 +643,7 @@ describe("SettingsPage save", () => {
       { path: "/project/.pi/extensions/reviewer/index.ts", resolvedPath: "/project/.pi/extensions/reviewer/index.ts", source: "local", scope: "project", tools: [{ name: "review", description: "Review changed files" }, { name: "summarize" }], commands: [{ name: "review", description: "Start a review" }] },
       { path: "/home/me/.pi/agent/extensions/status.ts", resolvedPath: "/home/me/.pi/agent/extensions/status.ts", source: "local", scope: "user", tools: [], commands: [{ name: "status" }] },
       { path: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", resolvedPath: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", source: "cli", scope: "temporary", bundled: true, tools: [{ name: "observe_ui" }], commands: [{ name: "computer-use" }] },
+      { path: "<inline:file-changes>", resolvedPath: "<inline:file-changes>", source: "sdk", scope: "temporary", tools: [], commands: [] },
     ];
     vi.mocked(desktop.invoke).mockImplementation(async (route) =>
       route === "agent.control" ? extensions : settings,
@@ -656,6 +657,12 @@ describe("SettingsPage save", () => {
     const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
 
+    // Inline extensions show their bare name and their own description copy,
+    // never the generic no-description fallback.
+    expect(wrapper.get('[data-extension="file-changes"] h3').text()).toBe("file-changes");
+    expect(wrapper.get('[data-extension="file-changes"]').text()).toContain("PiX machinery");
+    expect(wrapper.get('[data-extension="file-changes"]').text()).not.toContain("Adds custom behavior");
+
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("2 tools");
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("Review changed files");
     expect(wrapper.find('.extension-inspector').exists()).toBe(false);
@@ -668,7 +675,7 @@ describe("SettingsPage save", () => {
     expect(wrapper.get('[data-extension="reviewer"]').text()).not.toContain("Built into PiX");
     expect(wrapper.find('[data-extension-scope="bundled"]').exists()).toBe(false);
     await wrapper.get('[data-extension-scope="temporary"]').trigger("click");
-    expect(wrapper.findAll('[data-extension]')).toHaveLength(1);
+    expect(wrapper.findAll('[data-extension]')).toHaveLength(2);
     expect(wrapper.get('[data-extension="@injaneity/pi-computer-use"] .extension-identity').text()).toContain("cli");
     await wrapper.get('[data-extension-scope="all"]').trigger("click");
     const reviewerDetails = wrapper.get('[data-extension="reviewer"] .extension-details');
@@ -701,7 +708,7 @@ describe("SettingsPage save", () => {
     await wrapper.get("[data-extension-search]").setValue("does-not-exist");
     expect(wrapper.get('.extension-empty').text()).toContain("No matching extensions");
     await wrapper.get('.extension-empty button').trigger("click");
-    expect(wrapper.findAll('[data-extension]')).toHaveLength(3);
+    expect(wrapper.findAll('[data-extension]')).toHaveLength(4);
     await wrapper.get("[data-extension-search]").setValue("status");
     expect(wrapper.find('[data-extension="reviewer"]').exists()).toBe(false);
 
@@ -722,6 +729,66 @@ describe("SettingsPage save", () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
     expect(wrapper.get('.extension-empty').text()).toContain("No extensions detected");
     expect(wrapper.find('.extension-inspector').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("installs and removes recommended extensions, reflecting the installed state", async () => {
+    const extensions: RuntimeExtension[] = [];
+    const webAccess = (): RuntimeExtension => ({ path: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", resolvedPath: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", source: "npm:pi-web-access", scope: "user", tools: [{ name: "web_search", description: "Search the web" }], commands: [] });
+    vi.mocked(desktop.invoke).mockImplementation(async (route) =>
+      route === "agent.control" ? extensions : settings,
+    );
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "extensions";
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+
+    const card = () => wrapper.get('[data-recommended="pi-web-access"]');
+    // The package name stays untranslated; only the blurb is localized.
+    expect(card().get("h3").text()).toBe("pi-web-access");
+    expect(card().text()).toContain("npm:pi-web-access");
+    expect(card().text()).toContain("Install");
+
+    // A failed install reports on the card and keeps the install button.
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control" && (payload as { action?: string }).action === "installExtension")
+        throw new Error("npm registry unreachable");
+      return route === "agent.control" ? extensions : settings;
+    });
+    await card().get("button").trigger("click");
+    await flushPromises();
+    expect(card().text()).toContain("npm registry unreachable");
+    expect(card().text()).toContain("Install");
+
+    // A successful install refreshes the list and swaps the card to Remove.
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      const action = (payload as { action?: string }).action;
+      if (route === "agent.control" && action === "installExtension") {
+        extensions.push(webAccess());
+        return { ok: true };
+      }
+      if (route === "agent.control" && action === "removeExtension") {
+        extensions.length = 0;
+        return { ok: true };
+      }
+      return route === "agent.control" ? extensions : settings;
+    });
+    await card().get("button").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "installExtension", source: "npm:pi-web-access" });
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "getExtensions", reload: true });
+    expect(card().text()).toContain("Remove");
+
+    // Removing the package clears the extension and offers Install again.
+    await card().get("button").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "removeExtension", source: "npm:pi-web-access" });
+    expect(card().text()).toContain("Install");
+    expect(card().text()).not.toContain("Remove");
     wrapper.unmount();
   });
 });

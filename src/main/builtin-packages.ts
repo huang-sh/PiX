@@ -3,12 +3,15 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 
 /**
  * Pi packages PiX bundles with the app so they work without `pi install`.
+ * Native-binary packages only: candidates without platform-specific builds
+ * (e.g. pi-web-access) ship in the recommended list on the extensions page
+ * instead, so `pi update` can move them independently of PiX releases.
  * Loaded through resourceLoaderOptions.additionalExtensionPaths, which pi
  * resolves with "temporary" scope: the packages are available without project
  * trust and pi's own package management (pi list / pi update) never touches
  * them.
  */
-const BUILTIN_PACKAGE_NAMES = ["@injaneity/pi-computer-use", "@ff-labs/pi-fff", "pi-web-access"];
+const BUILTIN_PACKAGE_NAMES = ["@injaneity/pi-computer-use", "@ff-labs/pi-fff"];
 
 export interface BuiltinPackageSettings {
   getPackages(): unknown[];

@@ -35,7 +35,7 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "test:packaged": "node test/packaged-smoke-test.mjs",
     "test:fff": "node test/builtin-fff-smoke-test.mjs",
-    "test:web": "node --test test/bundle-pi-package.test.mjs test/prune-dev-artifacts.test.mjs && node test/builtin-web-smoke-test.mjs",
+    "test:web": "node --test test/prune-dev-artifacts.test.mjs && node test/web-extension-smoke-test.mjs",
     "dev": "electron-vite dev",
     "postinstall": "node node_modules/electron/install.js"
   },
@@ -73,7 +73,6 @@
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "jsdom": "^30.0.1",
-    "pi-web-access": "0.27.0",
     "tailwindcss": "^4.3.3",
     "typescript": "5.8.3",
     "vite": "^7.3.6",
