@@ -484,7 +484,7 @@ export const messages = {
         },
       },
       internalExtensions: {
-        "pix-file-changes": {
+        "file-changes": {
           description: "PiX machinery: snapshots files around the agent's edits and writes to feed the changes panel.",
         },
       },
@@ -1149,7 +1149,7 @@ export const messages = {
         },
       },
       internalExtensions: {
-        "pix-file-changes": {
+        "file-changes": {
           description: "PiX 内部机制：在智能体编辑、写入文件前后拍快照，为“变更”面板提供数据。",
         },
       },

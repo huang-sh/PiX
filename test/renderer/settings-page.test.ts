@@ -643,7 +643,7 @@ describe("SettingsPage save", () => {
       { path: "/project/.pi/extensions/reviewer/index.ts", resolvedPath: "/project/.pi/extensions/reviewer/index.ts", source: "local", scope: "project", tools: [{ name: "review", description: "Review changed files" }, { name: "summarize" }], commands: [{ name: "review", description: "Start a review" }] },
       { path: "/home/me/.pi/agent/extensions/status.ts", resolvedPath: "/home/me/.pi/agent/extensions/status.ts", source: "local", scope: "user", tools: [], commands: [{ name: "status" }] },
       { path: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", resolvedPath: "/app/pi-builtin/node_modules/@injaneity/pi-computer-use/extensions/computer-use.ts", source: "cli", scope: "temporary", bundled: true, tools: [{ name: "observe_ui" }], commands: [{ name: "computer-use" }] },
-      { path: "<inline:pix-file-changes>", resolvedPath: "<inline:pix-file-changes>", source: "sdk", scope: "temporary", tools: [], commands: [] },
+      { path: "<inline:file-changes>", resolvedPath: "<inline:file-changes>", source: "sdk", scope: "temporary", tools: [], commands: [] },
     ];
     vi.mocked(desktop.invoke).mockImplementation(async (route) =>
       route === "agent.control" ? extensions : settings,
@@ -659,9 +659,9 @@ describe("SettingsPage save", () => {
 
     // Inline extensions show their bare name and their own description copy,
     // never the generic no-description fallback.
-    expect(wrapper.get('[data-extension="pix-file-changes"] h3').text()).toBe("pix-file-changes");
-    expect(wrapper.get('[data-extension="pix-file-changes"]').text()).toContain("PiX machinery");
-    expect(wrapper.get('[data-extension="pix-file-changes"]').text()).not.toContain("Adds custom behavior");
+    expect(wrapper.get('[data-extension="file-changes"] h3').text()).toBe("file-changes");
+    expect(wrapper.get('[data-extension="file-changes"]').text()).toContain("PiX machinery");
+    expect(wrapper.get('[data-extension="file-changes"]').text()).not.toContain("Adds custom behavior");
 
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("2 tools");
     expect(wrapper.get('[data-extension="reviewer"]').text()).toContain("Review changed files");

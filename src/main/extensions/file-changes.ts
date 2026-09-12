@@ -19,7 +19,7 @@ import type { RawSessionEntry } from "../../shared/types.js";
  * executing worker.
  */
 export function pixFileChangesExtension(getSessionFile: () => string | undefined): InlineExtension {
-  return { name: "pix-file-changes", factory: fileChangesFactory(getSessionFile) };
+  return { name: "file-changes", factory: fileChangesFactory(getSessionFile) };
 }
 
 function fileChangesFactory(getSessionFile: () => string | undefined): ExtensionFactory {
