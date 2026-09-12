@@ -4,19 +4,21 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   GitService,
   SessionFiles,
   SettingsService,
   ShellService,
   WorkspaceService,
+  bootstrapPixProfile,
 } from "../src/main/services.js";
 import { projectId } from "../src/shared/types.js";
 const root = resolve(process.cwd(), "test", "workspace");
@@ -143,6 +145,149 @@ test("settings remembers local and remote project sessions", () => {
       settings.projectHistory().map((record) => record.id),
       [projectId(remote), projectId(local)],
     );
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("profile paths live under .pix with gui settings in gui.settings.json", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-profile-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = temp;
+  try {
+    const settings = new SettingsService(temp);
+    assert.equal(settings.appPath, join(temp, ".pix", "gui.settings.json"));
+    assert.equal(settings.globalPath, join(temp, ".pix", "agent", "settings.json"));
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previous;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("bootstrap copies the pi agent profile once", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-bootstrap-"));
+  try {
+    const agent = join(temp, ".pi", "agent");
+    mkdirSync(join(agent, "skills", "demo"), { recursive: true });
+    mkdirSync(join(agent, "sessions"));
+    writeFileSync(join(agent, "auth.json"), "{}");
+    writeFileSync(join(agent, "models.json"), "{}");
+    writeFileSync(join(agent, "sessions", "history.jsonl"), "");
+    writeFileSync(join(agent, "skills", "demo", "SKILL.md"), "");
+
+    bootstrapPixProfile(temp);
+
+    const pix = join(temp, ".pix");
+    assert.ok(existsSync(join(pix, "agent", "auth.json")));
+    assert.ok(existsSync(join(pix, "agent", "models.json")));
+    assert.ok(existsSync(join(pix, "agent", "skills", "demo", "SKILL.md")));
+    assert.ok(!existsSync(join(pix, "agent", "sessions")));
+
+    // The profile is configured now: a later bootstrap must not overwrite it.
+    writeFileSync(join(pix, "agent", "auth.json"), '{"pix":true}');
+    bootstrapPixProfile(temp);
+    assert.equal(readFileSync(join(pix, "agent", "auth.json"), "utf8"), '{"pix":true}');
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("bootstrap parks a corrupt gui settings file instead of losing it", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-bootstrap-corrupt-"));
+  try {
+    const pix = join(temp, ".pix");
+    mkdirSync(pix);
+    writeFileSync(join(pix, "gui.settings.json"), "{not json");
+
+    bootstrapPixProfile(temp);
+
+    assert.ok(!existsSync(join(pix, "gui.settings.json")));
+    const parked = readdirSync(pix).filter((name) => name.startsWith("gui.settings.json.corrupt-"));
+    assert.equal(parked.length, 1);
+    assert.equal(readFileSync(join(pix, parked[0]!), "utf8"), "{not json");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("settings tolerate wrong-typed values by falling back per key", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-settings-tolerance-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = temp;
+  try {
+    mkdirSync(join(temp, ".pix"), { recursive: true });
+    const appPath = join(temp, ".pix", "gui.settings.json");
+    writeFileSync(appPath, JSON.stringify({
+      language: "klingon",
+      density: 3,
+      theme: "purple",
+      closeToTray: "false",
+      enterToSend: "yes",
+      canvasDotGridSpacing: "24",
+      canvasDotGridDotSize: 99,
+      browserHome: 42,
+      futureKey: { keep: true },
+    }));
+
+    const app = new SettingsService(temp).bundle().app;
+    assert.equal(app.language, "system");
+    assert.equal(app.density, "comfortable");
+    assert.equal(app.theme, "light");
+    assert.equal(app.closeToTray, true);
+    assert.equal(app.enterToSend, true);
+    assert.equal(app.canvasDotGridSpacing, 24);
+    assert.equal(app.canvasDotGridDotSize, 4);
+    assert.equal(app.browserHome, "https://pi.dev");
+    // Unknown keys from a newer version must survive normalization.
+    assert.deepEqual((app as unknown as Record<string, unknown>).futureKey, { keep: true });
+
+    // A bad patch is normalized too: unusable values never reach the file.
+    new SettingsService(temp).update({ closeToTray: "nope", canvasDotGridDotSize: 0 });
+    const persisted = JSON.parse(readFileSync(appPath, "utf8"));
+    assert.equal(persisted.closeToTray, undefined);
+    assert.equal(persisted.canvasDotGridDotSize, undefined);
+    assert.deepEqual(persisted.futureKey, { keep: true });
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previous;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("pi settings writes go through the sdk: merge, replace, freeze, reset", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-pi-settings-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = temp;
+  try {
+    const settings = new SettingsService(null);
+    const file = settings.globalPath;
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ defaultProvider: "anthropic", queueMode: "tree" }));
+
+    // Merge keeps unrelated keys, legacy ones included.
+    let bundle = await settings.updatePi("global", { defaultProvider: "openai" });
+    assert.equal(bundle.piGlobal.defaultProvider, "openai");
+    assert.equal(bundle.piGlobal.queueMode, "tree");
+
+    // Replace writes exactly the patch.
+    bundle = await settings.updatePi("global", { defaultProvider: "openai" }, true);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { defaultProvider: "openai" });
+
+    // A corrupt file freezes saves instead of being silently overwritten.
+    writeFileSync(file, "{broken");
+    await assert.rejects(settings.updatePi("global", { defaultProvider: "x" }), /unreadable/);
+    assert.equal(readFileSync(file, "utf8"), "{broken");
+
+    // Reset is the remedy and bypasses the freeze.
+    await settings.resetPi("global");
+    assert.equal(readFileSync(file, "utf8"), "{}");
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previous;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("bootstrap without a pi profile creates nothing", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-bootstrap-empty-"));
+  try {
+    bootstrapPixProfile(temp);
+    assert.ok(!existsSync(join(temp, ".pix", "agent")));
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

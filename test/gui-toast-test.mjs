@@ -14,8 +14,8 @@ const artifacts = join(root, "artifacts");
 const testHome = join(artifacts, "gui-home-toast");
 const electron = process.env.ELECTRON_BINARY ?? electronBinary(root);
 if (!existsSync(electron)) throw new Error("Electron binary not found");
-mkdirSync(join(testHome, ".pi", "agent", "extensions"), { recursive: true });
-writeFileSync(join(testHome, ".pi", "agent", "extensions", "toast-check.ts"), `
+mkdirSync(join(testHome, ".pix", "agent", "extensions"), { recursive: true });
+writeFileSync(join(testHome, ".pix", "agent", "extensions", "toast-check.ts"), `
 export default function(pi) {
   pi.registerCommand("toast-info", { description: "Info toast",
     handler: (_args, ctx) => ctx.ui.notify("Toast info line", "info") });
@@ -27,11 +27,11 @@ export default function(pi) {
 `);
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
 writeFileSync(
-  join(testHome, ".pix", "settings.json"),
+  join(testHome, ".pix", "gui.settings.json"),
   JSON.stringify({ openLastSessionOnStartup: true }),
 );
 

@@ -14,6 +14,8 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
+import { pixHome } from "./paths.js";
+import { bootstrapPixProfile } from "./services.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
 const dir = dirname(fileURLToPath(import.meta.url));
@@ -170,6 +172,7 @@ async function create() {
   else await win.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
+  bootstrapPixProfile(pixHome());
   // No implicit project: without an explicit PIX_PROJECT override the app
   // starts project-less and the welcome screen asks for one.
   const initial = process.env.PIX_PROJECT

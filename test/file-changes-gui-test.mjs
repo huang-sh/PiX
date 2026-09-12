@@ -28,12 +28,12 @@ if (!existsSync(electron)) throw new Error("Electron binary not found");
 rmSync(testHome, { recursive: true, force: true });
 rmSync(project, { recursive: true, force: true });
 mkdirSync(join(project, "src"), { recursive: true });
-mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 process.env.PIX_HOME = testHome;
-process.env.PI_CODING_AGENT_DIR = join(testHome, ".pi", "agent");
-writeFileSync(join(testHome, ".pi", "agent", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
-writeFileSync(join(testHome, ".pix", "settings.json"), JSON.stringify({
+process.env.PI_CODING_AGENT_DIR = join(testHome, ".pix", "agent");
+writeFileSync(join(testHome, ".pix", "agent", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
+writeFileSync(join(testHome, ".pix", "gui.settings.json"), JSON.stringify({
   language: "zh-CN",
   openLastSessionOnStartup: true,
   layout: {

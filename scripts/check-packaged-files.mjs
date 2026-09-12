@@ -1,5 +1,5 @@
 import { extractFile } from "@electron/asar";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 // Missing optional dependencies must fail packaging, not the user's first search.
@@ -19,6 +19,21 @@ export function checkPackagedFff(resources, platform, arch) {
       throw new Error(`Incomplete PiX package: ${name}. Run npm ci and package on ${platform}-${arch}.`, { cause });
     }
   }
+}
+
+// A build that silently drops the bundled skills tree ships an app where they
+// just vanish (resolveBuiltinSkills returns nothing, no error); fail the
+// packaging instead.
+export function checkPackagedSkills(resources) {
+  const skills = join(resources, "skills");
+  const bundled = existsSync(skills)
+    ? readdirSync(skills, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && existsSync(join(skills, entry.name, "SKILL.md")))
+    : [];
+  if (!bundled.length)
+    throw new Error(
+      `Incomplete PiX package: no bundled skills under ${skills}. Keep the electron-builder extraResources "skills" entry in sync with the repo skills/ tree.`,
+    );
 }
 
 // Check the finished archive, not just the build directory: packaging can

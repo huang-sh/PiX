@@ -52,14 +52,14 @@ if (verifyHmr) {
   });
   await devServer.listen();
 }
-mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
 writeFileSync(
-  join(testHome, ".pix", "settings.json"),
+  join(testHome, ".pix", "gui.settings.json"),
   JSON.stringify({
     // The graph assertions below need a session opened at boot.
     openLastSessionOnStartup: true,
@@ -645,7 +645,7 @@ try {
             })
           } : null;
         })()`);
-        if (!value?.selected || value.embeddedComposer || !value.addAction || !value.centered || !value.noOverlap || value.footer.height < 54 || value.footer.height > 60 || !value.footer.context || value.footer.controls !== 0)
+        if (!value?.selected || value.embeddedComposer || !value.addAction || !value.centered || !value.noOverlap || value.footer.height < 29 || value.footer.height > 33 || !value.footer.context || value.footer.controls !== 0)
           throw new Error(`Selected graph node is not stable and centered: ${JSON.stringify(value)}`);
         return value;
       })
@@ -1010,7 +1010,7 @@ try {
       tuiTheme: Boolean(document.querySelector('[data-setting-path=tuiMode], [data-setting-path="terminal.showTerminalProgress"]')),
       advanced: Boolean(document.querySelector('[data-settings-category=advanced]'))
     })`);
-    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "settings.json"), "utf8"));
+    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "gui.settings.json"), "utf8"));
     if (value.theme !== themePreview.preview || value.savingTheme || saved.theme !== themePreview.preview || value.tuiTheme || value.advanced)
       throw new Error(`GUI appearance settings are not effective: ${JSON.stringify(value)}`);
   });
@@ -1022,7 +1022,7 @@ try {
   await retry(async () => {
     if (await cdp.evaluate("document.querySelector('[data-setting-path=theme] select').disabled"))
       throw new Error("Theme restore is still saving");
-    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "settings.json"), "utf8"));
+    const saved = JSON.parse(readFileSync(join(testHome, ".pix", "gui.settings.json"), "utf8"));
     if (saved.theme !== themePreview.original) throw new Error("Theme restore was not persisted");
   });
   for (const [category, setting] of [
@@ -1045,7 +1045,7 @@ try {
 
   // Skills are real SKILL.md files under the Pi agent dir; the settings page
   // creates, toggles, and deletes them through the host, so assert the disk.
-  const guiSkillDir = join(testHome, ".pi", "agent", "skills", "pix-gui-skill");
+  const guiSkillDir = join(testHome, ".pix", "agent", "skills", "pix-gui-skill");
   const guiSkillFile = join(guiSkillDir, "SKILL.md");
   rmSync(guiSkillDir, { recursive: true, force: true });
   await cdp.evaluate("document.querySelector('[data-settings-category=skills]').click()");
@@ -1077,12 +1077,25 @@ try {
   });
   if (!readFileSync(guiSkillFile, "utf8").includes("Created by the PiX GUI test."))
     throw new Error("Skill file did not keep its description");
+  // Saving leaves the row busy until loadSkills() settles; the switch is
+  // :disabled meanwhile, so a click would be silently dropped.
+  await retry(async () => {
+    if (await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] [data-skill-manual]')?.disabled"))
+      throw new Error("Skill row still busy after save");
+  });
   await cdp.evaluate("document.querySelector('[data-skill=\"pix-gui-skill\"] [data-skill-manual]').click()");
   await retry(async () => {
     if (!readFileSync(guiSkillFile, "utf8").includes("disable-model-invocation"))
       throw new Error("Manual-only toggle was not written to the skill file");
   });
   const guiSkillRemove = "document.querySelector('[data-skill=\"pix-gui-skill\"] .skill-actions button:last-child')";
+  // The manual toggle clears its busy state only after loadSkills() returns,
+  // which trails the disk write the previous step polled. Wait for the button
+  // to leave :disabled before pressing, or the click arms nothing.
+  await retry(async () => {
+    if (await cdp.evaluate(`${guiSkillRemove}?.disabled`))
+      throw new Error("Skill delete button still busy after the manual toggle");
+  });
   await cdp.evaluate(`${guiSkillRemove}.click()`);
   await retry(async () => {
     if (!(await cdp.evaluate(`Boolean(${guiSkillRemove}?.classList.contains('is-arming'))`)))

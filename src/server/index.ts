@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { MainController, type Platform } from "../main/controller.js";
+import { pixHome } from "../main/paths.js";
+import { bootstrapPixProfile } from "../main/services.js";
 import { enrichLoginPath } from "./login-env.js";
 import {
   PIX_HOST_VERSION,
@@ -72,6 +74,7 @@ async function serve() {
     quit() {},
   };
   await enrichLoginPath();
+  bootstrapPixProfile(pixHome());
   const controller = new MainController(cwd, platform);
   const token = randomBytes(32).toString("base64url");
   const wss = new WebSocketServer({

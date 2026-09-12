@@ -26,7 +26,7 @@ for (const dir of [testHome, project]) {
     console.warn(`could not clear ${dir} (in use?); continuing`);
   }
 }
-mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
 writeFileSync(join(project, "README.md"), "# gui-link-project\n\nFixture project for the chat-link GUI test.\n");
@@ -38,10 +38,10 @@ writeFileSync(
 // the drive-letter form must survive into the rendered href untouched.
 const notesHref = join(project, "NOTES.md").replaceAll("\\", "/");
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
-writeFileSync(join(testHome, ".pix", "settings.json"), JSON.stringify({ language: "en" }));
+writeFileSync(join(testHome, ".pix", "gui.settings.json"), JSON.stringify({ language: "en" }));
 
 const epoch = Date.parse("2026-08-30T10:00:00.000Z");
 const sessionFile = join(

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bundlePiPackage } from "../scripts/bundle-pi-package.mjs";
+import { pruneDevArtifacts } from "../scripts/strip-cross-platform-binaries.mjs";
 
 const appDir = fileURLToPath(new URL("..", import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "pix-web-smoke-"));
@@ -27,8 +28,12 @@ const server = createServer((_request, response) => {
 let session;
 try {
   // Staging outside the repository prevents undeclared dependencies from
-  // accidentally resolving against the developer's node_modules.
-  if (!process.argv[2]) bundlePiPackage(appDir, root, "pi-web-access");
+  // accidentally resolving against the developer's node_modules. Prune the
+  // same dev artifacts afterPack drops so the test loads the shipped layout.
+  if (!process.argv[2]) {
+    bundlePiPackage(appDir, root, "pi-web-access");
+    pruneDevArtifacts(join(root, "pi-builtin"));
+  }
   const modules = resolve(process.argv[2] ?? join(root, "pi-builtin", "node_modules"));
   const sdkModules = resolve(process.argv[3] ?? join(appDir, "node_modules"));
   const pi = await import(pathToFileURL(join(sdkModules, "@earendil-works/pi-coding-agent/dist/index.js")).href);

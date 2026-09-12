@@ -13,7 +13,7 @@ for (const streaming of [false, true]) {
     const previousHome = process.env.PIX_HOME;
     const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
     process.env.PIX_HOME = home;
-    process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
+    process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
     const cwd = join(home, "ws");
     const realCwd = join(home, "real-ws");
     mkdirSync(realCwd);

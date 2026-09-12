@@ -29,6 +29,11 @@ extraResources:
     filter:
       - "**/*"
       - "!node_modules/**"
+  # Built-in skills (src/main/builtin-skills.ts resolves <resources>/skills).
+  # Plain markdown outside the asar; the SSH/WSL installer uploads the same
+  # tree to remote hosts as a sibling of the server bundle.
+  - from: skills
+    to: skills
 
 win:
   icon: build/icon.png

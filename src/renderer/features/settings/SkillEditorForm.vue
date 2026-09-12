@@ -8,7 +8,7 @@ import type { RuntimeSkillDocument } from "../../../shared/types";
 import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
 
-const props = defineProps<{ skill?: RuntimeSkillDocument; scope: "user" | "project" }>();
+const props = defineProps<{ skill?: RuntimeSkillDocument; scope: "user" | "project"; readonly?: boolean }>();
 const emit = defineEmits<{ saved: [path: string]; cancel: [] }>();
 const { t } = useI18n();
 const session = useSessionStore();
@@ -105,7 +105,7 @@ async function save() {
       <form class="skill-sheet-form" data-skill-form :aria-busy="busy" @submit.prevent="save">
         <header class="skill-sheet-head">
           <div>
-            <DialogTitle class="skill-sheet-title">{{ t(skill ? "settings.editSkill" : "settings.newSkill") }}</DialogTitle>
+            <DialogTitle class="skill-sheet-title">{{ t(props.readonly ? "settings.viewSkill" : skill ? "settings.editSkill" : "settings.newSkill") }}</DialogTitle>
             <p id="skill-sheet-subtitle" class="skill-sheet-sub">{{ t("settings.skillSheetSubtitle") }}</p>
           </div>
           <button type="button" class="skill-sheet-close" :aria-label="t('common.close')" :disabled="busy" @click="emit('cancel')"><X :size="15" /></button>
@@ -119,6 +119,7 @@ async function save() {
               :value="draft.name"
               data-skill-name
               :placeholder="t('settings.skillNamePlaceholder')"
+              :readonly="props.readonly"
               @input="setName(($event.target as HTMLInputElement).value)"
               @blur="left.name = true"
             />
@@ -126,7 +127,7 @@ async function save() {
 
           <label class="skill-field">
             <span class="skill-field-label">{{ t("settings.skillDescription") }}</span>
-            <textarea v-model="draft.description" data-skill-description rows="2" :placeholder="t('settings.skillDescriptionPlaceholder')" @blur="left.description = true" />
+            <textarea v-model="draft.description" data-skill-description rows="2" :placeholder="t('settings.skillDescriptionPlaceholder')" :readonly="props.readonly" @blur="left.description = true" />
           </label>
 
           <div class="skill-field">
@@ -134,7 +135,7 @@ async function save() {
               <span>{{ t("settings.skillBody") }}</span>
               <span class="skill-byte-count" :class="{ 'is-over': bytes > MAX_SKILL_BYTES }">{{ t("settings.skillBytes", { used: kilobytes, max: MAX_SKILL_BYTES / 1024 }) }}</span>
             </div>
-            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="starter('')" @blur="left.body = true" />
+            <textarea v-model="draft.body" class="skill-body" data-skill-body rows="14" spellcheck="false" :aria-label="t('settings.skillBody')" :placeholder="starter('')" :readonly="props.readonly" @blur="left.body = true" />
           </div>
 
           <div class="skill-field">
@@ -155,9 +156,9 @@ async function save() {
             <div class="skill-tile">
               <div class="skill-tile-copy">
                 <span class="skill-tile-label">{{ t(draft.disableModelInvocation ? "settings.manualSkill" : "settings.skillAuto") }}</span>
-                <span class="skill-tile-hint">{{ t("settings.skillManualOnlyHint") }}</span>
+                <span class="skill-tile-hint">{{ t(draft.disableModelInvocation ? "settings.skillManualOnlyHint" : "settings.skillAutoHint") }}</span>
               </div>
-              <button type="button" class="skill-switch" role="switch" data-skill-invocation :aria-checked="draft.disableModelInvocation" :aria-label="t('settings.skillManualOnly')" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
+              <button type="button" class="skill-switch" role="switch" data-skill-invocation :aria-checked="!draft.disableModelInvocation" :aria-label="t('settings.skillAuto')" :disabled="props.readonly" @click="draft.disableModelInvocation = !draft.disableModelInvocation">
                 <span class="skill-switch-thumb" />
               </button>
             </div>
@@ -171,7 +172,7 @@ async function save() {
           <span class="skill-sheet-note">{{ t("settings.skillSheetNote") }}</span>
           <div class="skill-sheet-actions-end">
             <Button type="button" variant="ghost" :disabled="busy" @click="emit('cancel')">{{ t("settings.customCancel") }}</Button>
-            <Button type="submit" data-skill-save :disabled="busy || invalid">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
+            <Button v-if="!props.readonly" type="submit" data-skill-save :disabled="busy || invalid">{{ t(busy ? "settings.saving" : "settings.saveChanges") }}</Button>
           </div>
         </footer>
       </form>

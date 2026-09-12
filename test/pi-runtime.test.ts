@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
-import type { AgentControl } from "../src/shared/types.js";
+import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
+import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
 test("extension commands deliver notifications and errors before and after reload", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-slash-"));
@@ -338,6 +339,142 @@ test("maps skills discovered by the SDK resource loader", async () => {
     disableModelInvocation: true,
     editable: true,
   }]);
+});
+
+test("maps bundled skills as a read-only builtin category", async () => {
+  const [builtinRoot] = resolveBuiltinSkills(dirname(fileURLToPath(import.meta.url)));
+  assert.ok(builtinRoot, "bundled skills tree not found beside the test output");
+  const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+  runtime.runtime = {
+    session: {
+      resourceLoader: {
+        reload: async () => undefined,
+        getSkills: () => ({
+          skills: [{
+            name: "zotero-cli",
+            description: "Read and write a Zotero library.",
+            filePath: join(builtinRoot, "zotero-cli", "SKILL.md"),
+            sourceInfo: { source: "local" },
+            disableModelInvocation: false,
+          }],
+        }),
+      },
+    },
+  };
+
+  const [builtin] = await runtime.control({ action: "getSkills" }) as RuntimeSkill[];
+
+  assert.ok(builtin);
+  assert.equal(builtin.scope, "builtin");
+  assert.equal(builtin.editable, false);
+});
+
+test("toggling a bundled skill's manual-only writes the override table, not the file", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-builtin-toggle-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = home;
+  try {
+    let reloads = 0;
+    const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+    runtime.runtime = { session: { resourceLoader: { reload: async () => void reloads++ } } };
+    const [builtinRoot] = resolveBuiltinSkills(dirname(fileURLToPath(import.meta.url)));
+    assert.ok(builtinRoot, "bundled skills tree not found beside the test output");
+    const skillPath = join(builtinRoot, "zotero-cli", "SKILL.md");
+    assert.ok(existsSync(skillPath), "repo zotero-cli skill missing");
+    const original = readFileSync(skillPath, "utf8");
+
+    const result = await runtime.control({ action: "setSkillManualOnly", path: skillPath, manualOnly: true });
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(reloads, 1);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(home, ".pix", "skill-overrides.json"), "utf8")),
+      { "zotero-cli": true },
+    );
+    // The bundled file itself stays byte-for-byte untouched.
+    assert.equal(readFileSync(skillPath, "utf8"), original);
+
+    // A path outside every writable or bundled root still fails closed.
+    await assert.rejects(
+      runtime.control({ action: "setSkillManualOnly", path: join(home, "elsewhere", "x.md"), manualOnly: true }),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("viewing follows the loaded list: bundled and packaged skills read, strangers do not", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-skill-view-"));
+  try {
+    // A skill inside an installed package: listed by the loader, neither
+    // editable nor bundled.
+    const packaged = join(home, "node_modules", "some-pkg", ".agents", "skills", "packaged", "SKILL.md");
+    mkdirSync(dirname(packaged), { recursive: true });
+    writeFileSync(packaged, "---\nname: packaged\ndescription: From an installed package.\n---\nPackaged body.\n");
+    const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+    runtime.runtime = {
+      session: {
+        // The listed flag is the effective one and may differ from the file
+        // (an overridden bundled skill); the viewer must show the effective.
+        resourceLoader: { getSkills: () => ({ skills: [{ name: "packaged", filePath: packaged, disableModelInvocation: true }] }) },
+      },
+    };
+    const [builtinRoot] = resolveBuiltinSkills(dirname(fileURLToPath(import.meta.url)));
+    assert.ok(builtinRoot, "bundled skills tree not found beside the test output");
+
+    const packagedDocument = await runtime.control({ action: "getSkill", path: packaged }) as RuntimeSkillDocument;
+    assert.equal(packagedDocument.name, "packaged");
+    assert.match(packagedDocument.body, /Packaged body\./);
+    assert.equal(packagedDocument.disableModelInvocation, true);
+
+    const bundledDocument = await runtime.control({
+      action: "getSkill",
+      path: join(builtinRoot, "zotero-cli", "SKILL.md"),
+    }) as RuntimeSkillDocument;
+    assert.equal(bundledDocument.name, "zotero-cli");
+    assert.match(bundledDocument.description, /Zotero/);
+
+    // A path the loader never listed still requires an editable root.
+    const stranger = join(home, "stranger.md");
+    writeFileSync(stranger, "---\nname: stranger\ndescription: Not listed.\n---\nBody.\n");
+    await assert.rejects(runtime.control({ action: "getSkill", path: stranger }));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a user skill that shadows a bundled copy is badged with its path", async () => {
+  const [builtinRoot] = resolveBuiltinSkills(dirname(fileURLToPath(import.meta.url)));
+  assert.ok(builtinRoot, "bundled skills tree not found beside the test output");
+  const winner = "/home/me/.pi/agent/skills/zotero-cli/SKILL.md";
+  const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+  runtime.runtime = {
+    session: {
+      resourceLoader: {
+        reload: async () => undefined,
+        getSkills: () => ({
+          skills: [{
+            name: "zotero-cli",
+            description: "My own copy.",
+            filePath: winner,
+            sourceInfo: { source: "local", scope: "user" },
+          }],
+          diagnostics: [
+            { type: "collision", collision: { resourceType: "skill", name: "zotero-cli", winnerPath: winner, loserPath: join(builtinRoot, "zotero-cli", "SKILL.md") } },
+            // A shadowed non-bundled copy must not clobber the badge.
+            { type: "collision", collision: { resourceType: "skill", name: "other", winnerPath: winner, loserPath: "/project/.pi/skills/other/SKILL.md" } },
+          ],
+        }),
+      },
+    },
+  };
+
+  const [skill] = await runtime.control({ action: "getSkills", reload: true }) as RuntimeSkill[];
+
+  assert.ok(skill);
+  assert.equal(skill.shadowsBuiltin, join(builtinRoot, "zotero-cli", "SKILL.md"));
 });
 
 test("maps visible extensions discovered by the SDK resource loader", async () => {

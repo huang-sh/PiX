@@ -5,6 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MainController, type Platform } from "../src/main/controller.js";
 
+// Project-less controllers still construct the settings service against the
+// real home; keep every construction off the developer's profile.
+const settingsHome = mkdtempSync(join(tmpdir(), "pix-noproject-home-"));
+process.env.PIX_HOME = settingsHome;
+process.env.PI_CODING_AGENT_DIR = join(settingsHome, ".pix", "agent");
+process.on("exit", () => rmSync(settingsHome, { recursive: true, force: true }));
+
 const platform: Platform = {
   async pickProject() {
     return undefined;

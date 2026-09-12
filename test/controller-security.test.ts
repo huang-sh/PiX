@@ -1,10 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MainController, type Platform } from "../src/main/controller.js";
 import type { ProjectGroup } from "../src/shared/types.js";
+
+// Deletion and rename flows rewrite the project history in the app settings,
+// so without an isolated home these tests would enroll test/workspace in the
+// developer's real session panel.
+const home = mkdtempSync(join(tmpdir(), "pix-security-home-"));
+process.env.PIX_HOME = home;
+process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+process.on("exit", () => rmSync(home, { recursive: true, force: true }));
 
 const root = resolve(process.cwd(), "test", "workspace");
 const denied: Platform = {
@@ -110,8 +118,6 @@ test("renderer-confirmed session deletion skips the native prompt", async () => 
 
 test("local session rename reaches the local runtime", async () => {
   const controller = new MainController(root, denied);
-  const home = mkdtempSync(join(tmpdir(), "pix-controller-"));
-  controller.settings.appPath = join(home, "settings.json");
   const session = controller.files.list()[0]!;
   let renamed: { path: string; name: string } | undefined;
   controller.pi.rename = async (path, name) => {
@@ -119,18 +125,12 @@ test("local session rename reaches the local runtime", async () => {
   };
   controller.sessions = async () => [];
 
-  try {
-    await controller.invoke("session.rename", { path: session.path, name: "Local name" });
-    assert.deepEqual(renamed, { path: session.path, name: "Local name" });
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
+  await controller.invoke("session.rename", { path: session.path, name: "Local name" });
+  assert.deepEqual(renamed, { path: session.path, name: "Local name" });
 });
 
 test("remote session rename is forwarded to the remote host", async () => {
   const controller = new MainController(root, denied);
-  const home = mkdtempSync(join(tmpdir(), "pix-controller-"));
-  controller.settings.appPath = join(home, "settings.json");
   const calls: Array<{ route: string; input: unknown }> = [];
   controller.wsl = {
     request: async (route: string, input: unknown) => {
@@ -139,18 +139,14 @@ test("remote session rename is forwarded to the remote host", async () => {
     },
   } as any;
 
-  try {
-    await controller.invoke("session.rename", {
-      path: "/project/.pi/sessions/session.jsonl",
-      name: "Remote name",
-    });
-    assert.deepEqual(calls, [{
-      route: "session.rename",
-      input: { path: "/project/.pi/sessions/session.jsonl", name: "Remote name" },
-    }]);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
+  await controller.invoke("session.rename", {
+    path: "/project/.pi/sessions/session.jsonl",
+    name: "Remote name",
+  });
+  assert.deepEqual(calls, [{
+    route: "session.rename",
+    input: { path: "/project/.pi/sessions/session.jsonl", name: "Remote name" },
+  }]);
 });
 
 test("remote OAuth login runs on the desktop and only syncs models", async () => {

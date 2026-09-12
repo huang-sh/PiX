@@ -159,7 +159,7 @@ test("create, read, toggle, edit, and delete a skill through the runtime", async
   const previousHome = process.env.PIX_HOME;
   const home = mkdtempSync(join(tmpdir(), "pix-skills-"));
   process.env.PIX_HOME = home;
-  const agentDir = join(home, ".pi", "agent");
+  const agentDir = join(home, ".pix", "agent");
   const runtime = new PiRuntime(home, join(home, "sessions"), () => {}, async () => {});
   runtime["sessionServicesOptions"] = stubServices(agentDir);
   try {
@@ -227,7 +227,7 @@ test("importing keeps a valid document and rejects one Pi cannot load", async ()
   const previousHome = process.env.PIX_HOME;
   const home = mkdtempSync(join(tmpdir(), "pix-skill-import-"));
   process.env.PIX_HOME = home;
-  const agentDir = join(home, ".pi", "agent");
+  const agentDir = join(home, ".pix", "agent");
   const runtime = new PiRuntime(home, join(home, "sessions"), () => {}, async () => {});
   runtime["sessionServicesOptions"] = stubServices(agentDir);
   try {
@@ -279,7 +279,7 @@ test("project skills land in .pi/skills and are listable", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-skill-project-"));
   const project = mkdtempSync(join(tmpdir(), "pix-skill-project-cwd-"));
   process.env.PIX_HOME = home;
-  const agentDir = join(home, ".pi", "agent");
+  const agentDir = join(home, ".pix", "agent");
   const runtime = new PiRuntime(project, join(home, "sessions"), () => {}, async () => {});
   runtime["sessionServicesOptions"] = stubServices(agentDir);
   try {

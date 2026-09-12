@@ -89,6 +89,14 @@ try {
   assert.equal(projectState.projects.find((project) => project.id.startsWith("wsl:"))?.connected, true);
   const created = await controller.invoke("agent.control", { action: "newSession" });
   assert.equal(created.session.cwd, cwd);
+  // The bundled skills tree must ride the host install (uploaded beside the
+  // server bundle) and resolve from the host's runtime layout.
+  const skills = await controller.invoke("agent.control", { action: "getSkills" });
+  const bundled = skills.find((skill) => skill.name === "zotero-cli");
+  assert.ok(bundled, "bundled zotero-cli not listed on the WSL host");
+  assert.equal(bundled.scope, "builtin");
+  assert.equal(bundled.editable, false);
+  assert.match(bundled.path, /skills\/zotero-cli\/SKILL\.md$/);
   const disconnected = await controller.invoke("wsl.disconnect");
   assert.equal(disconnected.project.path, localProject);
   assert.equal(disconnected.project.remote, undefined);
@@ -99,7 +107,7 @@ try {
       distro,
       host: hello,
       workspace: cwd,
-      checks: ["controller", "websocket", "workspace", "shell", "pi-session", "session-rename", "project-session-create", "connection-state", "disconnect"],
+      checks: ["controller", "websocket", "workspace", "shell", "pi-session", "session-rename", "project-session-create", "bundled-skills", "connection-state", "disconnect"],
     })}\n`,
   );
 } finally {

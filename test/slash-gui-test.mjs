@@ -12,12 +12,12 @@ const artifacts = join(root, "artifacts");
 const testHome = join(artifacts, "gui-home-slash");
 const electron = process.env.ELECTRON_BINARY ?? electronBinary(root);
 if (!existsSync(electron)) throw new Error("Electron binary not found");
-mkdirSync(join(testHome, ".pi", "agent", "prompts"), { recursive: true });
-mkdirSync(join(testHome, ".pi", "agent", "extensions"), { recursive: true });
-mkdirSync(join(testHome, ".pi", "agent", "skills", "slash-check"), { recursive: true });
-writeFileSync(join(testHome, ".pi", "agent", "skills", "slash-check", "SKILL.md"),
+mkdirSync(join(testHome, ".pix", "agent", "prompts"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent", "extensions"), { recursive: true });
+mkdirSync(join(testHome, ".pix", "agent", "skills", "slash-check"), { recursive: true });
+writeFileSync(join(testHome, ".pix", "agent", "skills", "slash-check", "SKILL.md"),
   "---\nname: slash-check\ndescription: Slash GUI test skill\n---\nReply with a short greeting.\n");
-writeFileSync(join(testHome, ".pi", "agent", "extensions", "slash-check.ts"), `
+writeFileSync(join(testHome, ".pix", "agent", "extensions", "slash-check.ts"), `
 export default function(pi) {
   pi.registerCommand("slash-check", { description: "Test notification output",
     handler: (_args, ctx) => ctx.ui.notify("Slash command result\\nSecond line", "info") });
@@ -27,17 +27,17 @@ export default function(pi) {
 `);
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(
-  join(testHome, ".pi", "agent", "settings.json"),
+  join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
 );
 // A global prompt template: selecting it must insert "/review " for arguments
 // and show its argument-hint in the menu.
 writeFileSync(
-  join(testHome, ".pi", "agent", "prompts", "review.md"),
+  join(testHome, ".pix", "agent", "prompts", "review.md"),
   ['---', 'description: Review the changes', 'argument-hint: "<file>"', '---', '', 'Review $ARGUMENTS', ''].join("\n"),
 );
 writeFileSync(
-  join(testHome, ".pix", "settings.json"),
+  join(testHome, ".pix", "gui.settings.json"),
   JSON.stringify({ openLastSessionOnStartup: true }),
 );
 
