@@ -351,6 +351,11 @@ export const messages = {
       connecting: "Connecting…",
       openFolder: "Open folder",
     },
+    update: {
+      available: "PiX {version} is available",
+      viewRelease: "View release",
+      skip: "Skip this version",
+    },
     settings: {
       preferences: "Preferences",
       back: "Back to workbench",
@@ -999,6 +1004,11 @@ export const messages = {
       connect: "连接",
       connecting: "连接中…",
       openFolder: "打开文件夹",
+    },
+    update: {
+      available: "PiX {version} 可用",
+      viewRelease: "查看发布页",
+      skip: "跳过此版本",
     },
     settings: {
       preferences: "偏好设置",
