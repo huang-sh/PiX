@@ -819,7 +819,7 @@ async function logout(provider: RuntimeProvider) {
           <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
         </div>
         <nav v-if="!['models', 'skills', 'extensions', 'shortcuts', 'about'].includes(layout.settingsCategory)">
-          <Button :disabled="saving || layout.themeSaving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.saveChanges") }}</Button>
+          <Button :disabled="saving || layout.themeSaving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("common.save") }}</Button>
         </nav>
       </header>
 
@@ -915,7 +915,7 @@ async function logout(provider: RuntimeProvider) {
         <section id="model-preferences" class="settings-card model-options">
           <header class="model-options-header">
             <span class="model-preferences-title"><SlidersHorizontal :size="19" /><span><strong>{{ t("settings.modelPreferences") }}</strong><small>{{ t("settings.modelPreferencesHint") }}</small></span></span>
-            <Button class="model-primary-button" :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("settings.savePreferences") }}</Button>
+            <Button class="model-primary-button" :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("common.save") }}</Button>
           </header>
           <label v-if="selectedRuntimeModel" class="setting-row" data-setting-path="modelThinkingLevels">
             <span>
