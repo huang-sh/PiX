@@ -2,15 +2,15 @@
  * Curated extensions offered for one-click install on the settings page.
  * Pure-JavaScript pi packages that do not need to ship inside the installer;
  * the install action pins nothing, so `pi update` keeps them current.
- * Names and blurbs live in the renderer's i18n tables under
- * `settings.recommended.<key>.*`.
+ * Cards keep the package name untranslated; blurbs live in the renderer's
+ * i18n tables under `settings.recommended.<key>.description`.
  */
 export interface RecommendedExtension {
   /** pi package source string passed to the install action. */
   source: string;
-  /** npm package name used to detect an installed copy in the extension list. */
+  /** npm package name: displayed as the card title and used to detect an installed copy. */
   name: string;
-  /** i18n key fragment for the card's title and description. */
+  /** i18n key fragment for the card's description. */
   key: string;
 }
 

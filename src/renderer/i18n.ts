@@ -479,7 +479,6 @@ export const messages = {
       recommendedInstalled: "Installed",
       recommended: {
         webAccess: {
-          title: "Web Access",
           description: "Web search, URL fetching, PDF extraction and GitHub research for your agent. Search requires your own provider credentials.",
         },
       },
@@ -1139,7 +1138,6 @@ export const messages = {
       recommendedInstalled: "已安装",
       recommended: {
         webAccess: {
-          title: "网络访问",
           description: "为智能体提供网页搜索、URL 抓取、PDF 提取与 GitHub 研究能力。搜索功能需配置你自己的服务商凭据。",
         },
       },

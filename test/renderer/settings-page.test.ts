@@ -740,7 +740,8 @@ describe("SettingsPage save", () => {
     await flushPromises();
 
     const card = () => wrapper.get('[data-recommended="pi-web-access"]');
-    expect(card().text()).toContain("Web Access");
+    // The package name stays untranslated; only the blurb is localized.
+    expect(card().get("h3").text()).toBe("pi-web-access");
     expect(card().text()).toContain("npm:pi-web-access");
     expect(card().text()).toContain("Install");
 

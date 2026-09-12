@@ -1047,7 +1047,7 @@ async function logout(provider: RuntimeProvider) {
               <header class="extension-item-header">
                 <span class="extension-item-icon"><Download :size="21" aria-hidden="true" /></span>
                 <div class="extension-identity">
-                  <h3>{{ t(`settings.recommended.${item.key}.title`) }}</h3>
+                  <h3>{{ item.name }}</h3>
                   <span>{{ item.source }}</span>
                 </div>
                 <Button v-if="extensionInstalled(item.name)" variant="outline" size="sm" class="extension-install-button" disabled>
