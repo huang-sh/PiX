@@ -1,9 +1,32 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphNode } from "../../src/shared/types";
 import { i18n } from "../../src/renderer/i18n";
 import DraftNode, { type DraftNodeData } from "../../src/renderer/features/graph/DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "../../src/renderer/features/graph/PromptNode.vue";
+
+function nodeData(overrides: Partial<PromptNodeData> = {}): PromptNodeData {
+  return {
+    node: {
+      id: "turn:1",
+      parentId: null,
+      title: "Prompt",
+      timestamp: new Date().toISOString(),
+      footer: {
+        contextUsage: { tokens: 41_000, contextWindow: 128_000, percent: 32 },
+        model: { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", reasoning: true },
+        thinkingLevel: "high",
+      },
+    } as GraphNode,
+    active: true,
+    current: true,
+    runnable: true,
+    blockedReason: "",
+    content: () => ({ user: "Prompt", assistant: "Response" }),
+    onCompose: vi.fn(),
+    ...overrides,
+  };
+}
 
 describe("PromptNode branch action", () => {
   it("explains and blocks branching while the runtime is busy", async () => {
@@ -141,5 +164,114 @@ describe("PromptNode branch action", () => {
     (document.querySelector('[data-thinking-level="low"]') as HTMLElement).click();
     expect(onThinking).toHaveBeenCalledWith("low", true);
     menu.unmount();
+  });
+});
+
+describe("PromptNode hover card", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  it("stays closed while a mouse button is held and closes on press outside the card", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data: nodeData(), selected: true },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    const node = wrapper.get(".prompt-node");
+
+    // Hovering mid-drag (button held) must not open the card.
+    await node.trigger("mouseenter", { buttons: 1 });
+    await vi.advanceTimersByTimeAsync(280);
+    expect(document.querySelector(".node-hover-card")).toBeNull();
+
+    // A plain hover opens it.
+    await node.trigger("mouseenter", { buttons: 0 });
+    await vi.advanceTimersByTimeAsync(280);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+
+    // Pressing (and holding) outside the card closes it immediately.
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    await flushPromises();
+    expect(document.querySelector(".node-hover-card")).toBeNull();
+
+    // Pressing inside the card (links, text selection) keeps it open.
+    await node.trigger("mouseenter", { buttons: 0 });
+    await vi.advanceTimersByTimeAsync(280);
+    document.querySelector(".node-hover-card")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+
+    wrapper.unmount();
+  });
+
+  it("keeps the card open anywhere on the node and closes it 0.5s after leaving the node", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data: nodeData(), selected: true },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    const node = wrapper.get(".prompt-node");
+
+    await node.trigger("mouseenter", { buttons: 0 });
+    await vi.advanceTimersByTimeAsync(280);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+
+    // Moving to the footer or branch controls (still on the node) keeps it open.
+    await wrapper.get(".node-footer").trigger("mouseenter");
+    await wrapper.get(".node-branch-controls").trigger("mousemove", { clientY: 105 });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+
+    // The 0.5s close delay starts only when the pointer leaves the node.
+    await node.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(499);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector(".node-hover-card")).toBeNull();
+
+    wrapper.unmount();
+  });
+
+  it("treats the branch pill as a control: landing on it never opens the card", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data: nodeData(), selected: true },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    const node = wrapper.get(".prompt-node");
+    const controls = wrapper.get(".node-branch-controls");
+
+    // Entering the node straight onto the pill (article enter fires first,
+    // then the pill's) cancels the pending open.
+    await node.trigger("mouseenter", { buttons: 0 });
+    await controls.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(280);
+    expect(document.querySelector(".node-hover-card")).toBeNull();
+
+    // Leaving the pill toward the node body re-arms the open.
+    await controls.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(280);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+
+    // Reaching the pill from the node body keeps an open card open.
+    await controls.trigger("mouseenter", { relatedTarget: node.element });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+
+    // Reaching the pill from the card (outside the node) counts as leaving:
+    // the open card runs its 0.5s close delay.
+    const card = document.querySelector(".node-hover-card")!;
+    await controls.trigger("mouseenter", { relatedTarget: card });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(document.querySelector(".node-hover-card")).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector(".node-hover-card")).toBeNull();
+
+    wrapper.unmount();
   });
 });

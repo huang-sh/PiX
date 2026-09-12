@@ -2,7 +2,7 @@
 import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CSSProperties } from "vue";
 import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
@@ -44,6 +44,7 @@ const previewContent = ref<NodeContent>({ user: "", assistant: "" });
 const previewStyle = ref<CSSProperties>({ visibility: "hidden", left: "0px", top: "0px" });
 let openTimer: number | undefined;
 let closeTimer: number | undefined;
+const CLOSE_DELAY_MS = 500;
 let previewObserver: ResizeObserver | undefined;
 const displayModel = computed(() => props.data.node.footer?.model);
 const usage = computed(() => props.data.node.footer?.contextUsage);
@@ -74,7 +75,8 @@ function placePreview() {
   };
 }
 
-function showPreview() {
+function showPreview(event: MouseEvent) {
+  if (event.buttons) return; // a held button means a drag is in progress: no hover card
   window.clearTimeout(closeTimer);
   openTimer = window.setTimeout(async () => {
     previewContent.value = props.data.content();
@@ -93,14 +95,31 @@ function keepPreview() {
   window.clearTimeout(closeTimer);
 }
 
+// The branch pill is a control, not node content. Reaching it from the node
+// freezes the card state; arriving from elsewhere (card, canvas) counts as
+// off the node, so an open card still runs its close delay.
+function holdPreview(event: MouseEvent) {
+  clearTimers();
+  if (previewing.value && !root.value?.contains(event.relatedTarget as Node | null)) {
+    closeTimer = window.setTimeout(closePreview, CLOSE_DELAY_MS);
+  }
+}
+
 function hidePreview() {
   window.clearTimeout(openTimer);
-  closeTimer = window.setTimeout(closePreview, 1000);
+  closeTimer = window.setTimeout(closePreview, CLOSE_DELAY_MS);
 }
 
 function suppressPreview() {
   clearTimers();
   closePreview();
+}
+
+// Any pointer press outside an open hover card (or its pending open timer)
+// closes it immediately, so press-and-hold interactions (canvas pan, node
+// drag) never open or keep the card around.
+function onPointerDown(event: PointerEvent) {
+  if (!preview.value?.contains(event.target as Node)) suppressPreview();
 }
 
 function compose(direction: BranchDirection = "down") {
@@ -134,7 +153,10 @@ function compactTokens(value?: number | null) {
   return value >= 1000 ? `${Math.round(value / 1000)}K` : String(value);
 }
 
+onMounted(() => window.addEventListener("pointerdown", onPointerDown, true));
+
 onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", onPointerDown, true);
   clearTimers();
   previewObserver?.disconnect();
 });
@@ -156,7 +178,6 @@ function relative(value: string) {
     :class="{ active: data.active, current: data.current, running: data.running, selected, 'search-hit': data.searchHit }"
     @mouseenter="showPreview"
     @mouseleave="hidePreview"
-    @pointerdown="suppressPreview"
     @contextmenu.stop
   >
     <Handle v-if="data.node.parentId" type="target" :position="Position.Left" />
@@ -172,7 +193,7 @@ function relative(value: string) {
         <span v-else-if="data.node.toolCallCount" :title="t('graph.toolCalls', { n: data.node.toolCallCount })"><Wrench :size="11" />{{ data.node.toolCallCount }}</span>
         <button v-if="data.onRetry" type="button" class="node-retry nodrag nowheel"
           :title="t('graph.retryTurnHint')" :aria-label="t('graph.retryTurn')"
-          @mouseenter="suppressPreview" @focus="suppressPreview"
+          @focus="suppressPreview"
           @click.stop="data.onRetry()"
         ><RotateCcw :size="12" /></button>
         <time>{{ relative(data.node.timestamp) }}</time>
@@ -186,8 +207,6 @@ function relative(value: string) {
     <footer
       class="node-footer nodrag nowheel"
       @click.stop
-      @mouseenter="suppressPreview"
-      @mouseleave="showPreview"
     >
       <span
         class="node-context-usage"
@@ -207,15 +226,14 @@ function relative(value: string) {
     </footer>
     <div class="node-branch-controls nodrag nowheel"
       :class="branchDirection ? `direction-${branchDirection}` : ''"
-      @mouseenter="suppressPreview" @mousemove="pointBranch"
-      @mouseleave="branchDirection = undefined; showPreview()">
+      @mouseenter="holdPreview" @mousemove="pointBranch"
+      @mouseleave="branchDirection = undefined; showPreview($event)">
     <button
       type="button"
       class="node-add nodrag nowheel"
       :aria-disabled="!data.runnable"
       :title="data.runnable ? undefined : t(data.blockedReason)"
       :aria-label="data.runnable ? t('graph.continueFromTurn') : t(data.blockedReason)"
-      @mouseenter="suppressPreview"
       @focus="suppressPreview"
       @keydown.up.prevent.stop="focusBranch('up', $event)"
       @keydown.down.prevent.stop="focusBranch('down', $event)"
