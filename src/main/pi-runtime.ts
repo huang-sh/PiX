@@ -2,8 +2,7 @@ import { dirname, basename, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
-import { FileChangeTracker } from "./file-changes.js";
-import { FILE_CHANGE_CUSTOM_TYPE } from "../shared/file-changes.js";
+import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -44,7 +43,7 @@ import type {
   SessionSnapshot,
   SessionSummary,
 } from "../shared/types.js";
-import type { CreateAgentSessionServicesOptions, ExtensionFactory, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 
@@ -251,7 +250,9 @@ export class PiRuntime {
       // same resolution works for dev runs, the packaged app (extraResources
       // pi-builtin/), and remote server hosts (server npm dependencies).
       resourceLoaderOptions: {
-        extensionFactories: [{ name: "pix-file-changes", factory: this.fileChangesExtension() }] as InlineExtension[],
+        extensionFactories: [
+          pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
+        ] as InlineExtension[],
         additionalExtensionPaths: resolveBuiltinPackages(
           dirname(fileURLToPath(import.meta.url)),
           settingsManager,
@@ -306,37 +307,6 @@ export class PiRuntime {
         services,
         diagnostics: services.diagnostics ?? [],
       };
-    };
-  }
-  private fileChangesExtension(): ExtensionFactory {
-    return async pi => {
-      const tracker = new FileChangeTracker();
-      // Match the installed SDK's path rules, including Windows shell paths, ~ and @ prefixes.
-      const paths = await import(new URL("./core/tools/path-utils.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
-      pi.on("tool_call", async (event, ctx) => {
-        if (event.toolName !== "edit" && event.toolName !== "write") return;
-        const input = event.input as Record<string, unknown>;
-        if (typeof input.path !== "string") return;
-        // Nothing here may throw past the catch: a failed snapshot must never
-        // block the tool the user asked for.
-        try {
-          // Graph workers are opened through the graph owner's factory, so this
-          // extension belongs to that owner: snapshots must live next to the
-          // session whose entries reference them, not next to an executing worker.
-          const session = this.runtime?.session.sessionManager.getSessionFile();
-          if (!session) return;
-          await tracker.before(event.toolCallId, paths.resolveToCwd(input.path, ctx.cwd), ctx.cwd, session, ctx.sessionManager.getBranch() as RawSessionEntry[]);
-        } catch (error) { ctx.ui.notify(`File change tracking: ${String(error)}`, "warning"); }
-      });
-      pi.on("tool_result", async (event, ctx) => {
-        try {
-          const path = typeof event.input.path === "string" ? paths.resolveToCwd(event.input.path, ctx.cwd) : "";
-          const change = await tracker.after(event.toolCallId, path, event.isError);
-          if (change) pi.appendEntry(FILE_CHANGE_CUSTOM_TYPE, change);
-        } catch (error) { ctx.ui.notify(`File change tracking: ${String(error)}`, "warning"); }
-      });
-      pi.on("agent_settled", () => tracker.clear());
-      pi.on("session_shutdown", () => tracker.clear());
     };
   }
   bind() {
