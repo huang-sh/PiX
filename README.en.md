@@ -40,7 +40,8 @@ Branching is an everyday action in PiX, not something you have to plan ahead:
 Switching branches never means re-setting up context — context is part of the branch:
 
 - The **branch chat panel** shows only the messages of the active branch. Switch to another branch and the chat switches with it.
-- Select any node on the graph and the active branch changes; the chat panel and branch context panel align to that node.
+- A single click highlights a node on the graph without touching any panel (graph commands such as /fork act on the highlighted node); a double-click aligns the primary chat panel to that node.
+- Double-click a node on the graph to open its conversation in the primary chat panel. Ctrl+double-click (or the right-click menu's "Open in chat panel") pins that branch to a second or third side-by-side chat column — up to 3 columns at once for comparing branches. Each branch keeps a single panel: opening another node of an already-pinned branch retargets that column. Every column scrolls and replies independently. Replying from a pinned column grows that branch in place: the column follows the newly created node, and the primary column keeps the current selection. Closing the last pinned column — or the next start — restores the chat width.
 - The **branch context panel** follows the selected node and shows how that turn went: thinking, tool calls, duration, and step count — and you can reply to the selected node right from there.
 
 ## Remote Node runtime

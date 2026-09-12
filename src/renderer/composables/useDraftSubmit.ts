@@ -21,6 +21,7 @@ export function useDraftSubmit() {
     model?: RuntimeModel | null,
     thinkingLevel?: string,
     images?: PromptImage[],
+    options?: { follow?: boolean },
   ): Promise<boolean> {
     submittedNodeId.value = undefined;
     submitted.value = session.current?.graph ? undefined : {
@@ -29,7 +30,7 @@ export function useDraftSubmit() {
     };
     if (layout.layout.collapsed.chat) void layout.setCollapsed("chat", false);
     try {
-      submittedNodeId.value = await session.promptAt(parentId, text, model, thinkingLevel, images);
+      submittedNodeId.value = await session.promptAt(parentId, text, model, thinkingLevel, images, options);
       return true;
     } catch (error) {
       submitted.value = undefined;

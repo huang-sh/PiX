@@ -95,6 +95,8 @@ export const messages = {
     },
     graph: {
       deleteNode: "Delete",
+      openInPanel: "Open in chat panel",
+      openInPanelHint: "Pin this branch to a side-by-side chat column (Ctrl+double-click)",
       reopenSession: "Reopen session",
       deleteNodeHint: "Permanently delete this node and its descendants",
       deletingNode: "Deleting node…",
@@ -164,7 +166,6 @@ export const messages = {
       slashEmpty: "No matching commands",
     },
     branch: {
-      title: "Branch context",
       noNodeSelected: "No graph node selected",
       worked: "Worked {duration} · {n} steps",
       thinking: "Thinking",
@@ -179,6 +180,9 @@ export const messages = {
       composerFrom: "Reply to “{title}”",
       composerRoot: "Start a new turn",
       composerClose: "Collapse composer",
+      closePanel: "Close chat column",
+      closeChat: "Close chat panel",
+      panelLimit: "Chat panels are full — close one before pinning another branch",
     },
     tools: {
       files: "Files",
@@ -771,6 +775,8 @@ export const messages = {
     },
     graph: {
       deleteNode: "删除",
+      openInPanel: "在聊天面板中打开",
+      openInPanelHint: "将该分支固定到并排的聊天列（Ctrl+双击）",
       reopenSession: "重新打开会话",
       deleteNodeHint: "永久删除此节点及其后续分支",
       deletingNode: "正在删除节点…",
@@ -841,7 +847,6 @@ export const messages = {
       slashEmpty: "没有匹配的命令",
     },
     branch: {
-      title: "分支上下文",
       noNodeSelected: "未选中图节点",
       worked: "耗时 {duration} · {n} 步",
       thinking: "思考",
@@ -856,6 +861,9 @@ export const messages = {
       composerFrom: "回复「{title}」",
       composerRoot: "发起新的提问",
       composerClose: "收起输入框",
+      closePanel: "关闭聊天列",
+      closeChat: "关闭聊天面板",
+      panelLimit: "聊天面板已满，请先关闭一个再固定其他分支",
     },
     tools: {
       files: "文件",

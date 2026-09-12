@@ -381,7 +381,7 @@ describe("chat panel composer", () => {
     await panel.get(".prompt-composer textarea").setValue("local override");
     await panel.get(".composer-submit").trigger("click");
     await flushPromises();
-    expect(promptAt).toHaveBeenLastCalledWith("turn:u1", "local override", current.runtime.model, "high", undefined);
+    expect(promptAt).toHaveBeenLastCalledWith("turn:u1", "local override", current.runtime.model, "high", undefined, undefined);
 
     session.focusedNode = "turn:u2";
     await flushPromises();
