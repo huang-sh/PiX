@@ -724,4 +724,51 @@ describe("SettingsPage save", () => {
     expect(wrapper.find('.extension-inspector').exists()).toBe(false);
     wrapper.unmount();
   });
+
+  it("installs recommended extensions and reflects the installed state", async () => {
+    const extensions: RuntimeExtension[] = [];
+    vi.mocked(desktop.invoke).mockImplementation(async (route) =>
+      route === "agent.control" ? extensions : settings,
+    );
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "extensions";
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+
+    const card = () => wrapper.get('[data-recommended="pi-web-access"]');
+    expect(card().text()).toContain("Web Access");
+    expect(card().text()).toContain("npm:pi-web-access");
+    expect(card().text()).toContain("Install");
+
+    // A failed install reports on the card and keeps the install button.
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control" && (payload as { action?: string }).action === "installExtension")
+        throw new Error("npm registry unreachable");
+      return route === "agent.control" ? extensions : settings;
+    });
+    await card().get("button").trigger("click");
+    await flushPromises();
+    expect(card().text()).toContain("npm registry unreachable");
+    expect(card().text()).toContain("Install");
+
+    // A successful install refreshes the list and flips the card to installed.
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control" && (payload as { action?: string }).action === "installExtension") {
+        extensions.push({ path: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", resolvedPath: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", source: "npm:pi-web-access", scope: "user", tools: [{ name: "web_search", description: "Search the web" }], commands: [] });
+        return { ok: true };
+      }
+      return route === "agent.control" ? extensions : settings;
+    });
+    await card().get("button").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "installExtension", source: "npm:pi-web-access" });
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "getExtensions", reload: true });
+    expect(card().text()).toContain("Installed");
+    expect(card().get("button").attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
 });
