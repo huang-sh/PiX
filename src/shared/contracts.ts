@@ -213,7 +213,7 @@ export function validateRouteInput(
         };
       if (action === "getSkills" || action === "getExtensions")
         return { action, reload: v.reload === true };
-      if (action === "installExtension") {
+      if (action === "installExtension" || action === "removeExtension") {
         const source = str(v.source, "source")!;
         if (!INSTALLABLE_PACKAGE_SOURCES.includes(source))
           throw new Error("Source is not an installable recommended extension");

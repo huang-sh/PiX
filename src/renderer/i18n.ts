@@ -476,7 +476,8 @@ export const messages = {
       recommendedHint: "One-click install into your user configuration; keep them current with \"pi update\".",
       recommendedInstall: "Install",
       recommendedInstalling: "Installing…",
-      recommendedInstalled: "Installed",
+      recommendedRemove: "Remove",
+      recommendedRemoving: "Removing…",
       recommended: {
         webAccess: {
           description: "Web search, URL fetching, PDF extraction and GitHub research for your agent. Search requires your own provider credentials.",
@@ -1135,7 +1136,8 @@ export const messages = {
       recommendedHint: "一键安装到用户配置，之后可通过“pi update”保持更新。",
       recommendedInstall: "安装",
       recommendedInstalling: "安装中…",
-      recommendedInstalled: "已安装",
+      recommendedRemove: "移除",
+      recommendedRemoving: "移除中…",
       recommended: {
         webAccess: {
           description: "为智能体提供网页搜索、URL 抓取、PDF 提取与 GitHub 研究能力。搜索功能需配置你自己的服务商凭据。",

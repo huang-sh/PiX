@@ -508,6 +508,7 @@ export class PiRuntime {
       "setSkillManualOnly",
       "getExtensions",
       "installExtension",
+      "removeExtension",
       "loginApiKey",
       "loginOAuth",
       "logout",
@@ -904,7 +905,8 @@ export class PiRuntime {
             }),
           );
       }
-      case "installExtension": {
+      case "installExtension":
+      case "removeExtension": {
         // User scope (no --local), so the package lands in PiX's agentDir and
         // pi list / pi update / pi remove manage it from here on. Runs on
         // whichever host owns this session; remote hosts npm-install there.
@@ -915,7 +917,9 @@ export class PiRuntime {
           agentDir: this.agentDir(),
           settingsManager: pi.SettingsManager.create(cwd, this.agentDir()),
         });
-        await packageManager.installAndPersist(input.source);
+        await (input.action === "installExtension"
+          ? packageManager.installAndPersist(input.source)
+          : packageManager.removeAndPersist(input.source));
         return { ok: true };
       }
       case "loginApiKey": {

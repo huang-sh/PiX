@@ -520,26 +520,30 @@ test("maps visible extensions discovered by the SDK resource loader", async () =
   }]);
 });
 
-test("installs recommended extensions with user scope and PiX's agent dir, project optional", async () => {
-  // No project or session open: installs must work from the settings page.
+test("installs and removes recommended extensions with user scope and PiX's agent dir, project optional", async () => {
+  // No project or session open: package actions must work from the settings page.
   const runtime = new PiRuntime(null, null, () => undefined, async () => undefined);
-  const installs: Array<{ source: string; agentDir: string; cwd: string; scopeOptions?: { local?: boolean } }> = [];
+  const calls: Array<{ method: string; source: string; agentDir: string; cwd: string; scopeOptions?: { local?: boolean } }> = [];
   runtime.mod = {
     SettingsManager: { create: (cwd: string, agentDir: string) => ({ cwd, agentDir }) },
     DefaultPackageManager: class {
       options: { cwd: string; agentDir: string };
       constructor(options: { cwd: string; agentDir: string }) { this.options = options; }
       async installAndPersist(source: string, scopeOptions?: { local?: boolean }) {
-        installs.push({ source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
+        calls.push({ method: "install", source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
+      }
+      async removeAndPersist(source: string, scopeOptions?: { local?: boolean }) {
+        calls.push({ method: "remove", source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
+        return true;
       }
     },
   };
 
-  const result = await runtime.control({ action: "installExtension", source: "npm:pi-web-access" });
-
-  assert.deepEqual(result, { ok: true });
-  assert.deepEqual(installs, [
-    { source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
+  assert.deepEqual(await runtime.control({ action: "installExtension", source: "npm:pi-web-access" }), { ok: true });
+  assert.deepEqual(await runtime.control({ action: "removeExtension", source: "npm:pi-web-access" }), { ok: true });
+  assert.deepEqual(calls, [
+    { method: "install", source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
+    { method: "remove", source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
   ]);
 });
 

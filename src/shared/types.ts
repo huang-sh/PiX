@@ -454,7 +454,7 @@ export type AgentControl =
   | { action: "setSkillManualOnly"; path: string; manualOnly: boolean }
   | { action: "getModels"; broker?: boolean }
   | { action: "getExtensions"; reload?: boolean }
-  | { action: "installExtension"; source: string }
+  | { action: "installExtension" | "removeExtension"; source: string }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }
   | { action: "setThinking"; level: string }
   | {

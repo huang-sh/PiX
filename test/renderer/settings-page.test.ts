@@ -725,8 +725,9 @@ describe("SettingsPage save", () => {
     wrapper.unmount();
   });
 
-  it("installs recommended extensions and reflects the installed state", async () => {
+  it("installs and removes recommended extensions, reflecting the installed state", async () => {
     const extensions: RuntimeExtension[] = [];
+    const webAccess = (): RuntimeExtension => ({ path: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", resolvedPath: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", source: "npm:pi-web-access", scope: "user", tools: [{ name: "web_search", description: "Search the web" }], commands: [] });
     vi.mocked(desktop.invoke).mockImplementation(async (route) =>
       route === "agent.control" ? extensions : settings,
     );
@@ -756,10 +757,15 @@ describe("SettingsPage save", () => {
     expect(card().text()).toContain("npm registry unreachable");
     expect(card().text()).toContain("Install");
 
-    // A successful install refreshes the list and flips the card to installed.
+    // A successful install refreshes the list and swaps the card to Remove.
     vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
-      if (route === "agent.control" && (payload as { action?: string }).action === "installExtension") {
-        extensions.push({ path: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", resolvedPath: "/home/me/.pix/agent/npm/node_modules/pi-web-access/index.ts", source: "npm:pi-web-access", scope: "user", tools: [{ name: "web_search", description: "Search the web" }], commands: [] });
+      const action = (payload as { action?: string }).action;
+      if (route === "agent.control" && action === "installExtension") {
+        extensions.push(webAccess());
+        return { ok: true };
+      }
+      if (route === "agent.control" && action === "removeExtension") {
+        extensions.length = 0;
         return { ok: true };
       }
       return route === "agent.control" ? extensions : settings;
@@ -768,8 +774,14 @@ describe("SettingsPage save", () => {
     await flushPromises();
     expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "installExtension", source: "npm:pi-web-access" });
     expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "getExtensions", reload: true });
-    expect(card().text()).toContain("Installed");
-    expect(card().get("button").attributes("disabled")).toBeDefined();
+    expect(card().text()).toContain("Remove");
+
+    // Removing the package clears the extension and offers Install again.
+    await card().get("button").trigger("click");
+    await flushPromises();
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("agent.control", { action: "removeExtension", source: "npm:pi-web-access" });
+    expect(card().text()).toContain("Install");
+    expect(card().text()).not.toContain("Remove");
     wrapper.unmount();
   });
 });

@@ -533,24 +533,24 @@ async function loadExtensions(reload = false) {
   }
 }
 
-const installBusySource = ref("");
-const installError = ref<{ source: string; message: string } | undefined>();
+const packageBusySource = ref("");
+const packageError = ref<{ source: string; message: string } | undefined>();
 
 function extensionInstalled(name: string) {
   return extensions.value.some((extension) => isNpmPackageExtension(extension, name));
 }
 
-async function installRecommended(source: string) {
-  if (installBusySource.value) return;
-  installBusySource.value = source;
-  installError.value = undefined;
+async function runPackageAction(source: string, action: "installExtension" | "removeExtension") {
+  if (packageBusySource.value) return;
+  packageBusySource.value = source;
+  packageError.value = undefined;
   try {
-    await session.control({ action: "installExtension", source });
+    await session.control({ action, source });
     await loadExtensions(true);
   } catch (error) {
-    installError.value = { source, message: error instanceof Error ? error.message : String(error) };
+    packageError.value = { source, message: error instanceof Error ? error.message : String(error) };
   } finally {
-    installBusySource.value = "";
+    packageBusySource.value = "";
   }
 }
 
@@ -1050,18 +1050,20 @@ async function logout(provider: RuntimeProvider) {
                   <h3>{{ item.name }}</h3>
                   <span>{{ item.source }}</span>
                 </div>
-                <Button v-if="extensionInstalled(item.name)" variant="outline" size="sm" class="extension-install-button" disabled>
-                  <Check :size="14" aria-hidden="true" />{{ t("settings.recommendedInstalled") }}
+                <Button v-if="extensionInstalled(item.name)" variant="outline" size="sm" class="extension-install-button" :disabled="!!packageBusySource" @click="runPackageAction(item.source, 'removeExtension')">
+                  <RefreshCw v-if="packageBusySource === item.source" :size="14" class="spin" aria-hidden="true" />
+                  <Trash2 v-else :size="14" aria-hidden="true" />
+                  {{ t(packageBusySource === item.source ? "settings.recommendedRemoving" : "settings.recommendedRemove") }}
                 </Button>
-                <Button v-else size="sm" class="extension-install-button" :disabled="!!installBusySource" @click="installRecommended(item.source)">
-                  <RefreshCw v-if="installBusySource === item.source" :size="14" class="spin" aria-hidden="true" />
+                <Button v-else size="sm" class="extension-install-button" :disabled="!!packageBusySource" @click="runPackageAction(item.source, 'installExtension')">
+                  <RefreshCw v-if="packageBusySource === item.source" :size="14" class="spin" aria-hidden="true" />
                   <Download v-else :size="14" aria-hidden="true" />
-                  {{ t(installBusySource === item.source ? "settings.recommendedInstalling" : "settings.recommendedInstall") }}
+                  {{ t(packageBusySource === item.source ? "settings.recommendedInstalling" : "settings.recommendedInstall") }}
                 </Button>
               </header>
               <div class="extension-item-body">
                 <p class="extension-summary">{{ t(`settings.recommended.${item.key}.description`) }}</p>
-                <p v-if="installError?.source === item.source" class="extension-install-error" role="alert">{{ installError.message }}</p>
+                <p v-if="packageError?.source === item.source" class="extension-install-error" role="alert">{{ packageError.message }}</p>
               </div>
             </article>
           </div>

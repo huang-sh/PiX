@@ -112,16 +112,15 @@ test("validates persistent model and API key actions", () => {
   );
 });
 
-test("extension installs are limited to recommended sources", () => {
-  assert.deepEqual(
-    validateRouteInput("agent.control", {
-      action: "installExtension",
-      source: "npm:pi-web-access",
-    }),
-    { action: "installExtension", source: "npm:pi-web-access" },
-  );
-  for (const source of ["", "npm:not-recommended", "git:github.com/user/repo", "./local", "npm:pi-web-access; rm -rf /"])
-    assert.throws(() =>
-      validateRouteInput("agent.control", { action: "installExtension", source }),
+test("extension installs and removals are limited to recommended sources", () => {
+  for (const action of ["installExtension", "removeExtension"] as const) {
+    assert.deepEqual(
+      validateRouteInput("agent.control", { action, source: "npm:pi-web-access" }),
+      { action, source: "npm:pi-web-access" },
     );
+    for (const source of ["", "npm:not-recommended", "git:github.com/user/repo", "./local", "npm:pi-web-access; rm -rf /"])
+      assert.throws(() =>
+        validateRouteInput("agent.control", { action, source }),
+      );
+  }
 });

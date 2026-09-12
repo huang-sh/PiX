@@ -149,7 +149,7 @@ test("remote session rename is forwarded to the remote host", async () => {
   }]);
 });
 
-test("recommended extension installs run on the active remote host", async () => {
+test("recommended extension package actions run on the active remote host", async () => {
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
@@ -168,12 +168,16 @@ test("recommended extension installs run on the active remote host", async () =>
     action: "installExtension",
     source: "npm:pi-web-access",
   });
+  await controller.invoke("agent.control", {
+    action: "removeExtension",
+    source: "npm:pi-web-access",
+  });
 
   assert.deepEqual(localCalls, []);
-  assert.deepEqual(remoteCalls, [{
-    route: "agent.control",
-    input: { action: "installExtension", source: "npm:pi-web-access" },
-  }]);
+  assert.deepEqual(remoteCalls, [
+    { route: "agent.control", input: { action: "installExtension", source: "npm:pi-web-access" } },
+    { route: "agent.control", input: { action: "removeExtension", source: "npm:pi-web-access" } },
+  ]);
 });
 
 test("remote OAuth login runs on the desktop and only syncs models", async () => {  const controller = new MainController(root, denied);
