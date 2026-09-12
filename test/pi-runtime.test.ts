@@ -524,6 +524,7 @@ test("installs and removes recommended extensions with user scope and PiX's agen
   // No project or session open: package actions must work from the settings page.
   const runtime = new PiRuntime(null, null, () => undefined, async () => undefined);
   const calls: Array<{ method: string; source: string; agentDir: string; cwd: string; scopeOptions?: { local?: boolean } }> = [];
+  let removeResult = true;
   runtime.mod = {
     SettingsManager: { create: (cwd: string, agentDir: string) => ({ cwd, agentDir }) },
     DefaultPackageManager: class {
@@ -534,7 +535,7 @@ test("installs and removes recommended extensions with user scope and PiX's agen
       }
       async removeAndPersist(source: string, scopeOptions?: { local?: boolean }) {
         calls.push({ method: "remove", source, agentDir: this.options.agentDir, cwd: this.options.cwd, scopeOptions });
-        return true;
+        return removeResult;
       }
     },
   };
@@ -545,6 +546,13 @@ test("installs and removes recommended extensions with user scope and PiX's agen
     { method: "install", source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
     { method: "remove", source: "npm:pi-web-access", agentDir: pixAgentDir(), cwd: homedir(), scopeOptions: undefined },
   ]);
+  // A no-op removal (e.g. only a project-scoped copy exists) must report
+  // instead of pretending success and leaving the card in a remove loop.
+  removeResult = false;
+  await assert.rejects(
+    runtime.control({ action: "removeExtension", source: "npm:pi-web-access" }),
+    /Not installed in user scope/,
+  );
 });
 
 test("factory loads bundled packages as additional extension paths", async () => {

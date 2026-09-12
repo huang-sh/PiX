@@ -535,8 +535,9 @@ async function importSkillFile(event: Event) {
   }
 }
 
-async function loadExtensions(reload = false) {
-  if (layout.settingsCategory !== "extensions" || extensionBusy.value) return;
+/** Unconditional fetch; also used after installs so a category switch or an
+ *  in-flight refresh can never leave the card's state stale. */
+async function refreshExtensions(reload: boolean) {
   extensionBusy.value = true;
   extensionError.value = "";
   try {
@@ -546,6 +547,11 @@ async function loadExtensions(reload = false) {
   } finally {
     extensionBusy.value = false;
   }
+}
+
+async function loadExtensions(reload = false) {
+  if (layout.settingsCategory !== "extensions" || extensionBusy.value) return;
+  await refreshExtensions(reload);
 }
 
 const packageBusySource = ref("");
@@ -561,7 +567,7 @@ async function runPackageAction(source: string, action: "installExtension" | "re
   packageError.value = undefined;
   try {
     await session.control({ action, source });
-    await loadExtensions(true);
+    await refreshExtensions(true);
   } catch (error) {
     packageError.value = { source, message: error instanceof Error ? error.message : String(error) };
   } finally {

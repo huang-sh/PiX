@@ -887,9 +887,13 @@ export class PiRuntime {
           agentDir: this.agentDir(),
           settingsManager: pi.SettingsManager.create(cwd, this.agentDir()),
         });
-        await (input.action === "installExtension"
-          ? packageManager.installAndPersist(input.source)
-          : packageManager.removeAndPersist(input.source));
+        if (input.action === "installExtension") {
+          await packageManager.installAndPersist(input.source);
+        } else if (!(await packageManager.removeAndPersist(input.source))) {
+          // The button only manages user scope; a project-scoped install
+          // (pi install -l) must report instead of silently no-op.
+          throw new Error("Not installed in user scope; remove the project-scoped copy with pi remove");
+        }
         return { ok: true };
       }
       case "loginApiKey": {
