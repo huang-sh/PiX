@@ -480,7 +480,7 @@ async function skipUpdate() {
   updateNotice.value = null;
   if (!version) return;
   try {
-    await desktop.invoke("settings.update", { scope: "app", patch: { updateSkippedVersion: version } });
+    await layout.updateAppSettings({ updateSkippedVersion: version });
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }

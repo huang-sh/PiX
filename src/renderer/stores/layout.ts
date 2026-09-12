@@ -52,6 +52,14 @@ export const useLayoutStore = defineStore("layout", {
       applyTheme(settings.app.theme);
       applyAppearance(settings.app);
     },
+    // The renderer owns the app scope, so a write must fold the saved bundle
+    // back in: the settings form saves the clone of this state with
+    // replace: true, which would otherwise drop keys only main writes.
+    async updateAppSettings(patch: Record<string, unknown>) {
+      this.applySettings(
+        await desktop.invoke<SettingsBundle>("settings.update", { scope: "app", patch }),
+      );
+    },
     async setTheme(preference: ThemePreference) {
       if (!this.settings || this.themeSaving) return;
       const previous = this.settings.app.theme;
