@@ -47,7 +47,7 @@ import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
 import { pixAgentDir, pixHome } from "./paths.js";
 import { piSettingsSdk } from "./pi-runtime.js";
-const readJson = <T extends Record<string, unknown>>(p: string): T => {
+export const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
     const v = JSON.parse(readFileSync(p, "utf8"));
     return v && typeof v === "object" && !Array.isArray(v)
@@ -75,7 +75,7 @@ const merge = (
   }
   return out;
 };
-const atomic = (p: string, v: unknown) => {
+export const atomic = (p: string, v: unknown) => {
   mkdirSync(dirname(p), { recursive: true });
   const t = `${p}.tmp`;
   writeFileSync(t, JSON.stringify(v, null, 2) + "\n");

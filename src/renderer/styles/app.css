@@ -318,6 +318,9 @@ kbd {
 .session-item > span { display: flex; align-items: baseline; min-width: 0; gap: 8px; padding-right: 8px; }
 .session-item strong { overflow: hidden; font-size: var(--font-size-ui); text-overflow: ellipsis; white-space: nowrap; }
 .session-item small { flex-shrink: 0; margin-left: auto; color: var(--faint); font-size: var(--font-size-caption); white-space: nowrap; }
+.session-item .session-pin { flex-shrink: 0; color: var(--accent); }
+.session-item .archived-tag { border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; color: var(--muted); }
+.session-item.archived strong { color: var(--muted); }
 .show-more { min-height: 34px; padding: 0 11px; color: var(--faint); font-size: var(--font-size-small); text-align: left; }
 .show-more:hover { color: var(--muted); }
 .project-empty { margin: 4px 11px 10px; color: var(--faint); font-size: var(--font-size-caption); }

@@ -41,6 +41,8 @@ export const useSessionStore = defineStore("session", {
     // Last explicit pick, used when a draft has no parent thinking setting.
     userThinking: undefined as string | undefined,
     query: "",
+    // Archived projects and sessions rejoin the lists while this is on.
+    showArchived: false,
     commands: [] as RuntimeCommand[],
     commandRequest: 0,
     models: [] as RuntimeModel[],
@@ -81,6 +83,10 @@ export const useSessionStore = defineStore("session", {
     },
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
+      // Pinned sessions top their project group; the sort is stable, so
+      // recency order survives inside each rank.
+      const ranked = (sessions: SessionSummary[]) =>
+        [...sessions].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
       return state.projects
         .map((record) => {
           const projectMatch = !query || `${record.project.name} ${record.project.path} ${
@@ -88,18 +94,21 @@ export const useSessionStore = defineStore("session", {
               ? record.project.remote.host
               : record.project.remote?.distro ?? ""
           }`.toLowerCase().includes(query);
+          const sessions = projectMatch
+            ? record.sessions
+            : record.sessions.filter((session) =>
+                `${session.name ?? ""} ${session.firstMessage} ${session.id}`
+                  .toLowerCase()
+                  .includes(query),
+              );
           return {
             ...record,
-            sessions: projectMatch
-              ? record.sessions
-              : record.sessions.filter((session) =>
-                  `${session.name ?? ""} ${session.firstMessage} ${session.id}`
-                    .toLowerCase()
-                    .includes(query),
-                ),
+            sessions: ranked(sessions.filter((session) => state.showArchived || !session.archived)),
           };
         })
-        .filter((record) => !query || record.sessions.length || record.project.name.toLowerCase().includes(query));
+        .filter((record) =>
+          (state.showArchived || !record.archived) &&
+          (!query || record.sessions.length || record.project.name.toLowerCase().includes(query)));
     },
     selectedNode(state) {
       const id = state.focusedNode ?? state.current?.projection.activeNodeId;
@@ -390,6 +399,27 @@ export const useSessionStore = defineStore("session", {
     async remove(path: string, confirmed = false) {
       const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>("session.delete", confirmed ? { path, confirmed } : { path });
       if (!result.cancelled) this.applyDeletion(path, result.sessions);
+    },
+    async pin(path: string, pinned: boolean) {
+      const result = await desktop.invoke<{ sessions?: SessionSummary[]; projects: ProjectGroup[] }>("library.pin", { path, pinned });
+      this.applyLibrary(result);
+    },
+    async archiveSession(path: string, archived: boolean) {
+      const result = await desktop.invoke<{ sessions?: SessionSummary[]; projects: ProjectGroup[] }>("library.archiveSession", { path, archived });
+      this.applyLibrary(result);
+    },
+    async archiveProject(id: string, archived: boolean) {
+      const result = await desktop.invoke<{ projects: ProjectGroup[] }>("library.archiveProject", { id, archived });
+      this.projects = result.projects;
+    },
+    // Library marks ride back on the invoke reply: the sessions list only
+    // exists while a project is open, and projects always come back.
+    applyLibrary(result: { sessions?: SessionSummary[]; projects: ProjectGroup[] }) {
+      this.projects = result.projects;
+      if (result.sessions) {
+        this.sessions = result.sessions;
+        this.syncProject();
+      }
     },
   },
 });
