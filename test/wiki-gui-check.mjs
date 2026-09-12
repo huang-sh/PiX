@@ -102,7 +102,15 @@ try {
       const state = window.__pixTest?.state?.();
       return Boolean(state && state.current && state.current.session);
     })()`);
-    if (!ready) throw new Error("session not open yet");
+    if (!ready) {
+      const diag = await cdp.evaluate(`(() => {
+        const state = window.__pixTest?.state?.();
+        return { loading: state?.loading, welcome: state?.welcome,
+          sessions: state?.sessions?.length ?? -1, first: state?.sessions?.[0]?.path ?? null,
+          layoutChat: state?.layout?.collapsed?.chat };
+      })()`).catch(() => null);
+      throw new Error(`session not open yet: ${JSON.stringify(diag)}`);
+    }
   });
 
   // The "opened" persistence hook refreshes the wiki deterministically and
@@ -145,6 +153,10 @@ try {
     if (!after || after === before) throw new Error("refresh did not update wiki status");
     return true;
   });
+
+  // Capture proof of where the region sits in the panel.
+  const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(root, "artifacts", "wiki-region.png"), Buffer.from(shot.data, "base64"));
 
   console.log(JSON.stringify({ region, refreshOk }, null, 2));
   console.log("Wiki GUI check passed");
