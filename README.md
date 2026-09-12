@@ -74,6 +74,6 @@ npm run dev
 
 `npm run verify` 可执行完整的类型检查、测试与启动冒烟验证。
 
-`npm run test:fff` 验证内置文件搜索；`npm run test:web` 验证网页扩展依赖打包与网页抓取，均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；CI 分别在 Apple Silicon 和 Intel runner 上构建对应安装包，以包含正确的本机运行库。
+`npm run test:fff` 验证内置文件搜索；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络），均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；CI 分别在 Apple Silicon 和 Intel runner 上构建对应安装包，以包含正确的本机运行库。
 
 </details>

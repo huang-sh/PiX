@@ -74,6 +74,6 @@ npm run dev
 
 `npm run verify` runs the full typecheck, test, and startup smoke suite.
 
-`npm run test:fff` checks bundled file search; `npm run test:web` checks web dependency packaging and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; CI builds on separate Apple Silicon and Intel runners to include the matching native libraries.
+`npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; CI builds on separate Apple Silicon and Intel runners to include the matching native libraries.
 
 </details>
