@@ -16,6 +16,7 @@ artifacts/
 /.pi/
 test/workspace/.pi/sessions/
 test/workspace/.pi/wiki/
+test/workspace/.pix/wiki/
 
 # Workspace fixture dirt: install-fixtures.mjs intentionally leaves
 # src/example.ts modified and src/new-file.ts untracked in the nested repo.

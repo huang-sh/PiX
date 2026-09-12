@@ -195,11 +195,11 @@ export const messages = {
       agentsCopyFailed: "Could not copy the guide",
       agentsSnippet: [
         "# Session Wiki (for the coding agent)",
-        "- This workspace keeps a cross-session wiki under `.pi/wiki/` (generated and updated by PiX; derived data — never edit it by hand).",
-        "- Before picking up work, read `.pi/wiki/index.md`: topic anchors, one-line summaries per session branch, and coverage watermarks.",
-        "- Details live in `.pi/wiki/sessions/*/branches/*.md`; drill `turn:` citations into the sibling `sources/*.md` for evidence.",
+        "- This workspace keeps a cross-session wiki under `.pix/wiki/` (generated and updated by PiX; derived data — never edit it by hand).",
+        "- Before picking up work, read `.pix/wiki/index.md`: topic anchors, one-line summaries per session branch, and coverage watermarks.",
+        "- Details live in `.pix/wiki/sessions/*/branches/*.md`; drill `turn:` citations into the sibling `sources/*.md` for evidence.",
         '- The banner at the top of each page states what was covered and when evidence ends; treat "待更新/outdated" pages with care.',
-        "- To search, grep the `branches` pages under `.pi/wiki`, using the topic anchors in the index as keywords.",
+        "- To search, grep the `branches` pages under `.pix/wiki`, using the topic anchors in the index as keywords.",
       ].join("\n"),
       status: {
         fresh: "Fresh",
@@ -899,11 +899,11 @@ export const messages = {
       agentsCopyFailed: "复制失败",
       agentsSnippet: [
         "# 会话 Wiki（给编码代理）",
-        "- 本工作区在 `.pi/wiki/` 维护跨会话 Wiki（PiX 自动生成与更新，派生数据，勿手改）。",
-        "- 接手任务前先读 `.pi/wiki/index.md`：主题锚点、各会话分支的一句话摘要与覆盖水位。",
-        "- 明细读 `.pi/wiki/sessions/*/branches/*.md`；结论中的 `turn:` 引用可在同目录 `sources/*.md` 下钻到证据。",
+        "- 本工作区在 `.pix/wiki/` 维护跨会话 Wiki（PiX 自动生成与更新，派生数据，勿手改）。",
+        "- 接手任务前先读 `.pix/wiki/index.md`：主题锚点、各会话分支的一句话摘要与覆盖水位。",
+        "- 明细读 `.pix/wiki/sessions/*/branches/*.md`；结论中的 `turn:` 引用可在同目录 `sources/*.md` 下钻到证据。",
         "- 每页顶部横幅标注收录状态与证据截止时间；“待更新”页面的结论需谨慎引用。",
-        "- 检索时用 grep 限定 `.pi/wiki` 下的 branches 页面，以 index 的主题锚点为关键词。",
+        "- 检索时用 grep 限定 `.pix/wiki` 下的 branches 页面，以 index 的主题锚点为关键词。",
       ].join("\n"),
       status: {
         fresh: "已收录",

@@ -127,7 +127,7 @@ export class MainController {
     }, (url) => this.platform.openExternal(url));
     this.wiki = new WikiService({
       wikiRoot: () => this.project && !this.project.remote
-        ? join(this.project.path, ".pi", "wiki")
+        ? join(this.project.path, ".pix", "wiki")
         : null,
       settings: () => this.settings.bundle().app.wiki ?? {},
       defaultModel: () => {

@@ -1,6 +1,6 @@
 // Wiki compiler: deterministic snapshot/lint/render of session graphs plus the
 // model-side branch-summary pipeline. One wiki per workspace (project) under
-// `<project>/.pi/wiki`; every session that has been opened owns a
+// `<project>/.pix/wiki`; every session that has been opened owns a
 // `sessions/<sessionId>/` section. Source sessions are read but never written.
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -18,7 +18,7 @@ const cell = (value: unknown) => String(value ?? "").replace(/\|/g, "\\|").repla
 const blocks = (content: unknown) => typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
 // Tool results that read the wiki itself must not become evidence for the
 // wiki: summaries would gradually cite themselves. Detect and skip them.
-const WIKI_SELF_READ = /(?:\.pi[\\/]wiki|\.pix-tree[\\/]wiki)/u;
+const WIKI_SELF_READ = /(?:\.pi[\\/]wiki|\.pix(?:-tree)?[\\/]wiki)/u;
 const WIKI_SELF_READ_NOTE = "[wiki 读取结果，已跳过以防自引用]";
 const STATUS = /<!-- pix-wiki:status:start -->[\s\S]*?<!-- pix-wiki:status:end -->\s*/g;
 const bodyOf = (value: string) => value.replace(STATUS, "").trim() + "\n";
@@ -94,7 +94,7 @@ export interface WikiSnapshot {
 
 const WIKI_POLICY = `# Wiki 规则（policy）
 
-- 一个工作区一个 Wiki，位于 \`<project>/.pi/wiki/\`；每个打开过的会话占 \`sessions/<会话ID>/\` 一节。原始会话只读。
+- 一个工作区一个 Wiki，位于 \`<project>/.pix/wiki/\`；每个打开过的会话占 \`sessions/<会话ID>/\` 一节。原始会话只读。
 - \`sessions/<id>/branches/<branch>.md\`：分支摘要页。必需章节：摘要、目标、关键结论、修正与限制、未解决项。
 - 证据引用使用完整节点 ID 的反引号形式，例如 \`turn:<uuid>:<entry>\`，且必须位于该分支的祖先链上。
 - \`sessions/<id>/sources/<branch>.md\`：程序生成的有损证据导出；\`sessions/<id>/tree.md\`：该会话的车道地图；\`index.md\`：工作区首页。

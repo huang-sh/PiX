@@ -448,7 +448,7 @@ test("wiki self-reads never become evidence (recursion guard)", () => {
   const selfRead = {
     type: "message", id: "t9", parentId: "u3", timestamp: "2026-09-01T10:00:00.000Z",
     message: { role: "toolResult", toolName: "read", toolCallId: "c9",
-      content: [{ type: "text", text: ".pi/wiki/index.md: 支付回调验签机密内容" }] },
+      content: [{ type: "text", text: ".pix/wiki/index.md: 支付回调验签机密内容" }] },
   } as unknown as RawSessionEntry;
   f.appendMain(selfRead);
   refreshSessionWiki(f.wiki, f.main);

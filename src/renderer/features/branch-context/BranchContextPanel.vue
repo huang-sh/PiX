@@ -164,7 +164,7 @@ async function copyAgentsGuide() {
     layout.showNotice(t("wiki.agentsCopyFailed"), "error");
   }
 }
-// One workspace wiki at <project>/.pi/wiki; the current session owns the
+// One workspace wiki at <project>/.pix/wiki; the current session owns the
 // sessions/<sessionKey>/ section. Open pages with the regular workspace
 // viewer (relative path, no extra authority).
 async function openWikiFile(file: "index" | "summary") {
@@ -174,7 +174,7 @@ async function openWikiFile(file: "index" | "summary") {
     layout.showNotice(t("wiki.outsideProject"), "warning");
     return;
   }
-  const rel = file === "index" ? ".pi/wiki/index.md" : `.pi/wiki/sessions/${key}/branches/${wikiBranchId.value}.md`;
+  const rel = file === "index" ? ".pix/wiki/index.md" : `.pix/wiki/sessions/${key}/branches/${wikiBranchId.value}.md`;
   try {
     await workspace.openFile(rel);
     await layout.openTool("files");

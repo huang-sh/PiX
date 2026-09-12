@@ -15,7 +15,7 @@ mkdirSync(testHome, { recursive: true });
 mkdirSync(join(testHome, ".pi", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(join(testHome, ".pi", "agent", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
-writeFileSync(join(testHome, ".pix", "settings.json"), JSON.stringify({
+writeFileSync(join(testHome, ".pix", "gui.settings.json"), JSON.stringify({
   openLastSessionOnStartup: true,
   layout: {
     widths: { navigator: 248, chat: 356, content: 320 },
