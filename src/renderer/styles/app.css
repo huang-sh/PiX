@@ -611,6 +611,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-markdown .node-slot:last-of-type .paragraph-node { margin-bottom: 0; }
 .process-item .agent-markdown { color: var(--text); --markdown-body-size: var(--font-size-ui); }
 .chat-turn { margin-bottom: 4px; }
+.chat-turn:has(> .file-changes) + .chat-turn { margin-top: 24px; }
 .agent-process { margin: -4px 0 17px; }
 .agent-process > summary { display: flex; align-items: center; gap: 7px; min-height: 37px; padding: 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--font-size-caption); cursor: pointer; list-style: none; }
 .agent-process > summary::-webkit-details-marker { display: none; }
