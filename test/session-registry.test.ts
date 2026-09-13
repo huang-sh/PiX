@@ -336,6 +336,36 @@ test("background bookkeeping coalesces a burst of activity into one refresh", { 
   }
 });
 
+test("the session list and project groups carry running markers that flip back to idle", { timeout: 30000 }, async () => {
+  const first = workspace(), second = workspace();
+  const controller = new MainController(first, platform);
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", name: "Faux", reasoning: false, contextWindow: 128_000 }] });
+    injectFaux(controller, faux);
+    const run = await startGatedRun(controller, faux, "marked answer");
+    await controller.invoke("agent.control", { action: "newSession" });
+
+    const list = await controller.sessions();
+    assert.equal(list.find(session => session.path === run.path)?.running, true, "the background run is marked");
+    assert.equal(list.find(session => session.path === controller.current!.session.path)?.running, undefined);
+
+    controller.configure(second);
+    await controller.invoke("session.list");
+    const group = controller.projectGroups().find(record => record.project.path === first);
+    assert.equal(group?.sessions.find(session => session.path === run.path)?.running, true,
+      "the marker follows the session into its own project group");
+
+    await run.finish();
+    assert.equal((await controller.sessions()).find(session => session.path === run.path)?.running, undefined,
+      "the marker clears once the run settles");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
+  }
+});
+
 test("switching the view away shrinks the idle pool", { timeout: 15000 }, async () => {
   const ws = workspace();
   const controller = new MainController(ws, platform);

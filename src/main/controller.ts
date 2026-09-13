@@ -85,7 +85,7 @@ export class MainController {
   remoteBrokerModels = new Set<string>();
   listeners = new Set<(e: DesktopEvent) => void>();
   private readonly liveProgress = new Map<string, DesktopEvent>();
-  private liveProgressSession?: string;
+  private readonly liveProgressEpochs = new Map<string, string | undefined>();
   constructor(path: string | null, platform: Platform) {
     path = path ? resolve(path) : null;
     this.localProjectPath = path;
@@ -126,6 +126,7 @@ export class MainController {
         const current = (pushed.payload as { current?: SessionSnapshot })?.current;
         if (current && !this.registry.isActive(entry)) {
           // A background session settled: refresh history and the list, never the view.
+          this.noteEpoch(current);
           this.scheduleBackgroundRefresh(entry);
           return;
         }
@@ -134,10 +135,16 @@ export class MainController {
       this.emit(pushed);
       return;
     }
-    // Token streams exist only for the session in view; the renderer would
-    // otherwise attach an unscoped background event to the active session.
-    if (this.registry.isActive(entry)) this.emit(pushed);
-    const p = pushed.payload as { type?: string; graphId?: string; branchId?: string };
+    // Main-line events outside a scoped run still identify their session, so
+    // progress baselines stay per-session across view switches.
+    let p = pushed.payload as { type?: string; graphId?: string; branchId?: string };
+    let routed = pushed;
+    if (!p.graphId) {
+      p = { ...p, graphId: entry.path };
+      routed = { ...pushed, payload: p };
+    }
+    if (this.registry.isActive(entry)) this.emit(routed);
+    else this.recordProgress(routed);   // token streams of background runs are recorded for their return, never forwarded
     // GraphRuntime publishes child snapshots after updating its worker. Taking
     // one here would broadcast the old worker state, then the new state again.
     const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
@@ -244,20 +251,37 @@ export class MainController {
     return () => this.listeners.delete(listener);
   }
   emit(e: DesktopEvent) {
-    // Retain only active progress for reload/reconnect recovery, never token history.
-    pruneAgentProgress(e, this.liveProgress);
-    if (isAgentProgress(e)) this.liveProgress.set(agentProgressKey(e.payload as Record<string, unknown>), e);
+    this.recordProgress(e);
     if (e.type === "sessions") {
-      const current = (e.payload as { current?: SessionSnapshot }).current;
-      if (current) {
-        const key = JSON.stringify([current.session.path, current.graph?.epoch]);
-        if (this.liveProgressSession !== undefined && this.liveProgressSession !== key) this.liveProgress.clear();
-        this.liveProgressSession = key;
-      }
+      this.noteEpoch((e.payload as { current?: SessionSnapshot }).current);
     } else if (e.type === "remote.connection" && !(e.payload as { connected: boolean }).connected) {
-      this.liveProgress.clear();
+      // A dropped host's runs are dead; local sessions keep their baselines.
+      for (const key of [...this.liveProgress.keys()]) {
+        const graphId = (JSON.parse(key) as unknown[])[0];
+        if (typeof graphId === "string" && !this.registry.entry(graphId)) this.liveProgress.delete(key);
+      }
     }
     this.listeners.forEach((f) => f(e));
+  }
+  /**
+   * Progress baselines are keyed by graph id (= session path), so sessions
+   * running in the background keep theirs across view switches; they are
+   * replayed only when their session becomes the view again.
+   */
+  private recordProgress(e: DesktopEvent) {
+    pruneAgentProgress(e, this.liveProgress);
+    if (isAgentProgress(e)) this.liveProgress.set(agentProgressKey(e.payload as Record<string, unknown>), e);
+  }
+  /** A restarted session (new epoch) invalidates its own baselines, not other sessions'. */
+  private noteEpoch(current: SessionSnapshot | undefined) {
+    const graph = current?.graph;
+    if (!graph?.id) return;
+    const known = this.liveProgressEpochs.get(graph.id);
+    if (known !== undefined && known !== graph.epoch) {
+      for (const key of [...this.liveProgress.keys()])
+        if ((JSON.parse(key) as unknown[])[0] === graph.id) this.liveProgress.delete(key);
+    }
+    this.liveProgressEpochs.set(graph.id, graph.epoch);
   }
   remoteEvent(event: DesktopEvent) {
     const current = (event.payload as { current?: SessionSnapshot } | null)?.current;
@@ -274,8 +298,6 @@ export class MainController {
     this.emit(event);
   }
   configure(path: string | null) {
-    this.liveProgress.clear();
-    this.liveProgressSession = undefined;
     if (path) {
       path = resolve(path);
       if (!existsSync(path)) throw new Error("Project not found");
@@ -579,6 +601,7 @@ export class MainController {
   projectGroups(): ProjectGroup[] {
     const active = this.project ? projectId(this.project) : "";
     const marks = this.library.marks();
+    const running = this.registry.runningPaths();
     const pinned = new Set(marks.pinned),
       archivedSessions = new Set(marks.archivedSessions),
       archivedProjects = new Set(marks.archivedProjects);
@@ -594,6 +617,7 @@ export class MainController {
         ...session,
         pinned: pinned.has(session.path) || undefined,
         archived: archivedSessions.has(session.path) || undefined,
+        running: running.has(session.path) || undefined,
       })),
     }));
   }
@@ -613,15 +637,17 @@ export class MainController {
     ]);
   }
   async sessions() {
+    const running = this.registry.runningPaths();
     const decorate = (list: SessionSummary[]) => {
       const marks = this.library.marks();
       const pinned = new Set(marks.pinned),
-        archived = new Set(marks.archivedSessions);
+        archivedSessions = new Set(marks.archivedSessions);
       return list.map((x) => ({
         ...x,
         active: x.path === this.current?.session.path,
+        running: running.has(x.path) || undefined,
         pinned: pinned.has(x.path) || undefined,
-        archived: archived.has(x.path) || undefined,
+        archived: archivedSessions.has(x.path) || undefined,
       }));
     };
     try {
@@ -797,7 +823,10 @@ export class MainController {
         if (current) {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
-          for (const progress of this.liveProgress.values()) this.emit(progress);
+          // Replay only the session in view; other buckets wait for their turn.
+          const graphId = current.graph?.id;
+          for (const progress of this.liveProgress.values())
+            if ((progress.payload as { graphId?: string }).graphId === graphId) this.emit(progress);
         }
         return current;
       }

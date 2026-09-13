@@ -66,6 +66,56 @@ test("resync replays current live progress for every branch even when no more to
   } finally { controller.dispose(); }
 });
 
+test("switching sessions keeps the other session's live progress for its return", async () => {
+  const controller = new MainController(root, platform);
+  const snapshotOf = (path: string): SessionSnapshot => ({
+    session: { path }, entries: [], projection: projectSession([], null), runtime: {} as never,
+    graph: { id: path, epoch: "e", revision: 1, runs: [] },
+  }) as unknown as SessionSnapshot;
+  const runtimes = new Map<string, { open(): Promise<void>; snapshot(): SessionSnapshot; state(): unknown; emit?(event: unknown): void }>();
+  controller.createSessionRuntime = entry => {
+    const runtime = { open: async () => {}, snapshot: () => snapshotOf(entry.path), state: () => ({}) };
+    runtimes.set(entry.path, runtime);
+    return runtime as never;
+  };
+  const received: string[] = [];
+  const decode = sessionEventDecoder(async () => assert.fail("replay should decode without another resync"));
+  controller.onEvent(event => {
+    const decoded = decode(JSON.parse(JSON.stringify(event)));
+    if (decoded?.type === "agent") received.push(agentMessageContent((decoded.payload as any).message, "text"));
+  }, true);
+  const stamped: unknown[] = [];
+  controller.onEvent(event => {
+    const payload = (event as { type: string; payload?: { graphId?: string } }).payload;
+    if ((event as { type: string }).type === "agent" && payload) stamped.push(payload.graphId);
+  });
+  try {
+    await controller.registry.open(controller.project!, null, "a.jsonl");
+    // An unscoped main-line event identifies its session once routed.
+    runtimes.get("a.jsonl")!.emit!({ type: "agent", payload: {
+      type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "A streaming" }] },
+    } });
+    assert.ok(stamped.includes("a.jsonl"), "unscoped events are stamped with their session path");
+
+    await controller.registry.open(controller.project!, null, "b.jsonl");
+    received.length = 0;
+    // Tokens arriving while a runs in the background are recorded for its
+    // return, never forwarded to the session in view.
+    runtimes.get("a.jsonl")!.emit!({ type: "agent", payload: {
+      type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "A streaming more" }] },
+    } });
+    assert.deepEqual(received, [], "background token streams stay off the wire");
+
+    await controller.invoke("session.snapshot");   // b is in view: a's progress must not leak
+    assert.deepEqual(received, []);
+
+    await controller.registry.open(controller.project!, null, "a.jsonl");
+    received.length = 0;
+    await controller.invoke("session.snapshot");
+    assert.deepEqual(received, ["A streaming more"], "returning to a session replays its own progress");
+  } finally { controller.dispose(); }
+});
+
 test("IPC subscribers get deltas and session.snapshot publishes a full resync without reopening", async () => {
   const controller = new MainController(null, platform);
   const before = { session: { path: "s" }, entries: [], projection: projectSession([], null), runtime: {},

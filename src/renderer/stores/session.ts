@@ -71,6 +71,9 @@ export const useSessionStore = defineStore("session", {
     // payloads and applied when the lists are read, so surfaces that carry no
     // marks (remote replies, raw runtime snapshots) can never erase them.
     marks: { pinned: [] as string[], archivedSessions: [] as string[] },
+    // Running markers follow the same read-time pattern as marks: list
+    // payloads seed the set, snapshots without markers never erase it.
+    running: [] as string[],
     commands: [] as RuntimeCommand[],
     commandRequest: 0,
     models: [] as RuntimeModel[],
@@ -108,10 +111,12 @@ export const useSessionStore = defineStore("session", {
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
       const pinned = new Set(state.marks.pinned),
-        archived = new Set(state.marks.archivedSessions);
+        archived = new Set(state.marks.archivedSessions),
+        running = new Set(state.running);
       const marked = (sessions: SessionSummary[]) =>
         sessions.map((session) => ({
           ...session,
+          running: running.has(session.path) || session.running || undefined,
           pinned: pinned.has(session.path) || undefined,
           archived: archived.has(session.path) || undefined,
         }));
@@ -165,6 +170,9 @@ export const useSessionStore = defineStore("session", {
         }
       this.marks = { pinned, archivedSessions };
     },
+    adoptRunning(sessions: SessionSummary[]) {
+      this.running = sessions.filter(session => session.running).map(session => session.path);
+    },
     hydrate(
       project: ProjectInfo | null,
       sessions: SessionSummary[],
@@ -172,6 +180,7 @@ export const useSessionStore = defineStore("session", {
       current?: SessionSnapshot,
     ) {
       this.adoptMarks(projects);
+      this.adoptRunning(sessions);
       this.projects = projects;
       this.activeProjectId = project ? projectId(project) : "";
       this.sessions = sessions;
@@ -265,12 +274,15 @@ export const useSessionStore = defineStore("session", {
         this.focusedNode = null;
     },
     async refresh() {
-      this.sessions = await desktop.invoke<SessionSummary[]>("session.list");
+      const sessions = await desktop.invoke<SessionSummary[]>("session.list");
+      this.adoptRunning(sessions);
+      this.sessions = sessions;
       this.syncProject();
     },
     // Background completions refresh the list only; the session in view keeps
     // its snapshot and streaming state untouched.
     applySessions(sessions: SessionSummary[]) {
+      this.adoptRunning(sessions);
       this.sessions = sessions;
       this.syncProject();
     },
@@ -305,12 +317,26 @@ export const useSessionStore = defineStore("session", {
         const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
         this.applySnapshot(snapshot);
         this.focusedNode = snapshot.projection.activeNodeId;
+        if (snapshot.runtime.isStreaming || snapshot.graph?.runs.some(run => run.status === "running")) {
+          // Switching back mid-run: the snapshot resync replays the session's
+          // live progress so partial text shows before the next token.
+          void desktop.invoke("session.snapshot").catch(() => {});
+        }
         await Promise.all([
           this.refresh(),
           this.loadCommands(),
           this.loadModels().catch(() => {}),
         ]);
       } finally { this.loading = false; }
+    },
+    async stop(path: string) {
+      try {
+        await desktop.invoke("session.stop", { path });
+      } catch (error) {
+        useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
+        return;
+      }
+      await this.refresh();
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
       const result = await desktop.invoke<T>("agent.control", input);
@@ -432,6 +458,7 @@ export const useSessionStore = defineStore("session", {
         {},
       );
       if (!result) return;
+      this.adoptRunning(result.sessions);
       this.sessions = result.sessions;
       this.syncProject();
       if (result.imported) await this.open(result.imported);
@@ -441,11 +468,13 @@ export const useSessionStore = defineStore("session", {
         "session.rename",
         { path, name },
       );
+      this.adoptRunning(result.sessions);
       this.sessions = result.sessions;
       if (result.current) this.applySnapshot(result.current);
       this.syncProject();
     },
     applyDeletion(path: string, sessions: SessionSummary[]) {
+      this.adoptRunning(sessions);
       this.sessions = sessions;
       if (this.current?.session.path === path) {
         this.current = undefined;
@@ -481,6 +510,7 @@ export const useSessionStore = defineStore("session", {
       this.adoptMarks(result.projects);
       this.projects = result.projects;
       if (result.sessions) {
+        this.adoptRunning(result.sessions);
         this.sessions = result.sessions;
         this.syncProject();
       }

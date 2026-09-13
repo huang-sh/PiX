@@ -49,6 +49,12 @@ export class GraphRuntime extends PiRuntime {
   get recovering() {
     return Boolean(this.deletionRecovery);
   }
+  /** Cheap liveness probe for list decoration and guards; never bumps the snapshot revision. */
+  get busy() {
+    const state = this.state();
+    return Boolean(state.isStreaming || state.isCompacting || state.isRetrying || state.pendingMessageCount
+      || this.mainWork || [...this.workers.values()].some(worker => worker.work));
+  }
   private notify() {
     if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
     try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch {}

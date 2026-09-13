@@ -64,6 +64,36 @@ describe("session stream focus", () => {
     expect(session.messageWindow(40).messages).toHaveLength(2);
   });
 
+  it("composes running markers at read time and clears them when the list says so", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const row = session.current!.session;
+    const background = { ...row, path: "other.jsonl", messageCount: 2 };
+
+    session.applySessions([row, { ...background, running: true }]);
+
+    const project = () => session.filteredProjects[0]?.sessions;
+    expect(project()?.find(item => item.path === "other.jsonl")?.running).toBe(true);
+    // Snapshots carry no marker; they must never erase the set.
+    session.applySnapshot(snapshot(first, "a1"));
+    expect(project()?.find(item => item.path === "other.jsonl")?.running).toBe(true);
+    session.applySessions([row, background]);
+    expect(project()?.find(item => item.path === "other.jsonl")?.running).toBeUndefined();
+  });
+
+  it("stops a background session through the stop route and refreshes", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const row = session.current!.session;
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async (route: string) =>
+      route === "session.stop" ? { stopped: true } : [row]);
+
+    await session.stop("other.jsonl");
+
+    expect(invoke).toHaveBeenCalledWith("session.stop", { path: "other.jsonl" });
+    expect(invoke).toHaveBeenCalledWith("session.list");
+  });
+
   it("clears the current session after deletion, including broadcast-only deletion", async () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));

@@ -2,6 +2,7 @@
 import {
   Archive,
   ArchiveRestore,
+  CircleStop,
   Folder,
   FolderOpen,
   FolderSync,
@@ -232,14 +233,19 @@ async function revealSession(record: ProjectGroup, path: string) {
                   </span>
                   <i
                     :class="{
-                      running: record.id === session.activeProjectId && session.current?.session.path === item.path && session.activity?.active,
+                      running: item.running
+                        || (record.id === session.activeProjectId && session.current?.session.path === item.path && session.activity?.active),
                       current: record.id === session.activeProjectId && session.current?.session.path === item.path,
                     }"
+                    :title="item.running ? t('nav.stopSession') : undefined"
                   />
                 </button>
               </ContextMenuTrigger>
               <ContextMenuPortal>
                 <ContextMenuContent data-navigator-menu class="menu-content" :side-offset="5">
+                  <ContextMenuItem v-if="item.running" data-action="session-stop" class="menu-item danger" @select="session.stop(item.path)">
+                    <CircleStop :size="14" />{{ t("nav.stopSession") }}
+                  </ContextMenuItem>
                   <ContextMenuItem data-action="session-pin" class="menu-item" @select="session.pin(item.path, !item.pinned)">
                     <Star :size="14" />{{ t(item.pinned ? "nav.unpinSession" : "nav.pinSession") }}
                   </ContextMenuItem>

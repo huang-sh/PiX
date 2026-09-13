@@ -130,15 +130,23 @@ export class SessionRegistry {
    * never let eviction or deletion kill a live run.
    */
   busy(entry: SessionEntry): boolean {
-    const runtime = entry.runtime;
-    if (!runtime) return false;
     try {
-      const state = runtime.state();
-      if (state.isStreaming || state.isCompacting || state.isRetrying || state.pendingMessageCount) return true;
-      return Boolean(runtime.snapshot().graph?.runs.some(run => run.status === "running"));
+      return entry.runtime?.busy === true;
     } catch {
       return true;
     }
+  }
+
+  /** Session paths (canonical and SDK forms) that currently have work in flight. */
+  runningPaths(): Set<string> {
+    const paths = new Set<string>();
+    for (const entry of this.settled.values()) {
+      if (!entry.runtime?.busy) continue;
+      paths.add(entry.path);
+      const file = entry.runtime.state().sessionFile;
+      if (file) paths.add(file);
+    }
+    return paths;
   }
 
   async dispose(path: string): Promise<void> {

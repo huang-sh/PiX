@@ -61,6 +61,8 @@ export interface SessionSummary {
   messageCount: number;
   firstMessage: string;
   active?: boolean;
+  /** A run is in flight in this session's live runtime. */
+  running?: boolean;
   pinned?: boolean;
   archived?: boolean;
 }
