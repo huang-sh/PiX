@@ -12,7 +12,9 @@ currently active branch, avoiding cross-branch navigation mistakes.
 
 ```text
 Renderer -> isolated preload -> MainController
-                                |- PiRuntime
+                                |- PiRuntime (project: models, skills, login)
+                                |- SessionRegistry -> one GraphRuntime per open session
+                                |- RemoteSlot pool (WSL/SSH hosts, keyed by project)
                                 |- WorkspaceService
                                 |- GitService
                                 |- ShellService
@@ -21,6 +23,50 @@ Renderer -> isolated preload -> MainController
 
 Routes are runtime-validated before dispatch. Workspace paths are confined to
 the active project. Browser content uses an isolated webview partition.
+
+## Session lifecycle and the remote pool
+
+Opening a session switches the view; it never closes another session's
+runtime. `SessionRegistry` (`src/main/session-registry.ts`) keeps one
+`GraphRuntime` per session file, keyed by the canonical (realpath'd) session
+path, and survives project switches — `configure()` only repoints the view at
+the entered project's remembered session. Only four things close an entry:
+idle LRU eviction (`PIX_MAX_LIVE_SESSIONS`, default 4; running entries are
+never evicted and re-read the runtime before being treated as idle), the
+project's session directory changing, explicit deletion, and quitting.
+
+**Event routing.** Only the session in view drives `current` snapshots and
+token streams. Background sessions update their project's history and push
+decorated project groups (`{type:"sessions", payload:{projects}}`), coalesced
+to one write per 500 ms burst; their token events are stamped with the
+session's graph id and recorded — never forwarded — so switching back replays
+the in-flight text through the `session.snapshot` resync path. A restarted
+session (new graph epoch) invalidates only its own progress baselines.
+
+**Guards.** Deleting a session with work in flight is refused until it is
+stopped; the `session.stop` route aborts a session's runs from any project.
+Renames go through the owning runtime so a static append cannot race the
+session's own writes. Cross-project stop, rename, and delete resolve paths
+against the owning entry's session directory (`registry.resolve`), never a
+directory traversal hole.
+
+**Remote pool.** Each remote workspace's host connection lives in a pool keyed
+by project id. Switching projects parks the previous client instead of
+disposing it, and reconnecting to a pooled project adopts its slot — a second
+host would trip the graph ownership lock the pooled one still holds. Idle
+recycling disposes only quiet hosts: never the workspace in view, never a
+host whose `session.list` still reports running work, bounded by
+`PIX_MAX_REMOTE_CONNECTIONS` (default 2) and `PIX_REMOTE_IDLE_MS` (default
+5 min). Disconnects keep the slot until replaced so the degraded bootstrap
+can present remembered rows and a reconnect banner.
+
+**Shutdown.** Quitting flushes pending background history writes, aborts
+every local run (settling as `interrupted` with recovered inputs — this is
+in-process continuation, not persisted resumption), releases the graph
+ownership files, and disposes every pooled host. Per-graph parallelism stays
+capped by `PIX_MAX_PARALLEL_RUNS` (default 8); nothing bounds how many
+sessions may run at once beyond the user starting them, which is why the
+navigator's running markers are the visibility surface for it.
 
 ## Settings precedence
 

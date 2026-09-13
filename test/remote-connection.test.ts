@@ -267,8 +267,7 @@ test("reconnecting to a pooled project reuses its host instead of spawning a sec
   assert.equal(next.disposed, false);
 });
 
-test("recycling keeps hosts with running work and disposes idle ones", async (t) => {
-  const previousIdle = process.env.PIX_REMOTE_IDLE_MS;
+test("recycling keeps hosts with running work and disposes idle ones", async (t) => {  const previousIdle = process.env.PIX_REMOTE_IDLE_MS;
   process.env.PIX_REMOTE_IDLE_MS = "1000";
   t.after(() => {
     if (previousIdle === undefined) delete process.env.PIX_REMOTE_IDLE_MS;
@@ -289,6 +288,22 @@ test("recycling keeps hosts with running work and disposes idle ones", async (t)
   assert.equal(next.disposed, false, "the workspace in view is never recycled");
   assert.equal(spare.disposed, true, "an idle host is recycled");
   assert.equal(old.disposed, true, "an idle host beyond the pool cap is recycled");
+});
+
+test("quitting disposes every pooled host, running or not", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  const spare = candidate(controller);
+  controller.installSlot(spare as never, { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } }, controller.settings.bundle());
+  const next = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+
+  controller.dispose();
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  assert.equal(old.disposed, true, "a parked host is disposed on quit");
+  assert.equal(spare.disposed, true, "a pooled host is disposed on quit");
+  assert.equal(next.disposed, true, "the active host is disposed on quit");
 });
 
 test("cancellation during installation reaches the worker and prevents a late connection from replacing the old host", async (t) => {
