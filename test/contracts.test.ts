@@ -15,6 +15,12 @@ test("validates route inputs", () =>
   }));
 test("rejects malformed inputs", () =>
   assert.throws(() => validateRouteInput("session.open", { path: "" })));
+test("session stop targets one session file", () => {
+  assert.deepEqual(validateRouteInput("session.stop", { path: "D:/p/.pi/sessions/s.jsonl" }),
+    { path: "D:/p/.pi/sessions/s.jsonl" });
+  assert.throws(() => validateRouteInput("session.stop", { path: "" }));
+  assert.throws(() => validateRouteInput("session.stop", {}));
+});
 test("rejects unsafe external protocols", () =>
   assert.throws(() =>
     validateRouteInput("app.openExternal", { url: "file:///tmp/pix" }),

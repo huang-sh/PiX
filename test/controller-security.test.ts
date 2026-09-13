@@ -120,7 +120,7 @@ test("local session rename reaches the local runtime", async () => {
   const controller = new MainController(root, denied);
   const session = controller.files.list()[0]!;
   let renamed: { path: string; name: string } | undefined;
-  controller.pi.rename = async (path, name) => {
+  controller.projectRuntime.rename = async (path, name) => {
     renamed = { path, name };
   };
   controller.sessions = async () => [];
@@ -153,7 +153,7 @@ test("recommended extension package actions run on the active remote host", asyn
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     return { ok: true };
   };
@@ -183,7 +183,7 @@ test("recommended extension package actions run on the active remote host", asyn
 test("remote OAuth login runs on the desktop and only syncs models", async () => {  const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     if (input.action === "getModels") return [];
     return { ok: true, status: { type: "oauth" } };
@@ -216,7 +216,7 @@ test("remote model refresh uses the desktop catalog and resyncs the model broker
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     return input.action === "getModels" ? [{ provider: "openai", id: "new-model" }] : { ok: true };
   };
@@ -235,7 +235,7 @@ test("adding a remote custom model saves credentials on the desktop only", async
   const localCalls: unknown[] = [];
   const remoteCalls: unknown[] = [];
   const model = { provider: "local-llm", id: "custom-model", api: "openai-completions" };
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     return input.action === "getModels" ? [model] : { ok: true };
   };

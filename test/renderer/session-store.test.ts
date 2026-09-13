@@ -50,6 +50,20 @@ describe("session stream focus", () => {
     expect(session.sessions).toEqual([session.current?.session]);
   });
 
+  it("applies list-only refreshes from background sessions without touching the view", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const view = session.current;
+
+    session.applySessions([
+      { ...view!.session, modified: "2026-09-02T10:05:00Z", messageCount: 4 },
+    ]);
+
+    expect(session.current).toBe(view);
+    expect(session.sessions[0]?.messageCount).toBe(4);
+    expect(session.messageWindow(40).messages).toHaveLength(2);
+  });
+
   it("clears the current session after deletion, including broadcast-only deletion", async () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));

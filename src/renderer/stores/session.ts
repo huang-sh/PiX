@@ -268,6 +268,12 @@ export const useSessionStore = defineStore("session", {
       this.sessions = await desktop.invoke<SessionSummary[]>("session.list");
       this.syncProject();
     },
+    // Background completions refresh the list only; the session in view keeps
+    // its snapshot and streaming state untouched.
+    applySessions(sessions: SessionSummary[]) {
+      this.sessions = sessions;
+      this.syncProject();
+    },
     // Commands are session-scoped: no usable session means none to offer.
     async loadCommands() {
       const request = ++this.commandRequest;

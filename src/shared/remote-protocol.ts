@@ -14,6 +14,7 @@ export const PROJECT_ROUTES = [
   "session.list",
   "session.snapshot",
   "session.open",
+  "session.stop",
   "session.rename",
   "session.delete",
   "agent.control",

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
-import { GraphFiles, durableWrite, encodeSession, type BranchRecord, type SessionData } from "./graph-files.js";
+import { GraphFiles, durableWrite, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, SessionSnapshot } from "../shared/types.js";
 
@@ -44,6 +44,10 @@ export class GraphRuntime extends PiRuntime {
     const result = this.admission.then(job, job);
     this.admission = result.catch(() => {});
     return result;
+  }
+  /** True while a failed node deletion waits for a reopen or fresh session to recover. */
+  get recovering() {
+    return Boolean(this.deletionRecovery);
   }
   private notify() {
     if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
@@ -98,12 +102,7 @@ export class GraphRuntime extends PiRuntime {
     return this.exclusive(async () => {
       await this.closeInternal();
       this.stopping = false;
-      const pi = await this.pi();
-      const manager = pi.SessionManager.create(this.cwd, this.dir);
-      const path = manager.getSessionFile();
-      // Open an explicitly persisted header: SDK otherwise defers the first user input.
-      durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
-      return this.openInternal(path);
+      return this.openInternal(await this.createSessionFile());
     });
   }
   private child(record: BranchRecord) {
@@ -479,12 +478,4 @@ export class GraphRuntime extends PiRuntime {
     this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
   }
   override dispose() { void this.close().catch(() => {}); }
-  override setProject(cwd: string | null, dir: string | null) {
-    this.stopping = true;
-    void this.exclusive(async () => {
-      await this.closeInternal();
-      this.cwd = cwd; this.dir = dir; this.modelServices = undefined;
-      this.stopping = false;
-    }).catch(error => { this.storageError = String(error); });
-  }
 }

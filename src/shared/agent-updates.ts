@@ -17,6 +17,12 @@ export function isAgentProgress(event: DesktopEvent) {
     || (p?.type === "message_update" && p.message?.role === "assistant"));
 }
 
+// List-only session events (background refreshes, no snapshot) must not reset
+// streaming baselines; only an event that carries a new current snapshot does.
+export function sessionEventHasCurrent(event: DesktopEvent) {
+  return Boolean((event.payload as { current?: unknown } | null)?.current);
+}
+
 // Only active message/tool baselines survive; run restarts cannot reuse old text.
 export function pruneAgentProgress<T>(event: DesktopEvent, cache: Map<string, T>) {
   if (event.type !== "agent") return;
@@ -42,7 +48,7 @@ function textPatch(before: string, after: string): TextPatch {
 export function agentEventEncoder() {
   const cache = new Map<string, Progress>();
   return (event: DesktopEvent): DesktopEvent => {
-    if (event.type === "sessions") cache.clear();
+    if (event.type === "sessions" && sessionEventHasCurrent(event)) cache.clear();
     pruneAgentProgress(event, cache);
     if (!isAgentProgress(event)) return event;
     const p = event.payload as Payload;
@@ -62,7 +68,7 @@ export function agentEventEncoder() {
 export function agentEventDecoder(resync: () => void) {
   const cache = new Map<string, Progress>();
   return (event: DesktopEvent): DesktopEvent | undefined => {
-    if (event.type === "sessions") cache.clear();
+    if (event.type === "sessions" && sessionEventHasCurrent(event)) cache.clear();
     pruneAgentProgress(event, cache);
     if (event.type !== "agent") return event;
     const p = event.payload as Payload;

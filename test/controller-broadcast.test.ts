@@ -73,7 +73,6 @@ test("IPC subscribers get deltas and session.snapshot publishes a full resync wi
   const after = { ...before, graph: { ...before.graph!, revision: 2 } };
   const events: SessionUpdate[] = [];
   controller.onEvent(event => events.push(event.payload as SessionUpdate), true);
-  controller.pi.open = async () => { throw Error("resync must not reopen or abort a session"); };
   controller.emit({ type: "sessions", payload: { current: before } });
   controller.current = after;
   controller.emit({ type: "sessions", payload: { current: after } });
@@ -92,7 +91,8 @@ test("agent control broadcasts snapshots written after the last agent event", as
     session: { path: "session.jsonl" },
     projection: { nodes: [] },
   } as unknown as SessionSnapshot;
-  controller.pi.control = async () => snapshot;
+  controller.registry.activeOf = () => ({ runtime: { control: async () => snapshot } }) as never;
+  controller.registry.isActive = () => true;
   const events: { type: string; payload: unknown }[] = [];
   controller.onEvent((event) => events.push(event as { type: string; payload: unknown }));
 
@@ -108,7 +108,7 @@ test("agent control broadcasts snapshots written after the last agent event", as
 
 test("agent control actions without a projection response do not broadcast", async () => {
   const controller = new MainController(root, platform);
-  controller.pi.control = async () => [{ provider: "zai", id: "glm-5.3" }];
+  controller.projectRuntime.control = async () => [{ provider: "zai", id: "glm-5.3" }];
   const events: { type: string; payload: unknown }[] = [];
   controller.onEvent((event) => events.push(event as { type: string; payload: unknown }));
 
@@ -117,51 +117,56 @@ test("agent control actions without a projection response do not broadcast", asy
   assert.deepEqual(events, []);
 });
 
-test("child lifecycle events use the graph owner's fresh snapshot without duplicating it", () => {
-  const controller = new MainController(null, platform);
+test("child lifecycle events use the graph owner's fresh snapshot without duplicating it", async () => {
+  const controller = new MainController(root, platform);
   const snapshot = { session: { path: "session.jsonl" }, projection: { nodes: [] } } as unknown as SessionSnapshot;
   let snapshots = 0;
-  controller.pi.snapshot = () => { snapshots++; return snapshot; };
+  const runtime: { open(): Promise<void>; snapshot(): SessionSnapshot; emit?(event: unknown): void } = {
+    open: async () => {},
+    snapshot: () => { snapshots++; return snapshot; },
+  };
+  controller.createSessionRuntime = () => runtime as never;
+  await controller.registry.open(controller.project!, null, "session.jsonl");
+  snapshots = 0;   // the open reply itself takes one snapshot
   const events: string[] = [];
   controller.onEvent(event => events.push(event.type));
   try {
     for (const type of ["message_end", "entry_appended", "agent_settled", "session_info_changed", "compaction_start", "compaction_end"]) {
       events.length = 0;
-      controller.pi.emit({ type: "agent", payload: { type, graphId: "graph", branchId: "child", runId: "run" } });
+      runtime.emit!({ type: "agent", payload: { type, graphId: "graph", branchId: "child", runId: "run" } });
       assert.equal(snapshots, 0, "raw child events must not publish stale worker state");
-      controller.pi.emit({ type: "sessions", payload: { current: snapshot } });
+      runtime.emit!({ type: "sessions", payload: { current: snapshot } });
       assert.deepEqual(events, ["agent", "sessions"]);
       assert.equal(controller.current, snapshot);
     }
-    controller.pi.emit({ type: "agent", payload: { type: "entry_appended", graphId: "graph", branchId: "main", runId: "run" } });
+    runtime.emit!({ type: "agent", payload: { type: "entry_appended", graphId: "graph", branchId: "main", runId: "run" } });
     assert.equal(snapshots, 1, "main branch lifecycle still refreshes through the controller");
   } finally { controller.dispose(); }
 });
 
 test("compaction lifecycle events refresh and broadcast the snapshot", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pix-compaction-"));
-  mkdirSync(join(dir, "ws"), { recursive: true });
-  const controller = new MainController(join(dir, "ws"), platform);
-  try {
-    const snapshot = {
-      session: { path: "session.jsonl" },
-      projection: { nodes: [] },
-    } as unknown as SessionSnapshot;
-    controller.pi.snapshot = () => snapshot;
-    const events: { type: string; payload?: { current?: SessionSnapshot } }[] = [];
-    controller.onEvent((event) => events.push(event as { type: string; payload?: { current?: SessionSnapshot } }));
+  const controller = new MainController(root, platform);
+  const snapshot = {
+    session: { path: "session.jsonl" },
+    projection: { nodes: [] },
+  } as unknown as SessionSnapshot;
+  const runtime: { open(): Promise<void>; snapshot(): SessionSnapshot; emit?(event: unknown): void } = {
+    open: async () => {},
+    snapshot: () => snapshot,
+  };
+  controller.createSessionRuntime = () => runtime as never;
+  await controller.registry.open(controller.project!, null, "session.jsonl");
+  const events: { type: string; payload?: { current?: SessionSnapshot } }[] = [];
+  controller.onEvent((event) => events.push(event as { type: string; payload?: { current?: SessionSnapshot } }));
 
-    controller.pi.emit({ type: "agent", payload: { type: "compaction_start" } });
-    controller.pi.emit({ type: "agent", payload: { type: "compaction_end" } });
+  runtime.emit!({ type: "agent", payload: { type: "compaction_start" } });
+  runtime.emit!({ type: "agent", payload: { type: "compaction_end" } });
 
-    const broadcast = events.filter((event) => event.type === "sessions");
-    assert.equal(broadcast.length, 2);
-    assert.equal(broadcast[0]?.payload?.current, snapshot);
-    assert.equal(broadcast[1]?.payload?.current, snapshot);
-  } finally {
-    controller.dispose();
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const broadcast = events.filter((event) => event.type === "sessions");
+  assert.equal(broadcast.length, 2);
+  assert.equal(broadcast[0]?.payload?.current, snapshot);
+  assert.equal(broadcast[1]?.payload?.current, snapshot);
+  controller.dispose();
 });
 
 test("a page attached mid-run receives the settled node footer via broadcast", async () => {
@@ -172,11 +177,16 @@ test("a page attached mid-run receives the settled node footer via broadcast", a
   mkdirSync(join(dir, "ws"), { recursive: true });
   const controller = new MainController(join(dir, "ws"), platform);
   try {
-    const originalFactory = controller.pi.factory.bind(controller.pi);
-    controller.pi.factory = (pi: unknown) => async (args: unknown) => {
-      const created = await originalFactory(pi)(args);
-      created.services.modelRuntime.registerNativeProvider(faux.provider);
-      return created;
+    const original = controller.createSessionRuntime.bind(controller);
+    controller.createSessionRuntime = entry => {
+      const runtime = original(entry);
+      const factory = runtime.factory.bind(runtime);
+      runtime.factory = (pi: unknown) => async (args: unknown) => {
+        const created = await factory(pi as never)(args as never);
+        created.services.modelRuntime.registerNativeProvider(faux.provider);
+        return created;
+      };
+      return runtime;
     };
     await controller.invoke("agent.control", { action: "newSession" });
     await controller.invoke("agent.control", { action: "setModel", provider: "faux", modelId: "faux-1" });

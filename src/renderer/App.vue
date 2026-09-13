@@ -470,6 +470,7 @@ function onEvent(wireEvent: DesktopEvent) {
     if (payload.deletedPath && payload.sessions)
       session.applyDeletion(payload.deletedPath, payload.sessions);
     else if (payload.current) session.applySnapshot(payload.current);
+    else if (payload.sessions) session.applySessions(payload.sessions);
   } else if (event.type === "update.available") {
     updateNotice.value = event.payload as { version: string; url: string };
   }

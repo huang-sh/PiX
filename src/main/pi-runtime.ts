@@ -28,6 +28,7 @@ import {
 import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../shared/skills.js";
 import { pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
+import { durableWrite, encodeSession } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
 import type {
@@ -49,6 +50,30 @@ import { projectSession, summarizeSession } from "../shared/session.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+
+/** Control actions that need no open session; everything else is session-scoped. */
+export const MODEL_ACTIONS = [
+  "getModels",
+  "refreshModels",
+  "addCustomModel",
+  "updateCustomModel",
+  "getCustomModels",
+  "getProviders",
+  "getSkills",
+  "getSkill",
+  "createSkill",
+  "importSkill",
+  "updateSkill",
+  "deleteSkill",
+  "setSkillManualOnly",
+  "getExtensions",
+  "installExtension",
+  "removeExtension",
+  "loginApiKey",
+  "loginOAuth",
+  "logout",
+  "setBrokerProviders",
+] as const satisfies readonly AgentControl["action"][];
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -381,6 +406,18 @@ export class PiRuntime {
     this.bind();
     return this.snapshot();
   }
+  /**
+   * Creates an empty session file without holding any runtime on it, so the
+   * registry can hand the file to a runtime of its own choosing.
+   */
+  async createSessionFile(): Promise<string> {
+    const pi = await this.pi();
+    const manager = pi.SessionManager.create(this.cwd, this.dir);
+    const path = manager.getSessionFile();
+    // Open an explicitly persisted header: SDK otherwise defers the first user input.
+    durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
+    return path;
+  }
   state(): RuntimeState {
     const s = this.runtime?.session;
     if (!s)
@@ -462,28 +499,7 @@ export class PiRuntime {
   }
   private async runControl(input: AgentControl): Promise<unknown> {
     const s = this.runtime?.session;
-    const modelAction = [
-      "getModels",
-      "refreshModels",
-      "addCustomModel",
-      "updateCustomModel",
-      "getCustomModels",
-      "getProviders",
-      "getSkills",
-      "getSkill",
-      "createSkill",
-      "importSkill",
-      "updateSkill",
-      "deleteSkill",
-      "setSkillManualOnly",
-      "getExtensions",
-      "installExtension",
-      "removeExtension",
-      "loginApiKey",
-      "loginOAuth",
-      "logout",
-      "setBrokerProviders",
-    ].includes(input.action);
+    const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
     if (!this.cwd && !modelAction)
       throw new Error("Open a project first");
     if (!s && input.action !== "newSession" && !modelAction)

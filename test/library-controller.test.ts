@@ -51,7 +51,7 @@ test("a remote workspace keeps the session list it already holds when a mark cha
   controller.settings.rememberProject(remote, [remoteSession]);
   controller.project = remote;
   // The local runtime still points at whatever local project was open last.
-  controller.pi.list = async () => [summary("local-1", "/local/other")];
+  controller.projectRuntime.list = async () => [summary("local-1", "/local/other")];
 
   const reply = (await controller.invoke("library.pin", {
     path: remoteSession.path,
@@ -71,7 +71,7 @@ test("a local project still answers with the decorated live list", async () => {
   const localSession = summary("local-1", "/local/proj");
   controller.settings.rememberProject(local, [localSession]);
   controller.project = local;
-  controller.pi.list = async () => [localSession];
+  controller.projectRuntime.list = async () => [localSession];
 
   const reply = (await controller.invoke("library.archiveSession", {
     path: localSession.path,

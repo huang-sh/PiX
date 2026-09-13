@@ -264,7 +264,7 @@ app.on("before-quit", (event) => {
     event.preventDefault();
     if (!closingSessions) {
       closingSessions = true;
-      void controller.pi.close().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
+      void controller.closeSessions().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
     }
     return;
   }

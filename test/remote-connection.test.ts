@@ -169,7 +169,7 @@ function controllerFixture(t: TestContext) {
     async confirm() { return true; },
     async openExternal() {}, showItemInFolder() {}, quit() {},
   });
-  controller.pi.control = async () => [];
+  controller.projectRuntime.control = async () => [];
   const project: ProjectInfo = { name: "old", path: "/old", remote: { kind: "ssh", host: "old" } };
   const old = candidate(controller);
   controller.project = project;
@@ -178,7 +178,7 @@ function controllerFixture(t: TestContext) {
   controller.settings.rememberProject(project, []);
   t.after(async () => {
     await controller.closeWsl();
-    controller.pi.dispose();
+    controller.projectRuntime.dispose();
     controller.shell.dispose();
     rmSync(root, { recursive: true, force: true });
   });

@@ -20,8 +20,9 @@ import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js"
 import { projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
-import { PiRuntime } from "./pi-runtime.js";
+import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
@@ -65,7 +66,10 @@ export class MainController {
   git: GitService;
   shell: ShellService;
   files: SessionFiles;
-  pi: PiRuntime;
+  /** View-independent runtime: model catalog, skills, login — never opens a session. */
+  projectRuntime: PiRuntime;
+  /** Live session runtimes; opening a session switches the view, never closes another. */
+  registry: SessionRegistry;
   current?: SessionSnapshot;
   platform: Platform;
   localProjectPath: string | null;
@@ -75,6 +79,8 @@ export class MainController {
   private stopRemoteDisconnect?: () => void;
   private remoteAttempt?: AbortController;
   private pendingRemote?: { client: WslHostClient; project: ProjectInfo; abort: AbortController };
+  /** The remote session the desktop last opened; other host sessions stay background. */
+  private remoteActivePath = "";
   private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
   remoteBrokerModels = new Set<string>();
   listeners = new Set<(e: DesktopEvent) => void>();
@@ -95,36 +101,111 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files = new SessionFiles(path, dir);
-    this.pi = new GraphRuntime(path, dir, (e) => {
-      const pushed = e as DesktopEvent;
+    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url));
+    this.registry = new SessionRegistry({
+      createRuntime: entry => this.createSessionRuntime(entry),
+      onEvent: (entry, event) => this.routeSessionEvent(entry, event),
+    });
+  }
+  /**
+   * Registry entries build their own runtime with the entry's frozen project.
+   * Broker state lives on the project runtime; cloning it here keeps sessions
+   * created after a remote host connects streaming through the desktop broker.
+   */
+  createSessionRuntime(entry: SessionEntry): GraphRuntime {
+    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url));
+    runtime.modelBroker = this.projectRuntime.modelBroker;
+    runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
+    runtime.brokerModels = [...this.projectRuntime.brokerModels];
+    return runtime;
+  }
+  private routeSessionEvent(entry: SessionEntry, e: unknown) {
+    const pushed = e as DesktopEvent;
+    if (pushed.type !== "agent") {
       if (pushed.type === "sessions") {
-        const snapshot = (pushed.payload as { current?: SessionSnapshot })?.current;
-        if (snapshot) this.current = snapshot;
+        const current = (pushed.payload as { current?: SessionSnapshot })?.current;
+        if (current && !this.registry.isActive(entry)) {
+          // A background session settled: refresh history and the list, never the view.
+          this.rememberSnapshot(entry.project, current);
+          void this.refreshBackgroundList(entry);
+          return;
+        }
+        if (current) this.current = current;
       }
-      this.emit(e as DesktopEvent);
-      const p = (e as DesktopEvent).payload as { type?: string; graphId?: string; branchId?: string };
-      // GraphRuntime publishes child snapshots after updating its worker. Taking
-      // one here would broadcast the old worker state, then the new state again.
-      const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
-      if (
-        !childEvent &&
-        [
-          "message_end",
-          "agent_settled",
-          "entry_appended",
-          "session_info_changed",
-          "compaction_start",
-          "compaction_end",
-        ].includes(p?.type ?? "")
-      ) {
-        try {
-          this.current = this.pi.snapshot();
-          if (p.type !== "entry_appended" && this.current.session.path)
-            this.rememberSnapshot(this.current);
-          this.emit({ type: "sessions", payload: { current: this.current } });
-        } catch {}
-      }
-    }, (url) => this.platform.openExternal(url));
+      this.emit(pushed);
+      return;
+    }
+    // Token streams exist only for the session in view; the renderer would
+    // otherwise attach an unscoped background event to the active session.
+    if (this.registry.isActive(entry)) this.emit(pushed);
+    const p = pushed.payload as { type?: string; graphId?: string; branchId?: string };
+    // GraphRuntime publishes child snapshots after updating its worker. Taking
+    // one here would broadcast the old worker state, then the new state again.
+    const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
+    if (
+      !childEvent &&
+      entry.runtime &&
+      [
+        "message_end",
+        "agent_settled",
+        "entry_appended",
+        "session_info_changed",
+        "compaction_start",
+        "compaction_end",
+      ].includes(p?.type ?? "")
+    ) {
+      try {
+        const snapshot = entry.runtime.snapshot();
+        if (p.type !== "entry_appended" && snapshot.session.path)
+          this.rememberSnapshot(entry.project, snapshot);
+        if (this.registry.isActive(entry)) {
+          this.current = snapshot;
+          this.emit({ type: "sessions", payload: { current: snapshot } });
+        } else {
+          void this.refreshBackgroundList(entry);
+        }
+      } catch {}
+    }
+  }
+  private async refreshBackgroundList(entry: SessionEntry) {
+    // The navigator renders the active project's list directly; other projects
+    // pick their rows up from the history the next time they are read.
+    if (!this.project || projectId(this.project) !== projectId(entry.project)) return;
+    try {
+      this.emit({ type: "sessions", payload: { sessions: await this.sessions() } });
+    } catch {}
+  }
+  /** The entry the view is showing in the active project, if any. */
+  private activeEntry(): SessionEntry | undefined {
+    return this.project ? this.registry.activeOf(projectId(this.project)) : undefined;
+  }
+  /** Routes a control action: model actions to the project runtime, everything else to the active session. */
+  private async controlAgent(input: AgentControl): Promise<{ result: unknown; entry?: SessionEntry }> {
+    if (input.action === "newSession") {
+      const entry = this.activeEntry();
+      // A failed node deletion recovers by reusing the old close-and-create
+      // semantics on the same runtime; otherwise a new session is a new entry
+      // and the previous one keeps running in the background.
+      if (entry?.runtime?.recovering) return { result: await entry.runtime.control(input), entry };
+      if (!this.project) throw new Error("Open a project first");
+      const result = await this.registry.create(
+        this.project,
+        configuredSessionDir(this.project.path, this.settings.bundle()),
+        // Canonicalize through the session files service so junctioned and
+        // symlinked projects key and look up the same entry.
+        async () => this.files.managed(await this.projectRuntime.createSessionFile()),
+      );
+      return { result, entry: this.registry.entry((result as SessionSnapshot).session.path) };
+    }
+    if ((MODEL_ACTIONS as readonly string[]).includes(input.action))
+      return { result: await this.projectRuntime.control(input) };
+    const entry = this.activeEntry();
+    if (!entry?.runtime) throw new Error("Open a session first");
+    return { result: await entry.runtime.control(input), entry };
+  }
+  private restoreCurrent(): SessionSnapshot | undefined {
+    const entry = this.registry.viewProject(this.project ? projectId(this.project) : "");
+    return entry ? this.registry.snapshotOf(entry) : undefined;
   }
   onEvent(f: (e: DesktopEvent) => void, patches = false) {
     const encode = patches ? sessionEventEncoder() : undefined;
@@ -151,8 +232,14 @@ export class MainController {
   remoteEvent(event: DesktopEvent) {
     const current = (event.payload as { current?: SessionSnapshot } | null)?.current;
     if (event.type === "sessions" && current?.session.path) {
+      // Only the session the desktop opened may drive the view; anything else
+      // the host still streams belongs to a background run.
+      if (current.session.path !== this.remoteActivePath) {
+        this.rememberSnapshot(this.project, current);
+        return;
+      }
       this.current = current;
-      this.rememberSnapshot(current);
+      this.rememberSnapshot(this.project, current);
     }
     this.emit(event);
   }
@@ -171,7 +258,6 @@ export class MainController {
       this.project = null;
       this.settings.setProject(null);
     }
-    this.current = undefined;
     this.workspace.setRoot(path);
     this.git.setRoot(path);
     this.shell.setRoot(path);
@@ -179,7 +265,10 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files.set(path, dir);
-    this.pi.setProject(path, dir);
+    this.projectRuntime.setProject(path, dir);
+    // Session entries survive project switches; the view restores whatever was
+    // last active in the project being entered.
+    this.current = this.restoreCurrent();
   }
   mergedWslSettings(remote: SettingsBundle) {
     const local = this.settings.bundle();
@@ -221,7 +310,7 @@ export class MainController {
     };
   }
   async syncModelBroker(client: WslHostClient) {
-    const models = await this.pi.control({ action: "getModels", broker: true }) as BrokerModel[];
+    const models = await this.projectRuntime.control({ action: "getModels", broker: true }) as BrokerModel[];
     const allowed = new Set(
       models.map((model) => `${model.provider}\0${model.id}`),
     );
@@ -237,7 +326,7 @@ export class MainController {
     client.setModelBroker(async (request, signal) => {
       if (!this.brokerModels.get(client)?.has(`${request.provider}\0${request.modelId}`))
         throw new Error("The remote host requested a model that is not enabled locally");
-      const runtime = await this.pi.modelRuntime();
+      const runtime = await this.projectRuntime.modelRuntime();
       const model = runtime.getModel(request.provider, request.modelId);
       if (!model) throw new Error("The requested desktop model was not found");
       return runtime.streamSimple(model, request.context, {
@@ -333,7 +422,8 @@ export class MainController {
     this.wslSettings = settings;
     this.remoteBrokerModels = this.brokerModels.get(client) ?? new Set();
     this.project = project;
-    this.current = undefined;
+    this.remoteActivePath = "";
+    this.current = this.restoreCurrent();
     this.pendingRemote = undefined;
     this.remoteAttempt = undefined;
     this.stopWslEvents = client.onEvent((event) => this.remoteEvent(event));
@@ -372,14 +462,14 @@ export class MainController {
     if (route === "agent.control") {
       const action = String(v.action);
       if (action === "getProviders" || action === "getModels" || action === "getCustomModels")
-        return this.pi.control(v as unknown as AgentControl);
+        return this.projectRuntime.control(v as unknown as AgentControl);
       if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels" || action === "addCustomModel" || action === "updateCustomModel") {
-        const result = await this.pi.control(v as unknown as AgentControl);
+        const result = await this.projectRuntime.control(v as unknown as AgentControl);
         await this.syncModelBroker(this.wsl);
         return result;
       }
       if (action === "logout") {
-        const result = await this.pi.control(v as unknown as AgentControl);
+        const result = await this.projectRuntime.control(v as unknown as AgentControl);
         await this.syncModelBroker(this.wsl);
         return result;
       }
@@ -446,8 +536,14 @@ export class MainController {
       result &&
       typeof result === "object" &&
       "session" in result
-    )
-      this.rememberSnapshot(result as SessionSnapshot);
+    ) {
+      const snapshot = result as SessionSnapshot;
+      // Snapshots from the host mark the session the desktop now shows; only
+      // its events may drive the view.
+      if (snapshot.projection && snapshot.session?.path)
+        this.remoteActivePath = snapshot.session.path;
+      this.rememberSnapshot(this.project, snapshot);
+    }
     return result;
   }
   projectGroups(): ProjectGroup[] {
@@ -476,13 +572,12 @@ export class MainController {
     this.settings.rememberProject(this.project, sessions);
     return this.projectGroups();
   }
-  rememberSnapshot(snapshot: SessionSnapshot) {
-    const project = this.project;
+  rememberSnapshot(project: ProjectInfo | null, snapshot: SessionSnapshot) {
     if (!project) return;
     const old = this.settings.projectHistory().find(
       (record) => record.id === projectId(project),
     )?.sessions ?? [];
-    this.rememberProject([
+    this.settings.rememberProject(project, [
       snapshot.session,
       ...old.filter((session) => session.path !== snapshot.session.path),
     ]);
@@ -500,7 +595,7 @@ export class MainController {
       }));
     };
     try {
-      const s = await this.pi.list();
+      const s = await this.projectRuntime.list();
       return decorate(s.length ? s : this.files.list());
     } catch {
       return decorate(this.files.list());
@@ -604,6 +699,7 @@ export class MainController {
       [
         "session.list",
         "session.open",
+        "session.stop",
         "session.import",
         "session.rename",
         "session.delete",
@@ -666,7 +762,8 @@ export class MainController {
           return sessions;
         });
       case "session.snapshot": {
-        const current = this.pi.runtime ? this.pi.snapshot() : this.current;
+        const entry = this.activeEntry();
+        const current = entry?.runtime ? entry.runtime.snapshot() : this.current;
         if (current) {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
@@ -676,26 +773,30 @@ export class MainController {
       }
       case "session.open": {
         const p = this.files.managed(String(v.path));
-        try {
-          this.current = await this.pi.open(p);
-        } catch (e) {
-          this.current = this.fallback(p);
-          this.emit({
-            type: "notice",
-            payload: {
-              level: "warning",
-              message: `Read-only session: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          });
-        }
-        this.rememberSnapshot(this.current);
+        const project = this.project!;
+        this.current = await this.registry.open(
+          project,
+          configuredSessionDir(project.path, this.settings.bundle()),
+          p,
+          error => {
+            this.emit({
+              type: "notice",
+              payload: {
+                level: "warning",
+                message: `Read-only session: ${error instanceof Error ? error.message : String(error)}`,
+              },
+            });
+            return this.fallback(p);
+          },
+        );
+        this.rememberSnapshot(project, this.current);
         return this.current;
       }
       case "session.import": {
         const p = await this.platform.pickSession();
         if (!p) return null;
         try {
-          await this.pi.validate(p);
+          await this.projectRuntime.validate(p);
         } catch {}
         const imported = this.files.import(p);
         return { imported, sessions: await this.sessions() };
@@ -703,14 +804,16 @@ export class MainController {
       case "session.rename": {
         const p = this.files.managed(String(v.path)),
           name = String(v.name);
-        if (this.current?.session.path === p && this.current.runtime.available)
-          this.current = (await this.pi.control({
-            action: "setName",
-            name,
-          })) as SessionSnapshot;
+        const entry = this.registry.entry(p);
+        if (entry?.runtime) {
+          // Renames go through the owning runtime; a static append would race
+          // the background session's own writes.
+          const renamed = await entry.runtime.control({ action: "setName", name }) as SessionSnapshot;
+          if (this.registry.isActive(entry)) this.current = renamed;
+        }
         else
           try {
-            await this.pi.rename(p, name);
+            await this.projectRuntime.rename(p, name);
           } catch {
             this.files.rename(p, name);
           }
@@ -726,16 +829,25 @@ export class MainController {
           !(await this.platform.confirm("Delete this Pi session?", p))
         )
           return { cancelled: true, sessions: await this.sessions() };
-        const runtimePath = this.pi.state().sessionFile;
         const currentPath = this.current?.session.path;
-        const deletingCurrent = currentPath && realpathSync(currentPath) === p;
-        if (runtimePath && realpathSync(runtimePath) === p) await this.pi.close();
+        const deletingCurrent = Boolean(currentPath && realpathSync(currentPath) === p);
+        const entry = this.registry.entry(p);
+        if (entry && this.registry.busy(entry))
+          throw new Error("Stop the running session before deleting it");
+        if (entry) await this.registry.dispose(p);
         this.files.delete(p);
         if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
         this.rememberProject(sessions);
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
+      }
+      case "session.stop": {
+        const entry = this.registry.entry(this.files.managed(String(v.path)));
+        if (!entry?.runtime) return { stopped: false };
+        const runs = entry.runtime.snapshot().graph?.runs.filter(run => run.status === "running") ?? [];
+        await Promise.allSettled(runs.map(run => entry.runtime!.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
+        return { stopped: Boolean(runs.length) };
       }
       case "library.pin":
       case "library.archiveSession":
@@ -752,14 +864,15 @@ export class MainController {
         };
       }
       case "agent.control": {
-        const r = await this.pi.control(v as unknown as AgentControl);
-        if (r && typeof r === "object" && "projection" in r) {
+        const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl);
+        if (r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
           this.current = r as SessionSnapshot;
           // Mutating actions append entries after the last agent event (e.g.
           // the node-footer usage record written when a prompt settles), and
           // the invoke reply only reaches the page that started the action —
           // a page reloaded mid-run loses it. Broadcast so every attached
-          // renderer converges on the settled state.
+          // renderer converges on the settled state. A background run's reply
+          // carries its own snapshot and never drives the view.
           this.emit({ type: "sessions", payload: { current: this.current } });
         }
         return r;
@@ -782,7 +895,9 @@ export class MainController {
       case "git.diff":
         return this.git.diff(v.path as string | undefined, Boolean(v.staged));
       case "changes.read": {
-        const snapshot = this.pi.snapshot();
+        const runtime = this.activeEntry()?.runtime;
+        if (!runtime) throw new Error("No Pi session open");
+        const snapshot = runtime.snapshot();
         if (snapshot.session.path !== v.session) throw new Error("Session changed; reopen the file change");
         return readFileChange(snapshot.session.path, snapshot.entries, String(v.ref));
       }
@@ -839,8 +954,10 @@ export class MainController {
           const d = configuredSessionDir(this.project.path, b);
           this.files.set(this.project.path, d);
           if (d !== previousDir) {
-            this.pi.setProject(this.project.path, d);
-            this.current = undefined;
+            // Entries point at the old directory; they cannot survive the move.
+            void this.registry.disposeProject(projectId(this.project)).catch(() => {});
+            this.projectRuntime.setProject(this.project.path, d);
+            this.current = this.restoreCurrent();
           }
         }
         return b;
@@ -854,10 +971,14 @@ export class MainController {
         return { ok: true };
     }
   }
+  /** Graceful shutdown: abort runs, flush leaves, release graph ownership. */
+  closeSessions(): Promise<void> {
+    return this.registry.disposeAll();
+  }
   dispose() {
     this.liveProgress.clear();
     void this.closeWsl();
     this.shell.dispose();
-    this.pi.dispose();
+    void this.registry.disposeAll().catch(() => {});
   }
 }
