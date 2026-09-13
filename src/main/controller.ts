@@ -49,6 +49,8 @@ export interface RemoteSlot {
   client: WslHostClient;
   project: ProjectInfo;
   settings: SettingsBundle;
+  /** The session the desktop last viewed on this host, restored on reactivation. */
+  activePath: string;
   stopEvents: () => void;
   stopDisconnect: () => void;
   lastActivity: number;
@@ -323,9 +325,10 @@ export class MainController {
     }
     if (event.type === "agent") {
       const graphId = (event.payload as { graphId?: string } | null)?.graphId;
-      // Current hosts gate their own background sessions; older ones do not,
-      // so events of a session the desktop is not viewing only keep their
-      // progress baseline for the switch back.
+      // Events that carry a graph id but belong to a session the desktop is
+      // not viewing only keep their progress baseline for the switch back.
+      // Current hosts gate their own background sessions; older hosts may
+      // still send these, and id-less events cannot be attributed at all.
       if (graphId && graphId !== this.current?.graph?.id) {
         this.recordProgress(event);
         return;
@@ -441,7 +444,7 @@ export class MainController {
     const id = projectId(project);
     const previous = this.remotePool.get(id);
     if (previous && previous.client !== client) void this.dropSlot(previous, true);
-    const slot: RemoteSlot = { client, project, settings, lastActivity: Date.now(), stopEvents: () => {}, stopDisconnect: () => {} };
+    const slot: RemoteSlot = { client, project, settings, activePath: "", lastActivity: Date.now(), stopEvents: () => {}, stopDisconnect: () => {} };
     slot.stopEvents = client.onEvent(event => {
       slot.lastActivity = Date.now();
       this.remoteEvent(event, project);
@@ -510,7 +513,12 @@ export class MainController {
       index >= this.maxRemoteConnections || !slot.client.connected
       || Date.now() - slot.lastActivity >= this.remoteIdleMs);
     for (const slot of victims) {
-      if (slot.client.connected && await this.slotBusy(slot)) continue;
+      // Confirmed running work counts as activity: the next liveness probe
+      // waits a full idle window instead of firing every tick.
+      if (slot.client.connected && await this.slotBusy(slot)) {
+        slot.lastActivity = Date.now();
+        continue;
+      }
       await this.dropSlot(slot, true);
     }
     this.scheduleRemoteRecycle();
@@ -589,16 +597,34 @@ export class MainController {
     slot.lastActivity = Date.now();
     this.project = slot.project;
     this.remoteActivePath = "";
-    this.current = this.restoreCurrent();
+    this.current = undefined;
+    // Restore the session this workspace last showed, mirroring the local
+    // registry's per-project restore.
+    let current: SessionSnapshot | undefined;
+    if (slot.activePath) {
+      try {
+        current = await slot.client.request("session.open", { path: slot.activePath }) as SessionSnapshot;
+        this.remoteActivePath = slot.activePath;
+        this.current = current;
+      } catch { /* the remembered session is gone; open empty */ }
+    }
     return {
       project: slot.project, sessions, projects: this.projectGroups(),
       settings: this.mergedWslSettings(slot.settings),
-      layout: this.settings.layout(), current: undefined,
+      layout: this.settings.layout(), current,
     };
   }
   private async commitRemote(candidate: NonNullable<MainController["pendingRemote"]>) {
     const { client, abort, project } = candidate;
     abort.signal.throwIfAborted();
+    // The request path may differ in spelling from the host's canonical cwd;
+    // if the pool already holds this project, adopt it — a second host would
+    // trip the graph ownership lock the pooled one still holds.
+    const pooled = this.remotePool.get(projectId(project));
+    if (pooled && pooled.client !== client && pooled.client.connected) {
+      await client.dispose();
+      return this.activatePooled(pooled);
+    }
     this.emit({ type: "remote.progress", payload: { stage: "loading" } });
     await this.attachModelBroker(client);
     const [sessions, settings] = await Promise.all([
@@ -726,8 +752,10 @@ export class MainController {
       const snapshot = result as SessionSnapshot;
       // Snapshots from the host mark the session the desktop now shows; only
       // its events may drive the view.
-      if (snapshot.projection && snapshot.session?.path)
+      if (snapshot.projection && snapshot.session?.path) {
         this.remoteActivePath = snapshot.session.path;
+        if (slot) slot.activePath = snapshot.session.path;
+      }
       this.rememberSnapshot(this.project, snapshot);
     }
     return result;
@@ -865,6 +893,12 @@ export class MainController {
       const id = String(v.id);
       if (this.project && id === projectId(this.project))
         throw new Error("The open project cannot be removed from the list");
+      const slot = this.remotePool.get(id);
+      if (slot && slot.client.connected && await this.slotBusy(slot))
+        throw new Error("Stop the running sessions before removing this project");
+      // A pooled host would keep writing the forgotten project back into the
+      // history through its events; it goes with the history entry.
+      if (slot) await this.dropSlot(slot, true);
       this.settings.forgetProject(id);
       return this.projectGroups();
     }
@@ -1182,10 +1216,13 @@ export class MainController {
     this.flushBackgroundRefresh();
     return this.registry.disposeAll();
   }
+  /** Full shutdown: local sessions and every pooled host, awaited together. */
+  closeAll(): Promise<void> {
+    return Promise.all([this.closeSessions(), this.closeAllRemote()]).then(() => {});
+  }
   dispose() {
     this.liveProgress.clear();
-    void this.closeAllRemote();
     this.shell.dispose();
-    void this.closeSessions().catch(() => {});
+    void this.closeAll().catch(() => {});
   }
 }

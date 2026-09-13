@@ -57,8 +57,10 @@ host would trip the graph ownership lock the pooled one still holds. Idle
 recycling disposes only quiet hosts: never the workspace in view, never a
 host whose `session.list` still reports running work, bounded by
 `PIX_MAX_REMOTE_CONNECTIONS` (default 2) and `PIX_REMOTE_IDLE_MS` (default
-5 min). Disconnects keep the slot until replaced so the degraded bootstrap
-can present remembered rows and a reconnect banner.
+5 min). Recycling a host also closes its remote terminals and shell runs —
+`slotBusy` only weighs session runs, so a shell-only workspace recycles when
+its idle window passes. Disconnects keep the slot until replaced so the
+degraded bootstrap can present remembered rows and a reconnect banner.
 
 **Shutdown.** Quitting flushes pending background history writes, aborts
 every local run (settling as `interrupted` with recovered inputs — this is

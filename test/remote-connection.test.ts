@@ -306,6 +306,62 @@ test("quitting disposes every pooled host, running or not", async (t) => {
   assert.equal(next.disposed, true, "the active host is disposed on quit");
 });
 
+test("forgetting a project disposes its pooled host and refuses while it runs", async (t) => {
+  const { controller } = controllerFixture(t);
+  const spare = candidate(controller);
+  const project: ProjectInfo = { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } };
+  controller.installSlot(spare as never, project, controller.settings.bundle());
+  controller.settings.rememberProject(project, []);
+  const running = async (route: string) => route === "session.list" ? [{ running: true } as never] : [];
+  const idle = async (route: string) => route === "session.list" ? [] : [];
+  spare.request = running;
+
+  await assert.rejects(controller.invoke("app.forgetProject", { id: projectId(project) }), /Stop the running sessions/);
+  assert.equal(spare.disposed, false, "a running host is not disposed by the refused removal");
+
+  spare.request = idle;
+  await controller.invoke("app.forgetProject", { id: projectId(project) });
+  assert.equal(spare.disposed, true, "the pooled host goes with the history entry");
+  assert.equal(controller.projectGroups().some(record => record.id === projectId(project)), false);
+});
+
+test("a differently spelled path still adopts the pooled host instead of spawning a second one", async (t) => {
+  const { controller } = controllerFixture(t);
+  const canonical: ProjectInfo = { name: "new", path: "/new", remote: { kind: "ssh", host: "new" } };
+  const pooledClient = candidate(controller);
+  controller.installSlot(pooledClient as never, canonical, controller.settings.bundle());
+  controller.settings.rememberProject(canonical, []);
+  const fresh = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+
+  const result = await controller.connectSsh("new", "/new/");
+
+  assert.equal(fresh.disposed, true, "the redundant connection is dropped after the canonical recheck");
+  assert.equal(controller.wsl, pooledClient, "the pooled host is adopted");
+  assert.equal((result as { project: ProjectInfo }).project.path, "/new");
+});
+
+test("reactivating a pooled workspace restores its remembered session", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  const snapshot = { session: { path: "/old/s.jsonl" }, entries: [], projection: { nodes: [] }, runtime: {},
+    graph: { id: "/old/s.jsonl", epoch: "e", revision: 1, runs: [] } };
+  old.request = async (route: string, input?: any) => {
+    if (route === "session.open" && input?.path === "/old/s.jsonl") return snapshot;
+    if (route === "session.list") return [];
+    return {};
+  };
+  await controller.invoke("session.open", { path: "/old/s.jsonl" });
+
+  const next = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+  const result = await controller.connectSsh("old", "/old");
+
+  assert.equal((result as { current?: typeof snapshot }).current?.session.path, "/old/s.jsonl",
+    "the session this workspace last showed comes back with it");
+  assert.equal(controller.current?.session.path, "/old/s.jsonl");
+});
+
 test("cancellation during installation reaches the worker and prevents a late connection from replacing the old host", async (t) => {
   const { controller, old } = controllerFixture(t);
   const next = candidate(controller);

@@ -100,7 +100,7 @@ async function serve() {
       controller.shell.dispose();
       // An interrupted first turn may exist only in memory until its error
       // response is appended. Drain it before disposing or exiting.
-      await controller.closeSessions();
+      await controller.closeAll();
     } catch (error) {
       process.stderr.write(`Remote shutdown failed: ${String(error)}\n`);
       process.exitCode = 1;
