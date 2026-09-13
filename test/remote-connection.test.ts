@@ -173,8 +173,7 @@ function controllerFixture(t: TestContext) {
   const project: ProjectInfo = { name: "old", path: "/old", remote: { kind: "ssh", host: "old" } };
   const old = candidate(controller);
   controller.project = project;
-  controller.wsl = old as any;
-  controller.wslSettings = controller.settings.bundle();
+  controller.installSlot(old as never, project, controller.settings.bundle());
   controller.settings.rememberProject(project, []);
   t.after(async () => {
     await controller.closeWsl();
@@ -233,7 +232,7 @@ test("directory browsing and cancellation use only the candidate, not the active
   assert.equal(controller.project, project);
 });
 
-test("a successful candidate is committed before closing the old host and reports later disconnection", async (t) => {
+test("a successful candidate is pooled instead of closing the old host and reports later disconnection", async (t) => {
   const { controller, old } = controllerFixture(t);
   const next = candidate(controller);
   t.mock.method(WslHostClient, "connectSsh", async () => next as any);
@@ -241,7 +240,7 @@ test("a successful candidate is committed before closing the old host and report
   const result = await controller.openRemoteProject("/new/sub");
   assert.equal(result.project?.path, "/new/sub");
   assert.equal(controller.wsl, next);
-  assert.equal(old.disposed, true);
+  assert.equal(old.disposed, false, "switching remote projects keeps the previous host pooled");
   const events: any[] = [];
   controller.onEvent((event) => events.push(event));
   next.disconnect();
@@ -251,6 +250,45 @@ test("a successful candidate is committed before closing the old host and report
   const cached = await controller.invoke("app.bootstrap") as any;
   assert.equal(cached.project.path, "/new/sub");
   assert.equal(cached.projects.find((record: any) => record.id === id).connected, false);
+});
+
+test("reconnecting to a pooled project reuses its host instead of spawning a second one", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  const next = candidate(controller);
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+  assert.equal(controller.wsl, next);
+
+  const reused = await controller.connectSsh("old", "/old");
+
+  assert.equal(connectSsh.mock.callCount(), 1, "the pooled host is adopted, not reconnected");
+  assert.equal(controller.wsl, old);
+  assert.equal((reused as { project: ProjectInfo }).project.path, "/old");
+  assert.equal(next.disposed, false);
+});
+
+test("recycling keeps hosts with running work and disposes idle ones", async (t) => {
+  const previousIdle = process.env.PIX_REMOTE_IDLE_MS;
+  process.env.PIX_REMOTE_IDLE_MS = "1000";
+  t.after(() => {
+    if (previousIdle === undefined) delete process.env.PIX_REMOTE_IDLE_MS;
+    else process.env.PIX_REMOTE_IDLE_MS = previousIdle;
+  });
+  const { controller, old } = controllerFixture(t);
+  const busy = candidate(controller), spare = candidate(controller);
+  controller.installSlot(busy as never, { name: "busy", path: "/busy", remote: { kind: "ssh", host: "busy" } }, controller.settings.bundle());
+  controller.installSlot(spare as never, { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } }, controller.settings.bundle());
+  busy.request = async (route: string) => route === "session.list" ? [{ running: true } as never] : [];
+  const next = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+
+  await new Promise(resolve => setTimeout(resolve, 3500));
+
+  assert.equal(busy.disposed, false, "a host with running work is never recycled");
+  assert.equal(next.disposed, false, "the workspace in view is never recycled");
+  assert.equal(spare.disposed, true, "an idle host is recycled");
+  assert.equal(old.disposed, true, "an idle host beyond the pool cap is recycled");
 });
 
 test("cancellation during installation reaches the worker and prevents a late connection from replacing the old host", async (t) => {
