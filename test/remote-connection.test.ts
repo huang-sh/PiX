@@ -348,7 +348,7 @@ test("reactivating a pooled workspace restores its remembered session", async (t
   old.request = async (route: string, input?: any) => {
     if (route === "session.open" && input?.path === "/old/s.jsonl") return snapshot;
     if (route === "session.list") return [];
-    return {};
+    return controller.settings.bundle();
   };
   await controller.invoke("session.open", { path: "/old/s.jsonl" });
 

@@ -548,9 +548,13 @@ export class MainController {
   }
   private async connectRemote(remote: NonNullable<ProjectInfo["remote"]>, cwd: string, browse: boolean) {
     // A pooled workspace for this project is reused: spawning a second host
-    // would trip the graph ownership lock the first one still holds.
+    // would trip the graph ownership lock the first one still holds. Browsing
+    // keeps going through the connect flow — the user may pick another folder.
     const pooled = this.remotePool.get(projectId({ name: "", path: cwd, remote }));
-    if (pooled?.client.connected) return this.activatePooled(pooled);
+    if (!browse && pooled?.client.connected) {
+      await this.cancelRemote();
+      return this.activatePooled(pooled);
+    }
     // Install the new attempt synchronously, so overlapping requests cannot
     // finish out of order and replace a newer connection.
     const cancelled = this.cancelRemote();
@@ -592,7 +596,11 @@ export class MainController {
   }
   /** Switches the view back to a pooled workspace without touching its host. */
   private async activatePooled(slot: RemoteSlot) {
-    const sessions = await slot.client.request<SessionSummary[]>("session.list");
+    const [sessions, settings] = await Promise.all([
+      slot.client.request<SessionSummary[]>("session.list"),
+      slot.client.request<SettingsBundle>("settings.get"),
+    ]);
+    slot.settings = settings;
     this.settings.rememberProject(slot.project, sessions);
     slot.lastActivity = Date.now();
     this.project = slot.project;
@@ -623,6 +631,8 @@ export class MainController {
     const pooled = this.remotePool.get(projectId(project));
     if (pooled && pooled.client !== client && pooled.client.connected) {
       await client.dispose();
+      this.pendingRemote = undefined;
+      this.remoteAttempt = undefined;
       return this.activatePooled(pooled);
     }
     this.emit({ type: "remote.progress", payload: { stage: "loading" } });
@@ -896,9 +906,12 @@ export class MainController {
       const slot = this.remotePool.get(id);
       if (slot && slot.client.connected && await this.slotBusy(slot))
         throw new Error("Stop the running sessions before removing this project");
-      // A pooled host would keep writing the forgotten project back into the
-      // history through its events; it goes with the history entry.
+      if (this.registry.hasBusy(id))
+        throw new Error("Stop the running sessions before removing this project");
+      // Pooled hosts and live entries would write the forgotten project back
+      // into the history through their events; they go with the entry.
       if (slot) await this.dropSlot(slot, true);
+      await this.registry.disposeProject(id);
       this.settings.forgetProject(id);
       return this.projectGroups();
     }

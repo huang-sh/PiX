@@ -149,6 +149,13 @@ export class SessionRegistry {
     return paths;
   }
 
+  /** True when any of the project's entries has work in flight (re-read from the runtimes). */
+  hasBusy(project: string): boolean {
+    for (const entry of this.settled.values())
+      if (projectId(entry.project) === project && this.busy(entry)) return true;
+    return false;
+  }
+
   async dispose(path: string): Promise<void> {
     const entry = this.settled.get(path);
     if (entry) await this.disposeEntry(entry);

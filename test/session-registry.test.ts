@@ -411,6 +411,33 @@ test("the session list and project groups carry running markers that flip back t
   }
 });
 
+test("forgetting a local project refuses while it runs and disposes its entries otherwise", { timeout: 30000 }, async () => {
+  const first = workspace(), second = workspace();
+  const controller = new MainController(first, platform);
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", name: "Faux", reasoning: false, contextWindow: 128_000 }] });
+    injectFaux(controller, faux);
+    const run = await startGatedRun(controller, faux, "kept alive by the guard");
+    controller.configure(second);
+    await controller.invoke("session.list");
+
+    await assert.rejects(controller.invoke("app.forgetProject", { id: `local:${first}` }), /Stop the running sessions/);
+    assert.ok(controller.registry.entry(run.path)?.runtime, "the running entry survives the refused removal");
+
+    await run.finish();
+    await controller.invoke("app.forgetProject", { id: `local:${first}` });
+    assert.equal(controller.registry.entry(run.path), undefined, "the entry goes with the history row");
+    assert.ok(!controller.projectGroups().some(record => record.id === `local:${first}`), "the project is gone from the list");
+    await new Promise(resolve => setTimeout(resolve, 700));   // past the background coalescing window
+    assert.ok(!controller.projectGroups().some(record => record.id === `local:${first}`), "nothing writes the project back");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
+  }
+});
+
 test("switching the view away shrinks the idle pool", { timeout: 15000 }, async () => {
   const ws = workspace();
   const controller = new MainController(ws, platform);
