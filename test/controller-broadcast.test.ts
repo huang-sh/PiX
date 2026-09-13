@@ -167,6 +167,28 @@ test("agent control actions without a projection response do not broadcast", asy
   assert.deepEqual(events, []);
 });
 
+test("remote agent events of background host sessions stay off the view", () => {
+  const controller = new MainController(root, platform);
+  try {
+    const current = { session: { path: "r.jsonl" }, entries: [], projection: projectSession([], null), runtime: {},
+      graph: { id: "r.jsonl", epoch: "e", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+    controller.current = current;
+    const seen: string[] = [];
+    controller.onEvent(event => {
+      const payload = (event as { type: string; payload?: { graphId?: string } }).payload;
+      seen.push((event as { type: string }).type + ":" + (payload?.graphId ?? ""));
+    });
+    const message = (graphId: string) => ({ type: "agent", payload: {
+      type: "message_update", graphId, message: { role: "assistant", content: [{ type: "text", text: "x" }] },
+    } } as never);
+
+    controller.remoteEvent(message("other.jsonl"));
+    assert.deepEqual(seen, [], "a background host session's events are recorded, not forwarded");
+    controller.remoteEvent(message("r.jsonl"));
+    assert.deepEqual(seen, ["agent:r.jsonl"], "the viewed remote session's events pass");
+  } finally { controller.dispose(); }
+});
+
 test("child lifecycle events use the graph owner's fresh snapshot without duplicating it", async () => {
   const controller = new MainController(root, platform);
   const snapshot = { session: { path: "session.jsonl" }, projection: { nodes: [] } } as unknown as SessionSnapshot;

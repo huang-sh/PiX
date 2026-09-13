@@ -466,10 +466,11 @@ function onEvent(wireEvent: DesktopEvent) {
     const payload = event.payload as { level?: string; message?: string };
     if (payload.message) layout.showNotice(payload.message, payload.level);
   } else if (event.type === "sessions") {
-    const payload = event.payload as { current?: SessionSnapshot; deletedPath?: string; sessions?: SessionSummary[] };
+    const payload = event.payload as { current?: SessionSnapshot; deletedPath?: string; sessions?: SessionSummary[]; projects?: ProjectGroup[] };
     if (payload.deletedPath && payload.sessions)
       session.applyDeletion(payload.deletedPath, payload.sessions);
     else if (payload.current) session.applySnapshot(payload.current);
+    else if (payload.projects) session.applyProjects(payload.projects);
     else if (payload.sessions) session.applySessions(payload.sessions);
   } else if (event.type === "update.available") {
     updateNotice.value = event.payload as { version: string; url: string };

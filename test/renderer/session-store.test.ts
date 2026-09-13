@@ -64,6 +64,26 @@ describe("session stream focus", () => {
     expect(session.messageWindow(40).messages).toHaveLength(2);
   });
 
+  it("applies project-group refreshes from any project without touching the view", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const view = session.current;
+    const other: ProjectGroup = {
+      id: "local:other",
+      project: { name: "other", path: "D:/dev/other" },
+      sessions: [{ ...view!.session, path: "D:/dev/other/.pi/sessions/bg.jsonl", running: true }],
+      lastOpened: "2026-09-03T00:00:00Z",
+      connected: false,
+    };
+
+    session.applyProjects([...session.projects, other]);
+
+    expect(session.current).toBe(view);
+    expect(session.projects).toHaveLength(2);
+    const rows = session.filteredProjects.find(record => record.id === other.id)?.sessions ?? [];
+    expect(rows.find(item => item.running)?.path).toBe("D:/dev/other/.pi/sessions/bg.jsonl");
+  });
+
   it("composes running markers at read time and clears them when the list says so", () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));

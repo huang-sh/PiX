@@ -173,15 +173,7 @@ export class MainController {
       } catch {}
     }
   }
-  private async refreshBackgroundList(entry: SessionEntry) {
-    // The navigator renders the active project's list directly; other projects
-    // pick their rows up from the history the next time they are read.
-    if (!this.project || projectId(this.project) !== projectId(entry.project)) return;
-    try {
-      this.emit({ type: "sessions", payload: { sessions: await this.sessions() } });
-    } catch {}
-  }
-  private readonly backgroundRefresh = new WeakMap<object, NodeJS.Timeout>();
+  private readonly backgroundRefresh = new Map<SessionEntry, NodeJS.Timeout>();
   /**
    * Coalesces background bookkeeping: one settings write and one list refresh
    * per burst, instead of one per appended entry in a tool-heavy run.
@@ -192,14 +184,31 @@ export class MainController {
       this.backgroundRefresh.delete(entry);
       const snapshot = this.registry.snapshotOf(entry);
       if (snapshot) this.rememberSnapshot(entry.project, snapshot);
-      void this.refreshBackgroundList(entry);
+      // Decorated project groups carry running markers and fresh rows for
+      // every project, not just the one in view.
+      try { this.emit({ type: "sessions", payload: { projects: this.projectGroups() } }); } catch {}
     }, 500);
     timer.unref();
     this.backgroundRefresh.set(entry, timer);
   }
+  /** Quitting must not lose the last background history write to the coalescing window. */
+  private flushBackgroundRefresh() {
+    for (const [entry, timer] of [...this.backgroundRefresh]) {
+      clearTimeout(timer);
+      this.backgroundRefresh.delete(entry);
+      const snapshot = this.registry.snapshotOf(entry);
+      if (snapshot) this.rememberSnapshot(entry.project, snapshot);
+    }
+  }
   /** The entry the view is showing in the active project, if any. */
   private activeEntry(): SessionEntry | undefined {
     return this.project ? this.registry.activeOf(projectId(this.project)) : undefined;
+  }
+  /** Keeps a background project's own history in step with what happened to one of its sessions. */
+  private rememberOwnerProject(entry: SessionEntry, update: (sessions: SessionSummary[]) => SessionSummary[]) {
+    if (!this.project || projectId(entry.project) === projectId(this.project)) return;
+    const record = this.settings.projectHistory().find(item => item.id === projectId(entry.project));
+    if (record) this.settings.rememberProject(entry.project, update(record.sessions));
   }
   /**
    * Resolves a session path to a live entry even when another project is in
@@ -294,6 +303,16 @@ export class MainController {
       }
       this.current = current;
       this.rememberSnapshot(this.project, current);
+    }
+    if (event.type === "agent") {
+      const graphId = (event.payload as { graphId?: string } | null)?.graphId;
+      // Current hosts gate their own background sessions; older ones do not,
+      // so events of a session the desktop is not viewing only keep their
+      // progress baseline for the switch back.
+      if (graphId && graphId !== this.current?.graph?.id) {
+        this.recordProgress(event);
+        return;
+      }
     }
     this.emit(event);
   }
@@ -861,24 +880,29 @@ export class MainController {
         return { imported, sessions: await this.sessions() };
       }
       case "session.rename": {
-        const name = String(v.name);
-        const resolved = this.entryFor(String(v.path));
+        const raw = String(v.path), name = String(v.name);
+        const resolved = this.entryFor(raw);
+        let renamed: SessionSnapshot | undefined;
         if (resolved?.entry.runtime) {
           // Renames go through the owning runtime; a static append would race
           // the background session's own writes.
-          const renamed = await resolved.entry.runtime.control({ action: "setName", name }) as SessionSnapshot;
+          renamed = await resolved.entry.runtime.control({ action: "setName", name }) as SessionSnapshot;
           if (this.registry.isActive(resolved.entry)) this.current = renamed;
         }
         else {
           // Unopened or read-only sessions append the rename on disk; the
           // path is either entry-validated or checked against the project in view.
-          const p = resolved?.path ?? this.files.managed(String(v.path));
+          const p = resolved?.path ?? this.files.managed(raw);
           try {
             await this.projectRuntime.rename(p, name);
           } catch {
             this.files.renameAt(p, name);
           }
         }
+        if (resolved)
+          this.rememberOwnerProject(resolved.entry, sessions => sessions.map(session =>
+            session.path === resolved.path || session.path === raw
+              ? renamed?.session ?? { ...session, name } : session));
         const sessions = await this.sessions();
         this.rememberProject(sessions);
         return { sessions, current: this.current };
@@ -898,15 +922,9 @@ export class MainController {
           throw new Error("Stop the running session before deleting it");
         if (resolved?.entry) {
           await this.registry.dispose(p);
-          // A background project's history keeps its own row for this session.
-          const owner = resolved.entry.project;
-          if (this.project && projectId(owner) !== projectId(this.project)) {
-            const record = this.settings.projectHistory().find(item => item.id === projectId(owner));
-            if (record)
-              this.settings.rememberProject(owner, record.sessions.filter(
-                session => session.path !== p && session.path !== String(v.path),
-              ));
-          }
+          this.rememberOwnerProject(resolved.entry, sessions => sessions.filter(
+            session => session.path !== p && session.path !== String(v.path),
+          ));
         }
         this.files.deleteAt(p);
         if (deletingCurrent) this.current = undefined;
@@ -1044,14 +1062,15 @@ export class MainController {
         return { ok: true };
     }
   }
-  /** Graceful shutdown: abort runs, flush leaves, release graph ownership. */
+  /** Graceful shutdown: flush pending history, abort runs, release ownership. */
   closeSessions(): Promise<void> {
+    this.flushBackgroundRefresh();
     return this.registry.disposeAll();
   }
   dispose() {
     this.liveProgress.clear();
     void this.closeWsl();
     this.shell.dispose();
-    void this.registry.disposeAll().catch(() => {});
+    void this.closeSessions().catch(() => {});
   }
 }

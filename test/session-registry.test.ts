@@ -138,10 +138,10 @@ test("background completions refresh history and the list without touching the v
     const viewSnapshots: string[] = [];
     let listRefreshes = 0;
     controller.onEvent(event => {
-      const pushed = event as { type: string; payload?: { current?: SessionSnapshot; sessions?: unknown[] } };
+      const pushed = event as { type: string; payload?: { current?: SessionSnapshot; projects?: unknown[] } };
       if (pushed.type !== "sessions") return;
       if (pushed.payload?.current) viewSnapshots.push(pushed.payload.current.session.path);
-      else if (pushed.payload?.sessions) listRefreshes++;
+      else if (pushed.payload?.projects) listRefreshes++;
     });
 
     await first.finish();
@@ -270,6 +270,9 @@ test("background sessions stay operable while another project is in view", { tim
 
     await controller.invoke("session.rename", { path: run.path, name: "Renamed from away" });
     assert.equal(controller.registry.entry(run.path)!.runtime!.snapshot().session.name, "Renamed from away");
+    const renamedRow = controller.projectGroups().find(group => group.project.path === first)?.sessions
+      .find(session => session.path === run.path);
+    assert.equal(renamedRow?.name, "Renamed from away", "the owning project's history row carries the rename");
 
     await controller.invoke("session.delete", { path: run.path, confirmed: true });
     assert.equal(existsSync(run.path), false);
@@ -320,16 +323,45 @@ test("background bookkeeping coalesces a burst of activity into one refresh", { 
     controller.createSessionRuntime = () => runtime as never;
     await controller.registry.open(controller.project!, null, "bg.jsonl");
     controller.registry.viewProject("");   // the entry goes background
-    let lists = 0;
-    controller.sessions = async () => { lists++; return []; };
+    let pushes = 0;
+    controller.onEvent(event => {
+      const pushed = event as { type: string; payload?: { projects?: unknown } };
+      if (pushed.type === "sessions" && pushed.payload?.projects) pushes++;
+    });
     for (let i = 0; i < 5; i++) {
       runtime.emit!({ type: "agent", payload: { type: i ? "entry_appended" : "message_end", graphId: "g", branchId: "main", runId: "r" } });
       runtime.emit!({ type: "sessions", payload: { current: snapshot } });
     }
     await new Promise(resolve => setTimeout(resolve, 700));
-    assert.equal(lists, 1, "one list refresh per burst");
+    assert.equal(pushes, 1, "one project refresh per burst");
     const recorded = controller.settings.projectHistory().find(record => record.project.path === ws)?.sessions ?? [];
     assert.ok(recorded.some(session => session.path === "bg.jsonl"), "history still lands once");
+  } finally {
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("quitting flushes the pending background history write", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const snapshot = { session: { path: "late.jsonl", firstMessage: "late" }, entries: [], projection: { nodes: [] } } as unknown as SessionSnapshot;
+    const runtime: { open(): Promise<void>; snapshot(): SessionSnapshot; state(): unknown; close(): Promise<void>; emit?(event: unknown): void } = {
+      open: async () => {},
+      snapshot: () => snapshot,
+      state: () => ({}),
+      close: async () => {},
+    };
+    controller.createSessionRuntime = () => runtime as never;
+    await controller.registry.open(controller.project!, null, "late.jsonl");
+    controller.registry.viewProject("");
+    runtime.emit!({ type: "agent", payload: { type: "message_end", graphId: "late.jsonl", branchId: "main", runId: "r" } });
+
+    await controller.closeSessions();
+    const recorded = controller.settings.projectHistory().find(record => record.project.path === ws)?.sessions ?? [];
+    assert.ok(recorded.some(session => session.path === "late.jsonl"),
+      "the coalesced write lands even when quitting inside the window");
   } finally {
     controller.dispose();
     rmSync(ws, { recursive: true, force: true });
@@ -355,7 +387,20 @@ test("the session list and project groups carry running markers that flip back t
     assert.equal(group?.sessions.find(session => session.path === run.path)?.running, true,
       "the marker follows the session into its own project group");
 
+    // Rows of a project that is not in view still update when its run settles.
+    const awayRows: Array<{ path: string; running?: boolean; firstMessage?: string }> = [];
+    controller.onEvent(event => {
+      const pushed = event as { type: string; payload?: { projects?: Array<{ project: { path: string }; sessions: Array<{ path: string; running?: boolean; firstMessage?: string }> }> } };
+      if (pushed.type !== "sessions" || !pushed.payload?.projects) return;
+      const rows = pushed.payload.projects.find(record => record.project.path === first)?.sessions
+        .filter(session => session.path === run.path) ?? [];
+      awayRows.push(...rows);
+    });
+
     await run.finish();
+    await until(() => awayRows.length > 0);
+    assert.ok(awayRows.some(row => row.firstMessage === "hello"),
+      "the settled row reaches the view without entering its project");
     assert.equal((await controller.sessions()).find(session => session.path === run.path)?.running, undefined,
       "the marker clears once the run settles");
   } finally {

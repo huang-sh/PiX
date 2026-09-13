@@ -286,6 +286,14 @@ export const useSessionStore = defineStore("session", {
       this.sessions = sessions;
       this.syncProject();
     },
+    // Decorated project groups arrive when a background session settles in any
+    // project: rows, marks, and running markers all stay current out of view.
+    applyProjects(projects: ProjectGroup[]) {
+      this.adoptMarks(projects);
+      this.adoptRunning(projects.flatMap(record => record.sessions));
+      this.projects = projects;
+      this.syncProject();
+    },
     // Commands are session-scoped: no usable session means none to offer.
     async loadCommands() {
       const request = ++this.commandRequest;

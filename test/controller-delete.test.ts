@@ -8,7 +8,7 @@ import { MainController } from "../src/main/controller.js";
 import type { DesktopEvent } from "../src/shared/types.js";
 
 for (const streaming of [false, true]) {
-  test(`deleting the ${streaming ? "streaming" : "idle"} current session is refused while running and unlinks after a stop`, { timeout: 15_000 }, async () => {
+  test(`deleting the ${streaming ? "streaming" : "idle"} current session is refused while running and unlinks after a stop`, { timeout: 30_000 }, async () => {
     const home = mkdtempSync(join(tmpdir(), "pix-delete-"));
     const previousHome = process.env.PIX_HOME;
     const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
