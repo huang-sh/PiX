@@ -93,7 +93,6 @@ export const DEFAULT_LAYOUT: LayoutState = {
   widths: { navigator: 248, chat: 356, content: 320 },
   collapsed: { navigator: false, chat: true, content: true },
   minimap: false,
-  composer: { open: false },
   utility: {
     open: false,
     collapsed: false,

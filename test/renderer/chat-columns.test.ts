@@ -166,7 +166,7 @@ describe("pinned chat columns", () => {
     primary.unmount();
   });
 
-  it("keeps typed input in the column whose composer bar was clicked", async () => {
+  it("expands and closes each column's composer without touching the others", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     const layout = useLayoutStore();
@@ -180,18 +180,33 @@ describe("pinned chat columns", () => {
     const primary = mount(BranchContextPanel, { attachTo: document.body, global: { plugins: [pinia, i18n], stubs } });
     const pinned = mount(BranchContextPanel, { props: { nodeId: "turn:u3" }, attachTo: document.body, global: { plugins: [pinia, i18n], stubs } });
 
+    // Only the column whose bar was clicked expands and takes the focus.
     await primary.get(".composer-collapsed").trigger("click");
     await flushPromises();
-
-    // The shared composer state opens in every column, but only the column the
-    // user clicked may take the focus — a later-mounted column must not steal it.
     expect(primary.find("textarea").exists()).toBe(true);
-    expect(pinned.find("textarea").exists()).toBe(true);
+    expect(pinned.find("textarea").exists()).toBe(false);
     expect(primary.element.contains(document.activeElement)).toBe(true);
     expect(pinned.element.contains(document.activeElement)).toBe(false);
 
-    primary.unmount();
+    // Closing one column's composer leaves an independently opened one alone.
+    await pinned.get(".composer-collapsed").trigger("click");
+    await flushPromises();
+    await primary.get(".composer-head button").trigger("click");
+    expect(primary.find("textarea").exists()).toBe(false);
+    expect(pinned.find("textarea").exists()).toBe(true);
+
+    // Each column's own expansion survives a remount (an advance rebinds the
+    // column): an expanded column restores expanded, a collapsed one collapsed.
     pinned.unmount();
+    const rebound = mount(BranchContextPanel, { props: { nodeId: "turn:u3" }, attachTo: document.body, global: { plugins: [pinia, i18n], stubs } });
+    expect(rebound.find("textarea").exists()).toBe(true);
+    await rebound.get(".composer-head button").trigger("click");
+    rebound.unmount();
+    const recollapsed = mount(BranchContextPanel, { props: { nodeId: "turn:u3" }, attachTo: document.body, global: { plugins: [pinia, i18n], stubs } });
+    expect(recollapsed.find("textarea").exists()).toBe(false);
+    recollapsed.unmount();
+
+    primary.unmount();
     document.body.innerHTML = "";
   });
 
@@ -316,7 +331,6 @@ describe("pinned chat columns", () => {
     setActivePinia(pinia);
     const layout = useLayoutStore();
     layout.layout.collapsed.chat = false;
-    layout.layout.composer.open = true;
     const session = useSessionStore();
     session.applySnapshot(snapshot("a2"));
     session.focusedNode = "turn:u1";
@@ -339,6 +353,8 @@ describe("pinned chat columns", () => {
       props: { nodeId: "turn:u3" },
       global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true } },
     });
+    await pinned.get(".composer-collapsed").trigger("click");
+    await flushPromises();
     await pinned.get("textarea").setValue("continue here");
     await pinned.get("textarea").trigger("keydown", { key: "Enter" });
     await flushPromises();
@@ -348,11 +364,16 @@ describe("pinned chat columns", () => {
     expect(layout.chatColumns).toEqual(["turn:u4"]);
     expect(session.focusedNode).toBe("turn:u1");
     expect(pinned.get("textarea").element.value).toBe("");
-    // Workbench rebinds the column to the advanced node id.
-    await pinned.setProps({ nodeId: layout.chatColumns[0] });
-    await flushPromises();
-    expect(pinned.find(".branch-title small").text()).toContain("fourth prompt");
+    // Workbench rebinds the column by remounting it on the advanced node id;
+    // the composer the prompt was submitted from comes back expanded.
     pinned.unmount();
+    const advanced = mount(BranchContextPanel, {
+      props: { nodeId: layout.chatColumns[0] },
+      global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true } },
+    });
+    expect(advanced.get("textarea").element.value).toBe("");
+    expect(advanced.find(".branch-title small").text()).toContain("fourth prompt");
+    advanced.unmount();
   });
 
   it("resolves, reverts, and drops pinned columns as their runs settle", () => {
@@ -362,11 +383,13 @@ describe("pinned chat columns", () => {
     const running = [{ ...run, nodeId: null, status: "running" as const, pending: { text: "x", parentNodeId: "turn:u3" } }];
 
     layout.chatColumns = ["pending:r1"];
+    layout.chatColumnComposers = { "pending:r1": true };
     layout.trackChatColumns(ids, running);
     expect(layout.chatColumns).toEqual(["pending:r1"]); // still waiting for its node
 
     layout.trackChatColumns(ids, [{ ...run, nodeId: "turn:u4", status: "running" }]);
     expect(layout.chatColumns).toEqual(["turn:u4"]); // resolved to the new node
+    expect(layout.chatColumnComposers).toEqual({ "turn:u4": true }); // the column's composer expansion followed it
 
     // A settled run carries no pending of its own; the parent comes from the
     // in-flight frame the column remembered.
@@ -384,16 +407,21 @@ describe("pinned chat columns", () => {
     layout.trackChatColumns(ids, []);
     expect(layout.chatColumns).toEqual([]); // vanished run closes the column
 
+    layout.chatColumnComposers = { "turn:u2": true, "turn:gone": false };
     layout.chatColumns = ["turn:u2", "turn:gone"];
     layout.trackChatColumns(ids, []);
     expect(layout.chatColumns).toEqual(["turn:u2"]); // deleted nodes close their columns
+    expect(layout.chatColumnComposers).toEqual({ "turn:u2": true }); // closing drops the column's flag
   });
 
   it("merges columns when an advance lands on an already-pinned node", () => {
     const layout = useLayoutStore();
     layout.chatColumns = ["turn:u2", "turn:u3"];
+    // The surviving column keeps its own composer expansion.
+    layout.chatColumnComposers = { "turn:u2": true, "turn:u3": false };
     layout.advanceChatColumn("turn:u2", "turn:u3");
     expect(layout.chatColumns).toEqual(["turn:u3"]);
+    expect(layout.chatColumnComposers).toEqual({ "turn:u3": false });
   });
 
   it("restores the pre-pin width at boot", () => {
@@ -404,7 +432,6 @@ describe("pinned chat columns", () => {
       widths: { navigator: 248, chat, content: 320 },
       collapsed: { navigator: true, chat: false, content: true },
       minimap: false,
-      composer: { open: false },
       utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" as const },
       chatPinWidth: { from: 356, to: 960 },
     });
