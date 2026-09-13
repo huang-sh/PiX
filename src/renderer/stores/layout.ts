@@ -104,7 +104,8 @@ export const useLayoutStore = defineStore("layout", {
       // The chat panel opens on demand (node double-click, prompt submit) and is
       // never restored expanded: every boot/workspace reload starts with it closed.
       this.layout.collapsed.chat = true;
-      // Composer expansion is per-column ephemeral state now; drop any saved flag.
+      // Composer expansion is per-column ephemeral state; saved layouts may
+      // still carry the old global flag.
       delete (this.layout as { composer?: unknown }).composer;
       if ((this.layout.version ?? 0) < 3) {
         const defaults = defaultLayout();

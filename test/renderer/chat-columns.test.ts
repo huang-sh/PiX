@@ -180,8 +180,7 @@ describe("pinned chat columns", () => {
     const primary = mount(BranchContextPanel, { attachTo: document.body, global: { plugins: [pinia, i18n], stubs } });
     const pinned = mount(BranchContextPanel, { props: { nodeId: "turn:u3" }, attachTo: document.body, global: { plugins: [pinia, i18n], stubs } });
 
-    // Only the column whose bar was clicked expands, and only that column may
-    // take the focus — a later-mounted column never steals it.
+    // Only the column whose bar was clicked expands and takes the focus.
     await primary.get(".composer-collapsed").trigger("click");
     await flushPromises();
     expect(primary.find("textarea").exists()).toBe(true);

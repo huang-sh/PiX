@@ -134,10 +134,9 @@ async function submitComposer(text: string, images?: PromptImage[]) {
   return delivered;
 }
 
-// Each column's composer expands independently; only the column the user
-// clicked may take the focus, so one column's input never steals another's.
-// A pinned column remounts when its node advances, so its expansion is kept
-// in the store to survive that remount; the primary column never remounts.
+// Each column's composer expands independently. A pinned column remounts
+// when its node advances, so its expansion is kept in the store to survive
+// that remount; the primary column never remounts.
 const composer = ref<InstanceType<typeof PromptComposer>>();
 const composerOpen = ref(props.nodeId ? layout.chatColumnComposers[props.nodeId] ?? false : false);
 // Register the live state up front, so a record entry always mirrors a mounted
@@ -153,8 +152,8 @@ function closeComposer() {
   composerOpen.value = false;
   if (props.nodeId) layout.chatColumnComposers[props.nodeId] = false;
 }
-// Opening the chat panel (double-click, titlebar toggle) puts the cursor
-// where the user is headed; pinned columns leave the focus alone.
+// Reopening the chat panel puts the cursor back in the primary column's
+// composer when it is expanded; pinned columns leave the focus alone.
 watch(() => layout.layout.collapsed.chat, (collapsed) => {
   if (!collapsed && !props.nodeId) void composer.value?.focus();
 });
