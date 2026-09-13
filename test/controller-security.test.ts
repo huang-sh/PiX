@@ -89,7 +89,7 @@ test("session deletion requires main-process approval", async () => {
   const controller = new MainController(root, denied);
   const session = controller.files.list()[0]!;
   let deleted = false;
-  controller.files.delete = () => {
+  controller.files.deleteAt = () => {
     deleted = true;
   };
   controller.sessions = async () => [];
@@ -104,7 +104,7 @@ test("renderer-confirmed session deletion skips the native prompt", async () => 
   const controller = new MainController(root, denied);
   const session = controller.files.list()[0]!;
   let deleted = false;
-  controller.files.delete = () => {
+  controller.files.deleteAt = () => {
     deleted = true;
   };
   controller.sessions = async () => [];

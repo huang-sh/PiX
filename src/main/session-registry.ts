@@ -1,6 +1,7 @@
 import type { ProjectInfo, SessionSnapshot } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { managedSessionFile } from "./services.js";
 
 /** One live session per file; opening an entry never closes another. */
 export interface SessionEntry {
@@ -40,6 +41,21 @@ export class SessionRegistry {
     return this.settled.get(path);
   }
 
+  /**
+   * Resolves a renderer-supplied path to a live entry by validating it against
+   * the entry's own session directory, so background sessions stay reachable
+   * while another project is in view.
+   */
+  resolve(raw: string): { entry: SessionEntry; path: string } | undefined {
+    for (const entry of this.settled.values()) {
+      try {
+        const path = managedSessionFile(entry.dir, raw);
+        if (path === entry.path) return { entry, path };
+      } catch { /* belongs to another project's directory */ }
+    }
+    return undefined;
+  }
+
   isActive(entry: SessionEntry): boolean {
     return this.activePath === entry.path;
   }
@@ -57,6 +73,7 @@ export class SessionRegistry {
     const path = this.activeByProject.get(project);
     const entry = path ? this.settled.get(path) : undefined;
     this.activePath = entry?.path ?? "";
+    void this.evict();
     return entry;
   }
 
@@ -135,6 +152,9 @@ export class SessionRegistry {
   }
 
   async disposeAll(): Promise<void> {
+    // In-flight opens settle into the map first; their runtimes would
+    // otherwise outlive the shutdown and leak the graph ownership files.
+    await Promise.allSettled([...this.pending.values()]);
     for (const entry of [...this.settled.values()]) await this.disposeEntry(entry);
     this.activePath = "";
     this.activeByProject.clear();

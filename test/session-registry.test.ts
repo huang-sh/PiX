@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
@@ -249,6 +249,107 @@ test("deleting a running session is refused", { timeout: 30000 }, async () => {
     await assert.rejects(controller.invoke("session.delete", { path: first.path, confirmed: true }), /Stop the running session/);
     assert.ok(controller.registry.entry(first.path)?.runtime, "the runtime survives the refused delete");
     await first.finish();
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("background sessions stay operable while another project is in view", { timeout: 30000 }, async () => {
+  const first = workspace(), second = workspace();
+  const controller = new MainController(first, platform);
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", name: "Faux", reasoning: false, contextWindow: 128_000 }] });
+    injectFaux(controller, faux);
+    const run = await startGatedRun(controller, faux, "cross project work");
+    controller.configure(second);
+
+    assert.deepEqual(await controller.invoke("session.stop", { path: run.path }), { stopped: true });
+    await until(() => !controller.registry.busy(controller.registry.entry(run.path)!));
+
+    await controller.invoke("session.rename", { path: run.path, name: "Renamed from away" });
+    assert.equal(controller.registry.entry(run.path)!.runtime!.snapshot().session.name, "Renamed from away");
+
+    await controller.invoke("session.delete", { path: run.path, confirmed: true });
+    assert.equal(existsSync(run.path), false);
+    assert.equal(controller.registry.entry(run.path), undefined);
+    const own = controller.projectGroups().find(group => group.project.path === first)?.sessions ?? [];
+    assert.ok(!own.some(session => session.path === run.path), "the owning project's history drops the deleted row");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
+  }
+});
+
+test("closeSessions drains an open that is still in flight", { timeout: 30000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    let closed = false;
+    const runtime = {
+      open: async () => { await new Promise(resolve => setTimeout(resolve, 50)); },
+      close: async () => { closed = true; },
+      state: () => ({}),
+      snapshot: () => ({}) as never,
+    };
+    controller.createSessionRuntime = () => runtime as never;
+    const opening = controller.registry.open(controller.project!, null, "in-flight.jsonl");
+    await controller.closeSessions();
+    await opening;
+    assert.ok(closed, "the in-flight runtime is closed by shutdown");
+    assert.equal(controller.registry.entry("in-flight.jsonl"), undefined);
+  } finally {
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("background bookkeeping coalesces a burst of activity into one refresh", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const snapshot = { session: { path: "bg.jsonl" }, entries: [], projection: { nodes: [] } } as unknown as SessionSnapshot;
+    const runtime: { open(): Promise<void>; snapshot(): SessionSnapshot; state(): unknown; emit?(event: unknown): void } = {
+      open: async () => {},
+      snapshot: () => snapshot,
+      state: () => ({}),
+    };
+    controller.createSessionRuntime = () => runtime as never;
+    await controller.registry.open(controller.project!, null, "bg.jsonl");
+    controller.registry.viewProject("");   // the entry goes background
+    let lists = 0;
+    controller.sessions = async () => { lists++; return []; };
+    for (let i = 0; i < 5; i++) {
+      runtime.emit!({ type: "agent", payload: { type: i ? "entry_appended" : "message_end", graphId: "g", branchId: "main", runId: "r" } });
+      runtime.emit!({ type: "sessions", payload: { current: snapshot } });
+    }
+    await new Promise(resolve => setTimeout(resolve, 700));
+    assert.equal(lists, 1, "one list refresh per burst");
+    const recorded = controller.settings.projectHistory().find(record => record.project.path === ws)?.sessions ?? [];
+    assert.ok(recorded.some(session => session.path === "bg.jsonl"), "history still lands once");
+  } finally {
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("switching the view away shrinks the idle pool", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const runtime = { open: async () => {}, close: async () => {}, state: () => ({}), snapshot: () => ({}) as never };
+    controller.createSessionRuntime = () => runtime as never;
+    const live = () => ["s0", "s1", "s2", "s3", "s4", "s5", "s6"]
+      .filter(name => controller.registry.entry(`${name}.jsonl`)).length;
+    for (const name of ["s0", "s1", "s2", "s3", "s4", "s5", "s6"])
+      await controller.registry.open(controller.project!, null, `${name}.jsonl`);
+    assert.equal(live(), 5, "the idle cap holds beyond the active entry");
+    controller.registry.viewProject("");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(live(), 4, "leaving the view lets the pool shrink");
   } finally {
     await controller.closeSessions();
     controller.dispose();

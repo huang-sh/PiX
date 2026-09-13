@@ -126,8 +126,7 @@ export class MainController {
         const current = (pushed.payload as { current?: SessionSnapshot })?.current;
         if (current && !this.registry.isActive(entry)) {
           // A background session settled: refresh history and the list, never the view.
-          this.rememberSnapshot(entry.project, current);
-          void this.refreshBackgroundList(entry);
+          this.scheduleBackgroundRefresh(entry);
           return;
         }
         if (current) this.current = current;
@@ -156,13 +155,13 @@ export class MainController {
     ) {
       try {
         const snapshot = entry.runtime.snapshot();
-        if (p.type !== "entry_appended" && snapshot.session.path)
-          this.rememberSnapshot(entry.project, snapshot);
         if (this.registry.isActive(entry)) {
+          if (p.type !== "entry_appended" && snapshot.session.path)
+            this.rememberSnapshot(entry.project, snapshot);
           this.current = snapshot;
           this.emit({ type: "sessions", payload: { current: snapshot } });
         } else {
-          void this.refreshBackgroundList(entry);
+          this.scheduleBackgroundRefresh(entry);
         }
       } catch {}
     }
@@ -175,9 +174,40 @@ export class MainController {
       this.emit({ type: "sessions", payload: { sessions: await this.sessions() } });
     } catch {}
   }
+  private readonly backgroundRefresh = new WeakMap<object, NodeJS.Timeout>();
+  /**
+   * Coalesces background bookkeeping: one settings write and one list refresh
+   * per burst, instead of one per appended entry in a tool-heavy run.
+   */
+  private scheduleBackgroundRefresh(entry: SessionEntry) {
+    if (this.backgroundRefresh.has(entry)) return;
+    const timer = setTimeout(() => {
+      this.backgroundRefresh.delete(entry);
+      const snapshot = this.registry.snapshotOf(entry);
+      if (snapshot) this.rememberSnapshot(entry.project, snapshot);
+      void this.refreshBackgroundList(entry);
+    }, 500);
+    timer.unref();
+    this.backgroundRefresh.set(entry, timer);
+  }
   /** The entry the view is showing in the active project, if any. */
   private activeEntry(): SessionEntry | undefined {
     return this.project ? this.registry.activeOf(projectId(this.project)) : undefined;
+  }
+  /**
+   * Resolves a session path to a live entry even when another project is in
+   * view; unopened sessions still have to pass the active project's check.
+   */
+  private entryFor(raw: string): { entry: SessionEntry; path: string } | undefined {
+    const resolved = this.registry.resolve(raw);
+    if (resolved) return resolved;
+    try {
+      const path = this.files.managed(raw);
+      const entry = this.registry.entry(path);
+      return entry ? { entry, path } : undefined;
+    } catch {
+      return undefined;
+    }
   }
   /** Routes a control action: model actions to the project runtime, everything else to the active session. */
   private async controlAgent(input: AgentControl): Promise<{ result: unknown; entry?: SessionEntry }> {
@@ -802,27 +832,31 @@ export class MainController {
         return { imported, sessions: await this.sessions() };
       }
       case "session.rename": {
-        const p = this.files.managed(String(v.path)),
-          name = String(v.name);
-        const entry = this.registry.entry(p);
-        if (entry?.runtime) {
+        const name = String(v.name);
+        const resolved = this.entryFor(String(v.path));
+        if (resolved?.entry.runtime) {
           // Renames go through the owning runtime; a static append would race
           // the background session's own writes.
-          const renamed = await entry.runtime.control({ action: "setName", name }) as SessionSnapshot;
-          if (this.registry.isActive(entry)) this.current = renamed;
+          const renamed = await resolved.entry.runtime.control({ action: "setName", name }) as SessionSnapshot;
+          if (this.registry.isActive(resolved.entry)) this.current = renamed;
         }
-        else
+        else {
+          // Unopened or read-only sessions append the rename on disk; the
+          // path is either entry-validated or checked against the project in view.
+          const p = resolved?.path ?? this.files.managed(String(v.path));
           try {
             await this.projectRuntime.rename(p, name);
           } catch {
-            this.files.rename(p, name);
+            this.files.renameAt(p, name);
           }
+        }
         const sessions = await this.sessions();
         this.rememberProject(sessions);
         return { sessions, current: this.current };
       }
       case "session.delete": {
-        const p = this.files.managed(String(v.path));
+        const resolved = this.entryFor(String(v.path));
+        const p = resolved?.path ?? this.files.managed(String(v.path));
         if (
           v.confirmed !== true &&
           this.settings.bundle().app.confirmDestructiveActions &&
@@ -831,11 +865,21 @@ export class MainController {
           return { cancelled: true, sessions: await this.sessions() };
         const currentPath = this.current?.session.path;
         const deletingCurrent = Boolean(currentPath && realpathSync(currentPath) === p);
-        const entry = this.registry.entry(p);
-        if (entry && this.registry.busy(entry))
+        if (resolved?.entry && this.registry.busy(resolved.entry))
           throw new Error("Stop the running session before deleting it");
-        if (entry) await this.registry.dispose(p);
-        this.files.delete(p);
+        if (resolved?.entry) {
+          await this.registry.dispose(p);
+          // A background project's history keeps its own row for this session.
+          const owner = resolved.entry.project;
+          if (this.project && projectId(owner) !== projectId(this.project)) {
+            const record = this.settings.projectHistory().find(item => item.id === projectId(owner));
+            if (record)
+              this.settings.rememberProject(owner, record.sessions.filter(
+                session => session.path !== p && session.path !== String(v.path),
+              ));
+          }
+        }
+        this.files.deleteAt(p);
         if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
         this.rememberProject(sessions);
@@ -843,7 +887,7 @@ export class MainController {
         return { sessions };
       }
       case "session.stop": {
-        const entry = this.registry.entry(this.files.managed(String(v.path)));
+        const entry = this.entryFor(String(v.path))?.entry;
         if (!entry?.runtime) return { stopped: false };
         const runs = entry.runtime.snapshot().graph?.runs.filter(run => run.status === "running") ?? [];
         await Promise.allSettled(runs.map(run => entry.runtime!.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));

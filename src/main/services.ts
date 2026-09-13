@@ -679,6 +679,24 @@ export class ShellService {
     this.running.clear();
   }
 }
+
+/** Validates a session path against one project's session directory and returns its realpath. */
+export function managedSessionFile(dir: string | null, p: string) {
+  if (!dir)
+    throw new Error("Open a project first");
+  const root = realpathSync(dir);
+  const target = realpathSync(resolve(p));
+  const path = relative(root, target);
+  if (
+    !path ||
+    isAbsolute(path) ||
+    path.startsWith(`..${sep}`) ||
+    dirname(path) !== "." ||
+    extname(path) !== ".jsonl"
+  )
+    throw new Error("Session path escapes the configured session directory");
+  return target;
+}
 export class SessionFiles {
   cwd: string | null;
   dir: string | null;
@@ -693,20 +711,7 @@ export class SessionFiles {
     if (this.dir) mkdirSync(this.dir, { recursive: true });
   }
   managed(p: string) {
-    if (!this.dir)
-      throw new Error("Open a project first");
-    const root = realpathSync(this.dir);
-    const target = realpathSync(resolve(p));
-    const path = relative(root, target);
-    if (
-      !path ||
-      isAbsolute(path) ||
-      path.startsWith(`..${sep}`) ||
-      dirname(path) !== "." ||
-      extname(path) !== ".jsonl"
-    )
-      throw new Error("Session path escapes the configured session directory");
-    return target;
+    return managedSessionFile(this.dir, p);
   }
   list(): SessionSummary[] {
     const dir = this.dir;
@@ -751,7 +756,10 @@ export class SessionFiles {
     return target;
   }
   rename(p: string, name: string) {
-    p = this.managed(p);
+    this.renameAt(this.managed(p), name);
+  }
+  /** Renames a session whose path was already validated against its owning directory. */
+  renameAt(p: string, name: string) {
     const raw = readFileSync(p, "utf8").trimEnd(),
       entries = parseSessionJsonl(raw).entries;
     writeFileSync(
@@ -769,13 +777,16 @@ export class SessionFiles {
     );
   }
   delete(p: string) {
-    const path = this.managed(p);
-    unlinkSync(path);
+    this.deleteAt(this.managed(p));
+  }
+  /** Deletes a session whose path was already validated against its owning directory. */
+  deleteAt(p: string) {
+    unlinkSync(p);
     // The sidecars keep file contents and branch records that nothing can reach
     // once the session file is gone, so they go with it. Cleanup stays
     // best-effort: a locked snapshot must not report a finished deletion as a
     // failure after the session file itself is already unlinked.
-    for (const dir of [fileChangeDir(path), graphDir(path)]) {
+    for (const dir of [fileChangeDir(p), graphDir(p)]) {
       try { rmSync(dir, { recursive: true, force: true }); } catch {}
     }
   }
