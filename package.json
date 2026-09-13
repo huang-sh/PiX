@@ -1,6 +1,6 @@
 {
   "name": "pix",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "private": true,
   "type": "module",
   "description": "Graph-first Electron workbench for Pi Agent",
