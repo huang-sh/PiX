@@ -134,13 +134,24 @@ async function submitComposer(text: string, images?: PromptImage[]) {
   return delivered;
 }
 
-// Every column renders a composer while it is open; only the column the user
-// clicked may take the focus, so a newly pinned column never steals it.
+// Each column's composer expands independently; only the column the user
+// clicked may take the focus, so one column's input never steals another's.
+// A pinned column remounts when its node advances, so its expansion is kept
+// in the store to survive that remount; the primary column never remounts.
 const composer = ref<InstanceType<typeof PromptComposer>>();
+const composerOpen = ref(props.nodeId ? layout.chatColumnComposers[props.nodeId] ?? false : false);
+// Register the live state up front, so a record entry always mirrors a mounted
+// column and an advance can tell a live column from an id no column holds.
+if (props.nodeId) layout.chatColumnComposers[props.nodeId] = composerOpen.value;
 async function openComposer() {
-  await layout.setComposerOpen(true);
+  composerOpen.value = true;
+  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = true;
   await nextTick();
   void composer.value?.focus();
+}
+function closeComposer() {
+  composerOpen.value = false;
+  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = false;
 }
 // Opening the chat panel (double-click, titlebar toggle) puts the cursor
 // where the user is headed; pinned columns leave the focus alone.
@@ -457,7 +468,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer v-if="session.current" class="chat-composer">
-      <div v-if="!layout.layout.composer.open" class="composer-bar">
+      <div v-if="!composerOpen" class="composer-bar">
         <button
           type="button"
           class="composer-collapsed"
@@ -487,7 +498,7 @@ onBeforeUnmount(() => {
             type="button"
             :title="t('branch.composerClose')"
             :aria-label="t('branch.composerClose')"
-            @click="layout.setComposerOpen(false)"
+            @click="closeComposer"
           >
             <ChevronDown :size="14" />
           </button>

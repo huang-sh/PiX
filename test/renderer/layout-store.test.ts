@@ -108,21 +108,21 @@ describe("layout store", () => {
     expect(savedLayout.collapsed.content).toBe(false);
   });
 
-  it("keeps the chat composer collapsed by default and persists its toggle", async () => {
+  it("drops the legacy global composer flag from saved layouts", () => {
     const layout = useLayoutStore();
-    const savedLayout: LayoutState = {
+    const savedLayout = {
       widths: { navigator: 248, chat: 356, content: 620 },
       collapsed: { navigator: false, chat: false, content: false },
       minimap: false,
       utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
-    };
-    delete savedLayout.composer;
+      composer: { open: true },
+    } as LayoutState;
 
     layout.hydrate(settings, savedLayout);
-    expect(layout.layout.composer.open).toBe(false);
 
-    await layout.setComposerOpen(true);
-    expect(layout.layout.composer.open).toBe(true);
+    // Composer expansion is per-column ephemeral state; a saved flag must not
+    // survive hydration only to be written back forever.
+    expect(layout.layout).not.toHaveProperty("composer");
   });
 
   it("migrates inflated legacy side-panel widths once", () => {

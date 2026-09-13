@@ -363,7 +363,6 @@ export interface LayoutState {
   chatPinWidth?: { from: number; to: number };
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;
-  composer: { open: boolean };
   utility: {
     open: boolean;
     collapsed: boolean;
