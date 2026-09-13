@@ -36,7 +36,7 @@
     "test:packaged": "node test/packaged-smoke-test.mjs",
     "test:fff": "node test/builtin-fff-smoke-test.mjs",
     "test:web": "node --test test/prune-dev-artifacts.test.mjs && node test/web-extension-smoke-test.mjs",
-    "dev": "electron-vite dev",
+    "dev": "electron-vite dev -w",
     "postinstall": "node node_modules/electron/install.js"
   },
   "dependencies": {
