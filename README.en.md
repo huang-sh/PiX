@@ -82,3 +82,15 @@ npm run dev
 `npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; CI builds on separate Apple Silicon and Intel runners to include the matching native libraries.
 
 </details>
+
+## Contributors
+
+Thanks to everyone who has contributed to PiX:
+
+<p>
+  <a href="https://github.com/huang-sh"><img src="https://avatars.githubusercontent.com/u/24741118?v=4&s=80" width="80" alt="huang-sh" /></a>
+  <a href="https://github.com/mugpeng"><img src="https://avatars.githubusercontent.com/u/52995448?v=4&s=80" width="80" alt="mugpeng" /></a>
+  <a href="https://github.com/kindredzhang"><img src="https://avatars.githubusercontent.com/u/120791467?v=4&s=80" width="80" alt="kindredzhang" /></a>
+</p>
+
+Contributions are welcome: open an [issue](https://github.com/huang-sh/PiX/issues) for bugs and ideas, or send a pull request.

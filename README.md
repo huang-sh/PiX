@@ -82,3 +82,15 @@ npm run dev
 `npm run test:fff` 验证内置文件搜索；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络），均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；CI 分别在 Apple Silicon 和 Intel runner 上构建对应安装包，以包含正确的本机运行库。
 
 </details>
+
+## 贡献者
+
+感谢所有为 PiX 做出贡献的人：
+
+<p>
+  <a href="https://github.com/huang-sh"><img src="https://avatars.githubusercontent.com/u/24741118?v=4&s=80" width="80" alt="huang-sh" /></a>
+  <a href="https://github.com/mugpeng"><img src="https://avatars.githubusercontent.com/u/52995448?v=4&s=80" width="80" alt="mugpeng" /></a>
+  <a href="https://github.com/kindredzhang"><img src="https://avatars.githubusercontent.com/u/120791467?v=4&s=80" width="80" alt="kindredzhang" /></a>
+</p>
+
+欢迎参与：问题反馈和功能建议请开 [issue](https://github.com/huang-sh/PiX/issues)；修 bug 或加功能请提交 Pull Request。
