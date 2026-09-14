@@ -165,8 +165,12 @@ export class SessionRegistry {
       const failed = this.settled.get(path)!;
       if (selection === this.selection) this.setActive(failed);
       // A concurrent open can win this path while ours is failing; serve its
-      // snapshot instead of the missing fallback of a superseded entry.
-      if (failed.runtime) return failed.runtime.snapshot();
+      // snapshot instead of the missing fallback of a superseded entry. Going
+      // through snapshotOf keeps a winner whose runtime died underneath us on
+      // the read-only degradation instead of surfacing its error.
+      const snapshot = this.snapshotOf(failed);
+      if (snapshot) return snapshot;
+      failed.fallback ??= fallback(error);
       return failed.fallback!;
     }
     // Disposal may have raced this open (delete, project removal, session

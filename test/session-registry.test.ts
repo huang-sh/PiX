@@ -1050,6 +1050,39 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
   }
 });
 
+test("a failed open never leaks a superseded winner's dead runtime error", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const dir = controller.files.dir!;
+    const path = join(dir, "superseded.jsonl");
+    writeFileSync(path, "");
+    controller.createSessionRuntime = () => ({
+      async open() { throw new Error("launch failed"); },
+      snapshot: () => { throw new Error("runtime died"); },
+      state: () => ({}),
+      async close() {},
+    }) as never;
+    const pending = controller.invoke("session.open", { path });
+    // Simulate the interleaving the branch guards: a concurrent open wins the
+    // path with a runtime that has died by the time our failed launch's catch
+    // looks the entry up again.
+    (controller.registry as unknown as { settled: Map<string, never> }).settled.set(path, {
+      path, project: controller.project!, dir, lastUsed: Date.now(),
+      runtime: { async open() {}, snapshot: () => { throw new Error("runtime died"); }, state: () => ({}), async close() {} },
+    } as never);
+
+    const snapshot = await pending as SessionSnapshot;
+
+    assert.equal(snapshot.session.path, path,
+      "the failed open degrades to the read-only snapshot, not the dead winner's error");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("a catalog change reaches the sessions that are already open", { timeout: 30000 }, async () => {
   const ws = workspace();
   const controller = new MainController(ws, platform);
