@@ -1,9 +1,10 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectSession } from "../../src/shared/session";
-import type { ProjectGroup, ProjectInfo, RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
+import type { ProjectGroup, ProjectInfo, RawSessionEntry, SessionSnapshot, SessionSummary } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import { useSessionStore } from "../../src/renderer/stores/session";
+import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
 
 const first: RawSessionEntry[] = [
   { type: "message", id: "u1", parentId: null, timestamp: "2026-09-02T10:00:00Z", message: { role: "user", content: "first" } },
@@ -47,7 +48,174 @@ describe("session stream focus", () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));
 
-    expect(session.sessions).toEqual([session.current?.session]);
+    expect(session.sessions).toEqual([{ ...session.current?.session, running: true }]);
+  });
+
+  it("adopts the new session from its own reply before any broadcast arrives", async () => {
+    const session = useSessionStore();
+    useWorkspaceStore().hydrate(project);
+    hydrate(session, snapshot(first, "a1"));
+    const created = { ...session.current!, session: { ...session.current!.session, path: "new.jsonl" } };
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async (route, input) => {
+      if (route === "agent.control" && (input as { action?: string }).action === "newSession") return created;
+      if (route === "session.list") return [created.session];
+      return [];
+    });
+
+    await session.create();
+
+    expect(invoke.mock.calls.some(([route]) => route === "session.list")).toBe(true);
+    expect(session.current?.session.path).toBe("new.jsonl");
+    expect(session.sessions.map(row => row.path)).toEqual(["new.jsonl"]);
+  });
+
+  it("applies project-group refreshes from any project without touching the view", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const view = session.current;
+    const other: ProjectGroup = {
+      id: "local:other",
+      project: { name: "other", path: "D:/dev/other" },
+      sessions: [{ ...view!.session, path: "D:/dev/other/.pi/sessions/bg.jsonl", running: true }],
+      lastOpened: "2026-09-03T00:00:00Z",
+      connected: false,
+    };
+
+    session.applyProjects([...session.projects, other]);
+
+    expect(session.current).toBe(view);
+    expect(session.projects).toHaveLength(2);
+    const rows = session.filteredProjects.find(record => record.id === other.id)?.sessions ?? [];
+    expect(rows.find(item => item.running)?.path).toBe("D:/dev/other/.pi/sessions/bg.jsonl");
+  });
+
+  it("refreshes running markers without losing another session's state", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const row = session.current!.session;
+    const background = { ...row, path: "other.jsonl", messageCount: 2 };
+    const groups = (rows: SessionSummary[]) => [{ ...session.projects[0]!, sessions: rows }];
+
+    session.applyProjects(groups([row, { ...background, running: true }]));
+
+    const project = () => session.filteredProjects[0]?.sessions;
+    expect(project()?.find(item => item.path === "other.jsonl")?.running).toBe(true);
+    // A snapshot updates its own row without erasing the background run.
+    session.applySnapshot(snapshot(first, "a1"));
+    expect(project()?.find(item => item.path === "other.jsonl")?.running).toBe(true);
+    session.applyProjects(groups([row, background]));
+    expect(project()?.find(item => item.path === "other.jsonl")?.running).toBeUndefined();
+  });
+
+  it("stops a background session through the stop route and refreshes", async () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    const row = session.current!.session;
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async (route: string) =>
+      route === "session.stop" ? { stopped: true } : [row]);
+
+    await session.stop("other.jsonl");
+
+    expect(invoke).toHaveBeenCalledWith("session.stop", { path: "other.jsonl" });
+    expect(invoke).toHaveBeenCalledWith("session.list");
+  });
+
+  it("updates graph running markers from snapshots without a list refresh", () => {
+    const session = useSessionStore();
+    const idle = snapshot(first, "a1");
+    idle.runtime.isStreaming = false;
+    const graph = { id: idle.session.path, epoch: "e", revision: 1,
+      runs: [{ branchId: "b", runId: "r", status: "running" }] } as SessionSnapshot["graph"];
+    hydrate(session, { ...idle, graph });
+    expect(session.filteredProjects[0]!.sessions[0]!.running).toBe(true);
+    session.applySnapshot({ ...idle, graph: { ...graph!, revision: 2, runs: [] } });
+    expect(session.filteredProjects[0]!.sessions[0]!.running).toBeUndefined();
+  });
+
+  it("keeps running flags scoped to each project even when hosts share a session path", () => {
+    const session = useSessionStore();
+    const idle = snapshot(first, "a1");
+    idle.runtime.isStreaming = false;
+    hydrate(session, idle);
+    const other: ProjectGroup = { ...session.projects[0]!, id: "ssh:host:/project",
+      project: { name: "remote", path: "/project", remote: { kind: "ssh", host: "host" } },
+      sessions: [{ ...idle.session, running: true }], connected: true };
+    session.applyProjects([...session.projects, other]);
+    expect(session.filteredProjects.find(row => row.id === session.activeProjectId)!.sessions[0]!.running).toBeUndefined();
+    expect(session.filteredProjects.find(row => row.id === other.id)!.sessions[0]!.running).toBe(true);
+    session.disconnected(other.id);
+    expect(session.filteredProjects.find(row => row.id === other.id)!.sessions[0]!.running).toBeUndefined();
+  });
+
+  it("applies fresh active-project rows from background project events", () => {
+    const session = useSessionStore();
+    hydrate(session, snapshot(first, "a1"));
+    session.applyProjects([{ ...session.projects[0]!, sessions: [{ ...session.sessions[0]!, running: false, messageCount: 42 }] }]);
+    expect(session.sessions[0]!.messageCount).toBe(42);
+    expect(session.filteredProjects[0]!.sessions[0]!.running).toBe(false);
+  });
+
+  it.each(["project", "session"])("ignores delayed prompt replies after switching %s", async kind => {
+    const session = useSessionStore();
+    const before = snapshot(first, "a1");
+    hydrate(session, before);
+    let finish!: (snapshot: SessionSnapshot) => void;
+    vi.spyOn(desktop, "invoke").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = session.prompt("held");
+    if (kind === "project") {
+      session.hydrate({ ...project, path: "D:/other" }, [], [], before);
+    } else session.applySnapshot({ ...before, session: { ...before.session, path: "other.jsonl" } });
+    const view = session.current;
+    session.focusedNode = "keep-focus";
+    finish(before);
+    await pending;
+    expect(session.current).toBe(view);
+    expect(session.focusedNode).toBe("keep-focus");
+  });
+
+  it.each([["A", "B"], ["B", "A"]])("keeps the latest open when replies arrive %s then %s", async (firstReply, lastReply) => {
+    const session = useSessionStore(); hydrate(session, snapshot(first, "a1"));
+    const release = new Map<string, (value: SessionSnapshot) => void>();
+    const idle = snapshot(first, "a1"); idle.runtime.isStreaming = false;
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation((route, input) => route === "session.open"
+      ? new Promise(resolve => release.set((input as { path: string }).path, resolve)) : Promise.resolve([]));
+    invoke.mockClear();
+    const a = session.open("A"), b = session.open("B");
+    const pending = { A: a, B: b };
+    for (const path of [firstReply, lastReply]) {
+      release.get(path)!({ ...idle, session: { ...idle.session, path } });
+      await pending[path as keyof typeof pending];
+      if (path === "A" && firstReply === "A") expect(session.loading).toBe(true);
+    }
+    expect(session.current?.session.path).toBe("B");
+    expect(session.loading).toBe(false);
+    expect(invoke.mock.calls.filter(([route]) => route === "session.list")).toHaveLength(1);
+  });
+
+  it("invalidates pending opens at the start of a project switch and ignores stale errors", async () => {
+    const session = useSessionStore(); hydrate(session, snapshot(first, "a1"));
+    const before = session.current;
+    let reject!: (error: Error) => void;
+    vi.spyOn(desktop, "invoke").mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+    const opening = session.open("old");
+    const request = ++session.viewRequest;
+    reject(new Error("old open failed")); await opening;
+    expect(session.current).toBe(before);
+    expect(session.loading).toBe(true);
+    session.hydrate({ name: "other", path: "/other" }, [], [], undefined, request);
+    expect(session.current).toBeUndefined();
+  });
+
+  it("does not apply an old open reply after hydrating another project", async () => {
+    const session = useSessionStore(); hydrate(session, snapshot(first, "a1"));
+    let finish!: (value: SessionSnapshot) => void;
+    vi.spyOn(desktop, "invoke").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const opening = session.open("old");
+    const other = { ...snapshot(first, "a1"), session: { ...snapshot(first, "a1").session, path: "other" } };
+    session.hydrate({ name: "other", path: "/other" }, [], [], other);
+    finish(snapshot(first, "a1")); await opening;
+    expect(session.current?.session.path).toBe("other");
+    expect(session.sessions.map(row => row.path)).toEqual(["other"]);
   });
 
   it("clears the current session after deletion, including broadcast-only deletion", async () => {
@@ -209,6 +377,8 @@ describe("session stream focus", () => {
 
     expect(inputs).toEqual([
       { action: "navigateTree", entryId: "a1" },
+      // Session-scoped, like the TUI's model switch; the profile default only
+      // moves through an explicit "set as default".
       { action: "setModel", provider: "zai", modelId: "glm-5.3" },
       { action: "setThinking", level: "low" },
       { action: "prompt", text: "second" },

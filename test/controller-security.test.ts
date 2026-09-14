@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MainController, type Platform } from "../src/main/controller.js";
-import type { ProjectGroup } from "../src/shared/types.js";
+import type { ProjectGroup, ProjectInfo, SettingsBundle } from "../src/shared/types.js";
 
 // Deletion and rename flows rewrite the project history in the app settings,
 // so without an isolated home these tests would enroll test/workspace in the
@@ -29,6 +29,19 @@ const denied: Platform = {
   showItemInFolder() {},
   quit() {},
 };
+
+/** Installs a mock remote workspace as the pooled, active connection. */
+function attachRemote(
+  controller: MainController,
+  request: (route: string, input?: unknown) => Promise<unknown>,
+  effective?: Partial<SettingsBundle["effective"]>,
+) {
+  const project: ProjectInfo = { name: "remote", path: "/remote", remote: { kind: "ssh", host: "remote" } };
+  controller.project = project;
+  const bundle = controller.settings.bundle();
+  controller.installSlot({ request, onEvent: () => () => {}, onDisconnect: () => () => {} } as never, project,
+    effective ? { ...bundle, effective: { ...bundle.effective, ...effective } } : bundle);
+}
 
 test("revealing a session uses its project history without opening the project", async () => {
   const shown: string[] = [];
@@ -89,7 +102,7 @@ test("session deletion requires main-process approval", async () => {
   const controller = new MainController(root, denied);
   const session = controller.files.list()[0]!;
   let deleted = false;
-  controller.files.delete = () => {
+  controller.files.deleteAt = () => {
     deleted = true;
   };
   controller.sessions = async () => [];
@@ -104,7 +117,7 @@ test("renderer-confirmed session deletion skips the native prompt", async () => 
   const controller = new MainController(root, denied);
   const session = controller.files.list()[0]!;
   let deleted = false;
-  controller.files.delete = () => {
+  controller.files.deleteAt = () => {
     deleted = true;
   };
   controller.sessions = async () => [];
@@ -120,7 +133,7 @@ test("local session rename reaches the local runtime", async () => {
   const controller = new MainController(root, denied);
   const session = controller.files.list()[0]!;
   let renamed: { path: string; name: string } | undefined;
-  controller.pi.rename = async (path, name) => {
+  controller.projectRuntime.rename = async (path, name) => {
     renamed = { path, name };
   };
   controller.sessions = async () => [];
@@ -132,12 +145,10 @@ test("local session rename reaches the local runtime", async () => {
 test("remote session rename is forwarded to the remote host", async () => {
   const controller = new MainController(root, denied);
   const calls: Array<{ route: string; input: unknown }> = [];
-  controller.wsl = {
-    request: async (route: string, input: unknown) => {
-      calls.push({ route, input });
-      return { sessions: [] };
-    },
-  } as any;
+  attachRemote(controller, async (route, input) => {
+    calls.push({ route, input });
+    return { sessions: [] };
+  });
 
   await controller.invoke("session.rename", {
     path: "/project/.pi/sessions/session.jsonl",
@@ -153,16 +164,14 @@ test("recommended extension package actions run on the active remote host", asyn
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     return { ok: true };
   };
-  controller.wsl = {
-    request: async (route: string, input: unknown) => {
-      remoteCalls.push({ route, input });
-      return { ok: true };
-    },
-  } as any;
+  attachRemote(controller, async (route, input) => {
+    remoteCalls.push({ route, input });
+    return { ok: true };
+  });
 
   await controller.invoke("agent.control", {
     action: "installExtension",
@@ -183,17 +192,15 @@ test("recommended extension package actions run on the active remote host", asyn
 test("remote OAuth login runs on the desktop and only syncs models", async () => {  const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     if (input.action === "getModels") return [];
     return { ok: true, status: { type: "oauth" } };
   };
-  controller.wsl = {
-    request: async (route: string, input: unknown) => {
-      remoteCalls.push({ route, input });
-      return { ok: true };
-    },
-  } as any;
+  attachRemote(controller, async (route, input) => {
+    remoteCalls.push({ route, input });
+    return { ok: true };
+  });
 
   const result = await controller.invoke("agent.control", {
     action: "loginOAuth",
@@ -216,14 +223,14 @@ test("remote model refresh uses the desktop catalog and resyncs the model broker
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     return input.action === "getModels" ? [{ provider: "openai", id: "new-model" }] : { ok: true };
   };
-  controller.wsl = { request: async (route: string, input: unknown) => {
+  attachRemote(controller, async (route, input) => {
     remoteCalls.push({ route, input });
     return { ok: true };
-  } } as any;
+  });
   await controller.invoke("agent.control", { action: "refreshModels" });
   assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels", broker: true }]);
   assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openai"], models: [{ provider: "openai", id: "new-model" }] } }]);
@@ -235,14 +242,14 @@ test("adding a remote custom model saves credentials on the desktop only", async
   const localCalls: unknown[] = [];
   const remoteCalls: unknown[] = [];
   const model = { provider: "local-llm", id: "custom-model", api: "openai-completions" };
-  controller.pi.control = async (input) => {
+  controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
     return input.action === "getModels" ? [model] : { ok: true };
   };
-  controller.wsl = { request: async (_route: string, input: unknown) => {
+  attachRemote(controller, async (_route, input) => {
     remoteCalls.push(input);
     return { ok: true };
-  } } as any;
+  });
   const input = {
     action: "addCustomModel", provider: model.provider, modelId: model.id,
     api: model.api, baseUrl: "http://localhost:11434/v1", apiKey: "desktop-secret",
@@ -266,16 +273,10 @@ test("adding a remote custom model saves credentials on the desktop only", async
 test("WSL shell commands keep the local main-process approval boundary", async () => {
   const controller = new MainController(root, denied);
   const calls: string[] = [];
-  controller.wsl = {
-    request: async (route: string) => {
-      calls.push(route);
-      return [];
-    },
-  } as any;
-  controller.wslSettings = {
-    ...controller.settings.bundle(),
-    effective: { defaultProjectTrust: "ask" },
-  };
+  attachRemote(controller, async (route: string) => {
+    calls.push(route);
+    return [];
+  }, { defaultProjectTrust: "ask" });
   const result = (await controller.invoke("shell.run", {
     command: "uname -a",
   })) as { cancelled: boolean };
@@ -286,16 +287,10 @@ test("WSL shell commands keep the local main-process approval boundary", async (
 test("remote interactive terminals open without a second confirmation", async () => {
   const controller = new MainController(root, denied);
   const calls: string[] = [];
-  controller.wsl = {
-    request: async (route: string) => {
-      calls.push(route);
-      return { id: "remote-terminal" };
-    },
-  } as any;
-  controller.wslSettings = {
-    ...controller.settings.bundle(),
-    effective: { defaultProjectTrust: "ask" },
-  };
+  attachRemote(controller, async (route: string) => {
+    calls.push(route);
+    return { id: "remote-terminal" };
+  }, { defaultProjectTrust: "ask" });
   const result = await controller.invoke("terminal.create", { cols: 80, rows: 24 });
   assert.deepEqual({ result, calls }, {
     result: { id: "remote-terminal" },
@@ -310,11 +305,7 @@ test("remote terminals reject an invalid host response", async () => {
       return true;
     },
   });
-  controller.wsl = { request: async () => undefined } as any;
-  controller.wslSettings = {
-    ...controller.settings.bundle(),
-    effective: { defaultProjectTrust: "always" },
-  };
+  attachRemote(controller, async () => undefined, { defaultProjectTrust: "always" });
 
   await assert.rejects(
     controller.invoke("terminal.create", { cols: 80, rows: 24 }),

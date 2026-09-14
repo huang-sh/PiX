@@ -66,6 +66,10 @@ async function mountComposer(invoke: ReturnType<typeof vi.spyOn>) {
   return { session, panel, invoke };
 }
 
+function settingsBundle(): SettingsBundle {
+  return { app: {}, piGlobal: {}, piProject: {}, effective: {}, paths: {} } as SettingsBundle;
+}
+
 function promptCalls(invoke: ReturnType<typeof vi.spyOn>) {
   return invoke.mock.calls
     .filter(([route, input]) => route === "agent.control" && (input as { action?: string }).action === "prompt")
@@ -390,7 +394,8 @@ describe("chat panel composer", () => {
   });
 
   it("model-driven clamps show locally without polluting the sticky level", async () => {
-    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async route =>
+      (route === "settings.update" ? settingsBundle() : {}) as never);
     const { session, panel } = await mountComposer(invoke);
     session.setUserThinking("high");
     session.models = [
@@ -407,6 +412,49 @@ describe("chat panel composer", () => {
 
     expect(panel.get('button[aria-label="Draft thinking level"]').text()).toContain("off");
     expect(session.userThinking).toBe("high");
+    panel.unmount();
+  });
+
+  it("leaves the default alone while only inheriting a model", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async route =>
+      (route === "settings.update" ? settingsBundle() : {}) as never);
+    invoke.mockClear();
+    const { session, panel } = await mountComposer(invoke);
+    // The composer shows the model inherited from the target node; nothing is
+    // written until the user actually picks one.
+    session.models = [
+      { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", reasoning: true },
+      { provider: "xai", id: "grok-fast", name: "Grok Fast", reasoning: false },
+    ];
+    await flushPromises();
+
+    expect(panel.get(".node-model-select").text()).toContain("gpt-5.4");
+    expect(invoke).not.toHaveBeenCalledWith("settings.update", expect.anything());
+    panel.unmount();
+  });
+
+  it("writes an explicit pick as the profile default new sessions start from", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async route =>
+      (route === "settings.update" ? settingsBundle() : {}) as never);
+    invoke.mockClear();
+    const { session, panel } = await mountComposer(invoke);
+    session.focusedNode = "turn:u2";
+    session.models = [
+      { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", reasoning: true },
+      { provider: "xai", id: "grok-fast", name: "Grok Fast", reasoning: false },
+    ];
+
+    await panel.get(".node-model-select").trigger("click");
+    await flushPromises();
+    (document.querySelector('[data-model-provider="xai"]') as HTMLElement).click();
+    await flushPromises();
+    (document.querySelector('[data-model-id="grok-fast"]') as HTMLElement).click();
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("settings.update", {
+      scope: "global",
+      patch: { defaultProvider: "xai", defaultModel: "grok-fast" },
+    });
     panel.unmount();
   });
 

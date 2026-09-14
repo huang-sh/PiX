@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, posix, resolve } from "node:path";
 import type {
   AgentControl,
@@ -17,11 +17,13 @@ import type {
 import { projectId } from "../shared/types.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
-import { projectSession } from "../shared/session.js";
+import { canonicalPath } from "./paths.js";
+import { isSessionRunning, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
-import { PiRuntime } from "./pi-runtime.js";
+import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
@@ -30,6 +32,7 @@ import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
   GitService,
+  managedSessionFile,
   SessionFiles,
   SettingsService,
   ShellService,
@@ -43,6 +46,25 @@ export interface Platform {
   showItemInFolder(path: string): void;
   quit(): void;
 }
+/** One pooled remote workspace: the host stays alive while another project is in view. */
+export interface RemoteSlot {
+  client: WslHostClient;
+  project: ProjectInfo;
+  settings: SettingsBundle;
+  /** The session the desktop last viewed on this host, restored on reactivation. */
+  activePath: string;
+  stopEvents: () => void;
+  stopDisconnect: () => void;
+  lastActivity: number;
+}
+/** Host workspace paths may differ from the slot's by a trailing slash. */
+const sameHostPath = (a: string, b: string) => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
+/** Session-scoped control actions whose runtime moves to a new session file. */
+const SESSION_MIGRATING_ACTIONS = ["fork", "clone"];
+/** Model actions whose catalog or credential change must reach open sessions. */
+const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
+const migratesSession = (action: unknown) =>
+  action === "newSession" || (SESSION_MIGRATING_ACTIONS as readonly unknown[]).includes(action);
 const unavailable = (): RuntimeState => ({
   available: false,
   model: null,
@@ -65,21 +87,31 @@ export class MainController {
   git: GitService;
   shell: ShellService;
   files: SessionFiles;
-  pi: PiRuntime;
+  /** View-independent runtime: model catalog, skills, login — never opens a session. */
+  projectRuntime: PiRuntime;
+  /** Live session runtimes; opening a session switches the view, never closes another. */
+  registry: SessionRegistry;
   current?: SessionSnapshot;
   platform: Platform;
   localProjectPath: string | null;
-  wsl?: WslHostClient;
-  wslSettings?: SettingsBundle;
-  stopWslEvents?: () => void;
-  private stopRemoteDisconnect?: () => void;
+  private readonly remotePool = new Map<string, RemoteSlot>();
+  private remoteRecycleTimer?: NodeJS.Timeout;
   private remoteAttempt?: AbortController;
   private pendingRemote?: { client: WslHostClient; project: ProjectInfo; abort: AbortController };
+  private viewRequest = 0;
   private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
-  remoteBrokerModels = new Set<string>();
   listeners = new Set<(e: DesktopEvent) => void>();
   private readonly liveProgress = new Map<string, DesktopEvent>();
-  private liveProgressSession?: string;
+  /** Last-seen graph epoch per session; pruned to the live set in noteEpoch. */
+  private readonly liveProgressEpochs = new Map<string, string | undefined>();
+  /** The client of the remote workspace in view, pooled or freshly connected. */
+  get wsl(): WslHostClient | undefined {
+    return this.activeSlot()?.client;
+  }
+  get remoteBrokerModels(): Set<string> {
+    const slot = this.activeSlot();
+    return (slot && this.brokerModels.get(slot.client)) ?? new Set<string>();
+  }
   constructor(path: string | null, platform: Platform) {
     path = path ? resolve(path) : null;
     this.localProjectPath = path;
@@ -95,36 +127,232 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files = new SessionFiles(path, dir);
-    this.pi = new GraphRuntime(path, dir, (e) => {
-      const pushed = e as DesktopEvent;
+    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url));
+    this.registry = new SessionRegistry({
+      createRuntime: entry => this.createSessionRuntime(entry),
+      onEvent: (entry, event) => this.routeSessionEvent(entry, event),
+    });
+  }
+  /**
+   * Registry entries build their own runtime with the entry's frozen project.
+   * Broker state lives on the project runtime; cloning it here keeps sessions
+   * created after a remote host connects streaming through the desktop broker.
+   */
+  createSessionRuntime(entry: SessionEntry): GraphRuntime {
+    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url));
+    runtime.modelBroker = this.projectRuntime.modelBroker;
+    runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
+    runtime.brokerModels = [...this.projectRuntime.brokerModels];
+    return runtime;
+  }
+  private routeSessionEvent(entry: SessionEntry, e: unknown) {
+    // A runtime that is no longer its entry's (closed underneath a disposal)
+    // must not publish: its baselines would outlive the epoch record that
+    // would have invalidated them on reopen.
+    if (!entry.runtime) return;
+    const pushed = e as DesktopEvent;
+    if (pushed.type !== "agent") {
       if (pushed.type === "sessions") {
-        const snapshot = (pushed.payload as { current?: SessionSnapshot })?.current;
-        if (snapshot) this.current = snapshot;
+        const current = (pushed.payload as { current?: SessionSnapshot })?.current;
+        if (current && !this.registry.isActive(entry)) {
+          // A background session settled: refresh history and the list, never the view.
+          this.noteEpoch(current);
+          this.scheduleBackgroundRefresh(entry);
+          return;
+        }
+        if (current) this.current = current;
       }
-      this.emit(e as DesktopEvent);
-      const p = (e as DesktopEvent).payload as { type?: string; graphId?: string; branchId?: string };
-      // GraphRuntime publishes child snapshots after updating its worker. Taking
-      // one here would broadcast the old worker state, then the new state again.
-      const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
-      if (
-        !childEvent &&
-        [
-          "message_end",
-          "agent_settled",
-          "entry_appended",
-          "session_info_changed",
-          "compaction_start",
-          "compaction_end",
-        ].includes(p?.type ?? "")
-      ) {
-        try {
-          this.current = this.pi.snapshot();
-          if (p.type !== "entry_appended" && this.current.session.path)
-            this.rememberSnapshot(this.current);
-          this.emit({ type: "sessions", payload: { current: this.current } });
-        } catch {}
+      // A parked session's notices are dropped like a pooled host's — an
+      // invisible workspace must not toast; its failed run settles onto the
+      // row and the session's own error state instead.
+      if (!this.registry.isActive(entry)) return;
+      this.emit(pushed);
+      return;
+    }
+    // Main-line events outside a scoped run still identify their session, so
+    // progress baselines stay per-session across view switches.
+    let p = pushed.payload as { type?: string; graphId?: string; branchId?: string };
+    let routed = pushed;
+    if (!p.graphId) {
+      p = { ...p, graphId: entry.path };
+      routed = { ...pushed, payload: p };
+    }
+    if (this.registry.isActive(entry)) this.emit(routed);
+    else this.recordProgress(routed);   // token streams of background runs are recorded for their return, never forwarded
+    // GraphRuntime publishes child snapshots after updating its worker. Taking
+    // one here would broadcast the old worker state, then the new state again.
+    const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
+    if (
+      !childEvent &&
+      entry.runtime &&
+      [
+        "message_end",
+        "agent_settled",
+        "entry_appended",
+        "session_info_changed",
+        "compaction_start",
+        "compaction_end",
+      ].includes(p?.type ?? "")
+    ) {
+      try {
+        const snapshot = entry.runtime.snapshot();
+        if (this.registry.isActive(entry)) {
+          if (p.type !== "entry_appended" && snapshot.session.path)
+            this.rememberSnapshot(entry.project, snapshot);
+          this.current = snapshot;
+          this.emit({ type: "sessions", payload: { current: snapshot } });
+        } else {
+          this.scheduleBackgroundRefresh(entry);
+        }
+      } catch {}
+    }
+  }
+  private readonly backgroundRefresh = new Map<SessionEntry, NodeJS.Timeout>();
+  /**
+   * Coalesces background bookkeeping: one settings write and one list refresh
+   * per burst, instead of one per appended entry in a tool-heavy run.
+   */
+  private scheduleBackgroundRefresh(entry: SessionEntry) {
+    if (this.backgroundRefresh.has(entry)) return;
+    const timer = setTimeout(() => {
+      this.backgroundRefresh.delete(entry);
+      // A disposed entry must not publish a refresh for a project that may have
+      // just been removed from the list or moved to another session directory.
+      if (this.registry.entry(entry.path) !== entry) return;
+      const snapshot = this.registry.snapshotOf(entry);
+      if (snapshot) this.rememberSnapshot(entry.project, snapshot);
+      // Decorated project groups carry running markers and fresh rows for
+      // every project, not just the one in view.
+      try { this.emit({ type: "sessions", payload: { projects: this.projectGroups() } }); } catch {}
+    }, 500);
+    timer.unref();
+    this.backgroundRefresh.set(entry, timer);
+  }
+  /** Quitting must not lose the last background history write to the coalescing window. */
+  private flushBackgroundRefresh() {
+    for (const [entry, timer] of [...this.backgroundRefresh]) {
+      clearTimeout(timer);
+      this.backgroundRefresh.delete(entry);
+      const snapshot = this.registry.snapshotOf(entry);
+      if (snapshot) this.rememberSnapshot(entry.project, snapshot);
+    }
+  }
+  /** The entry the view is showing in the active project, if any. */
+  private activeEntry(): SessionEntry | undefined {
+    return this.project ? this.registry.activeOf(projectId(this.project)) : undefined;
+  }
+  /** Keeps a background project's own history in step with what happened to one of its sessions. */
+  private rememberOwnerProject(entry: SessionEntry, update: (sessions: SessionSummary[]) => SessionSummary[]) {
+    if (!this.project || projectId(entry.project) === projectId(this.project)) return;
+    const record = this.settings.projectHistory().find(item => item.id === projectId(entry.project));
+    if (record) this.settings.rememberProject(entry.project, update(record.sessions));
+  }
+  /**
+   * Resolves a session path to a live entry even when another project is in
+   * view; unopened sessions still have to pass the active project's check.
+   */
+  private entryFor(raw: string): { entry: SessionEntry; path: string } | undefined {
+    const resolved = this.registry.resolve(raw);
+    if (resolved) return resolved;
+    try {
+      const path = this.files.managed(raw);
+      const entry = this.registry.entry(path);
+      return entry ? { entry, path } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  private async stopSession(path: string, owner?: string) {
+    const entry = this.entryFor(path)?.entry;
+    if (entry?.runtime && (!owner || projectId(entry.project) === owner)) {
+      const runtime = entry.runtime;
+      const runs = this.registry.snapshotOf(entry)?.graph?.runs.filter(run => run.status === "running") ?? [];
+      // Aborts are best-effort per run: one refusal must not fail the stop
+      // while the other runs' aborts are already in flight.
+      await Promise.allSettled(runs.map(run => runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
+      this.scheduleBackgroundRefresh(entry);
+      return { stopped: Boolean(runs.length) };
+    }
+    const slot = owner ? this.remotePool.get(owner) : this.activeSlot();
+    if (slot) {
+      if (!slot.client.connected) throw new Error("Remote host is not connected");
+      slot.lastActivity = Date.now();
+      // The desktop project id selects the host; the host resolves its own path.
+      const result = await slot.client.request("session.stop", { path });
+      const sessions = await slot.client.request<SessionSummary[]>("session.list");
+      this.rememberProject(sessions, slot.project);
+      this.emit({ type: "sessions", payload: { projects: this.projectGroups() } });
+      return result;
+    }
+    if (owner && /^(?:ssh|wsl):/u.test(owner)) throw new Error("Remote host is not connected");
+    return { stopped: false };
+  }
+  /** Routes a control action: model actions to the project runtime, everything else to the active session. */
+  private async controlAgent(input: AgentControl): Promise<{ result: unknown; entry?: SessionEntry }> {
+    if (input.action === "newSession") {
+      const entry = this.activeEntry();
+      // A failed node deletion recovers by reusing the old close-and-create
+      // semantics on the same runtime; otherwise a new session is a new entry
+      // and the previous one keeps running in the background.
+      if (entry?.runtime?.recovering) {
+        const result = await entry.runtime.control(input);
+        this.followRuntimeFile(entry);
+        return { result, entry };
       }
-    }, (url) => this.platform.openExternal(url));
+      if (!this.project) throw new Error("Open a project first");
+      const project = this.project;
+      const files = this.files;
+      const result = await this.registry.create(
+        project,
+        files.dir,
+        // Canonicalize through the session files service so junctioned and
+        // symlinked projects key and look up the same entry.
+        async () => files.managed(await this.projectRuntime.createSessionFile()),
+      );
+      return { result, entry: this.registry.entry((result as SessionSnapshot).session.path) };
+    }
+    if ((MODEL_ACTIONS as readonly string[]).includes(input.action)) {
+      const result = await this.projectRuntime.control(input);
+      // Every open session holds its own copy of the catalog, so a change has
+      // to be pushed or the new model is invisible until the session reopens.
+      if (input.action === "setBrokerProviders") await this.adoptProjectBroker();
+      else if ((CATALOG_MUTATIONS as readonly string[]).includes(input.action)) await this.pushCatalogs(input);
+      return { result };
+    }
+    const entry = this.activeEntry();
+    if (!entry?.runtime) throw new Error("Open a session first");
+    const result = await entry.runtime.control(input);
+    // Fork and clone move this runtime to the new session file they created;
+    // the entry's key must follow it or the old row would serve the new file.
+    if (migratesSession(input.action)) this.followRuntimeFile(entry);
+    return { result, entry };
+  }
+  /** Points every open session runtime at the project runtime's broker catalog. */
+  private async adoptProjectBroker() {
+    for (const entry of this.registry.liveEntries())
+      await entry.runtime?.adoptBroker(this.projectRuntime);
+  }
+  /** Re-reads the project runtime's catalog change into every open session. */
+  private async pushCatalogs(input: AgentControl) {
+    for (const entry of this.registry.liveEntries())
+      // Best-effort per session: one stale runtime must not fail the settings reply.
+      try { await entry.runtime?.adoptCatalog(input); } catch {}
+  }
+  /**
+   * Re-binds an entry whose runtime moved to another session file (fork,
+   * clone, deletion recovery). The key keeps the canonical realpath spelling
+   * the registry compares; a miss falls back to the runtime's own spelling.
+   */
+  private followRuntimeFile(entry: SessionEntry) {
+    let file = "";
+    try { file = entry.runtime?.state().sessionFile ?? ""; } catch { /* closed underneath us */ }
+    if (!file || file === entry.path) return;
+    try { file = managedSessionFile(entry.dir, file); } catch { /* keep the runtime's spelling */ }
+    this.registry.rekey(entry, file);
+  }
+  private restoreCurrent(): SessionSnapshot | undefined {
+    const entry = this.registry.viewProject(this.project ? projectId(this.project) : "");
+    return entry ? this.registry.snapshotOf(entry) : undefined;
   }
   onEvent(f: (e: DesktopEvent) => void, patches = false) {
     const encode = patches ? sessionEventEncoder() : undefined;
@@ -133,32 +361,90 @@ export class MainController {
     return () => this.listeners.delete(listener);
   }
   emit(e: DesktopEvent) {
-    // Retain only active progress for reload/reconnect recovery, never token history.
-    pruneAgentProgress(e, this.liveProgress);
-    if (isAgentProgress(e)) this.liveProgress.set(agentProgressKey(e.payload as Record<string, unknown>), e);
+    this.recordProgress(e);
     if (e.type === "sessions") {
-      const current = (e.payload as { current?: SessionSnapshot }).current;
-      if (current) {
-        const key = JSON.stringify([current.session.path, current.graph?.epoch]);
-        if (this.liveProgressSession !== undefined && this.liveProgressSession !== key) this.liveProgress.clear();
-        this.liveProgressSession = key;
-      }
+      this.noteEpoch((e.payload as { current?: SessionSnapshot }).current);
     } else if (e.type === "remote.connection" && !(e.payload as { connected: boolean }).connected) {
-      this.liveProgress.clear();
+      // A dropped host's runs are dead; local sessions keep their baselines.
+      for (const key of [...this.liveProgress.keys()]) {
+        const graphId = (JSON.parse(key) as unknown[])[0];
+        if (typeof graphId === "string" && !this.registry.entry(graphId)) this.liveProgress.delete(key);
+      }
     }
     this.listeners.forEach((f) => f(e));
   }
-  remoteEvent(event: DesktopEvent) {
-    const current = (event.payload as { current?: SessionSnapshot } | null)?.current;
-    if (event.type === "sessions" && current?.session.path) {
-      this.current = current;
-      this.rememberSnapshot(current);
+  /**
+   * Progress baselines are keyed by graph id (= session path), so sessions
+   * running in the background keep theirs across view switches; they are
+   * replayed only when their session becomes the view again.
+   */
+  private recordProgress(e: DesktopEvent) {
+    pruneAgentProgress(e, this.liveProgress);
+    if (isAgentProgress(e)) this.liveProgress.set(agentProgressKey(e.payload as Record<string, unknown>), e);
+  }
+  /** A restarted session (new epoch) invalidates its own baselines, not other sessions'. */
+  private noteEpoch(current: SessionSnapshot | undefined) {
+    const graph = current?.graph;
+    if (!graph?.id) return;
+    const known = this.liveProgressEpochs.get(graph.id);
+    if (known !== undefined && known !== graph.epoch) {
+      for (const key of [...this.liveProgress.keys()])
+        if ((JSON.parse(key) as unknown[])[0] === graph.id) this.liveProgress.delete(key);
+    }
+    this.liveProgressEpochs.set(graph.id, graph.epoch);
+    // A record can only invalidate baselines that still exist or could be
+    // recorded again: a session that is neither live, mid-stream, nor in view
+    // is inert, so its record goes and the map stays bounded by the live set
+    // instead of every session ever opened.
+    const tracked = new Set([...this.liveProgress.keys()].map(key => (JSON.parse(key) as unknown[])[0]));
+    const viewed = this.current?.graph?.id;
+    for (const id of [...this.liveProgressEpochs.keys()])
+      if (id !== graph.id && id !== viewed && !tracked.has(id) && !this.registry.entry(id))
+        this.liveProgressEpochs.delete(id);
+  }
+  remoteEvent(event: DesktopEvent, project: ProjectInfo | null = this.project) {
+    if (!project) return;
+    const slot = this.remotePool.get(projectId(project));
+    if (!slot) return;
+    const active = slot === this.activeSlot();
+    if (event.type === "sessions") {
+      const payload = event.payload as { current?: SessionSnapshot; sessions?: SessionSummary[]; projects?: ProjectGroup[]; deletedPath?: string };
+      // A host's history uses host-local project ids; only this workspace's
+      // rows belong to the slot, never to the project currently on screen.
+      const sessions = payload.sessions ?? payload.projects?.find(record =>
+        !record.project.remote && sameHostPath(record.project.path, project.path))?.sessions;
+      if (sessions) this.rememberProject(sessions, project);
+      if (payload.current) this.rememberSnapshot(project, payload.current);
+      if (sessions || payload.current)
+        this.emit({ type: "sessions", payload: { projects: this.projectGroups() } });
+      if (!active) return;
+      if (payload.deletedPath) {
+        if (payload.deletedPath === slot.activePath) {
+          slot.activePath = "";
+          this.current = undefined;
+        }
+        // The deletion broadcast carries the surviving rows; without them it
+        // would wipe the project's list in the renderer, so it is dropped.
+        if (sessions) this.emit({ type: "sessions", payload: { deletedPath: payload.deletedPath, sessions } });
+        return;
+      }
+      if (payload.current) {
+        if (payload.current.session.path !== slot.activePath) return;
+        this.current = payload.current;
+      } else if (payload.projects || payload.sessions) return;
+    }
+    // Background hosts replay their own progress on session.snapshot. Keeping
+    // it here by path would conflate identical paths on different machines,
+    // and their notices are dropped too: an invisible workspace must not toast.
+    if (!active) return;
+    if (event.type === "agent") {
+      const graphId = (event.payload as { graphId?: string } | null)?.graphId;
+      if (graphId && graphId !== this.current?.graph?.id) return;
     }
     this.emit(event);
   }
   configure(path: string | null) {
-    this.liveProgress.clear();
-    this.liveProgressSession = undefined;
+    ++this.viewRequest;
     if (path) {
       path = resolve(path);
       if (!existsSync(path)) throw new Error("Project not found");
@@ -171,15 +457,17 @@ export class MainController {
       this.project = null;
       this.settings.setProject(null);
     }
-    this.current = undefined;
     this.workspace.setRoot(path);
     this.git.setRoot(path);
     this.shell.setRoot(path);
     const dir = path
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
-    this.files.set(path, dir);
-    this.pi.setProject(path, dir);
+    this.files = new SessionFiles(path, dir);
+    this.projectRuntime.setProject(path, dir);
+    // Session entries survive project switches; the view restores whatever was
+    // last active in the project being entered.
+    this.current = this.restoreCurrent();
   }
   mergedWslSettings(remote: SettingsBundle) {
     const local = this.settings.bundle();
@@ -190,24 +478,32 @@ export class MainController {
     };
   }
   async wslBootstrap() {
-    if (!this.wsl) throw new Error("Remote host is not connected");
-    if (!this.wsl.connected && this.wslSettings) {
+    const request = this.viewRequest;
+    const slot = this.activeSlot();
+    if (!slot) throw new Error("Remote host is not connected");
+    if (!slot.client.connected && slot.settings) {
       const record = this.projectGroups().find((record) => record.id === projectId(this.project!));
       return {
         project: this.project,
         sessions: record?.sessions ?? [],
         projects: this.projectGroups(),
-        settings: this.mergedWslSettings(this.wslSettings),
+        settings: this.mergedWslSettings(slot.settings),
         layout: this.settings.layout(),
         current: this.current ? { ...this.current, runtime: unavailable() } : undefined,
       };
     }
     const [sessions, settings] = await Promise.all([
-      this.wsl.request("session.list"),
-      this.wsl.request<SettingsBundle>("settings.get"),
+      slot.client.request("session.list"),
+      slot.client.request<SettingsBundle>("settings.get"),
     ]);
-    this.wslSettings = settings;
-    const projects = this.rememberProject(sessions as SessionSummary[]);
+    if (request !== this.viewRequest || slot !== this.activeSlot()) throw new Error("Project selection changed");
+    slot.settings = settings;
+    slot.lastActivity = Date.now();
+    const projects = this.rememberProject(sessions as SessionSummary[], slot.project);
+    // A window reload lands here while the host may still be running the
+    // session this workspace last showed; restore it like a reactivation.
+    const current = await this.restoreSlotSession(slot, request);
+    if (request !== this.viewRequest || slot !== this.activeSlot()) throw new Error("Project selection changed");
     return {
       project: this.project,
       sessions,
@@ -217,11 +513,11 @@ export class MainController {
         app: this.settings.bundle().app,
       },
       layout: this.settings.layout(),
-      current: undefined,
+      current,
     };
   }
   async syncModelBroker(client: WslHostClient) {
-    const models = await this.pi.control({ action: "getModels", broker: true }) as BrokerModel[];
+    const models = await this.projectRuntime.control({ action: "getModels", broker: true }) as BrokerModel[];
     const allowed = new Set(
       models.map((model) => `${model.provider}\0${model.id}`),
     );
@@ -231,13 +527,12 @@ export class MainController {
       models,
     });
     this.brokerModels.set(client, allowed);
-    if (client === this.wsl) this.remoteBrokerModels = allowed;
   }
   async attachModelBroker(client: WslHostClient) {
     client.setModelBroker(async (request, signal) => {
       if (!this.brokerModels.get(client)?.has(`${request.provider}\0${request.modelId}`))
         throw new Error("The remote host requested a model that is not enabled locally");
-      const runtime = await this.pi.modelRuntime();
+      const runtime = await this.projectRuntime.modelRuntime();
       const model = runtime.getModel(request.provider, request.modelId);
       if (!model) throw new Error("The requested desktop model was not found");
       return runtime.streamSimple(model, request.context, {
@@ -247,17 +542,104 @@ export class MainController {
     });
     await this.syncModelBroker(client);
   }
+  private activeSlot(): RemoteSlot | undefined {
+    return this.project?.remote ? this.remotePool.get(projectId(this.project)) : undefined;
+  }
+  /**
+   * Subscribes a connected client as a pooled workspace. Switching projects
+   * never disposes a slot; only explicit disconnect, recycling, or quitting
+   * does. Also the seam through which tests adopt a pre-existing connection.
+   */
+  installSlot(client: WslHostClient, project: ProjectInfo, settings: SettingsBundle): RemoteSlot {
+    const id = projectId(project);
+    const previous = this.remotePool.get(id);
+    if (previous && previous.client !== client) void this.dropSlot(previous, true);
+    const slot: RemoteSlot = { client, project, settings, activePath: "", lastActivity: Date.now(), stopEvents: () => {}, stopDisconnect: () => {} };
+    slot.stopEvents = client.onEvent(event => {
+      slot.lastActivity = Date.now();
+      if (this.remotePool.get(id) === slot) this.remoteEvent(event, slot.project);
+    });
+    slot.stopDisconnect = client.onDisconnect(error => {
+      if (this.remotePool.get(id) !== slot) return;
+      // The slot stays until replaced or recycled so a degraded bootstrap can
+      // still present the project's remembered rows and a reconnect banner.
+      if (this.project && projectId(this.project) === id && this.current)
+        this.current = { ...this.current, runtime: unavailable() };
+      this.emit({ type: "remote.connection", payload: {
+        projectId: id, connected: false, message: error.message,
+      } });
+    });
+    this.remotePool.set(id, slot);
+    this.scheduleRemoteRecycle();
+    return slot;
+  }
+  private async dropSlot(slot: RemoteSlot, dispose: boolean) {
+    slot.stopEvents();
+    slot.stopDisconnect();
+    for (const [id, pooled] of this.remotePool) if (pooled === slot) this.remotePool.delete(id);
+    if (dispose) await slot.client.dispose().catch(() => {});
+  }
+  /** Detaches the active remote workspace; pooled hosts of other projects keep serving them. */
   async closeWsl() {
     await this.cancelRemote();
-    this.stopWslEvents?.();
-    this.stopWslEvents = undefined;
-    this.stopRemoteDisconnect?.();
-    this.stopRemoteDisconnect = undefined;
-    const client = this.wsl;
-    this.wsl = undefined;
-    this.wslSettings = undefined;
-    this.remoteBrokerModels.clear();
-    await client?.dispose();
+    const slot = this.activeSlot();
+    if (slot) await this.dropSlot(slot, true);
+  }
+  /** Quit-time teardown: every pooled host goes away. */
+  private async closeAllRemote(): Promise<void> {
+    if (this.remoteRecycleTimer) {
+      clearTimeout(this.remoteRecycleTimer);
+      this.remoteRecycleTimer = undefined;
+    }
+    await this.cancelRemote();
+    for (const slot of [...this.remotePool.values()]) await this.dropSlot(slot, true);
+  }
+  private get maxRemoteConnections(): number {
+    return Math.min(16, Math.max(1, Number.parseInt(process.env.PIX_MAX_REMOTE_CONNECTIONS ?? "2", 10) || 2));
+  }
+  private get remoteIdleMs(): number {
+    return Math.max(1_000, Number.parseInt(process.env.PIX_REMOTE_IDLE_MS ?? "300000", 10) || 300_000);
+  }
+  private scheduleRemoteRecycle() {
+    if (this.remoteRecycleTimer || !this.remotePool.size) return;
+    const timer = setTimeout(() => {
+      this.remoteRecycleTimer = undefined;
+      void this.recycleRemote();
+    }, Math.min(5_000, this.remoteIdleMs));
+    timer.unref();
+    this.remoteRecycleTimer = timer;
+  }
+  /**
+   * Idle recycling: the workspace in view and hosts with running work are
+   * never disposed, and liveness is confirmed by the host itself rather than
+   * any cached flag.
+   */
+  private async recycleRemote(): Promise<void> {
+    const activeId = this.project ? projectId(this.project) : "";
+    const idle = [...this.remotePool.values()]
+      .filter(slot => projectId(slot.project) !== activeId)
+      .sort((a, b) => b.lastActivity - a.lastActivity);
+    const victims = idle.filter((slot, index) =>
+      index >= this.maxRemoteConnections || !slot.client.connected
+      || Date.now() - slot.lastActivity >= this.remoteIdleMs);
+    for (const slot of victims) {
+      // Confirmed running work counts as activity: the next liveness probe
+      // waits a full idle window instead of firing every tick.
+      if (slot.client.connected && await this.slotBusy(slot)) {
+        slot.lastActivity = Date.now();
+        continue;
+      }
+      await this.dropSlot(slot, true);
+    }
+    this.scheduleRemoteRecycle();
+  }
+  private async slotBusy(slot: RemoteSlot): Promise<boolean> {
+    try {
+      const sessions = await slot.client.request<SessionSummary[]>("session.list");
+      return Boolean(sessions.some(session => session.running));
+    } catch {
+      return true;   // cannot prove the host is idle
+    }
   }
   async connectWsl(distro: string, cwd: string, browse = false) {
     return this.connectRemote({ kind: "wsl", distro }, cwd, browse);
@@ -275,6 +657,15 @@ export class MainController {
     return { cancelled: true };
   }
   private async connectRemote(remote: NonNullable<ProjectInfo["remote"]>, cwd: string, browse: boolean) {
+    const request = browse ? undefined : ++this.viewRequest;
+    // A pooled workspace for this project is reused: spawning a second host
+    // would trip the graph ownership lock the first one still holds. Browsing
+    // keeps going through the connect flow — the user may pick another folder.
+    const pooled = this.remotePool.get(projectId({ name: "", path: cwd, remote }));
+    if (!browse && pooled?.client.connected) {
+      await this.cancelRemote();
+      return this.activatePooled(pooled, request!);
+    }
     // Install the new attempt synchronously, so overlapping requests cannot
     // finish out of order and replace a newer connection.
     const cancelled = this.cancelRemote();
@@ -304,7 +695,7 @@ export class MainController {
       } };
       this.pendingRemote = candidate;
       if (browse) return { project: candidate.project };
-      return await this.commitRemote(candidate);
+      return await this.commitRemote(candidate, request!);
     } catch (error) {
       await client?.dispose();
       if (this.remoteAttempt === abort) {
@@ -314,9 +705,54 @@ export class MainController {
       throw error;
     }
   }
-  private async commitRemote(candidate: NonNullable<MainController["pendingRemote"]>) {
+  /** Reopens the session this workspace last showed; empty when it is gone. */
+  private async restoreSlotSession(slot: RemoteSlot, request: number): Promise<SessionSnapshot | undefined> {
+    if (!slot.activePath) return undefined;
+    try {
+      const current = await slot.client.request("session.open", { path: slot.activePath }) as SessionSnapshot;
+      if (request === this.viewRequest) this.current = current;
+      return current;
+    } catch {
+      return undefined;
+    }
+  }
+  /** Switches the view back to a pooled workspace without touching its host. */
+  private async activatePooled(slot: RemoteSlot, request: number) {
+    const [sessions, settings] = await Promise.all([
+      slot.client.request<SessionSummary[]>("session.list"),
+      slot.client.request<SettingsBundle>("settings.get"),
+    ]);
+    if (request !== this.viewRequest) throw new Error("Project selection changed");
+    slot.settings = settings;
+    this.settings.rememberProject(slot.project, sessions);
+    slot.lastActivity = Date.now();
+    this.project = slot.project;
+    this.registry.viewProject(projectId(slot.project));
+    this.current = undefined;
+    // Restore the session this workspace last showed, mirroring the local
+    // registry's per-project restore.
+    const current = await this.restoreSlotSession(slot, request);
+    if (request !== this.viewRequest) throw new Error("Project selection changed");
+    return {
+      project: slot.project, sessions, projects: this.projectGroups(),
+      settings: this.mergedWslSettings(slot.settings),
+      layout: this.settings.layout(), current,
+    };
+  }
+  private async commitRemote(candidate: NonNullable<MainController["pendingRemote"]>, request: number) {
     const { client, abort, project } = candidate;
     abort.signal.throwIfAborted();
+    if (request !== this.viewRequest) throw new Error("Project selection changed");
+    // The request path may differ in spelling from the host's canonical cwd;
+    // if the pool already holds this project, adopt it — a second host would
+    // trip the graph ownership lock the pooled one still holds.
+    const pooled = this.remotePool.get(projectId(project));
+    if (pooled && pooled.client !== client && pooled.client.connected) {
+      await client.dispose();
+      this.pendingRemote = undefined;
+      this.remoteAttempt = undefined;
+      return this.activatePooled(pooled, request);
+    }
     this.emit({ type: "remote.progress", payload: { stage: "loading" } });
     await this.attachModelBroker(client);
     const [sessions, settings] = await Promise.all([
@@ -324,30 +760,18 @@ export class MainController {
       client.request<SettingsBundle>("settings.get"),
     ]);
     abort.signal.throwIfAborted();
+    if (request !== this.viewRequest) throw new Error("Project selection changed");
     if (!client.connected) throw new Error("Remote host disconnected before the workspace was ready");
     this.settings.rememberProject(project, sessions);
-    const old = this.wsl;
-    this.stopWslEvents?.();
-    this.stopRemoteDisconnect?.();
-    this.wsl = client;
-    this.wslSettings = settings;
-    this.remoteBrokerModels = this.brokerModels.get(client) ?? new Set();
-    this.project = project;
-    this.current = undefined;
     this.pendingRemote = undefined;
     this.remoteAttempt = undefined;
-    this.stopWslEvents = client.onEvent((event) => this.remoteEvent(event));
-    this.stopRemoteDisconnect = client.onDisconnect((error) => {
-      if (this.wsl !== client) return;
-      if (this.current) this.current = { ...this.current, runtime: unavailable() };
-      this.emit({ type: "remote.connection", payload: {
-        projectId: projectId(project), connected: false, message: error.message,
-      } });
-    });
-    const projects = this.projectGroups();
-    await old?.dispose();
+    // The previously active client stays pooled: its host keeps serving its
+    // project's background runs.
+    this.installSlot(client, project, settings);
+    this.project = project;
+    this.current = this.restoreCurrent();
     return {
-      project, sessions, projects,
+      project, sessions, projects: this.projectGroups(),
       settings: this.mergedWslSettings(settings),
       layout: this.settings.layout(), current: undefined,
     };
@@ -360,27 +784,36 @@ export class MainController {
       return this.connectRemote(remote, path, false);
     }
     candidate.abort.signal.throwIfAborted();
+    const request = ++this.viewRequest;
     const selected = await candidate.client.request<{ path: string }>("workspace.open", { path });
     candidate.project = { ...candidate.project,
       name: posix.basename(selected.path.replace(/\/+$/u, "")) || selected.path,
       path: selected.path,
     };
-    return this.commitRemote(candidate);
+    return this.commitRemote(candidate, request);
   }
-  async invokeWsl(route: ProjectRoute, v: Record<string, unknown>) {
-    if (!this.wsl) throw new Error("Remote host is not connected");
+  async invokeWsl(route: ProjectRoute, v: Record<string, unknown>, request = this.viewRequest) {
+    const slot = this.activeSlot();
+    if (!slot) throw new Error("Remote host is not connected");
+    const { client, project } = slot;
+    slot.lastActivity = Date.now();
+    const remoteSettings = async () => {
+      const settings = await client.request<SettingsBundle>(route, v);
+      slot.settings = settings;
+      return this.mergedWslSettings(settings);
+    };
     if (route === "agent.control") {
       const action = String(v.action);
       if (action === "getProviders" || action === "getModels" || action === "getCustomModels")
-        return this.pi.control(v as unknown as AgentControl);
+        return this.projectRuntime.control(v as unknown as AgentControl);
       if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels" || action === "addCustomModel" || action === "updateCustomModel") {
-        const result = await this.pi.control(v as unknown as AgentControl);
-        await this.syncModelBroker(this.wsl);
+        const result = await this.projectRuntime.control(v as unknown as AgentControl);
+        await this.syncModelBroker(client);
         return result;
       }
       if (action === "logout") {
-        const result = await this.pi.control(v as unknown as AgentControl);
-        await this.syncModelBroker(this.wsl);
+        const result = await this.projectRuntime.control(v as unknown as AgentControl);
+        await this.syncModelBroker(client);
         return result;
       }
     }
@@ -390,10 +823,10 @@ export class MainController {
         this.settings.bundle().app.confirmDestructiveActions &&
         !(await this.platform.confirm("Delete this Pi session in WSL?", String(v.path)))
       )
-        return { cancelled: true, sessions: await this.wsl.request("session.list") };
+        return { cancelled: true, sessions: await client.request("session.list") };
     } else if (route === "shell.run") {
       const command = String(v.command);
-      const trust = this.wslSettings?.effective.defaultProjectTrust ?? "ask";
+      const trust = slot.settings.effective.defaultProjectTrust ?? "ask";
       if (trust === "never") throw new Error("Shell is disabled for this WSL project");
       if (
         trust !== "always" &&
@@ -408,58 +841,66 @@ export class MainController {
           truncated: false,
         };
     } else if (route === "terminal.create") {
-      const trust = this.wslSettings?.effective.defaultProjectTrust ?? "ask";
+      const trust = slot.settings.effective.defaultProjectTrust ?? "ask";
       if (trust === "never") throw new Error("Terminal is disabled for this remote project");
-      const session = await this.wsl.request<TerminalSession>(route, v);
+      const session = await client.request<TerminalSession>(route, v);
       if (!session?.id)
         throw new Error(
           "Remote host returned an invalid terminal session. Disconnect and reconnect the remote workspace.",
         );
       return session;
     } else if (route === "settings.get") {
-      this.wslSettings = await this.wsl.request<SettingsBundle>(route, v);
-      return this.mergedWslSettings(this.wslSettings);
+      return remoteSettings();
     } else if (route === "settings.update" || route === "settings.reset") {
       if (v.scope === "app") {
         const local =
           route === "settings.update"
             ? this.settings.update(v.patch as Record<string, unknown>)
             : this.settings.reset();
-        return this.wslSettings
-          ? { ...this.mergedWslSettings(this.wslSettings), app: local.app }
-          : local;
+        return { ...this.mergedWslSettings(slot.settings), app: local.app };
       }
-      this.wslSettings = await this.wsl.request<SettingsBundle>(route, v);
-      return this.mergedWslSettings(this.wslSettings);
+      return remoteSettings();
     }
-    const result = await this.wsl.request(route, v);
+    const result = await client.request(route, v);
+    if (this.remotePool.get(projectId(project)) !== slot) return result;
     if (route === "session.list" && Array.isArray(result))
-      this.rememberProject(result as SessionSummary[]);
+      this.rememberProject(result as SessionSummary[], project);
     else if (
       result &&
       typeof result === "object" &&
       "sessions" in result &&
       Array.isArray((result as { sessions: unknown }).sessions)
     )
-      this.rememberProject((result as { sessions: SessionSummary[] }).sessions);
+      this.rememberProject((result as { sessions: SessionSummary[] }).sessions, project);
     else if (
       result &&
       typeof result === "object" &&
       "session" in result
-    )
-      this.rememberSnapshot(result as SessionSnapshot);
+    ) {
+      const snapshot = result as SessionSnapshot;
+      // Selection replies and path-migrating actions move the slot's session; a
+      // prompt reply can finish long after the desktop has moved elsewhere.
+      if (snapshot.projection && snapshot.session?.path && slot === this.activeSlot()
+        && request === this.viewRequest) {
+        if (route === "session.open" || (route === "agent.control" && migratesSession(v.action)))
+          slot.activePath = snapshot.session.path;
+        if (snapshot.session.path === slot.activePath) this.current = snapshot;
+      }
+      this.rememberSnapshot(project, snapshot);
+    }
     return result;
   }
   projectGroups(): ProjectGroup[] {
     const active = this.project ? projectId(this.project) : "";
     const marks = this.library.marks();
+    const running = this.registry.runningPaths();
     const pinned = new Set(marks.pinned),
       archivedSessions = new Set(marks.archivedSessions),
       archivedProjects = new Set(marks.archivedProjects);
     return this.settings.projectHistory().map((record) => ({
       ...record,
       connected: record.project.remote
-        ? Boolean(this.wsl?.connected && record.id === active)
+        ? Boolean(this.remotePool.get(record.id)?.client.connected)
         : record.id === active,
       archived: archivedProjects.has(record.id) || undefined,
       // History snapshots embed whatever flags were current when remembered;
@@ -468,50 +909,54 @@ export class MainController {
         ...session,
         pinned: pinned.has(session.path) || undefined,
         archived: archivedSessions.has(session.path) || undefined,
+        running: (record.project.remote
+          ? this.remotePool.get(record.id)?.client.connected && session.running
+          : running.has(session.path)) || undefined,
       })),
     }));
   }
-  rememberProject(sessions: SessionSummary[]) {
-    if (!this.project) return this.projectGroups();
-    this.settings.rememberProject(this.project, sessions);
+  rememberProject(sessions: SessionSummary[], project: ProjectInfo | null = this.project) {
+    if (!project) return this.projectGroups();
+    this.settings.rememberProject(project, sessions);
     return this.projectGroups();
   }
-  rememberSnapshot(snapshot: SessionSnapshot) {
-    const project = this.project;
+  rememberSnapshot(project: ProjectInfo | null, snapshot: SessionSnapshot) {
     if (!project) return;
     const old = this.settings.projectHistory().find(
       (record) => record.id === projectId(project),
     )?.sessions ?? [];
-    this.rememberProject([
-      snapshot.session,
+    this.settings.rememberProject(project, [
+      { ...snapshot.session, running: isSessionRunning(snapshot) || undefined },
       ...old.filter((session) => session.path !== snapshot.session.path),
     ]);
   }
   async sessions() {
+    const files = this.files;
+    const running = this.registry.runningPaths();
     const decorate = (list: SessionSummary[]) => {
       const marks = this.library.marks();
       const pinned = new Set(marks.pinned),
-        archived = new Set(marks.archivedSessions);
+        archivedSessions = new Set(marks.archivedSessions);
       return list.map((x) => ({
         ...x,
-        active: x.path === this.current?.session.path,
+        running: running.has(x.path) || undefined,
         pinned: pinned.has(x.path) || undefined,
-        archived: archived.has(x.path) || undefined,
+        archived: archivedSessions.has(x.path) || undefined,
       }));
     };
     try {
-      const s = await this.pi.list();
-      return decorate(s.length ? s : this.files.list());
+      const s = await this.projectRuntime.list();
+      return decorate(s.length ? s : files.list());
     } catch {
-      return decorate(this.files.list());
+      return decorate(files.list());
     }
   }
-  fallback(path: string): SessionSnapshot {
-    const x = this.files.read(path),
-      summary = this.files.list().find((s) => s.path === resolve(path)) ?? {
+  fallback(path: string, files = this.files): SessionSnapshot {
+    const x = files.read(path),
+      summary = files.list().find((s) => s.path === resolve(path)) ?? {
         id: String(x.header?.id ?? path),
         path: resolve(path),
-        cwd: String(x.header?.cwd ?? this.project?.path ?? path),
+        cwd: String(x.header?.cwd ?? files.cwd ?? path),
         created: String(x.header?.timestamp ?? new Date().toISOString()),
         modified: new Date().toISOString(),
         messageCount: x.entries.filter((e) => e.type === "message").length,
@@ -527,6 +972,8 @@ export class MainController {
   }
   async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
     const v = validateRouteInput(route, raw);
+    const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
+      ? ++this.viewRequest : this.viewRequest;
     if (route === "app.revealSession") {
       const record = this.projectGroups().find((record) => record.id === v.id);
       const session = record?.sessions.find((session) => session.path === v.path);
@@ -564,9 +1011,11 @@ export class MainController {
       );
       if (!record || record.project.remote)
         throw new Error("Local project is not in the project history");
-      await this.closeWsl();
+      // The remote workspace stays pooled; its host keeps serving it.
       this.configure(record.project.path);
+      const selected = this.viewRequest;
       const sessions = await this.sessions();
+      if (selected !== this.viewRequest) throw new Error("Project selection changed");
       return {
         project: this.project,
         sessions,
@@ -580,13 +1029,25 @@ export class MainController {
       const id = String(v.id);
       if (this.project && id === projectId(this.project))
         throw new Error("The open project cannot be removed from the list");
+      const slot = this.remotePool.get(id);
+      if (slot && slot.client.connected && await this.slotBusy(slot))
+        throw new Error("Stop the running sessions before removing this project");
+      if (this.registry.hasBusy(id))
+        throw new Error("Stop the running sessions before removing this project");
+      // Pooled hosts and live entries would write the forgotten project back
+      // into the history through their events; they go with the entry.
+      if (slot) await this.dropSlot(slot, true);
+      await this.registry.disposeProject(id);
       this.settings.forgetProject(id);
       return this.projectGroups();
     }
     if (route === "wsl.disconnect" || route === "remote.disconnect") {
       await this.closeWsl();
+      if (request !== this.viewRequest) throw new Error("Project selection changed");
       this.configure(this.localProjectPath);
+      const selected = this.viewRequest;
       const sessions = await this.sessions();
+      if (selected !== this.viewRequest) throw new Error("Project selection changed");
       return {
         project: this.project,
         sessions,
@@ -598,7 +1059,8 @@ export class MainController {
     }
     if (this.wsl && route === "session.import")
       throw new Error("Importing sessions into a remote host is not available yet");
-    if (this.wsl && isProjectRoute(route)) return this.invokeWsl(route, v);
+    if (route === "session.stop") return this.stopSession(String(v.path), v.projectId as string | undefined);
+    if (this.wsl && isProjectRoute(route)) return this.invokeWsl(route, v, request);
     if (
       !this.project &&
       [
@@ -628,7 +1090,9 @@ export class MainController {
         const last = this.settings.bundle().app.lastProject;
         if (last && existsSync(last) && resolve(last) !== this.project?.path)
           this.configure(last);
+        const selected = this.viewRequest;
         const sessions = this.project ? await this.sessions() : [];
+        if (selected !== this.viewRequest) throw new Error("Project selection changed");
         return {
           project: this.project,
           sessions,
@@ -643,9 +1107,11 @@ export class MainController {
       case "app.pickProject": {
         const p = await this.platform.pickProject();
         if (!p) return null;
-        await this.closeWsl();
+        // The remote workspace stays pooled; its host keeps serving it.
         this.configure(p);
+        const selected = this.viewRequest;
         const sessions = await this.sessions();
+        if (selected !== this.viewRequest) throw new Error("Project selection changed");
         return {
           project: this.project,
           sessions,
@@ -662,75 +1128,111 @@ export class MainController {
         return { ok: true };
       case "session.list":
         return this.sessions().then((sessions) => {
-          this.rememberProject(sessions);
+          if (request === this.viewRequest) this.rememberProject(sessions);
           return sessions;
         });
       case "session.snapshot": {
-        const current = this.pi.runtime ? this.pi.snapshot() : this.current;
+        const entry = this.activeEntry();
+        const current = entry?.runtime ? entry.runtime.snapshot() : this.current;
         if (current) {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
-          for (const progress of this.liveProgress.values()) this.emit(progress);
+          // Replay only the session in view; other buckets wait for their turn.
+          const graphId = current.graph?.id;
+          for (const progress of this.liveProgress.values())
+            if ((progress.payload as { graphId?: string }).graphId === graphId) this.emit(progress);
         }
         return current;
       }
       case "session.open": {
         const p = this.files.managed(String(v.path));
-        try {
-          this.current = await this.pi.open(p);
-        } catch (e) {
-          this.current = this.fallback(p);
-          this.emit({
-            type: "notice",
-            payload: {
-              level: "warning",
-              message: `Read-only session: ${e instanceof Error ? e.message : String(e)}`,
-            },
-          });
-        }
-        this.rememberSnapshot(this.current);
-        return this.current;
+        const project = this.project!;
+        const files = this.files;
+        const snapshot = await this.registry.open(
+          project,
+          files.dir,
+          p,
+          error => {
+            if (request === this.viewRequest) this.emit({
+              type: "notice",
+              payload: {
+                level: "warning",
+                message: `Read-only session: ${error instanceof Error ? error.message : String(error)}`,
+              },
+            });
+            return this.fallback(p, files);
+          },
+        );
+        // The registry refuses a snapshot for an entry it no longer owns, and a
+        // concurrent delete or project removal can dispose this one between the
+        // two steps; publishing then would resurrect what was just removed.
+        if (!this.registry.entry(p)) throw new Error("Session was closed while opening");
+        if (request === this.viewRequest && this.registry.isActive(this.registry.entry(p)!))
+          this.current = snapshot;
+        this.rememberSnapshot(project, snapshot);
+        return snapshot;
       }
       case "session.import": {
         const p = await this.platform.pickSession();
         if (!p) return null;
         try {
-          await this.pi.validate(p);
+          await this.projectRuntime.validate(p);
         } catch {}
         const imported = this.files.import(p);
         return { imported, sessions: await this.sessions() };
       }
       case "session.rename": {
-        const p = this.files.managed(String(v.path)),
-          name = String(v.name);
-        if (this.current?.session.path === p && this.current.runtime.available)
-          this.current = (await this.pi.control({
-            action: "setName",
-            name,
-          })) as SessionSnapshot;
-        else
+        const raw = String(v.path), name = String(v.name);
+        const resolved = this.entryFor(raw);
+        let renamed: SessionSnapshot | undefined;
+        if (resolved?.entry.runtime) {
+          // Renames go through the owning runtime; a static append would race
+          // the background session's own writes.
+          renamed = await resolved.entry.runtime.control({ action: "setName", name }) as SessionSnapshot;
+          if (this.registry.isActive(resolved.entry)) this.current = renamed;
+        }
+        else {
+          // Unopened or read-only sessions append the rename on disk; the
+          // path is either entry-validated or checked against the project in view.
+          const p = resolved?.path ?? this.files.managed(raw);
           try {
-            await this.pi.rename(p, name);
+            await this.projectRuntime.rename(p, name);
           } catch {
-            this.files.rename(p, name);
+            this.files.renameAt(p, name);
           }
+        }
+        if (resolved)
+          this.rememberOwnerProject(resolved.entry, sessions => sessions.map(session =>
+            session.path === resolved.path || session.path === raw
+              ? renamed?.session ?? { ...session, name } : session));
         const sessions = await this.sessions();
         this.rememberProject(sessions);
         return { sessions, current: this.current };
       }
       case "session.delete": {
-        const p = this.files.managed(String(v.path));
+        const resolved = this.entryFor(String(v.path));
+        const p = resolved?.path ?? this.files.managed(String(v.path));
         if (
           v.confirmed !== true &&
           this.settings.bundle().app.confirmDestructiveActions &&
           !(await this.platform.confirm("Delete this Pi session?", p))
         )
           return { cancelled: true, sessions: await this.sessions() };
-        const runtimePath = this.pi.state().sessionFile;
+        if (resolved?.entry && this.registry.busy(resolved.entry))
+          throw new Error("Stop the running session before deleting it");
+        // Disposal drains an open still in flight for this file — its late
+        // settlement would otherwise resurrect the deleted session — and the
+        // unlink runs inside the blocked window so no new open can build a
+        // runtime between the close and the missing file.
+        await this.registry.dispose(p, () => this.files.deleteAt(p));
+        // A racing open can have settled the view during the drain; capture
+        // the viewed path only now so that view still clears.
         const currentPath = this.current?.session.path;
-        const deletingCurrent = currentPath && realpathSync(currentPath) === p;
-        if (runtimePath && realpathSync(runtimePath) === p) await this.pi.close();
-        this.files.delete(p);
+        const deletingCurrent = Boolean(currentPath && canonicalPath(currentPath) === p);
+        if (resolved)
+          this.rememberOwnerProject(resolved.entry, sessions => sessions.filter(
+            session => session.path !== p && session.path !== String(v.path),
+          ));
         if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
         this.rememberProject(sessions);
@@ -752,14 +1254,15 @@ export class MainController {
         };
       }
       case "agent.control": {
-        const r = await this.pi.control(v as unknown as AgentControl);
-        if (r && typeof r === "object" && "projection" in r) {
+        const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl);
+        if (request === this.viewRequest && r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
           this.current = r as SessionSnapshot;
           // Mutating actions append entries after the last agent event (e.g.
           // the node-footer usage record written when a prompt settles), and
           // the invoke reply only reaches the page that started the action —
           // a page reloaded mid-run loses it. Broadcast so every attached
-          // renderer converges on the settled state.
+          // renderer converges on the settled state. A background run's reply
+          // carries its own snapshot and never drives the view.
           this.emit({ type: "sessions", payload: { current: this.current } });
         }
         return r;
@@ -782,7 +1285,9 @@ export class MainController {
       case "git.diff":
         return this.git.diff(v.path as string | undefined, Boolean(v.staged));
       case "changes.read": {
-        const snapshot = this.pi.snapshot();
+        const runtime = this.activeEntry()?.runtime;
+        if (!runtime) throw new Error("No Pi session open");
+        const snapshot = runtime.snapshot();
         if (snapshot.session.path !== v.session) throw new Error("Session changed; reopen the file change");
         return readFileChange(snapshot.session.path, snapshot.entries, String(v.ref));
       }
@@ -836,11 +1341,18 @@ export class MainController {
                 v.patch as Record<string, unknown>,
               );
         if (v.scope === "project" && this.project) {
-          const d = configuredSessionDir(this.project.path, b);
-          this.files.set(this.project.path, d);
+          const project = this.project;
+          const d = configuredSessionDir(project.path, b);
+          this.files = new SessionFiles(project.path, d);
           if (d !== previousDir) {
-            this.pi.setProject(this.project.path, d);
-            this.current = undefined;
+            // Entries point at the old directory; they cannot survive the move.
+            // Awaiting keeps the view from restoring an entry that is closing,
+            // and the drain may outlast a switch to another project.
+            await this.registry.disposeProject(projectId(project)).catch(() => {});
+            if (this.project === project) {
+              this.projectRuntime.setProject(project.path, d);
+              this.current = this.restoreCurrent();
+            }
           }
         }
         return b;
@@ -854,10 +1366,18 @@ export class MainController {
         return { ok: true };
     }
   }
+  /** Graceful shutdown: flush pending history, abort runs, release ownership. */
+  closeSessions(): Promise<void> {
+    this.flushBackgroundRefresh();
+    return this.registry.disposeAll();
+  }
+  /** Full shutdown: local sessions and every pooled host, awaited together. */
+  closeAll(): Promise<void> {
+    return Promise.all([this.closeSessions(), this.closeAllRemote()]).then(() => {});
+  }
   dispose() {
     this.liveProgress.clear();
-    void this.closeWsl();
     this.shell.dispose();
-    this.pi.dispose();
+    void this.closeAll().catch(() => {});
   }
 }

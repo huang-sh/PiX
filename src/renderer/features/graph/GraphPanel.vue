@@ -316,6 +316,7 @@ function rebuild() {
       onModel: (next: RuntimeModel) => {
         draftModel.value = next;
         if (next.reasoning === false) draftThinking.value = "off";
+        void session.setDefaultModel(next);
         rebuild();
       },
       onThinking: (level: string, explicit: boolean) => {

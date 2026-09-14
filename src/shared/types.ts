@@ -60,7 +60,8 @@ export interface SessionSummary {
   modified: string;
   messageCount: number;
   firstMessage: string;
-  active?: boolean;
+  /** A run is in flight in this session's live runtime. */
+  running?: boolean;
   pinned?: boolean;
   archived?: boolean;
 }
@@ -503,6 +504,7 @@ export type DesktopRoute =
   | "session.list"
   | "session.snapshot"
   | "session.open"
+  | "session.stop"
   | "session.import"
   | "session.rename"
   | "session.delete"
