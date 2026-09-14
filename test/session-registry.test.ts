@@ -94,6 +94,36 @@ test("late read-only opens and new-session creation cannot undo a later selectio
   } finally { await controller.closeAll(); rmSync(ws, { recursive: true, force: true }); }
 });
 
+test("a background session's notices never reach the view", async () => {
+  const ws = workspace(), other = workspace();
+  const controller = new MainController(ws, platform);
+  const path = join(controller.files.dir!, "A.jsonl");
+  writeFileSync(path, "");
+  controller.createSessionRuntime = entry => ({
+    open: () => Promise.resolve(),
+    snapshot: () => ({ session: { path: entry.path }, entries: [], projection: { nodes: [] } }),
+    state: () => ({}), close: async () => {},
+  }) as never;
+  const emit = (event: unknown) =>
+    (controller.registry.entry(path)!.runtime as { emit: (e: unknown) => void }).emit(event);
+  const notices: unknown[] = [];
+  controller.onEvent(event => { if ((event as { type: string }).type === "notice") notices.push(event); });
+  try {
+    await controller.invoke("session.open", { path });
+    controller.configure(other);
+    emit({ type: "notice", payload: { level: "error", message: "background failure" } });
+    assert.deepEqual(notices, [], "a parked session must not toast into another view");
+
+    controller.configure(ws);
+    emit({ type: "notice", payload: { level: "error", message: "active failure" } });
+    assert.equal(notices.length, 1, "the session in view still toasts");
+  } finally {
+    await controller.closeAll();
+    rmSync(ws, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
+  }
+});
+
 function injectFaux(controller: MainController, faux: ReturnType<typeof fauxProvider>) {
   const original = controller.createSessionRuntime.bind(controller);
   controller.createSessionRuntime = entry => {

@@ -155,6 +155,10 @@ export class MainController {
         }
         if (current) this.current = current;
       }
+      // A parked session's notices are dropped like a pooled host's — an
+      // invisible workspace must not toast; its failed run settles onto the
+      // row and the session's own error state instead.
+      if (!this.registry.isActive(entry)) return;
       this.emit(pushed);
       return;
     }

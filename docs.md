@@ -55,7 +55,10 @@ token streams. Background local sessions update their project's history and push
 decorated project groups (`{type:"sessions", payload:{projects}}`), coalesced
 to one write per 500 ms burst; their token events are stamped with the
 session's graph id and recorded — never forwarded — so switching back replays
-the in-flight text through the `session.snapshot` resync path. A restarted
+the in-flight text through the `session.snapshot` resync path; their notices are
+dropped the same way a pooled host's are — an invisible workspace must not
+toast, and a failed run's state stays on its row and in the session when it is
+reopened. A restarted
 session (new graph epoch) invalidates only its own progress baselines.
 Remote events and delayed replies retain their owning slot's project; both
 the project and its selected session must match before a snapshot reaches the
