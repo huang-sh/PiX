@@ -116,6 +116,7 @@ watch(
 function setComposerModel(model: RuntimeModel) {
   composerModel.value = model;
   if (model.reasoning === false) composerThinking.value = "off";
+  void session.setDefaultModel(model);
 }
 
 function setComposerThinking(level: string, explicit: boolean) {

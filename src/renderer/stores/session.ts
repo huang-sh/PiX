@@ -10,6 +10,7 @@ import type {
   PromptImage,
   SessionSnapshot,
   SessionSummary,
+  SettingsBundle,
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
@@ -310,6 +311,21 @@ export const useSessionStore = defineStore("session", {
       const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
       this.models = models;
       return models;
+    },
+    // A deliberate pick in a model menu is what "last set" means: it becomes the
+    // profile default every new session starts from, while the open session keeps
+    // its own transcript model — the same split as the TUI's set-as-default.
+    // Nodes that merely inherit a model never come through here.
+    async setDefaultModel(model: RuntimeModel) {
+      try {
+        const settings = await desktop.invoke<SettingsBundle>("settings.update", {
+          scope: "global",
+          patch: { defaultProvider: model.provider, defaultModel: model.id },
+        });
+        useLayoutStore().applySettings(settings);
+      } catch (error) {
+        useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
+      }
     },
     async open(path: string, request?: number) {
       request ??= ++this.viewRequest;

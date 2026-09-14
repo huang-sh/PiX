@@ -114,6 +114,19 @@ independently. PiX reads:
 Project settings override global settings. PiX-specific layout and appearance
 are stored in `~/.pix/gui.settings.json`.
 
+Model choice resolves in two scopes. Inside a session a draft inherits the model
+of the node it branches from (`node.footer.model`), falling back to the session's
+current model, so a node runs on its predecessor's model and only a deliberate
+pick changes it. Any pick in a model menu is that "last set" model: it writes the
+profile defaults (`defaultProvider`/`defaultModel`; Settings → Default model
+writes the same keys), so the next new session starts from it, while the open
+session keeps its own transcript model — the TUI's split between switching a model
+and setting one as the default. Inheriting a model never writes anything, so a
+run on an inherited model leaves the default untouched. Every new session resolves
+its model like a fresh Pi session: transcript model on resume, then
+`defaultProvider`/`defaultModel`, then the first model with configured
+credentials.
+
 ## Built-in skills
 
 Skills that ship with PiX live in `skills/<name>/SKILL.md` at the repo root,
