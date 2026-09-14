@@ -90,7 +90,7 @@ export const atomic = (p: string, v: unknown) => {
 export const DEFAULT_LAYOUT: LayoutState = {
   version: 4,
   navigatorPinned: false,
-  widths: { navigator: 248, chat: 356, content: 320 },
+  widths: { navigator: 248, chat: 356, content: 320, settings: 260 },
   collapsed: { navigator: false, chat: true, content: true },
   minimap: false,
   utility: {

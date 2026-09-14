@@ -358,7 +358,7 @@ export interface LayoutState {
   branchOrders?: Record<string, Array<[string, number]>>;
   /** Keep the projects and sessions navigator open instead of auto-hiding it. */
   navigatorPinned?: boolean;
-  widths: { navigator: number; chat: number; content: number };
+  widths: { navigator: number; chat: number; content: number; settings: number };
   /** The width chat pins widened the slot from/to, so a pinless boot restores it. */
   chatPinWidth?: { from: number; to: number };
   collapsed: Record<PanelId, boolean>;

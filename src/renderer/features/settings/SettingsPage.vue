@@ -46,6 +46,34 @@ onBeforeUnmount(() => {
 const shortcutsPage = ref<InstanceType<typeof KeyboardShortcuts>>();
 function close() { shortcutsPage.value?.requestClose(); }
 defineExpose({ close });
+
+// The category sidebar resizes like the workbench navigator: drag the edge or
+// arrow keys, clamped, persisted with the rest of the GUI layout.
+const SETTINGS_SIDEBAR_MIN = 210, SETTINGS_SIDEBAR_MAX = 420;
+let sidebarDrag: { id: number; x: number; width: number } | undefined;
+function clampSidebarWidth(width: number) {
+  return Math.min(SETTINGS_SIDEBAR_MAX, Math.max(SETTINGS_SIDEBAR_MIN, width));
+}
+function startSidebarResize(event: PointerEvent) {
+  if (event.button !== 0) return;
+  sidebarDrag = { id: event.pointerId, x: event.clientX, width: layout.layout.widths.settings };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+function moveSidebarResize(event: PointerEvent) {
+  if (!sidebarDrag || event.pointerId !== sidebarDrag.id) return;
+  layout.layout.widths.settings = clampSidebarWidth(sidebarDrag.width + event.clientX - sidebarDrag.x);
+}
+function finishSidebarResize() {
+  if (!sidebarDrag) return;
+  sidebarDrag = undefined;
+  void layout.save();
+}
+function resizeSidebarWithKeyboard(event: KeyboardEvent) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  layout.layout.widths.settings = Math.round(clampSidebarWidth(layout.layout.widths.settings + (event.key === "ArrowLeft" ? -10 : 10)));
+  void layout.save();
+}
 // The model catalog lives in the session store so every consumer (settings,
 // graph, branch context) reads one list; this page only reloads it.
 const models = computed(() => session.models);
@@ -797,7 +825,7 @@ async function logout(provider: RuntimeProvider) {
 </script>
 
 <template>
-  <div class="settings-page" :class="{ 'has-details-panel': (layout.settingsCategory === 'extensions' && selectedExtension) || (layout.settingsCategory === 'models' && selectedProvider) }" v-if="draft">
+  <div class="settings-page" :class="{ 'has-details-panel': (layout.settingsCategory === 'extensions' && selectedExtension) || (layout.settingsCategory === 'models' && selectedProvider) }" :style="{ '--settings-sidebar-width': `${layout.layout.widths.settings}px` }" v-if="draft">
     <aside>
       <Button variant="ghost" class="justify-start" @click="close">
         <ArrowLeft :size="16" />{{ t("settings.back") }}
@@ -816,6 +844,21 @@ async function logout(provider: RuntimeProvider) {
         </button>
       </nav>
       <footer><strong>{{ workspace.project?.name }}</strong><small>{{ workspace.project?.path }}</small></footer>
+      <div
+        class="settings-resize resize-handle"
+        role="separator"
+        tabindex="0"
+        aria-orientation="vertical"
+        :aria-label="t('settings.resizeNav')"
+        :aria-valuenow="layout.layout.widths.settings"
+        :aria-valuemin="SETTINGS_SIDEBAR_MIN"
+        :aria-valuemax="SETTINGS_SIDEBAR_MAX"
+        @pointerdown.prevent="startSidebarResize"
+        @pointermove="moveSidebarResize"
+        @pointerup="finishSidebarResize"
+        @lostpointercapture="finishSidebarResize"
+        @keydown="resizeSidebarWithKeyboard"
+      />
     </aside>
 
     <main>

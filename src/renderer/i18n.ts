@@ -372,6 +372,7 @@ export const messages = {
     settings: {
       preferences: "Preferences",
       back: "Back to workbench",
+      resizeNav: "Resize settings sidebar",
       saving: "Saving…",
       themeAutoSave: "Applies and saves immediately.",
       modelsDescription: "Connect providers, choose models, and tune how they run.",
@@ -1053,6 +1054,7 @@ export const messages = {
     settings: {
       preferences: "偏好设置",
       back: "返回工作台",
+      resizeNav: "调整设置侧栏宽度",
       saving: "保存中…",
       themeAutoSave: "切换后立即生效并自动保存。",
       modelsDescription: "连接模型提供商、选择模型并调整运行方式。",
