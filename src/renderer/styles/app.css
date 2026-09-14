@@ -644,9 +644,12 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-markdown .markstream-vue .strong-node { font-weight: 600; }
 /* The renderer's mobile list rule otherwise replaces the configured spacing. */
 .agent-markdown .markstream-vue .list-node { --ms-flow-list-indent: 20px; margin-block: var(--ms-flow-list-y); }
+/* Compatibility override: markstream-vue's li:has(.checkbox-node) also hides
+   ancestor markers. Match only this item's own paragraph, rendered directly or
+   through the nested renderer. These selectors depend on the library's DOM/classes.
+   After upgrades, run npm run test:gui:typography. Once the upstream rule is fixed,
+   remove the list-style-type/margin-left overrides below, keeping padding-left. */
 .agent-markdown .markstream-vue .list-item { list-style-type: inherit; margin-left: 0; padding-left: 0; }
-/* A task checkbox belongs to this item's paragraph, not a descendant list.
-   Markstream renders paragraphs directly or through its nested renderer. */
 .agent-markdown .markstream-vue .list-item:has(
   > .paragraph-node > .checkbox-node,
   > .markstream-vue > .node-slot[data-node-type="paragraph"] > .node-content > .paragraph-node > .checkbox-node
