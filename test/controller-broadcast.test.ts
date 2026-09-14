@@ -116,6 +116,71 @@ test("switching sessions keeps the other session's live progress for its return"
   } finally { controller.dispose(); }
 });
 
+test("epoch records are pruned to the live set", async () => {
+  const controller = new MainController(root, platform);
+  const snapshotOf = (path: string): SessionSnapshot => ({
+    session: { path }, entries: [], projection: projectSession([], null), runtime: {} as never,
+    graph: { id: path, epoch: "e", revision: 1, runs: [] },
+  }) as unknown as SessionSnapshot;
+  controller.createSessionRuntime = entry =>
+    ({ open: async () => {}, snapshot: () => snapshotOf(entry.path), state: () => ({}), close: async () => {} }) as never;
+  const epochs = () => (controller as unknown as { liveProgressEpochs: Map<string, unknown> }).liveProgressEpochs;
+  const note = (path: string) => controller.emit({ type: "sessions", payload: { current: snapshotOf(path) } });
+  const stream = (graphId: string) => ({ type: "agent", payload: {
+    type: "message_update", graphId, message: { role: "assistant", content: [{ type: "text", text: "streaming" }] },
+  } } as never);
+  try {
+    await controller.registry.open(controller.project!, null, "a.jsonl");
+    await controller.registry.open(controller.project!, null, "b.jsonl");
+    note("a.jsonl");
+    note("b.jsonl");
+    assert.deepEqual([...epochs().keys()].sort(), ["a.jsonl", "b.jsonl"], "live entries keep their records");
+
+    // A viewed session without a live entry (a remote host's, say) keeps its
+    // record, and its stream keeps it across the view switch until it settles.
+    controller.current = snapshotOf("r.jsonl");
+    note("r.jsonl");
+    controller.emit(stream("r.jsonl"));
+    controller.current = snapshotOf("b.jsonl");
+    note("b.jsonl");
+    assert.ok(epochs().has("r.jsonl"), "a mid-stream session keeps its record without a live entry");
+    controller.emit({ type: "agent", payload: { type: "message_end", graphId: "r.jsonl",
+      message: { role: "assistant", content: [{ type: "text", text: "done" }] } } } as never);
+    note("b.jsonl");
+    assert.ok(!epochs().has("r.jsonl"), "the record dies with its last baseline");
+
+    await controller.registry.dispose("a.jsonl");
+    note("b.jsonl");
+    assert.deepEqual([...epochs().keys()].sort(), ["b.jsonl"],
+      "a disposed session's record goes with it; live entries survive every pass");
+  } finally { controller.dispose(); }
+});
+
+test("a disposed runtime's late events record no baseline and reach no listener", async () => {
+  const controller = new MainController(root, platform);
+  const snapshotOf = (path: string): SessionSnapshot => ({
+    session: { path }, entries: [], projection: projectSession([], null), runtime: {} as never,
+    graph: { id: path, epoch: "e", revision: 1, runs: [] },
+  }) as unknown as SessionSnapshot;
+  controller.createSessionRuntime = entry =>
+    ({ open: async () => {}, snapshot: () => snapshotOf(entry.path), state: () => ({}), close: async () => {} }) as never;
+  const seen: string[] = [];
+  controller.onEvent(event => seen.push((event as { type: string }).type));
+  try {
+    await controller.registry.open(controller.project!, null, "a.jsonl");
+    const runtime = controller.registry.entry("a.jsonl")!.runtime as unknown as { emit(e: unknown): void };
+    await controller.registry.dispose("a.jsonl");
+    // The abort settling during a close can still fire the sink; it must not
+    // record a baseline nothing will invalidate when the session reopens.
+    runtime.emit({ type: "agent", payload: { type: "message_update", graphId: "a.jsonl",
+      message: { role: "assistant", content: [{ type: "text", text: "straggler" }] } } });
+    runtime.emit({ type: "notice", payload: { level: "error", message: "straggler" } });
+    controller.current = snapshotOf("a.jsonl");
+    await controller.invoke("session.snapshot");
+    assert.deepEqual(seen, ["sessions"], "a closed runtime's stragglers stay off the wire and out of the replay");
+  } finally { controller.dispose(); }
+});
+
 test("IPC subscribers get deltas and session.snapshot publishes a full resync without reopening", async () => {
   const controller = new MainController(null, platform);
   const before = { session: { path: "s" }, entries: [], projection: projectSession([], null), runtime: {},

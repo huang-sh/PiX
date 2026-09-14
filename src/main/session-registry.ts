@@ -9,6 +9,13 @@ interface PendingOpen {
   promise: Promise<SessionEntry>;
 }
 
+/** A new-session file may be created before its runtime can be registered. */
+interface PendingCreate {
+  project: string;
+  cancelled: boolean;
+  promise: Promise<SessionSnapshot>;
+}
+
 /** One live session per file; opening an entry never closes another. */
 export interface SessionEntry {
   /** Canonical session file path; also the registry key. */
@@ -38,6 +45,9 @@ export interface SessionRegistryHost {
 export class SessionRegistry {
   private settled = new Map<string, SessionEntry>();
   private pending = new Map<string, PendingOpen>();
+  private pendingCreates = new Set<PendingCreate>();
+  private blockedPaths = new Set<string>();
+  private blockedProjects = new Set<string>();
   private activePath = "";
   private selection = 0;
   private readonly activeByProject = new Map<string, string>();
@@ -108,6 +118,9 @@ export class SessionRegistry {
 
   private async load(project: ProjectInfo, dir: string | null, path: string, selection: number,
     fallback?: (error: unknown) => SessionSnapshot): Promise<SessionSnapshot> {
+    const owner = projectId(project);
+    if (this.blockedPaths.has(path) || this.blockedProjects.has(owner))
+      throw new Error("Session was closed while opening");
     const settled = this.settled.get(path);
     if (settled?.runtime) {
       try {
@@ -157,8 +170,29 @@ export class SessionRegistry {
   }
 
   async create(project: ProjectInfo, dir: string | null, createFile: () => Promise<string>): Promise<SessionSnapshot> {
+    const owner = projectId(project);
+    if (this.blockedProjects.has(owner)) throw new Error("Project is being closed");
     const selection = ++this.selection;
-    return this.load(project, dir, await createFile(), selection);
+    const pending = {
+      project: owner,
+      cancelled: false,
+    } as PendingCreate;
+    this.pendingCreates.add(pending);
+    pending.promise = (async () => {
+      const path = await createFile();
+      if (pending.cancelled || this.blockedProjects.has(owner))
+        throw new Error("Session creation was cancelled");
+      const snapshot = await this.load(project, dir, path, selection);
+      if (!pending.cancelled) return snapshot;
+      const entry = this.settled.get(path);
+      if (entry) await this.disposeEntry(entry);
+      throw new Error("Session creation was cancelled");
+    })();
+    try {
+      return await pending.promise;
+    } finally {
+      this.pendingCreates.delete(pending);
+    }
   }
 
   /**
@@ -204,19 +238,35 @@ export class SessionRegistry {
     if (remembered === previous) this.activeByProject.set(projectId(entry.project), path);
   }
 
-  async dispose(path: string): Promise<void> {
-    await this.drainPending(pendingPath => pendingPath === path);
-    const entry = this.settled.get(path);
-    if (entry) await this.disposeEntry(entry);
+  async dispose(path: string, after?: () => void | Promise<void>): Promise<void> {
+    // Keep new opens out while the caller performs the destructive operation.
+    // Otherwise a second open could create a runtime between close and unlink.
+    this.blockedPaths.add(path);
+    try {
+      await this.drainPending(pendingPath => pendingPath === path);
+      const entry = this.settled.get(path);
+      if (entry) await this.disposeEntry(entry);
+      await after?.();
+    } finally {
+      this.blockedPaths.delete(path);
+    }
   }
 
   async disposeProject(project: string): Promise<void> {
-    await this.drainPending((_path, pendingProject) => pendingProject === project);
-    for (const entry of [...this.settled.values()])
-      if (projectId(entry.project) === project) await this.disposeEntry(entry);
+    this.blockedProjects.add(project);
+    for (const pending of this.pendingCreates)
+      if (pending.project === project) pending.cancelled = true;
+    try {
+      await this.drainPending((_path, pendingProject) => pendingProject === project);
+      for (const entry of [...this.settled.values()])
+        if (projectId(entry.project) === project) await this.disposeEntry(entry);
+    } finally {
+      this.blockedProjects.delete(project);
+    }
   }
 
   async disposeAll(): Promise<void> {
+    for (const pending of this.pendingCreates) pending.cancelled = true;
     await this.drainPending(() => true);
     for (const entry of [...this.settled.values()]) await this.disposeEntry(entry);
     this.activePath = "";
@@ -232,7 +282,11 @@ export class SessionRegistry {
     const opens = [...this.pending.entries()]
       .filter(([path, opening]) => match(path, opening.project))
       .map(([, opening]) => opening.promise);
-    if (opens.length) await Promise.allSettled(opens);
+    const creates = [...this.pendingCreates]
+      .filter(pending => match("", pending.project))
+      .map(pending => pending.promise);
+    if (opens.length || creates.length)
+      await Promise.allSettled([...opens, ...creates]);
   }
 
   private launch(project: ProjectInfo, dir: string | null, path: string): Promise<SessionEntry> {

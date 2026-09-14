@@ -100,6 +100,7 @@ export class MainController {
   private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
   listeners = new Set<(e: DesktopEvent) => void>();
   private readonly liveProgress = new Map<string, DesktopEvent>();
+  /** Last-seen graph epoch per session; pruned to the live set in noteEpoch. */
   private readonly liveProgressEpochs = new Map<string, string | undefined>();
   /** The client of the remote workspace in view, pooled or freshly connected. */
   get wsl(): WslHostClient | undefined {
@@ -143,6 +144,10 @@ export class MainController {
     return runtime;
   }
   private routeSessionEvent(entry: SessionEntry, e: unknown) {
+    // A runtime that is no longer its entry's (closed underneath a disposal)
+    // must not publish: its baselines would outlive the epoch record that
+    // would have invalidated them on reopen.
+    if (!entry.runtime) return;
     const pushed = e as DesktopEvent;
     if (pushed.type !== "agent") {
       if (pushed.type === "sessions") {
@@ -378,6 +383,15 @@ export class MainController {
         if ((JSON.parse(key) as unknown[])[0] === graph.id) this.liveProgress.delete(key);
     }
     this.liveProgressEpochs.set(graph.id, graph.epoch);
+    // A record can only invalidate baselines that still exist or could be
+    // recorded again: a session that is neither live, mid-stream, nor in view
+    // is inert, so its record goes and the map stays bounded by the live set
+    // instead of every session ever opened.
+    const tracked = new Set([...this.liveProgress.keys()].map(key => (JSON.parse(key) as unknown[])[0]));
+    const viewed = this.current?.graph?.id;
+    for (const id of [...this.liveProgressEpochs.keys()])
+      if (id !== graph.id && id !== viewed && !tracked.has(id) && !this.registry.entry(id))
+        this.liveProgressEpochs.delete(id);
   }
   remoteEvent(event: DesktopEvent, project: ProjectInfo | null = this.project) {
     if (!project) return;
@@ -1195,19 +1209,21 @@ export class MainController {
           !(await this.platform.confirm("Delete this Pi session?", p))
         )
           return { cancelled: true, sessions: await this.sessions() };
-        const currentPath = this.current?.session.path;
-        // The viewed file may already be gone (deleted externally); fall back
-        // to the resolved spelling so deletion still succeeds.
-        const deletingCurrent = Boolean(currentPath && canonicalPath(currentPath) === p);
         if (resolved?.entry && this.registry.busy(resolved.entry))
           throw new Error("Stop the running session before deleting it");
-        if (resolved?.entry) {
-          await this.registry.dispose(p);
+        // Disposal drains an open still in flight for this file — its late
+        // settlement would otherwise resurrect the deleted session — and the
+        // unlink runs inside the blocked window so no new open can build a
+        // runtime between the close and the missing file.
+        await this.registry.dispose(p, () => this.files.deleteAt(p));
+        // A racing open can have settled the view during the drain; capture
+        // the viewed path only now so that view still clears.
+        const currentPath = this.current?.session.path;
+        const deletingCurrent = Boolean(currentPath && canonicalPath(currentPath) === p);
+        if (resolved)
           this.rememberOwnerProject(resolved.entry, sessions => sessions.filter(
             session => session.path !== p && session.path !== String(v.path),
           ));
-        }
-        this.files.deleteAt(p);
         if (deletingCurrent) this.current = undefined;
         const sessions = await this.sessions();
         this.rememberProject(sessions);

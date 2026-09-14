@@ -619,6 +619,77 @@ test("forgetting a project during an in-flight open disposes the late runtime", 
   }
 });
 
+test("deleting a session drains an open that is still in flight", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const dir = controller.files.dir!;
+    const path = join(dir, "pending-delete.jsonl");
+    writeFileSync(path, "");
+    let release!: () => void;
+    controller.createSessionRuntime = entry => ({
+      open: () => new Promise<void>(resolve => { release = resolve; }),
+      snapshot: () => ({ session: { path: entry.path }, entries: [], projection: { nodes: [] } }) as never,
+      state: () => ({}),
+      close: async () => {},
+    }) as never;
+
+    const opening = controller.invoke("session.open", { path });
+    await new Promise(resolve => setImmediate(resolve));   // the open is registered and in flight
+    const deleting = controller.invoke("session.delete", { path, confirmed: true });
+    await new Promise(resolve => setImmediate(resolve));   // the delete is draining the open
+    release();
+    await deleting;
+    await opening.catch(() => {});
+
+    assert.equal(existsSync(path), false, "the file is unlinked inside the disposal window");
+    assert.equal(controller.registry.entry(path), undefined, "the late open never leaves an entry behind");
+    assert.ok(!controller.projectGroups().some(record =>
+      record.sessions.some(row => row.path === path)), "the deleted session stays out of every list");
+  } finally {
+    await controller.closeAll();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+
+
+test("forgetting a project during an in-flight create never resurrects it", { timeout: 15000 }, async () => {
+  const first = workspace(), second = workspace();
+  const controller = new MainController(first, platform);
+  try {
+    const project = controller.project!;
+    const dir = controller.files.dir!;
+    const path = join(dir, "created.jsonl");
+    controller.settings.rememberProject(project, []);
+    let release!: () => void;
+    const gate = new Promise<string>(resolve => {
+      release = () => { writeFileSync(path, ""); resolve(path); };
+    });
+
+    const creating = controller.registry.create(project, dir, () => gate);
+    await new Promise(resolve => setImmediate(resolve));   // the create is registered and writing its file
+    controller.configure(second);
+    const forgetting = controller.invoke("app.forgetProject", { id: projectId(project) });
+    await new Promise(resolve => setImmediate(resolve));   // the forget is draining the create
+    release();
+    await forgetting;
+
+    await assert.rejects(creating, /cancelled/);
+    assert.equal(controller.registry.entry(path), undefined, "the cancelled create settles no entry");
+    assert.ok(!controller.projectGroups().some(record => record.id === projectId(project)),
+      "the forgotten project is not written back");
+    await new Promise(resolve => setTimeout(resolve, 700));   // past the background coalescing window
+    assert.ok(!controller.projectGroups().some(record => record.id === projectId(project)),
+      "nothing writes the project back");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
+  }
+});
+
 test("session.open never publishes a snapshot the registry no longer owns", { timeout: 15000 }, async () => {
   const ws = workspace();
   const controller = new MainController(ws, platform);
