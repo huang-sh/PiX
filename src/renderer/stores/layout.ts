@@ -25,7 +25,7 @@ let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 const defaultLayout = (): LayoutState => ({
   version: 4,
   navigatorPinned: false,
-  widths: { navigator: 248, chat: 356, content: 320 },
+  widths: { navigator: 248, chat: 356, content: 320, settings: 260 },
   collapsed: { navigator: true, chat: true, content: true },
   minimap: false,
   utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
@@ -116,6 +116,9 @@ export const useLayoutStore = defineStore("layout", {
         this.layout.collapsed.chat = true;
       }
       if (typeof this.layout.navigatorPinned !== "boolean") this.layout.navigatorPinned = false;
+      // Layouts saved before the settings sidebar became resizable carry no
+      // width for it; the default restores the fixed width it used to have.
+      if (typeof this.layout.widths.settings !== "number") this.layout.widths.settings = 260;
       if (!this.layout.navigatorPinned) this.layout.collapsed.navigator = true;
       if ((this.layout.version ?? 0) < 4) {
         this.layout.version = 4;
