@@ -135,7 +135,7 @@ describe("layout store", () => {
     } as LayoutState);
 
     expect(layout.layout.version).toBe(4);
-    expect(layout.layout.widths).toEqual({ navigator: 248, chat: 356, content: 320 });
+    expect(layout.layout.widths).toEqual({ navigator: 248, chat: 356, content: 320, settings: 260 });
     expect(layout.layout.collapsed.chat).toBe(true);
   });
 
