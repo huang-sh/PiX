@@ -48,7 +48,46 @@ const numberedLists = `## 编号空间
     10000. 嵌套第一万项
 
            - 嵌套项目符号
+
+### 混合复选框列表
+
+1. 编号父项
+
+   - [ ] 未完成子项
+   - [x] 已完成子项
+
+2. 普通编号项
+
+### 多层复选框列表
+
+- 项目符号父项
+
+    1000. 深层编号父项
+
+          - [ ] 深层任务项
+
+### 复选框父项
+
+1. [ ] 任务父项
+
+   - [x] 任务子项
+
+2. [x] 有序完成任务
+
+### 多段落父项
+
+1. 多段落编号父项
+
+   补充说明。
+
+   - [ ] 多段落子任务
 `;
+const taskListMarkers = {
+  "编号父项": "decimal", "普通编号项": "decimal", "项目符号父项": "disc",
+  "深层编号父项": "decimal", "多段落编号父项": "decimal",
+  "未完成子项": "none", "已完成子项": "none", "深层任务项": "none",
+  "任务父项": "none", "任务子项": "none", "有序完成任务": "none", "多段落子任务": "none",
+};
 const sessionFile = join(workspace, ".pi", "sessions", "typography.jsonl");
 const timestamp = new Date().toISOString();
 const usage = { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -179,7 +218,13 @@ try {
                   needed: markerContext.measureText(li.value + '. ').width,
                   reserved: parseFloat(getComputedStyle(li.parentElement).paddingLeft) };
               });
-              result.numberedLists.push({ variant, width, markers });
+              const tasks = [...host.querySelectorAll('li')].map(li => ({
+                text: li.querySelector('.paragraph-node')?.textContent.trim(),
+                marker: getComputedStyle(li).listStyleType,
+                margin: parseFloat(getComputedStyle(li).marginLeft),
+                indent: parseFloat(getComputedStyle(li.parentElement).paddingLeft),
+              })).filter(item => item.text in ${JSON.stringify(taskListMarkers)});
+              result.numberedLists.push({ variant, width, markers, tasks });
             }
           }
           host.style.width = '320px';
@@ -266,10 +311,15 @@ try {
       assert.ok(measurements.nodeRows.every(item => item.sameRow), 'node context, model and thinking must share one row without overlap');
       assert.ok(measurements.narrow.every(item => item.sameRow), 'composer attachment, model, thinking and send must share one row without overlap');
       assert.ok(measurements.narrow.every(item => item.fits), "narrow composer controls must fit");
-      for (const { variant, width, markers } of measurements.numberedLists) {
+      for (const { variant, width, markers, tasks } of measurements.numberedLists) {
         for (const number of [10, 99, 100, 1000, 10000, 999999999])
           assert.ok(markers.some(marker => marker.number === number), 'numbered-list fixture includes ' + number);
         assert.ok(markers.every(marker => marker.reserved >= marker.needed), 'numbered-list markers must fit: ' + JSON.stringify({ variant, width, markers }));
+        assert.equal(tasks.length, Object.keys(taskListMarkers).length, 'mixed task-list fixture must render completely');
+        for (const task of tasks) {
+          assert.equal(task.marker, taskListMarkers[task.text], 'only the task itself hides its marker: ' + task.text);
+          assert.equal(task.margin, task.marker === 'none' ? -task.indent : 0, 'task-list indentation: ' + task.text);
+        }
       }
     }
     const screenshot = await send("Page.captureScreenshot", { format: "png" });

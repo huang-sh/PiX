@@ -644,7 +644,13 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-markdown .markstream-vue .strong-node { font-weight: 600; }
 /* The renderer's mobile list rule otherwise replaces the configured spacing. */
 .agent-markdown .markstream-vue .list-node { --ms-flow-list-indent: 20px; margin-block: var(--ms-flow-list-y); }
-.agent-markdown .markstream-vue .list-item { padding-left: 0; }
+.agent-markdown .markstream-vue .list-item { list-style-type: inherit; margin-left: 0; padding-left: 0; }
+/* A task checkbox belongs to this item's paragraph, not a descendant list.
+   Markstream renders paragraphs directly or through its nested renderer. */
+.agent-markdown .markstream-vue .list-item:has(
+  > .paragraph-node > .checkbox-node,
+  > .markstream-vue > .node-slot[data-node-type="paragraph"] > .node-content > .paragraph-node > .checkbox-node
+) { list-style-type: none; margin-left: calc(-1 * var(--ms-flow-list-indent)); }
 .agent-markdown .markstream-vue .list-item > .paragraph-node + .paragraph-node { margin-top: 6px; }
 /* Keep wrapped identifiers readable without making each fragment look like a badge. */
 .agent-markdown .markstream-vue .inline-code { padding: 0 4px; border-radius: 3px; font-size: max(13px, .875em); }
