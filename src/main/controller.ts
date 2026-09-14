@@ -61,6 +61,8 @@ export interface RemoteSlot {
 const sameHostPath = (a: string, b: string) => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
 /** Session-scoped control actions whose runtime moves to a new session file. */
 const SESSION_MIGRATING_ACTIONS = ["fork", "clone"];
+/** Model actions whose catalog or credential change must reach open sessions. */
+const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 const migratesSession = (action: unknown) =>
   action === "newSession" || (SESSION_MIGRATING_ACTIONS as readonly unknown[]).includes(action);
 const unavailable = (): RuntimeState => ({
@@ -314,6 +316,7 @@ export class MainController {
       // Every open session holds its own copy of the catalog, so a change has
       // to be pushed or the new model is invisible until the session reopens.
       if (input.action === "setBrokerProviders") await this.adoptProjectBroker();
+      else if ((CATALOG_MUTATIONS as readonly string[]).includes(input.action)) await this.pushCatalogs(input);
       return { result };
     }
     const entry = this.activeEntry();
@@ -328,6 +331,12 @@ export class MainController {
   private async adoptProjectBroker() {
     for (const entry of this.registry.liveEntries())
       await entry.runtime?.adoptBroker(this.projectRuntime);
+  }
+  /** Re-reads the project runtime's catalog change into every open session. */
+  private async pushCatalogs(input: AgentControl) {
+    for (const entry of this.registry.liveEntries())
+      // Best-effort per session: one stale runtime must not fail the settings reply.
+      try { await entry.runtime?.adoptCatalog(input); } catch {}
   }
   /**
    * Re-binds an entry whose runtime moved to another session file (fork,

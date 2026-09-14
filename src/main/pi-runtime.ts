@@ -242,6 +242,22 @@ export class PiRuntime {
     await this.replaceBrokerCatalog(modelRuntime, new Set(source.brokerProviders), [...source.brokerModels]);
   }
 
+  /**
+   * Pulls a catalog or credential change another runtime already applied into
+   * this one. Every runtime's model catalog is its own in-memory copy, so an
+   * open session never sees a model added, updated, or logged in elsewhere
+   * until it re-reads it. A session running the updated model adopts the new
+   * definition; a streaming one keeps it for its current response only.
+   */
+  async adoptCatalog(input: AgentControl) {
+    const modelRuntime = await this.modelRuntime();
+    await modelRuntime.refresh({ allowNetwork: false });
+    const s = this.runtime?.session;
+    if (input.action === "updateCustomModel" && s?.model && !s.isStreaming
+      && s.model.provider === input.provider && s.model.id === input.modelId)
+      await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
+  }
+
   /** Switches one model runtime over to a catalog, dropping the providers that left it. */
   private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
     for (const provider of this.brokerProviders)

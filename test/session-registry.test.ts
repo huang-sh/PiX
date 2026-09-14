@@ -1074,6 +1074,32 @@ test("a catalog change reaches the sessions that are already open", { timeout: 3
   }
 });
 
+test("a custom model reaches the session that was already open", { timeout: 30000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  const definition = {
+    provider: "acme", modelId: "acme-1", name: "Acme 1", api: "openai-completions",
+    baseUrl: "https://api.acme.test/v1", contextWindow: 1000, maxTokens: 100, apiKey: "test-key",
+  };
+  try {
+    await controller.invoke("agent.control", { action: "newSession" });
+    const entry = controller.registry.entry(controller.current!.session.path)!;
+    await controller.invoke("agent.control", { action: "addCustomModel", ...definition });
+
+    // setModel resolves in the session's own catalog copy, which the add must reach.
+    const switched = await controller.invoke("agent.control",
+      { action: "setModel", provider: "acme", modelId: "acme-1" }) as SessionSnapshot;
+    assert.equal(switched.runtime.model?.id, "acme-1", "the open session can pick the added model");
+
+    await controller.invoke("agent.control", { action: "updateCustomModel", ...definition, contextWindow: 2000 });
+    assert.equal(entry.runtime!.state().model?.contextWindow, 2000,
+      "a session running the updated model adopts the new definition");
+  } finally {
+    await controller.closeAll();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("a junctioned project keeps one canonical history row and its running marker", { timeout: 30000 }, async () => {
   const real = workspace();
   const link = `${real}-link`;
