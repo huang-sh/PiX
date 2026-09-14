@@ -571,7 +571,10 @@ test("dispose waits for an in-flight open instead of settling it afterwards", { 
     const opening = controller.registry.open(controller.project!, null, "in-flight.jsonl");
 
     await controller.registry.dispose("in-flight.jsonl");
-    await opening;
+    // A disposal drains the open it races and then closes its entry; the
+    // drained open must reject instead of resolving into a snapshot whose
+    // entry is already being closed.
+    await assert.rejects(opening, /Session was closed while opening/);
 
     assert.equal(Boolean(controller.registry.entry("in-flight.jsonl")), false, "the late open does not settle after disposal");
     assert.ok(closed, "the runtime the late open built is closed");
@@ -634,13 +637,13 @@ test("deleting a session drains an open that is still in flight", { timeout: 150
       close: async () => {},
     }) as never;
 
-    const opening = controller.invoke("session.open", { path });
+    const opening = controller.invoke("session.open", { path }).catch(() => {});
     await new Promise(resolve => setImmediate(resolve));   // the open is registered and in flight
     const deleting = controller.invoke("session.delete", { path, confirmed: true });
     await new Promise(resolve => setImmediate(resolve));   // the delete is draining the open
     release();
     await deleting;
-    await opening.catch(() => {});
+    await opening;
 
     assert.equal(existsSync(path), false, "the file is unlinked inside the disposal window");
     assert.equal(controller.registry.entry(path), undefined, "the late open never leaves an entry behind");
@@ -652,7 +655,81 @@ test("deleting a session drains an open that is still in flight", { timeout: 150
   }
 });
 
+test("reopening a dead cached entry cannot outlive the disposal that raced it", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const dir = controller.files.dir!;
+    const path = join(dir, "dead-cache.jsonl");
+    writeFileSync(path, "");
+    let broken = 0, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let closes = 0, serial = 0;
+    controller.createSessionRuntime = entry => {
+      const id = ++serial;
+      return {
+        open: async () => {},
+        snapshot: () => {
+          if (id === broken) throw new Error("runtime died underneath us");
+          return { session: { path: entry.path }, entries: [], projection: { nodes: [] } } as never;
+        },
+        state: () => ({}),
+        close: async () => { if (++closes === 1) await gate; },
+      } as never;
+    };
 
+    await controller.invoke("session.open", { path });
+    assert.ok(controller.registry.entry(path), "the first open settles the entry");
+
+    broken = serial;                  // the cached runtime dies underneath the registry
+    const reopening = controller.invoke("session.open", { path });
+    await new Promise(resolve => setImmediate(resolve));   // the reopen is parked draining the dead entry
+    const disposing = controller.registry.disposeProject(projectId(controller.project!));
+    await new Promise(resolve => setImmediate(resolve));   // the disposal is draining the reopen
+    release();
+    await disposing;
+
+    await assert.rejects(reopening, /Session was closed while opening/);
+    assert.equal(controller.registry.entry(path), undefined, "the reopened entry goes with the project");
+    assert.equal(controller.registry.liveEntries().length, 0, "no ghost entry is left behind");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("a failed open drained by a deletion settles no read-only fallback", { timeout: 15000 }, async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const dir = controller.files.dir!;
+    const path = join(dir, "failing.jsonl");
+    writeFileSync(path, "");
+    let failOpen!: (error: Error) => void;
+    controller.createSessionRuntime = () => ({
+      open: () => new Promise<void>((_resolve, reject) => { failOpen = reject; }),
+      snapshot: () => ({ session: { path }, entries: [], projection: { nodes: [] } }) as never,
+      state: () => ({}),
+      close: async () => {},
+    }) as never;
+
+    const opening = controller.invoke("session.open", { path }).catch(error => error as Error);
+    await new Promise(resolve => setImmediate(resolve));   // the open is registered and in flight
+    const deleting = controller.invoke("session.delete", { path, confirmed: true });
+    await new Promise(resolve => setImmediate(resolve));   // the delete is draining the open
+    failOpen(new Error("graph parse failed"));
+    await deleting;
+
+    const failure = await opening;
+    assert.ok(/Session was closed while opening/.test(String(failure)),
+      "the drained open reports the disposal, not the parse error");
+    assert.equal(controller.registry.entry(path), undefined, "no read-only fallback is settled");
+  } finally {
+    await controller.closeSessions();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
 
 test("forgetting a project during an in-flight create never resurrects it", { timeout: 15000 }, async () => {
   const first = workspace(), second = workspace();

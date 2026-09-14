@@ -121,6 +121,7 @@ export class SessionRegistry {
     const owner = projectId(project);
     if (this.blockedPaths.has(path) || this.blockedProjects.has(owner))
       throw new Error("Session was closed while opening");
+    let dead: SessionEntry | undefined;
     const settled = this.settled.get(path);
     if (settled?.runtime) {
       try {
@@ -130,15 +131,19 @@ export class SessionRegistry {
         return snapshot;
       } catch {
         // The cached runtime died underneath us; reopen so the caller gets a
-        // working session or the read-only fallback instead of the error.
-        await this.disposeEntry(settled);
+        // working session or the read-only fallback instead of the error. The
+        // disposal joins the pending open below, where a drain can wait for
+        // it: kept before the registration, a racing disposal of this path or
+        // project could finish unseen and the reopen would resurrect the
+        // entry it just closed.
+        dead = settled;
       }
     }
     // A previous open left only a read-only fallback; the next open retries.
     if (settled) this.settled.delete(path);
     let opening = this.pending.get(path);
     if (!opening) {
-      const created: PendingOpen = { project: projectId(project), promise: this.launch(project, dir, path) };
+      const created: PendingOpen = { project: projectId(project), promise: this.launch(project, dir, path, dead) };
       opening = created;
       this.pending.set(path, created);
       void created.promise.catch(() => {}).finally(() => {
@@ -150,6 +155,11 @@ export class SessionRegistry {
       entry = await opening.promise;
     } catch (error) {
       if (!fallback) throw error;
+      // A disposal of this path or project raced the failed launch and is
+      // still draining it; settling a read-only fallback — or serving a
+      // concurrent winner's snapshot — would resurrect what it closes.
+      if (this.blockedPaths.has(path) || this.blockedProjects.has(owner))
+        throw new Error("Session was closed while opening");
       if (!this.settled.has(path))
         this.settled.set(path, { path, project, dir, lastUsed: Date.now(), fallback: fallback(error) });
       const failed = this.settled.get(path)!;
@@ -162,7 +172,13 @@ export class SessionRegistry {
     // Disposal may have raced this open (delete, project removal, session
     // directory change). Its runtime is already closed, and returning a
     // snapshot here would resurrect the entry in the view and the history.
-    if (this.settled.get(path) !== entry) throw new Error("Session was closed while opening");
+    // The settled check catches the disposal that finished first; the block
+    // check catches the one still draining this open — a disposer holds its
+    // block until its destructive step is done, and a snapshot served inside
+    // that window would reach the view before the disposer's own cleanup.
+    if (this.settled.get(path) !== entry
+      || this.blockedPaths.has(path) || this.blockedProjects.has(projectId(entry.project)))
+      throw new Error("Session was closed while opening");
     if (selection === this.selection) this.setActive(entry);
     const snapshot = entry.runtime!.snapshot();
     void this.evict();
@@ -289,7 +305,9 @@ export class SessionRegistry {
       await Promise.allSettled([...opens, ...creates]);
   }
 
-  private launch(project: ProjectInfo, dir: string | null, path: string): Promise<SessionEntry> {
+  private async launch(project: ProjectInfo, dir: string | null, path: string,
+    dead?: SessionEntry): Promise<SessionEntry> {
+    if (dead) await this.disposeEntry(dead);
     const entry: SessionEntry = { path, project, dir, lastUsed: Date.now() };
     const runtime = this.host.createRuntime(entry);
     runtime.emit = event => this.host.onEvent(entry, event);

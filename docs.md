@@ -39,9 +39,11 @@ never evicted, and each victim is re-read for liveness and view ownership
 right before it is disposed, so a project switch during the pass keeps its
 entry), the
 project's session directory changing, explicit deletion, and quitting. Every
-disposal drains the in-flight operations it races first — cold opens and
-creates still writing their file — refuses new opens for the disposed path or
-project until the caller's destructive step finishes, and a coalesced
+disposal drains the in-flight operations it races first — cold opens, creates
+still writing their file, and the reopen of an entry whose cached runtime
+died — refuses new opens for the disposed path or project until the caller's
+destructive step finishes, rejects any snapshot an open tries to serve from
+inside that window, and a coalesced
 background refresh scheduled for an entry that has since been disposed
 publishes nothing, so a late open or a late timer cannot outlive the disposal.
 Deleting a session drains its in-flight open the same way and unlinks inside
