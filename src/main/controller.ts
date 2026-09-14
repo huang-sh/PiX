@@ -105,9 +105,6 @@ export class MainController {
   get wsl(): WslHostClient | undefined {
     return this.activeSlot()?.client;
   }
-  get wslSettings(): SettingsBundle | undefined {
-    return this.activeSlot()?.settings;
-  }
   get remoteBrokerModels(): Set<string> {
     const slot = this.activeSlot();
     return (slot && this.brokerModels.get(slot.client)) ?? new Set<string>();
@@ -914,7 +911,6 @@ export class MainController {
         archivedSessions = new Set(marks.archivedSessions);
       return list.map((x) => ({
         ...x,
-        active: x.path === this.current?.session.path,
         running: running.has(x.path) || undefined,
         pinned: pinned.has(x.path) || undefined,
         archived: archivedSessions.has(x.path) || undefined,

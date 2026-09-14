@@ -19,7 +19,7 @@ export function isAgentProgress(event: DesktopEvent) {
 
 // List-only session events (background refreshes, no snapshot) must not reset
 // streaming baselines; only an event that carries a new current snapshot does.
-export function sessionEventHasCurrent(event: DesktopEvent) {
+function sessionEventHasCurrent(event: DesktopEvent) {
   return Boolean((event.payload as { current?: unknown } | null)?.current);
 }
 

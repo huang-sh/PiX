@@ -622,14 +622,12 @@ export class PiRuntime {
         );
       }
       case "getCustomModels": {
-        const pi = await this.pi();
         return getCustomModels(join(this.agentDir(), "models.json"));
       }
       case "addCustomModel":
       case "updateCustomModel": {
         const update = input.action === "updateCustomModel";
         if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
-        const pi = await this.pi();
         const modelRuntime = await this.modelRuntime();
         if (!update && modelRuntime.getModel(input.provider, input.modelId))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");

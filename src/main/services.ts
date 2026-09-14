@@ -705,11 +705,6 @@ export class SessionFiles {
     this.dir = dir ? resolve(dir) : null;
     if (this.dir) mkdirSync(this.dir, { recursive: true });
   }
-  set(cwd: string | null, dir: string | null) {
-    this.cwd = cwd ? resolve(cwd) : null;
-    this.dir = dir ? resolve(dir) : null;
-    if (this.dir) mkdirSync(this.dir, { recursive: true });
-  }
   managed(p: string) {
     return managedSessionFile(this.dir, p);
   }

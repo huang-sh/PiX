@@ -14,7 +14,7 @@ import type {
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, isSessionRunning, projectSession } from "../../shared/session";
+import { entryAnchorForNode, isSessionRunning } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
 import { useLayoutStore } from "./layout";
@@ -96,16 +96,6 @@ export const useSessionStore = defineStore("session", {
     },
     selectedActivity(state): AgentActivity | undefined {
       return activityForId(state, focusId(state));
-    },
-    filtered(state) {
-      const query = state.query.toLowerCase();
-      return state.sessions.filter(
-        (session) =>
-          !query ||
-          `${session.name ?? ""} ${session.firstMessage} ${session.id}`
-            .toLowerCase()
-            .includes(query),
-      );
     },
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
