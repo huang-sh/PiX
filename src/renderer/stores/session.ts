@@ -13,7 +13,7 @@ import type {
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, projectSession } from "../../shared/session";
+import { entryAnchorForNode, isSessionRunning, projectSession } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
 import { useLayoutStore } from "./layout";
@@ -54,6 +54,7 @@ interface PendingPrompt {
 export const useSessionStore = defineStore("session", {
   state: () => ({
     loading: true,
+    viewRequest: 0,
     sessions: [] as SessionSummary[],
     projects: [] as ProjectGroup[],
     activeProjectId: "",
@@ -71,9 +72,6 @@ export const useSessionStore = defineStore("session", {
     // payloads and applied when the lists are read, so surfaces that carry no
     // marks (remote replies, raw runtime snapshots) can never erase them.
     marks: { pinned: [] as string[], archivedSessions: [] as string[] },
-    // Running markers follow the same read-time pattern as marks: list
-    // payloads seed the set, snapshots without markers never erase it.
-    running: [] as string[],
     commands: [] as RuntimeCommand[],
     commandRequest: 0,
     models: [] as RuntimeModel[],
@@ -111,12 +109,10 @@ export const useSessionStore = defineStore("session", {
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
       const pinned = new Set(state.marks.pinned),
-        archived = new Set(state.marks.archivedSessions),
-        running = new Set(state.running);
+        archived = new Set(state.marks.archivedSessions);
       const marked = (sessions: SessionSummary[]) =>
         sessions.map((session) => ({
           ...session,
-          running: running.has(session.path) || session.running || undefined,
           pinned: pinned.has(session.path) || undefined,
           archived: archived.has(session.path) || undefined,
         }));
@@ -170,17 +166,16 @@ export const useSessionStore = defineStore("session", {
         }
       this.marks = { pinned, archivedSessions };
     },
-    adoptRunning(sessions: SessionSummary[]) {
-      this.running = sessions.filter(session => session.running).map(session => session.path);
-    },
     hydrate(
       project: ProjectInfo | null,
       sessions: SessionSummary[],
       projects: ProjectGroup[],
       current?: SessionSnapshot,
+      request?: number,
     ) {
+      request ??= ++this.viewRequest;
+      if (request !== this.viewRequest) return;
       this.adoptMarks(projects);
-      this.adoptRunning(sessions);
       this.projects = projects;
       this.activeProjectId = project ? projectId(project) : "";
       this.sessions = sessions;
@@ -204,8 +199,12 @@ export const useSessionStore = defineStore("session", {
     },
     disconnected(id: string) {
       const record = this.projects.find((item) => item.id === id);
-      if (record) record.connected = false;
+      if (record) {
+        record.connected = false;
+        record.sessions = record.sessions.map(row => ({ ...row, running: undefined }));
+      }
       if (this.activeProjectId !== id) return;
+      if (record) this.sessions = record.sessions;
       this.activity = undefined;
       this.branchActivities = {};
       if (this.current) this.current.runtime = {
@@ -239,7 +238,7 @@ export const useSessionStore = defineStore("session", {
       this.current = snapshot;
       if (snapshot.session.path)
         this.sessions = [
-          snapshot.session,
+          { ...snapshot.session, running: isSessionRunning(snapshot) || undefined },
           ...this.sessions.filter((item) => item.path !== snapshot.session.path),
         ];
       this.syncProject();
@@ -274,15 +273,9 @@ export const useSessionStore = defineStore("session", {
         this.focusedNode = null;
     },
     async refresh() {
+      const project = this.activeProjectId, request = this.viewRequest;
       const sessions = await desktop.invoke<SessionSummary[]>("session.list");
-      this.adoptRunning(sessions);
-      this.sessions = sessions;
-      this.syncProject();
-    },
-    // Background completions refresh the list only; the session in view keeps
-    // its snapshot and streaming state untouched.
-    applySessions(sessions: SessionSummary[]) {
-      this.adoptRunning(sessions);
+      if (project !== this.activeProjectId || request !== this.viewRequest) return;
       this.sessions = sessions;
       this.syncProject();
     },
@@ -290,9 +283,8 @@ export const useSessionStore = defineStore("session", {
     // project: rows, marks, and running markers all stay current out of view.
     applyProjects(projects: ProjectGroup[]) {
       this.adoptMarks(projects);
-      this.adoptRunning(projects.flatMap(record => record.sessions));
       this.projects = projects;
-      this.syncProject();
+      this.sessions = projects.find(record => record.id === this.activeProjectId)?.sessions ?? this.sessions;
     },
     // Commands are session-scoped: no usable session means none to offer.
     async loadCommands() {
@@ -319,10 +311,13 @@ export const useSessionStore = defineStore("session", {
       this.models = models;
       return models;
     },
-    async open(path: string) {
+    async open(path: string, request?: number) {
+      request ??= ++this.viewRequest;
+      if (request !== this.viewRequest) return;
       this.loading = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
+        if (request !== this.viewRequest) return;
         this.applySnapshot(snapshot);
         this.focusedNode = snapshot.projection.activeNodeId;
         if (snapshot.runtime.isStreaming || snapshot.graph?.runs.some(run => run.status === "running")) {
@@ -335,11 +330,13 @@ export const useSessionStore = defineStore("session", {
           this.loadCommands(),
           this.loadModels().catch(() => {}),
         ]);
-      } finally { this.loading = false; }
+      } catch (error) {
+        if (request === this.viewRequest) throw error;
+      } finally { if (request === this.viewRequest) this.loading = false; }
     },
-    async stop(path: string) {
+    async stop(path: string, projectId?: string) {
       try {
-        await desktop.invoke("session.stop", { path });
+        await desktop.invoke("session.stop", { path, ...(projectId ? { projectId } : {}) });
       } catch (error) {
         useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
         return;
@@ -347,8 +344,10 @@ export const useSessionStore = defineStore("session", {
       await this.refresh();
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
+      const project = this.activeProjectId, path = this.current?.session.path, request = this.viewRequest;
       const result = await desktop.invoke<T>("agent.control", input);
-      if (result && typeof result === "object" && "projection" in result)
+      if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path
+        && result && typeof result === "object" && "projection" in result)
         this.applySnapshot(result as unknown as SessionSnapshot);
       return result;
     },
@@ -379,10 +378,11 @@ export const useSessionStore = defineStore("session", {
     async deleteNode(id: string) {
       if (!this.current || this.deleteBlockedReason) return;
       const graphId = this.current.graph!.id;
+      const request = this.viewRequest;
       this.deletingNode = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("agent.control", { action: "deleteNode", nodeId: id, graphId });
-        if (this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
+        if (request === this.viewRequest && this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
       } finally { this.deletingNode = false; }
     },
     // Only explicit thinking-menu picks may update the sticky level; model-driven
@@ -391,6 +391,7 @@ export const useSessionStore = defineStore("session", {
       this.userThinking = level;
     },
     async prompt(text: string, targetNodeId?: string | null, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[]) {
+      const project = this.activeProjectId, path = this.current?.session.path, request = this.viewRequest;
       const value = text.trim();
       if (!value && !images?.length) return;
       const target = targetNodeId === undefined
@@ -415,7 +416,8 @@ export const useSessionStore = defineStore("session", {
       this.focusedNode = null;
       try {
         await this.control({ action: "prompt", text: value, ...(images?.length ? { images } : {}) });
-        this.focusedNode = this.current?.projection.activeNodeId ?? this.focusedNode;
+        if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path)
+          this.focusedNode = this.current?.projection.activeNodeId ?? this.focusedNode;
       } finally {
         if (this.pendingPrompt?.message.entryId === id) this.pendingPrompt = undefined;
       }
@@ -424,11 +426,13 @@ export const useSessionStore = defineStore("session", {
     // branch, but the primary column must keep showing the current selection.
     async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean }) {
       const current = this.current;
+      const project = this.activeProjectId, request = this.viewRequest;
       if (!current || (!text.trim() && !images?.length)) return;
       if (current.graph) {
         const requestId = crypto.randomUUID();
         const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
           provider: model?.provider, modelId: model?.id, thinkingLevel, images });
+        if (request !== this.viewRequest || project !== this.activeProjectId || current.session.path !== this.current?.session.path) return;
         const run = result.graph?.runs.find(r => r.requestId === requestId);
         const focus = run?.nodeId ?? (run?.status === "running" ? `pending:${run.runId}` : nodeId);
         if (run && options?.follow !== false) this.focusedNode = focus;
@@ -442,6 +446,8 @@ export const useSessionStore = defineStore("session", {
         await this.control({ action: "navigateTree", entryId: anchor });
       }
       if (model && (this.current?.runtime.model?.provider !== model.provider || this.current.runtime.model.id !== model.id))
+        // Session-scoped, like the TUI's model switch: the profile default stays
+        // put, so a new session still starts from whatever Pi resolved for it.
         await this.control({ action: "setModel", provider: model.provider, modelId: model.id });
       if (thinkingLevel && this.current?.runtime.thinkingLevel !== thinkingLevel)
         await this.control({ action: "setThinking", level: thinkingLevel });
@@ -456,7 +462,14 @@ export const useSessionStore = defineStore("session", {
         );
         return;
       }
-      this.applySnapshot(await this.control<SessionSnapshot>({ action: "newSession" }));
+      const request = ++this.viewRequest;
+      const project = this.activeProjectId;
+      const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
+      if (request !== this.viewRequest || project !== this.activeProjectId) return;
+      // The reply is authoritative for the new file, and the broadcast event may
+      // still be in flight: without adopting it here the list and slash commands
+      // would keep serving the session that was just replaced.
+      if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
       this.focusedNode = this.current?.projection.activeNodeId ?? null;
       await Promise.all([this.refresh(), this.loadCommands()]);
     },
@@ -466,7 +479,6 @@ export const useSessionStore = defineStore("session", {
         {},
       );
       if (!result) return;
-      this.adoptRunning(result.sessions);
       this.sessions = result.sessions;
       this.syncProject();
       if (result.imported) await this.open(result.imported);
@@ -476,13 +488,11 @@ export const useSessionStore = defineStore("session", {
         "session.rename",
         { path, name },
       );
-      this.adoptRunning(result.sessions);
       this.sessions = result.sessions;
       if (result.current) this.applySnapshot(result.current);
       this.syncProject();
     },
     applyDeletion(path: string, sessions: SessionSummary[]) {
-      this.adoptRunning(sessions);
       this.sessions = sessions;
       if (this.current?.session.path === path) {
         this.current = undefined;
@@ -518,7 +528,6 @@ export const useSessionStore = defineStore("session", {
       this.adoptMarks(result.projects);
       this.projects = result.projects;
       if (result.sessions) {
-        this.adoptRunning(result.sessions);
         this.sessions = result.sessions;
         this.syncProject();
       }

@@ -26,7 +26,7 @@ import {
   skillRoots,
 } from "./skill-files.js";
 import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../shared/skills.js";
-import { pixAgentDir } from "./paths.js";
+import { canonicalPath, pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
 import { durableWrite, encodeSession } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
@@ -223,14 +223,33 @@ export class PiRuntime {
   }
 
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
-    const modelRuntime = await this.modelRuntime();
-    const next = new Set(providers);
+    await this.replaceBrokerCatalog(await this.modelRuntime(), new Set(providers), models);
+  }
+
+  /**
+   * Re-points this runtime at another runtime's broker catalog. Remote hosts
+   * hand every catalog change to the project runtime, while an open session
+   * holds its own copy — without this it would never see a newly added model.
+   */
+  async adoptBroker(source: PiRuntime) {
+    this.modelBroker = source.modelBroker;
+    const modelRuntime = this.runtime?.session?.modelRuntime;
+    if (!modelRuntime) {
+      this.brokerProviders = new Set(source.brokerProviders);
+      this.brokerModels = [...source.brokerModels];
+      return;
+    }
+    await this.replaceBrokerCatalog(modelRuntime, new Set(source.brokerProviders), [...source.brokerModels]);
+  }
+
+  /** Switches one model runtime over to a catalog, dropping the providers that left it. */
+  private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
     for (const provider of this.brokerProviders)
-      if (!next.has(provider)) {
+      if (!providers.has(provider)) {
         await modelRuntime.removeRuntimeApiKey(provider);
         modelRuntime.unregisterProvider(provider);
       }
-    this.brokerProviders = next;
+    this.brokerProviders = providers;
     this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
@@ -362,13 +381,16 @@ export class PiRuntime {
     this.bind();
   }
   async list(): Promise<SessionSummary[]> {
+    const { cwd, dir } = this;
     const pi = await this.pi(),
-      all = await pi.SessionManager.list(this.cwd, this.dir);
+      all = await pi.SessionManager.list(cwd, dir);
     return all.map((s: any) => ({
       id: s.id,
-      path: s.path,
+      // Registry entries key on the canonical file, so rows have to spell it the
+      // same way or a running marker would never match its own session.
+      path: canonicalPath(String(s.path)),
       name: s.name,
-      cwd: s.cwd || this.cwd,
+      cwd: s.cwd || cwd,
       created: new Date(s.created).toISOString(),
       modified: new Date(s.modified).toISOString(),
       messageCount: s.messageCount,
@@ -411,8 +433,9 @@ export class PiRuntime {
    * registry can hand the file to a runtime of its own choosing.
    */
   async createSessionFile(): Promise<string> {
+    const { cwd, dir } = this;
     const pi = await this.pi();
-    const manager = pi.SessionManager.create(this.cwd, this.dir);
+    const manager = pi.SessionManager.create(cwd, dir);
     const path = manager.getSessionFile();
     // Open an explicitly persisted header: SDK otherwise defers the first user input.
     durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
@@ -634,6 +657,8 @@ export class PiRuntime {
       case "setModel": {
         const m = s.modelRuntime.getModel(input.provider, input.modelId);
         if (!m) throw new Error("Model not found");
+        // A switch belongs to this session's transcript, like the TUI's /model;
+        // only an explicit "set as default" writes the profile defaults.
         await s.setModel(m, { persist: input.persist });
         break;
       }

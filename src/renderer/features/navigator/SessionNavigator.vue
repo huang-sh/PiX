@@ -233,8 +233,7 @@ async function revealSession(record: ProjectGroup, path: string) {
                   </span>
                   <i
                     :class="{
-                      running: item.running
-                        || (record.id === session.activeProjectId && session.current?.session.path === item.path && session.activity?.active),
+                      running: item.running,
                       current: record.id === session.activeProjectId && session.current?.session.path === item.path,
                     }"
                     :title="item.running ? t('nav.stopSession') : undefined"
@@ -243,7 +242,7 @@ async function revealSession(record: ProjectGroup, path: string) {
               </ContextMenuTrigger>
               <ContextMenuPortal>
                 <ContextMenuContent data-navigator-menu class="menu-content" :side-offset="5">
-                  <ContextMenuItem v-if="item.running" data-action="session-stop" class="menu-item danger" @select="session.stop(item.path)">
+                  <ContextMenuItem v-if="item.running" data-action="session-stop" class="menu-item danger" @select="session.stop(item.path, record.id)">
                     <CircleStop :size="14" />{{ t("nav.stopSession") }}
                   </ContextMenuItem>
                   <ContextMenuItem data-action="session-pin" class="menu-item" @select="session.pin(item.path, !item.pinned)">

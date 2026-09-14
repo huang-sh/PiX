@@ -30,30 +30,61 @@ Opening a session switches the view; it never closes another session's
 runtime. `SessionRegistry` (`src/main/session-registry.ts`) keeps one
 `GraphRuntime` per session file, keyed by the canonical (realpath'd) session
 path, and survives project switches — `configure()` only repoints the view at
-the entered project's remembered session. Only four things close an entry:
+the entered project's remembered session. Every listing (`PiRuntime.list`,
+`SessionFiles.list`) spells that same canonical path, so rows, history, and
+registry keys agree even when the project is reached through a junction or
+symlink. Only four things close an entry:
 idle LRU eviction (`PIX_MAX_LIVE_SESSIONS`, default 4; running entries are
-never evicted and re-read the runtime before being treated as idle), the
-project's session directory changing, explicit deletion, and quitting.
+never evicted, and each victim is re-read for liveness and view ownership
+right before it is disposed, so a project switch during the pass keeps its
+entry), the
+project's session directory changing, explicit deletion, and quitting. Every
+disposal drains the in-flight opens it races first, and a coalesced background
+refresh scheduled for an entry that has since been disposed publishes nothing,
+so a late open or a late timer cannot outlive the disposal.
+
+Selection follows request order, not completion order. The registry, desktop
+controller, and renderer invalidate older selection requests when another
+session or project is chosen. A late load may populate the background cache,
+but cannot change the active session, its project's remembered selection, or
+the current loading state. Creating a session and opening a read-only fallback
+follow the same rule; pending file operations retain their original directory.
 
 **Event routing.** Only the session in view drives `current` snapshots and
-token streams. Background sessions update their project's history and push
+token streams. Background local sessions update their project's history and push
 decorated project groups (`{type:"sessions", payload:{projects}}`), coalesced
 to one write per 500 ms burst; their token events are stamped with the
 session's graph id and recorded — never forwarded — so switching back replays
 the in-flight text through the `session.snapshot` resync path. A restarted
 session (new graph epoch) invalidates only its own progress baselines.
+Remote events and delayed replies retain their owning slot's project; both
+the project and its selected session must match before a snapshot reaches the
+view, and the selection moves both for `session.open` and for the actions that
+migrate the runtime to a new file (`newSession`, `fork`, `clone`).
+Remote background progress is replayed by its host. List events are
+translated into desktop project groups, retaining only the slot's workspace.
+Running markers use local registry liveness or the connected remote project's
+latest state; foreground snapshots update the row and stop menu immediately.
 
 **Guards.** Deleting a session with work in flight is refused until it is
 stopped; the `session.stop` route aborts a session's runs from any project.
-Renames go through the owning runtime so a static append cannot race the
-session's own writes. Cross-project stop, rename, and delete resolve paths
-against the owning entry's session directory (`registry.resolve`), never a
-directory traversal hole.
+Navigator requests include `projectId` so identical paths on different hosts
+resolve to the correct owner before dispatch; path-only callers remain supported.
+Removing a project from the list is refused while any of its sessions run,
+whether they live in the local registry or on a pooled remote host; otherwise
+the removal disposes that project's pooled host and live entries together, so
+neither can write the removed project back into the history. Renames go through
+the owning runtime so a static append cannot race the session's own writes.
+Local cross-project stop, rename, and delete resolve paths against the owning entry's
+session directory (`registry.resolve`), never a directory traversal hole.
 
 **Remote pool.** Each remote workspace's host connection lives in a pool keyed
 by project id. Switching projects parks the previous client instead of
 disposing it, and reconnecting to a pooled project adopts its slot — a second
-host would trip the graph ownership lock the pooled one still holds. Idle
+host would trip the graph ownership lock the pooled one still holds. The
+desktop broker catalog is cloned into each session runtime as it is created,
+and a later `setBrokerProviders` is pushed into every settled entry, so a
+login or a new custom model reaches sessions that were already open. Idle
 recycling disposes only quiet hosts: never the workspace in view, never a
 host whose `session.list` still reports running work, bounded by
 `PIX_MAX_REMOTE_CONNECTIONS` (default 2) and `PIX_REMOTE_IDLE_MS` (default

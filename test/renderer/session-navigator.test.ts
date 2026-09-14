@@ -1,7 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { describe, expect, it, vi } from "vitest";
-import type { ProjectGroup, SessionSummary } from "../../src/shared/types";
+import type { ProjectGroup, SessionSnapshot, SessionSummary } from "../../src/shared/types";
+import { projectSession } from "../../src/shared/session";
 import SessionNavigator from "../../src/renderer/features/navigator/SessionNavigator.vue";
 import { i18n } from "../../src/renderer/i18n";
 import { useSessionStore } from "../../src/renderer/stores/session";
@@ -19,6 +20,38 @@ const summary = (id: string): SessionSummary => ({
 });
 
 describe("session project navigator", () => {
+  it("shows the running marker and stop action together as graph snapshots start and settle", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const session = useSessionStore();
+    const row = summary("live");
+    const record: ProjectGroup = { id: "local:/project", project: { name: "project", path: "/project" },
+      sessions: [row], lastOpened: "", connected: true };
+    const idle = { session: row, entries: [], projection: projectSession([], null),
+      runtime: { available: true, isStreaming: false }, graph: { id: row.path, epoch: "e", revision: 1, runs: [] },
+    } as unknown as SessionSnapshot;
+    session.hydrate(record.project, [row], [record], idle);
+    const stop = vi.spyOn(session, "stop").mockResolvedValue();
+    const wrapper = mount(SessionNavigator, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    try {
+      await wrapper.get(".project-main").trigger("click");
+      session.applySnapshot({ ...idle, graph: { ...idle.graph!, revision: 2,
+        runs: [{ branchId: "b", runId: "r", status: "running" }] as never } });
+      await flushPromises();
+      expect(wrapper.find(".session-item i.running").exists()).toBe(true);
+      await wrapper.get(".session-item").trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      document.querySelector<HTMLElement>('[data-action="session-stop"]')!.click();
+      await flushPromises();
+      expect(stop).toHaveBeenCalledWith(row.path, record.id);
+      session.applySnapshot({ ...idle, graph: { ...idle.graph!, revision: 3 } });
+      await flushPromises();
+      expect(wrapper.find(".session-item i.running").exists()).toBe(false);
+      await wrapper.get(".session-item").trigger("contextmenu", { button: 2 });
+      await flushPromises();
+      expect(document.querySelector('[data-action="session-stop"]')).toBeNull();
+    } finally { wrapper.unmount(); }
+  });
   it("opens rename and delete from the session context menu without opening the session", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

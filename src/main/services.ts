@@ -45,7 +45,7 @@ import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
-import { pixAgentDir, pixHome } from "./paths.js";
+import { canonicalPath, pixAgentDir, pixHome } from "./paths.js";
 import { piSettingsSdk } from "./pi-runtime.js";
 export const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
@@ -724,7 +724,9 @@ export class SessionFiles {
           const s = statSync(p),
             x = parseSessionJsonl(readFileSync(p, "utf8"));
           return [
-            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
+            // Rows carry the canonical file so they match registry entries and
+            // history rows even when the project is reached through a junction.
+            summarizeSession(canonicalPath(p), x.header, x.entries, s.mtime.toISOString()),
           ];
         } catch {
           return [];

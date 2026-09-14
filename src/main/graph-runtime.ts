@@ -484,4 +484,9 @@ export class GraphRuntime extends PiRuntime {
     this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
   }
   override dispose() { void this.close().catch(() => {}); }
+  override setProject(): never {
+    // Registry entries are never repointed: the base implementation only
+    // disposes, which would leak the graph ownership file a close releases.
+    throw new Error("A session runtime cannot switch projects; dispose its entry and open anew");
+  }
 }

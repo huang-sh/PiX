@@ -170,6 +170,10 @@ test("agent control actions without a projection response do not broadcast", asy
 test("remote agent events of background host sessions stay off the view", () => {
   const controller = new MainController(root, platform);
   try {
+    controller.project = { name: "remote", path: "/remote", remote: { kind: "ssh", host: "host" } };
+    controller.installSlot({
+      connected: true, onEvent: () => () => {}, onDisconnect: () => () => {}, dispose: async () => {},
+    } as never, controller.project, controller.settings.bundle()).activePath = "r.jsonl";
     const current = { session: { path: "r.jsonl" }, entries: [], projection: projectSession([], null), runtime: {},
       graph: { id: "r.jsonl", epoch: "e", revision: 1, runs: [] } } as unknown as SessionSnapshot;
     controller.current = current;

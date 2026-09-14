@@ -93,11 +93,12 @@ function applyLanguage(settings: SettingsBundle) {
 // Opening or switching a project never auto-opens a session — the user
 // lands in the project's empty state and picks or starts a session. The
 // only auto-open left is the opt-in "open last session on startup".
-async function hydrate(data: BootstrapData, openFirst = false) {
+async function hydrate(data: BootstrapData, openFirst = false, request = ++session.viewRequest) {
+  if (request !== session.viewRequest) return;
   workspace.hydrate(data.project, data.settings.app.browserHome);
   layout.hydrate(data.settings, data.layout);
   applyLanguage(data.settings);
-  session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current);
+  session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current, request);
   remoteDisconnected.value = Boolean(data.project?.remote &&
     !data.projects?.find((record) => record.id === session.activeProjectId)?.connected);
   if (remoteDisconnected.value) {
@@ -107,26 +108,32 @@ async function hydrate(data: BootstrapData, openFirst = false) {
   // Re-seed active streams after hydrate cleared local state, even if the model
   // is currently paused and will not send another token for a while.
   if (data.current) await desktop.invoke("session.snapshot");
+  if (request !== session.viewRequest) return;
   await workspace.load();
+  if (request !== session.viewRequest) return;
   if (openFirst && !session.current && session.sessions[0])
-    await session.open(session.sessions[0].path);
+    await session.open(session.sessions[0].path, request);
+  if (request !== session.viewRequest) return;
   await Promise.all([session.loadCommands(), session.loadModels().catch(() => {})]);
-  session.loading = false;
+  if (request === session.viewRequest) session.loading = false;
 }
 
 async function bootstrap() {
+  const request = ++session.viewRequest;
   try {
     const data = await desktop.invoke<BootstrapData>("app.bootstrap");
-    await hydrate(data, data.settings.app.openLastSessionOnStartup);
+    await hydrate(data, data.settings.app.openLastSessionOnStartup, request);
   } catch (error) {
+    if (request !== session.viewRequest) return;
     session.loading = false;
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
 }
 
 async function pickProject() {
+  const request = ++session.viewRequest;
   const data = await desktop.invoke<BootstrapData | null>("app.pickProject");
-  if (data) await hydrate(data);
+  if (data) await hydrate(data, false, request);
 }
 
 // wsl.exe can stall for its full timeout while the WSL service cold-starts,
@@ -180,6 +187,7 @@ function probeWslHomes() {
 }
 
 async function connectSsh(input: { host: string; cwd: string; browse?: boolean }) {
+  const request = ++session.viewRequest;
   const attempt = ++remoteUiAttempt;
   remoteStages.value = [];
   wslBusy.value = true;
@@ -189,7 +197,7 @@ async function connectSsh(input: { host: string; cwd: string; browse?: boolean }
     if (attempt !== remoteUiAttempt) return;
     if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
-      await hydrate(data as BootstrapData);
+      await hydrate(data as BootstrapData, false, request);
       remoteBrowseRoot.value = "";
       wslOpen.value = false;
       layout.showNotice(t("notice.connectedTo", { name: input.host }));
@@ -205,6 +213,7 @@ async function connectSsh(input: { host: string; cwd: string; browse?: boolean }
 }
 
 async function connectWsl(input: { distro: string; cwd: string; browse?: boolean }) {
+  const request = ++session.viewRequest;
   const attempt = ++remoteUiAttempt;
   remoteStages.value = [];
   wslBusy.value = true;
@@ -214,7 +223,7 @@ async function connectWsl(input: { distro: string; cwd: string; browse?: boolean
     if (attempt !== remoteUiAttempt) return;
     if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
-      await hydrate(data as BootstrapData);
+      await hydrate(data as BootstrapData, false, request);
       remoteBrowseRoot.value = "";
       wslOpen.value = false;
       layout.showNotice(t("notice.connectedTo", { name: input.distro }));
@@ -247,14 +256,15 @@ async function browseRemoteDirectory(path: string) {
 }
 
 async function openRemoteDirectory(path: string) {
+  const request = ++session.viewRequest;
   const attempt = remoteUiAttempt;
   wslBusy.value = true;
   wslError.value = "";
   try {
     const data = await desktop.invoke<BootstrapData>("remote.openProject", { path });
-    // The backend may have committed just before Cancel was received. Always
-    // hydrate a successful commit so the visible workspace matches routing.
-    await hydrate(data);
+    // A cancelled dialog can still complete its commit, but a newer project
+    // selection must keep its view.
+    await hydrate(data, false, request);
     remoteBrowseRoot.value = "";
     remoteDirectories.value = [];
     wslOpen.value = false;
@@ -290,16 +300,19 @@ async function closeRemoteDialog() {
 }
 
 async function disconnectRemote() {
+  const request = ++session.viewRequest;
   try {
-    await hydrate(await desktop.invoke<BootstrapData>("remote.disconnect"));
+    await hydrate(await desktop.invoke<BootstrapData>("remote.disconnect"), false, request);
+    if (request !== session.viewRequest) return;
     layout.showNotice(t("notice.disconnectedRemote"));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
 }
 
-async function activateProject(record: ProjectGroup) {
-  if (record.id === session.activeProjectId && record.connected) return true;
+async function activateProject(record: ProjectGroup, request = ++session.viewRequest) {
+  if (request !== session.viewRequest) return false;
+  if (record.id === session.activeProjectId && record.connected && !session.loading) return true;
   session.loading = true;
   try {
     const remote = record.project.remote;
@@ -314,18 +327,19 @@ async function activateProject(record: ProjectGroup) {
             cwd: record.project.path,
           })
         : await desktop.invoke<BootstrapData>("app.openProject", { id: record.id });
-    await hydrate(data);
-    return true;
+    await hydrate(data, false, request);
+    return request === session.viewRequest;
   } catch (error) {
+    if (request !== session.viewRequest) return false;
     // A failed remote preparation leaves the old workspace and session intact.
     if (!record.project.remote) {
-      try { await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap")); }
+      try { await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap"), false, request); }
       catch {}
     }
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     return false;
   } finally {
-    session.loading = false;
+    if (request === session.viewRequest) session.loading = false;
   }
 }
 
@@ -342,7 +356,8 @@ async function reconnectRemote() {
 }
 
 async function inProject(record: ProjectGroup, action: () => Promise<void>) {
-  if (!(await activateProject(record))) return;
+  const request = ++session.viewRequest;
+  if (!(await activateProject(record, request)) || request !== session.viewRequest) return;
   try {
     await action();
   } catch (error) {
@@ -471,7 +486,6 @@ function onEvent(wireEvent: DesktopEvent) {
       session.applyDeletion(payload.deletedPath, payload.sessions);
     else if (payload.current) session.applySnapshot(payload.current);
     else if (payload.projects) session.applyProjects(payload.projects);
-    else if (payload.sessions) session.applySessions(payload.sessions);
   } else if (event.type === "update.available") {
     updateNotice.value = event.payload as { version: string; url: string };
   }
