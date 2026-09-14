@@ -254,10 +254,11 @@ export class MainController {
   private async stopSession(path: string, owner?: string) {
     const entry = this.entryFor(path)?.entry;
     if (entry?.runtime && (!owner || projectId(entry.project) === owner)) {
-      const runs = entry.runtime.snapshot().graph?.runs.filter(run => run.status === "running") ?? [];
+      const runtime = entry.runtime;
+      const runs = this.registry.snapshotOf(entry)?.graph?.runs.filter(run => run.status === "running") ?? [];
       // Aborts are best-effort per run: one refusal must not fail the stop
       // while the other runs' aborts are already in flight.
-      await Promise.allSettled(runs.map(run => entry.runtime!.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
+      await Promise.allSettled(runs.map(run => runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
       this.scheduleBackgroundRefresh(entry);
       return { stopped: Boolean(runs.length) };
     }
