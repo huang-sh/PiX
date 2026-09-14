@@ -384,11 +384,15 @@ export class PiRuntime {
     const { cwd, dir } = this;
     const pi = await this.pi(),
       all = await pi.SessionManager.list(cwd, dir);
+    // Registry entries key on the canonical file, so rows have to spell it the
+    // same way or a running marker would never match its own session. The
+    // listing comes from one directory of plain session files, so
+    // canonicalizing that directory once spells every row without a realpath
+    // per file.
+    const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
     return all.map((s: any) => ({
       id: s.id,
-      // Registry entries key on the canonical file, so rows have to spell it the
-      // same way or a running marker would never match its own session.
-      path: canonicalPath(String(s.path)),
+      path: root ? join(root, basename(String(s.path))) : String(s.path),
       name: s.name,
       cwd: s.cwd || cwd,
       created: new Date(s.created).toISOString(),

@@ -711,17 +711,21 @@ export class SessionFiles {
   list(): SessionSummary[] {
     const dir = this.dir;
     if (!dir || !existsSync(dir)) return [];
-    return readdirSync(dir)
+    // Rows carry the canonical file so they match registry entries and history
+    // rows even when the project is reached through a junction. Rows all name
+    // plain files in this one directory, so canonicalizing the directory once
+    // spells every row without a realpath per file; reading through the
+    // canonical spelling also skips the junction on every stat and read.
+    const root = canonicalPath(dir);
+    return readdirSync(root)
       .filter((n) => n.endsWith(".jsonl"))
       .flatMap((n) => {
-        const p = join(dir, n);
+        const p = join(root, n);
         try {
           const s = statSync(p),
             x = parseSessionJsonl(readFileSync(p, "utf8"));
           return [
-            // Rows carry the canonical file so they match registry entries and
-            // history rows even when the project is reached through a junction.
-            summarizeSession(canonicalPath(p), x.header, x.entries, s.mtime.toISOString()),
+            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
           ];
         } catch {
           return [];
