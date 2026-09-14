@@ -644,8 +644,6 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-markdown .markstream-vue .strong-node { font-weight: 600; }
 /* The renderer's mobile list rule otherwise replaces the configured spacing. */
 .agent-markdown .markstream-vue .list-node { --ms-flow-list-indent: 20px; margin-block: var(--ms-flow-list-y); }
-/* Reserve three digits plus punctuation at the list's own font size. */
-.agent-markdown .markstream-vue ol.list-node { --ms-flow-list-indent: 4ch; }
 .agent-markdown .markstream-vue .list-item { padding-left: 0; }
 .agent-markdown .markstream-vue .list-item > .paragraph-node + .paragraph-node { margin-top: 6px; }
 /* Keep wrapped identifiers readable without making each fragment look like a badge. */

@@ -26,12 +26,28 @@ const numberedLists = `## 编号空间
 99. 第九十九项
 100. 第一百项
 
+### 四位数及以上
+
+999. 第九百九十九项
+1000. 第一千项
+
+### 五位数
+
+9999. 第九千九百九十九项
+10000. 第一万项
+
+### 九位数
+
+999999999. Markdown 支持的九位数起始编号
+
+### 独立嵌套缩进
+
 - 父级列表
 
-    99. 嵌套第九十九项
-    100. 嵌套第一百项
+    9999. 嵌套第九千九百九十九项
+    10000. 嵌套第一万项
 
-         - 嵌套项目符号
+           - 嵌套项目符号
 `;
 const sessionFile = join(workspace, ".pi", "sessions", "typography.jsonl");
 const timestamp = new Date().toISOString();
@@ -251,7 +267,7 @@ try {
       assert.ok(measurements.narrow.every(item => item.sameRow), 'composer attachment, model, thinking and send must share one row without overlap');
       assert.ok(measurements.narrow.every(item => item.fits), "narrow composer controls must fit");
       for (const { variant, width, markers } of measurements.numberedLists) {
-        for (const number of [10, 99, 100])
+        for (const number of [10, 99, 100, 1000, 10000, 999999999])
           assert.ok(markers.some(marker => marker.number === number), 'numbered-list fixture includes ' + number);
         assert.ok(markers.every(marker => marker.reserved >= marker.needed), 'numbered-list markers must fit: ' + JSON.stringify({ variant, width, markers }));
       }
