@@ -211,6 +211,7 @@ try {
             host.replaceChildren(document.querySelector('.final-response .agent-markdown').cloneNode(true));
             for (const width of [320, 420, 560]) {
               host.style.width = width + 'px';
+              if (variant && width === 320) result[variant] = { size: parseFloat(getComputedStyle(host.querySelector('.paragraph-node')).fontSize) };
               const markers = [...host.querySelectorAll('ol > li')].filter(li => getComputedStyle(li).listStyleType !== 'none').map(li => {
                 const style = getComputedStyle(li, '::marker');
                 markerContext.font = style.fontWeight + ' ' + style.fontSize + ' ' + style.fontFamily;
@@ -228,11 +229,6 @@ try {
             }
           }
           host.style.width = '320px';
-          for (const variant of ['process-item', 'node-hover-card']) {
-            host.className = variant;
-            host.replaceChildren(document.querySelector('.final-response .agent-markdown').cloneNode(true));
-            result[variant] = { size: parseFloat(getComputedStyle(host.querySelector('.paragraph-node')).fontSize) };
-          }
           host.className = '';
           const editor = document.createElement('div');
           editor.className = 'code-editor';

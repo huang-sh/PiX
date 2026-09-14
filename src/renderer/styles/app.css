@@ -654,7 +654,6 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   > .paragraph-node > .checkbox-node,
   > .markstream-vue > .node-slot[data-node-type="paragraph"] > .node-content > .paragraph-node > .checkbox-node
 ) { list-style-type: none; margin-left: calc(-1 * var(--ms-flow-list-indent)); }
-.agent-markdown .markstream-vue .list-item > .paragraph-node + .paragraph-node { margin-top: 6px; }
 /* Keep wrapped identifiers readable without making each fragment look like a badge. */
 .agent-markdown .markstream-vue .inline-code { padding: 0 4px; border-radius: 3px; font-size: max(13px, .875em); }
 /* The library's code "⋯" menu uses text-xs (10.5px); hold the caption floor. */
