@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { expect, it } from "vitest";
-import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
+import { MAX_UTILITY_OUTPUT, useWorkspaceStore } from "../../src/renderer/stores/workspace";
 
 it("bounds diagnostics and never serializes streaming payloads or session history", () => {
   setActivePinia(createPinia());
@@ -20,4 +20,14 @@ it("bounds diagnostics and never serializes streaming payloads or session histor
   expect(store.events[0]).toContain('"branchId":"A"');
   store.record({ type: "shell", payload: { chunk: "shell output" } });
   expect(store.utilityOutput).toContain("shell output");
+});
+
+it("caps the utility output buffer and keeps the newest lines", () => {
+  setActivePinia(createPinia());
+  const store = useWorkspaceStore();
+  store.record({ type: "shell", payload: { chunk: "a".repeat(MAX_UTILITY_OUTPUT) } });
+  store.record({ type: "shell", payload: { chunk: "tail" } });
+  expect(store.utilityOutput.length).toBeLessThanOrEqual(MAX_UTILITY_OUTPUT);
+  expect(store.utilityOutput.endsWith("tail")).toBe(true);
+  expect(store.utilityOutput).not.toContain("a".repeat(MAX_UTILITY_OUTPUT));
 });
