@@ -1,0 +1,32 @@
+name: debug-macos
+on: workflow_dispatch
+jobs:
+  repro:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+      - name: Install dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Compile tests
+        run: npx tsc -p tsconfig.test.json
+      - name: Diagnostics
+        run: |
+          node --version
+          sw_vers
+          node -e "const os=require('os'),fs=require('fs');console.log('tmpdir:',os.tmpdir());console.log('realpath:',fs.realpathSync(os.tmpdir()))"
+      - name: session-registry spec
+        run: node --test --test-reporter=spec out-test/test/session-registry.test.js
+      - name: remote-connection spec
+        run: node --test --test-reporter=spec out-test/test/remote-connection.test.js
+        continue-on-error: true
