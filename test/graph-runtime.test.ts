@@ -4,8 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
-import { durableWrite } from "../src/main/graph-files.js";
+import { durableWrite, parseStrict } from "../src/main/graph-files.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 
 async function until(check: () => boolean) {
@@ -221,6 +222,95 @@ test("independent branches persist without merging; export during a run preserve
       "an explicitly empty main context survives reopening, even if SDK startup appends settings");
   } finally {
     releaseA?.(); releaseMain?.(); await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+test("branch export copies a root-to-tip path into a standalone session without touching the graph", { timeout: 30000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-export-branch-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const sessions = join(home, "sessions");
+  const runtime = new GraphRuntime(cwd, sessions, () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  let releaseHeld!: () => void;
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    async function turn(requestId: string, nodeId: string | null, text: string, answer: string) {
+      faux.setResponses([fauxAssistantMessage(answer)]);
+      await runtime.control({ action: "promptAt", requestId, nodeId, text, provider: "faux", modelId: "test" });
+      await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+      return runtime.snapshot().projection.nodes.find(node => node.title === text)!.id;
+    }
+    const root = await turn("root", null, "root prompt", "root answer");
+    // Advance main past the root so prompts at the historical root fork parallel branches.
+    await turn("main", root, "main question", "main answer");
+    const a = await turn("a", root, "A question", "A answer");
+    const a2 = await turn("a-next", a, "A next question", "A next answer");
+    const b = await turn("b", a, "B question", "B answer");
+    const graphId = runtime.graph!.main;
+    const graphBefore = readFileSync(graphId, "utf8");
+    const recordsBefore = runtime.graph!.records.size;
+    const nodesBefore = runtime.snapshot().projection.nodes.map(node => node.id).sort();
+
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId: "other", nodeId: a2 }), /same graph/);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: "turn:gone" }), /no longer exists/);
+    for (const nodeId of [root, a]) await assert.rejects(
+      runtime.control({ action: "exportBranchSession", graphId, nodeId }), /tip of a branch/);
+
+    const exported = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a2 }) as { path: string };
+    const raw = readFileSync(exported.path, "utf8");
+    assert.ok(exported.path.startsWith(sessions), "the exported session lands in the session directory");
+    for (const text of ["root prompt", "root answer", "A question", "A answer", "A next question", "A next answer"])
+      assert.ok(raw.includes(text), text);
+    for (const text of ["main question", "B question", "B answer"]) assert.ok(!raw.includes(text), text);
+    const parsed = parseStrict(raw);
+    assert.notEqual(parsed.header.id, parseStrict(graphBefore).header.id);
+    assert.equal(parsed.header.parentSession, graphId);
+    const manager = SessionManager.inMemory(cwd, undefined, [parsed.header, ...parsed.entries] as any);
+    assert.equal(manager.getTree().length, 1, "the exported path is one linear branch");
+    assert.equal(readFileSync(graphId, "utf8"), graphBefore);
+    assert.equal(runtime.graph!.records.size, recordsBefore);
+    assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.id).sort(), nodesBefore);
+
+    const exportedB = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
+    const rawB = readFileSync(exportedB.path, "utf8");
+    assert.ok(rawB.includes("B answer"));
+    assert.ok(!rawB.includes("A next question"));
+
+    faux.setResponses([async () => { await new Promise<void>(r => { releaseHeld = r; }); return fauxAssistantMessage("held answer"); }]);
+    await runtime.control({ action: "promptAt", requestId: "held", nodeId: a2, text: "held question", provider: "faux", modelId: "test" });
+    await until(() => {
+      const run = runtime.snapshot().graph!.runs.find(r => r.requestId === "held");
+      return run?.status === "running" && Boolean(run.nodeId);
+    });
+    const held = runtime.snapshot().graph!.runs.find(r => r.requestId === "held")!;
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /tip of a branch/);
+    releaseHeld();
+    await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+
+    // The export is a live, standalone session: it reopens and continues on its own.
+    await runtime.close();
+    await runtime.open(exported.path);
+    assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.title),
+      ["root prompt", "A question", "A next question"]);
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    faux.setResponses([fauxAssistantMessage("exported continuation")]);
+    await runtime.control({ action: "prompt", text: "continue exported" });
+    await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.equal(runtime.snapshot().projection.nodes.length, 4);
+    assert.equal(runtime.snapshot().projection.nodes.at(-1)!.title, "continue exported");
+  } finally {
+    releaseHeld?.(); await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });

@@ -224,6 +224,12 @@ function rebuild() {
   // While a submitted prompt is being processed the runtime is busy even though
   // the streaming flag only lands with the next snapshot, so both gate composing.
   const busy = !session.current?.graph && Boolean(session.current?.runtime.isStreaming || session.pendingPrompt);
+  // A submitted input that has not become a node yet still counts as a branch
+  // growing under its target, so export must treat that parent as occupied.
+  const pendingBranchParents = new Set<string | null>();
+  for (const run of session.current?.graph?.runs ?? [])
+    if (run.pending && run.status === "running") pendingBranchParents.add(run.pending.parentNodeId ?? null);
+  if (session.pendingPrompt?.targetNodeId) pendingBranchParents.add(session.pendingPrompt.targetNodeId);
   const turns: Node<PromptNodeData>[] = placed.nodes.map((node, index) => ({
     id: node.id,
     type: "prompt",
@@ -244,6 +250,21 @@ function rebuild() {
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
         ? () => { void retryTurn(node.id); }
         : undefined,
+      onExportSession: session.current?.graph ? () => { void exportSession(node.id); } : undefined,
+      // The export target is exactly "the branch the user is standing on": the
+      // node the chat panel shows, with nothing — child, running turn, or
+      // pending input — after it. The chat column follows focusedNode, while the
+      // projection's activeNodeId is only the main branch's cursor, so the
+      // viewed id stays a live getter: focus moves never rebuild the cards.
+      viewedNodeId: session.current?.graph
+        ? () => session.focusedNode && !session.focusedNode.startsWith("pending:")
+          ? session.focusedNode : session.current?.projection.activeNodeId ?? null
+        : undefined,
+      exportBlockedReason: node.running
+        ? "graph.blockedStreaming"
+        : children.has(node.id) || pendingBranchParents.has(node.id)
+          ? "graph.exportBranchBlockedAfter"
+          : !session.current?.runtime.available ? "graph.blockedReadonly" : undefined,
       onDelete: () => { void deleteNode(node.id); },
       deleteBlockedReason: session.deleteBlockedReason,
     }),
@@ -455,6 +476,15 @@ async function deleteNode(id: string) {
     rebuild();
     await center(defaultFocusId());
   } catch (error) { deleteError.value = String(error); }
+}
+
+async function exportSession(id: string) {
+  try {
+    const result = await session.exportBranchSession(id);
+    if (result?.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 async function recoverDeletion() {

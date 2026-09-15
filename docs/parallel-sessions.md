@@ -16,6 +16,8 @@
 
 `exportJsonl` 和 `exportHtml` 导出整张图。点击导出时，同步捕获主分支与所有子分支的 SDK 完整记录，交给工作线程组合和校验；导出任务离开启动队列后，新的输入可以继续启动。正在流式生成、尚未形成完整 session 记录的内容不包含在此次快照内。
 
+节点右键菜单的「导出为独立会话」导出单条分支：把根到当前所在节点的路径（含公共历史）复制成会话目录里的一个新顶层 session，可独立打开继续对话。只有分支末端且无运行中任务的节点可导出；复制不移动，主 session、分支源文件和游标都不被修改，新会话 header 记录 `parentSession` 溯源且不产生 sidecar。路径提取后经严格 JSONL 校验与上下文保真比较，失败时清理临时输出、不产出文件。
+
 导出使用稳定 ID 去重、按父子依赖排序，并通过严格 JSONL 校验和 Pi SDK 的主分支/子分支上下文比较。结果写入独立临时目录，完成后原子发布到新目标文件；已有目标不被覆盖，主 session、分支源文件和游标不被修改。失败时清理临时输出，保留全部源数据，不产生缺少某个分支却被当作成功的导出。
 
 JSONL 可作为独立 Pi tree 导入。HTML 复用 Pi 的 HTML 导出器，不启动 agent 或项目扩展。当前 SDK 未公开单独的 HTML 导出入口，版本相关的模块适配集中在 `pi-runtime.ts`，由实际导出测试验证。
@@ -39,7 +41,7 @@ JSONL 可作为独立 Pi tree 导入。HTML 复用 Pi 的 HTML 导出器，不�
 
 ## 验证
 
-`test/graph-runtime.test.ts` 使用真实 Pi SDK 和本地模型，覆盖并行、嵌套分叉、空闲分支复用、独立停止、请求去重、运行中 JSONL/HTML 导出、无自动合并和重启稳定 ID。`test/graph-files.test.ts` 覆盖所有权锁、缺失依赖、损坏来源和元数据恢复。
+`test/graph-runtime.test.ts` 使用真实 Pi SDK 和本地模型，覆盖并行、嵌套分叉、空闲分支复用、独立停止、请求去重、运行中 JSONL/HTML 导出、单分支导出为独立会话、无自动合并和重启稳定 ID。`test/graph-files.test.ts` 覆盖所有权锁、缺失依赖、损坏来源和元数据恢复。
 
 编译测试后运行 `node scripts/graph-benchmark.mjs` 可获得投影/布局基准。使用 `PIX_GUI_BRANCHES=1000 node test/gui-parallel-fixture.mjs` 启动隔离的真实 Electron 测试环境：1000 个实际子 session，每个 5 回合，共 5001 个节点，所有模型调用仅连接本地测试服务。
 
