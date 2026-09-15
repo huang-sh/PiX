@@ -158,6 +158,34 @@ describe("SettingsPage save", () => {
     expect(layout.notice?.level).toBe("info");
   });
 
+  it("clearing defaultTools removes the key instead of saving a no-tools list", async () => {
+    const withTools = {
+      ...structuredClone(settings),
+      piProject: { defaultTools: ["read", "bash", "edit", "write"] },
+    } satisfies SettingsBundle;
+    vi.mocked(desktop.invoke).mockImplementation(async () => withTools);
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(withTools);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    layout.settingsCategory = "tools";
+    await flushPromises();
+
+    const input = wrapper.get('[data-setting-path="defaultTools"] input');
+    expect((input.element as HTMLInputElement).value).toBe("read, bash, edit, write");
+    await input.setValue("");
+    await wrapper.get("main > header nav button").trigger("click");
+    await flushPromises();
+
+    const updates = updateCalls();
+    expect(updates.find((payload) => payload.scope === "project")?.patch).toMatchObject({
+      defaultTools: null,
+    });
+    for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
+    wrapper.unmount();
+  });
+
   it("adds a custom model and refreshes the shared picker catalog", async () => {
     const available: RuntimeModel[] = [];
     const providers: RuntimeProvider[] = [];

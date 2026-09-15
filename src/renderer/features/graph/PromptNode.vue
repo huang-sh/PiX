@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -32,6 +32,11 @@ export interface PromptNodeData {
   onOpenPanel?: () => void;
   /** Present only on failed turns: reopens the prompt as an editable draft. */
   onRetry?: () => void;
+  /** Copies the root-to-node path into a new standalone session; graph sessions only. */
+  onExportSession?: () => void;
+  /** Live id of the node the chat panel shows; focus moves do not re-render cards. */
+  viewedNodeId?: () => string | null;
+  exportBlockedReason?: string;
   onDelete?: () => void;
   deleteBlockedReason?: string;
 }
@@ -50,6 +55,12 @@ const CLOSE_DELAY_MS = 500;
 let previewObserver: ResizeObserver | undefined;
 const displayModel = computed(() => props.data.node.footer?.model);
 const usage = computed(() => props.data.node.footer?.contextUsage);
+// Focus moves never rebuild the cards, so the viewed-node check stays live here.
+const exportBlocked = computed(() => {
+  if (props.data.viewedNodeId && props.data.viewedNodeId() !== props.data.node.id)
+    return t("graph.exportBranchBlockedNotCurrent");
+  return props.data.exportBlockedReason ? t(props.data.exportBlockedReason) : undefined;
+});
 
 function clearTimers() {
   window.clearTimeout(openTimer);
@@ -270,6 +281,14 @@ function relative(value: string) {
         :title="t('graph.retryTurnHint')"
         @select="data.onRetry?.()"
       ><RotateCcw :size="14" />{{ t('graph.retryTurn') }}</ContextMenuItem>
+      <ContextMenuItem
+        v-if="data.onExportSession"
+        class="menu-item"
+        data-action="node-export-session"
+        :disabled="Boolean(exportBlocked)"
+        :title="exportBlocked || t('graph.exportBranchHint')"
+        @select="data.onExportSession()"
+      ><FolderOutput :size="14" />{{ t('graph.exportBranch') }}</ContextMenuItem>
       <ContextMenuItem
         class="menu-item danger"
         data-action="node-delete"

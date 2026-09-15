@@ -10,6 +10,7 @@ import { getSupportedThinkingLevels, type ModelsRefreshResult } from "@earendil-
 import {
   detectWindowsBash,
   memoizeOnce,
+  withDefaultPowershellTool,
   withDetectedBashShell,
 } from "./bash-resolution.js";
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
@@ -295,10 +296,15 @@ export class PiRuntime {
     const agentDir = this.agentDir();
     // Pi's bash tool otherwise only finds Git Bash under Program Files or
     // directly on PATH; derive it from git.exe so custom install roots
-    // (e.g. D:\software\Git) get a POSIX shell without user setup.
-    const settingsManager = withDetectedBashShell(
-      pi.SettingsManager.create(cwd, agentDir),
-      detectBash(),
+    // (e.g. D:\software\Git) get a POSIX shell without user setup. The
+    // powershell tool joins the active default set the same way — PiX's own
+    // or a migrated pi CLI config — on Windows only; Pi resolves the
+    // executable itself when the tool runs.
+    const settingsManager = withDefaultPowershellTool(
+      withDetectedBashShell(
+        pi.SettingsManager.create(cwd, agentDir),
+        detectBash(),
+      ),
     );
     return {
       cwd,

@@ -29,6 +29,10 @@ const unavailableGit = (): GitStatus => ({
   clean: true,
 });
 
+// The shell/preview buffer must stay bounded like the desktop-side aggregate;
+// past the cap the oldest output is dropped and only recent lines are kept.
+export const MAX_UTILITY_OUTPUT = 2 * 1024 * 1024;
+
 export const useWorkspaceStore = defineStore("workspace", {
   state: () => ({
     project: undefined as ProjectInfo | undefined,
@@ -183,10 +187,14 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.tabs = this.tabs.filter((tab) => tab.id !== id);
       this.activeTab = this.tabs.at(-1)?.id ?? "";
     },
+    appendUtility(text: string) {
+      if (!text) return;
+      this.utilityOutput = `${this.utilityOutput}${text}`.slice(-MAX_UTILITY_OUTPUT);
+    },
     async runShell(command: string) {
-      this.utilityOutput += `\n$ ${command}\n`;
+      this.appendUtility(`\n$ ${command}\n`);
       const result = await desktop.invoke<ShellResult>("shell.run", { command });
-      this.utilityOutput += result.output;
+      this.appendUtility(result.output);
     },
     record(event: DesktopEvent) {
       if (event.type === "terminal") return;
@@ -207,12 +215,12 @@ export const useWorkspaceStore = defineStore("workspace", {
       if (this.events.length > 200) this.events.length = 200;
       if (event.type === "shell") {
         const payload = event.payload as { chunk?: string };
-        if (payload.chunk) this.utilityOutput += payload.chunk;
+        if (payload.chunk) this.appendUtility(payload.chunk);
       }
       if (event.type === "notice") {
         const payload = event.payload as { source?: string; message?: string };
         if (payload.source === "extension" && payload.message)
-          this.utilityOutput += `${payload.message}\n`;
+          this.appendUtility(`${payload.message}\n`);
       }
     },
   },

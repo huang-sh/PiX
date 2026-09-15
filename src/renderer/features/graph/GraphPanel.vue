@@ -244,6 +244,19 @@ function rebuild() {
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
         ? () => { void retryTurn(node.id); }
         : undefined,
+      onExportSession: session.current?.graph ? () => { void exportSession(node.id); } : undefined,
+      // The export target is the node the chat panel shows: that node becomes
+      // the new session's tip and everything after it stays in the original
+      // graph. The chat column follows focusedNode, while the projection's
+      // activeNodeId is only the main branch's cursor, so the viewed id stays a
+      // live getter: focus moves never rebuild the cards.
+      viewedNodeId: session.current?.graph
+        ? () => session.focusedNode && !session.focusedNode.startsWith("pending:")
+          ? session.focusedNode : session.current?.projection.activeNodeId ?? null
+        : undefined,
+      exportBlockedReason: node.running
+        ? "graph.blockedStreaming"
+        : !session.current?.runtime.available ? "graph.blockedReadonly" : undefined,
       onDelete: () => { void deleteNode(node.id); },
       deleteBlockedReason: session.deleteBlockedReason,
     }),
@@ -456,6 +469,15 @@ async function deleteNode(id: string) {
     rebuild();
     await center(defaultFocusId());
   } catch (error) { deleteError.value = String(error); }
+}
+
+async function exportSession(id: string) {
+  try {
+    const result = await session.exportBranchSession(id);
+    if (result?.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 async function recoverDeletion() {
