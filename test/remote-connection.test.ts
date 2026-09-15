@@ -2,7 +2,7 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
@@ -162,7 +162,8 @@ test("cancelling the WebSocket handshake closes the real socket promptly", async
 });
 
 function controllerFixture(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), "pix-remote-"));
+  // Canonical like the controller sees it: session.stop matches registry entries by the realpath the invoke boundary produces (macOS /var symlink).
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-remote-")));
   const controller = new MainController(root, {
     async pickProject() { return undefined; },
     async pickSession() { return undefined; },
