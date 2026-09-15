@@ -39,10 +39,62 @@ function updateCalls(): UpdatePayload[] {
     .map(([, payload]) => payload as UpdatePayload);
 }
 
+// jsdom ships no pointer capture; the sidebar drag only needs it not to throw.
+HTMLElement.prototype.setPointerCapture = vi.fn();
+HTMLElement.prototype.releasePointerCapture = vi.fn();
+
 describe("SettingsPage save", () => {
   beforeEach(() => {
     vi.mocked(desktop.invoke).mockReset();
     vi.mocked(desktop.invoke).mockImplementation(async () => settings);
+  });
+
+  it("resizes the settings sidebar by drag and keyboard, persisting the width", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    const handle = wrapper.get(".settings-resize");
+    expect(handle.attributes("role")).toBe("separator");
+    expect(handle.attributes("aria-label")).toBe("Resize settings sidebar");
+    expect(handle.attributes("aria-valuemin")).toBe("210");
+    expect(handle.attributes("aria-valuemax")).toBe("420");
+    expect(handle.attributes("aria-valuenow")).toBe("260");
+    expect(wrapper.get(".settings-page").attributes("style")).toContain("--settings-sidebar-width: 260px");
+
+    vi.mocked(desktop.invoke).mockClear();
+    // Vue Test Utils maps pointer events onto MouseEvent, whose coordinates are
+    // read-only; dispatch real PointerEvents instead.
+    const fire = (type: string, init: PointerEventInit) =>
+      handle.element.dispatchEvent(new PointerEvent(type, { button: 0, bubbles: true, ...init }));
+    fire("pointerdown", { pointerId: 1, clientX: 400 });
+    fire("pointermove", { pointerId: 1, clientX: 480 });
+    expect(layout.layout.widths.settings).toBe(340);
+    // The drag cannot push the column past its cap.
+    fire("pointermove", { pointerId: 1, clientX: 4000 });
+    expect(layout.layout.widths.settings).toBe(420);
+    fire("pointerup", { pointerId: 1 });
+    await flushPromises();
+    expect(desktop.invoke).toHaveBeenCalledWith("layout.save", {
+      layout: expect.objectContaining({ widths: expect.objectContaining({ settings: 420 }) }),
+    });
+    expect(handle.attributes("aria-valuenow")).toBe("420");
+    expect(wrapper.get(".settings-page").attributes("style")).toContain("--settings-sidebar-width: 420px");
+
+    // A stray move after the drag ended moves nothing.
+    fire("pointermove", { pointerId: 1, clientX: 100 });
+    expect(layout.layout.widths.settings).toBe(420);
+
+    // Arrow keys nudge the width in steps and save each one.
+    vi.mocked(desktop.invoke).mockClear();
+    await handle.trigger("keydown", { key: "ArrowLeft" });
+    expect(layout.layout.widths.settings).toBe(410);
+    await handle.trigger("keydown", { key: "ArrowRight" });
+    expect(layout.layout.widths.settings).toBe(420);
+    expect(vi.mocked(desktop.invoke)).toHaveBeenCalledWith("layout.save", expect.anything());
+    wrapper.unmount();
   });
 
   it("opens About from settings and links to releases and source, with localized errors", async () => {

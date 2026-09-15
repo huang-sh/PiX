@@ -14,9 +14,9 @@
   --font-size-caption: 12px;
   --font-size-small: 13px;
   --font-size-ui: 14px;
-  --font-size-body: 15px;
+  --font-size-body: 16px;
   --font-size-code: 13px;
-  --line-height-body: 1.75;
+  --line-height-body: 1.7;
   --line-height-code: 1.6;
   font-family: var(--font-sans);
   font-size: var(--font-size-ui);
@@ -598,12 +598,12 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   min-width: 0;
   color: inherit;
   --markdown-body-size: var(--font-size-body);
-  --markdown-h1-size: 24px;
-  --markdown-h2-size: 20px;
+  --markdown-h1-size: 22px;
+  --markdown-h2-size: 19px;
   --markdown-h3-size: 17px;
 }
 .agent-markdown .markstream-vue {
-  color: inherit;
+  color: light-dark(#292d34, #e2e4e9);
   overflow-wrap: anywhere;
   /* Set these on the renderer itself: its own defaults shadow inherited --ms-* values. */
   --ms-font-sans: var(--font-sans);
@@ -617,19 +617,48 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   --ms-text-h4: var(--markdown-body-size);
   --ms-text-h5: var(--markdown-body-size);
   --ms-text-h6: var(--markdown-body-size);
+  --ms-weight-h1: 600;
   --markstream-code-font-family: var(--font-mono);
   --vscode-editor-font-size: var(--font-size-code);
   --vscode-editor-line-height: calc(var(--font-size-code) * var(--line-height-code));
-  --ms-flow-paragraph-y: .65em;
-  --ms-flow-list-y: .65em;
+  --ms-flow-paragraph-y: 12px;
+  --ms-flow-list-y: 12px;
+  --ms-flow-list-item-y: 6px;
+  --ms-flow-list-indent-mobile: 20px;
+  --ms-flow-heading-1-mt: 24px;
+  --ms-flow-heading-1-mb: 8px;
+  --ms-flow-heading-2-mt: 24px;
+  --ms-flow-heading-2-mb: 8px;
+  --ms-flow-heading-3-mt: 24px;
+  --ms-flow-heading-3-mb: 8px;
   --ms-flow-table-y: .85em;
   --ms-flow-codeblock-y: .85em;
+  --inline-code-fg: currentColor;
+  --inline-code-bg: color-mix(in srgb, var(--text) 5%, var(--surface));
+  --code-bg: var(--surface);
+  --code-header-bg: var(--surface-subtle);
+  --code-border: var(--border);
+  --code-action-fg: var(--muted);
+  --ms-shadow-subtle: none;
 }
-/* Inline code should not shrink mixed Chinese/English identifiers to ~10px. */
-.agent-markdown .markstream-vue .inline-code { font-size: .93em; }
+.agent-markdown .markstream-vue .strong-node { font-weight: 600; }
+/* The renderer's mobile list rule otherwise replaces the configured spacing. */
+.agent-markdown .markstream-vue .list-node { --ms-flow-list-indent: 20px; margin-block: var(--ms-flow-list-y); }
+/* Compatibility override: markstream-vue's li:has(.checkbox-node) also hides
+   ancestor markers. Match only this item's own paragraph, rendered directly or
+   through the nested renderer. These selectors depend on the library's DOM/classes.
+   After upgrades, run npm run test:gui:typography. Once the upstream rule is fixed,
+   remove the list-style-type/margin-left overrides below, keeping padding-left. */
+.agent-markdown .markstream-vue .list-item { list-style-type: inherit; margin-left: 0; padding-left: 0; }
+.agent-markdown .markstream-vue .list-item:has(
+  > .paragraph-node > .checkbox-node,
+  > .markstream-vue > .node-slot[data-node-type="paragraph"] > .node-content > .paragraph-node > .checkbox-node
+) { list-style-type: none; margin-left: calc(-1 * var(--ms-flow-list-indent)); }
+/* Keep wrapped identifiers readable without making each fragment look like a badge. */
+.agent-markdown .markstream-vue .inline-code { padding: 0 4px; border-radius: 3px; font-size: max(13px, .875em); }
 /* The library's code "⋯" menu uses text-xs (10.5px); hold the caption floor. */
 .agent-markdown .markstream-vue .code-more-menu button { font-size: var(--font-size-caption); }
-.agent-markdown .node-slot:first-of-type .paragraph-node { margin-top: 0; }
+.agent-markdown .markstream-vue > .node-slot:first-child > .node-content > :is(.paragraph-node, .heading-node) { margin-top: 0; }
 .agent-markdown .node-slot:last-of-type .paragraph-node { margin-bottom: 0; }
 .process-item .agent-markdown { color: var(--text); --markdown-body-size: var(--font-size-ui); }
 .chat-turn { margin-bottom: 4px; }
@@ -637,7 +666,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-process { margin: -4px 0 17px; }
 .agent-process > summary { display: flex; align-items: center; gap: 7px; min-height: 37px; padding: 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--font-size-caption); cursor: pointer; list-style: none; }
 .agent-process > summary::-webkit-details-marker { display: none; }
-.agent-process > summary .disclosure { flex: 0 0 auto; margin-left: auto; color: var(--faint); transition: transform 150ms ease; }
+.agent-process > summary .disclosure { flex: 0 0 auto; color: var(--faint); transition: transform 150ms ease; }
 .agent-process[open] > summary .disclosure { transform: rotate(90deg); }
 .process-items { display: grid; gap: 0; }
 .process-item { min-width: 0; padding: 10px 0; color: var(--text); font-size: var(--font-size-caption); }
@@ -900,8 +929,9 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   .remote-method { min-height: 150px; }
 }
 
-.settings-page { display: grid; grid-template-columns: 260px minmax(0,1fr); width: 100%; height: 100%; background: var(--background); }
-.settings-page > aside { display: flex; flex-direction: column; padding: 14px 10px; border-right: 1px solid var(--border); background: var(--navigator); }
+.settings-page { display: grid; grid-template-columns: var(--settings-sidebar-width, 260px) minmax(0,1fr); width: 100%; height: 100%; background: var(--background); }
+.settings-page > aside { position: relative; display: flex; flex-direction: column; padding: 14px 10px; border-right: 1px solid var(--border); background: var(--navigator); }
+.settings-page > aside > .settings-resize { position: absolute; top: 0; right: -1px; bottom: 0; width: 1px; touch-action: none; }
 .settings-page > aside > nav { display: grid; gap: 3px; margin-top: 12px; }
 .settings-page > aside > nav button { display: flex; align-items: center; gap: 10px; height: 39px; padding: 0 10px; border-radius: 8px; color: var(--text); text-align: left; }
 .settings-page > aside > nav button svg { flex: 0 0 auto; }
@@ -1079,7 +1109,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .extension-details { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 11px 19px; border-top: 1px solid var(--border); background: var(--surface-subtle); color: var(--muted); font-size: var(--font-size-small); cursor: pointer; text-align: left; }
 .extension-details:hover, .extension-details[aria-expanded="true"] { color: var(--accent-strong); }
 .extension-item.is-selected { border-color: var(--accent); }
-.settings-page.has-details-panel { position: relative; grid-template-columns: 260px minmax(0,1fr) clamp(340px,32vw,460px); }
+.settings-page.has-details-panel { position: relative; grid-template-columns: var(--settings-sidebar-width, 260px) minmax(0,1fr) clamp(340px,32vw,460px); }
 .settings-page.has-details-panel > main { padding-left: 24px; padding-right: 24px; }
 .settings-page > .settings-inspector { min-width: 0; min-height: 0; overflow: hidden; padding: 0; border-right: 0; border-left: 1px solid var(--border); background: var(--surface); }
 .settings-inspector-header { display: flex; flex-shrink: 0; align-items: flex-start; gap: 12px; padding: 24px; border-bottom: 1px solid var(--border); }
@@ -1115,7 +1145,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .extension-install-error { margin: 10px 0 0; color: var(--danger); font-size: var(--font-size-small); line-height: 1.6; overflow-wrap: anywhere; }
 .extension-card button:focus-visible, .settings-inspector button:focus-visible, .settings-inspector-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @media (max-width: 1100px) {
-  .settings-page.has-details-panel { grid-template-columns: 260px minmax(0,1fr); }
+  .settings-page.has-details-panel { grid-template-columns: var(--settings-sidebar-width, 260px) minmax(0,1fr); }
   .settings-page > .settings-inspector { position: absolute; inset: 0 0 0 auto; z-index: 50; width: min(440px,100%); box-shadow: -12px 0 32px rgba(14,38,31,.14); }
 }
 @container (max-width: 650px) {

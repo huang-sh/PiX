@@ -83,6 +83,14 @@ npm run dev
 
 </details>
 
+## Community
+
+Join our WeChat group:
+
+<p>
+  <img src="assets/images/wechat_qr.jpeg" width="220" alt="PiX WeChat group QR code">
+</p>
+
 ## Contributors
 
 Thanks to everyone who has contributed to PiX:

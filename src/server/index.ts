@@ -100,7 +100,7 @@ async function serve() {
       controller.shell.dispose();
       // An interrupted first turn may exist only in memory until its error
       // response is appended. Drain it before disposing or exiting.
-      await controller.pi.close();
+      await controller.closeAll();
     } catch (error) {
       process.stderr.write(`Remote shutdown failed: ${String(error)}\n`);
       process.exitCode = 1;
@@ -113,7 +113,7 @@ async function serve() {
   wss.on("connection", (socket) => {
     hadClient = true;
     const modelStreams = new Map<string, BrokerModelStream>();
-    controller.pi.setModelBroker((model, context, options) => {
+    controller.projectRuntime.setModelBroker((model, context, options) => {
       const id = randomBytes(16).toString("hex");
       const stream = new BrokerModelStream(model);
       const abort = () => send(socket, { type: "model.cancel", id });
@@ -194,7 +194,7 @@ async function serve() {
       }
     });
     socket.on("close", () => {
-      controller.pi.setModelBroker(undefined);
+      controller.projectRuntime.setModelBroker(undefined);
       for (const stream of modelStreams.values())
         stream.fail("Desktop model broker disconnected");
       modelStreams.clear();

@@ -83,6 +83,14 @@ npm run dev
 
 </details>
 
+## 交流群
+
+扫码加入微信交流群：
+
+<p>
+  <img src="assets/images/wechat_qr.jpeg" width="220" alt="PiX 微信交流群二维码">
+</p>
+
 ## 贡献者
 
 感谢所有为 PiX 做出贡献的人：

@@ -16,6 +16,78 @@ for (const path of [artifacts, join(home, ".pix", "agent"), join(home, ".pix"), 
 writeFileSync(join(home, ".pix", "agent", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
 writeFileSync(join(home, ".pix", "gui.settings.json"), JSON.stringify({ language: "zh-CN", openLastSessionOnStartup: false }));
 const text = "中文阅读应该清晰舒适，English text should feel natural. PiX 支持分支会话、文件编辑和工具调用。";
+const numberedLists = `## 编号空间
+
+9. 第九项
+10. 第十项
+
+### 三位数与嵌套
+
+99. 第九十九项
+100. 第一百项
+
+### 四位数及以上
+
+999. 第九百九十九项
+1000. 第一千项
+
+### 五位数
+
+9999. 第九千九百九十九项
+10000. 第一万项
+
+### 九位数
+
+999999999. Markdown 支持的九位数起始编号
+
+### 独立嵌套缩进
+
+- 父级列表
+
+    9999. 嵌套第九千九百九十九项
+    10000. 嵌套第一万项
+
+           - 嵌套项目符号
+
+### 混合复选框列表
+
+1. 编号父项
+
+   - [ ] 未完成子项
+   - [x] 已完成子项
+
+2. 普通编号项
+
+### 多层复选框列表
+
+- 项目符号父项
+
+    1000. 深层编号父项
+
+          - [ ] 深层任务项
+
+### 复选框父项
+
+1. [ ] 任务父项
+
+   - [x] 任务子项
+
+2. [x] 有序完成任务
+
+### 多段落父项
+
+1. 多段落编号父项
+
+   补充说明。
+
+   - [ ] 多段落子任务
+`;
+const taskListMarkers = {
+  "编号父项": "decimal", "普通编号项": "decimal", "项目符号父项": "disc",
+  "深层编号父项": "decimal", "多段落编号父项": "decimal",
+  "未完成子项": "none", "已完成子项": "none", "深层任务项": "none",
+  "任务父项": "none", "任务子项": "none", "有序完成任务": "none", "多段落子任务": "none",
+};
 const sessionFile = join(workspace, ".pi", "sessions", "typography.jsonl");
 const timestamp = new Date().toISOString();
 const usage = { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -24,7 +96,7 @@ writeFileSync(sessionFile, [
   { type: "message", id: "user0001", parentId: null, timestamp, message: { role: "user", content: text, timestamp: Date.now() } },
   { type: "message", id: "reply001", parentId: "user0001", timestamp, message: {
     role: "assistant", api: "openai-responses", provider: "openai", model: "gpt-5.6", usage, stopReason: "stop", timestamp: Date.now(),
-    content: [{ type: "text", text: `# 中文与 English\n\n${text}\n\n## 阅读与排版 Typography\n\n- 中英混排：${text}\n- 行内代码：\`const 中文 = 'Hello PiX'\`\n\n\`\`\`typescript\n// 中文注释 English comment\nconst greeting = '你好，PiX';\nconsole.log(greeting);\n\`\`\`` }],
+    content: [{ type: "text", text: `# 中文与 English\n\n${text}\n\n**清晰的层级，让长段落也容易阅读。** 正文、标题与代码采用统一的排版规则，重点信息保留强调。\n\n## 阅读与排版 Typography\n\n- 中英混排：${text}\n- 行内代码：\`const 中文 = 'Hello PiX'\`\n- 长标识符：\`resourceLoaderOptions.additionalExtensionPaths\` 可以在窄栏内自然换行。\n\n\`\`\`typescript\n// 中文注释 English comment\nconst greeting = '你好，PiX';\nconsole.log(greeting);\n\`\`\`\n\n${numberedLists}` }],
   } },
 ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
 const port = 10000 + Math.floor(Math.random() * 1000);
@@ -85,7 +157,7 @@ try {
   await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('.chat-composer textarea'))"), true));
 
   const report = [];
-  for (const theme of ['light', 'dark', 'teal']) {
+  for (const theme of ['light', 'dark', 'teal', 'peach']) {
     await evaluate("window.__pixTest.settings()");
     await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('[data-settings-category=appearance]'))"), true));
     await evaluate("document.querySelector('[data-settings-category=appearance]').click()");
@@ -130,11 +202,33 @@ try {
         host.style.cssText = 'position:fixed;left:-10000px;top:0;width:320px';
         document.body.append(host);
         try {
-          for (const variant of ['process-item', 'node-hover-card']) {
+          // scrollWidth misses markers clipped to the left by content-visibility.
+          // Measure the actual marker font against each list's reserved space.
+          const markerContext = document.createElement('canvas').getContext('2d');
+          result.numberedLists = [];
+          for (const variant of ['', 'process-item', 'node-hover-card']) {
             host.className = variant;
             host.replaceChildren(document.querySelector('.final-response .agent-markdown').cloneNode(true));
-            result[variant] = { size: parseFloat(getComputedStyle(host.querySelector('.paragraph-node')).fontSize) };
+            for (const width of [320, 420, 560]) {
+              host.style.width = width + 'px';
+              if (variant && width === 320) result[variant] = { size: parseFloat(getComputedStyle(host.querySelector('.paragraph-node')).fontSize) };
+              const markers = [...host.querySelectorAll('ol > li')].filter(li => getComputedStyle(li).listStyleType !== 'none').map(li => {
+                const style = getComputedStyle(li, '::marker');
+                markerContext.font = style.fontWeight + ' ' + style.fontSize + ' ' + style.fontFamily;
+                return { number: li.value,
+                  needed: markerContext.measureText(li.value + '. ').width,
+                  reserved: parseFloat(getComputedStyle(li.parentElement).paddingLeft) };
+              });
+              const tasks = [...host.querySelectorAll('li')].map(li => ({
+                text: li.querySelector('.paragraph-node')?.textContent.trim(),
+                marker: getComputedStyle(li).listStyleType,
+                margin: parseFloat(getComputedStyle(li).marginLeft),
+                indent: parseFloat(getComputedStyle(li.parentElement).paddingLeft),
+              })).filter(item => item.text in ${JSON.stringify(taskListMarkers)});
+              result.numberedLists.push({ variant, width, markers, tasks });
+            }
           }
+          host.style.width = '320px';
           host.className = '';
           const editor = document.createElement('div');
           editor.className = 'code-editor';
@@ -186,14 +280,14 @@ try {
         return result;
       })()`);
       report.push({ theme, density, ...measurements });
-      assert.equal(measurements.reply.size, 15, "assistant body");
-      assert.equal(measurements.user.size, 15, "user body");
-      assert.equal(measurements.input.size, 15, "composer");
-      assert.equal(measurements.reply.line, 26.25, "body line height");
+      assert.equal(measurements.reply.size, 16, "assistant body");
+      assert.equal(measurements.user.size, 16, "user body");
+      assert.equal(measurements.input.size, 16, "composer");
+      assert.equal(measurements.reply.line, 27.2, "body line height");
       assert.equal(measurements.reply.family, measurements.ui.family, "Markdown must share UI fonts");
       assert.equal(measurements.user.family, measurements.ui.family);
       assert.equal(measurements.input.family, measurements.ui.family);
-      assert.equal(measurements.heading.size, 24, "Markdown heading override");
+      assert.equal(measurements.heading.size, 22, "Markdown heading override");
       assert.equal(measurements.code.size, 13, "code block");
       assert.ok(measurements.code.line >= 20, "code line spacing");
       assert.ok(measurements.inline.size >= 13, "inline code");
@@ -213,6 +307,16 @@ try {
       assert.ok(measurements.nodeRows.every(item => item.sameRow), 'node context, model and thinking must share one row without overlap');
       assert.ok(measurements.narrow.every(item => item.sameRow), 'composer attachment, model, thinking and send must share one row without overlap');
       assert.ok(measurements.narrow.every(item => item.fits), "narrow composer controls must fit");
+      for (const { variant, width, markers, tasks } of measurements.numberedLists) {
+        for (const number of [10, 99, 100, 1000, 10000, 999999999])
+          assert.ok(markers.some(marker => marker.number === number), 'numbered-list fixture includes ' + number);
+        assert.ok(markers.every(marker => marker.reserved >= marker.needed), 'numbered-list markers must fit: ' + JSON.stringify({ variant, width, markers }));
+        assert.equal(tasks.length, Object.keys(taskListMarkers).length, 'mixed task-list fixture must render completely');
+        for (const task of tasks) {
+          assert.equal(task.marker, taskListMarkers[task.text], 'only the task itself hides its marker: ' + task.text);
+          assert.equal(task.margin, task.marker === 'none' ? -task.indent : 0, 'task-list indentation: ' + task.text);
+        }
+      }
     }
     const screenshot = await send("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(artifacts, `typography-${theme}.png`), Buffer.from(screenshot.data, "base64"));
@@ -225,6 +329,7 @@ try {
     fonts[selector] = (await send("CSS.getPlatformFontsForNode", { nodeId: element.nodeId })).fonts;
   }
   writeFileSync(join(artifacts, "typography-checks.json"), JSON.stringify({ passed: true, report, fonts }, null, 2));
+  writeFileSync(join(artifacts, "typography-markdown.html"), await evaluate("document.querySelector('.final-response .agent-markdown').outerHTML"));
   console.log(JSON.stringify({ passed: true, combinations: report.length, fonts }, null, 2));
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {

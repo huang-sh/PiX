@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # External PRs run the same validation as main (typecheck, fixtures, tests);
+  # the packaging steps below stay main/tag-only.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -76,9 +80,11 @@ jobs:
         run: npm run test:web
 
       - name: Build
+        if: github.event_name != 'pull_request'
         run: npm run build
 
       - name: Package
+        if: github.event_name != 'pull_request'
         # The release job creates one draft with installers from all platforms.
         run: npx electron-builder ${{ matrix.targets }} --publish never
         env:
@@ -86,6 +92,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - name: Upload installers
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: PiX-${{ matrix.os }}-${{ github.ref_name }}

@@ -62,6 +62,10 @@ export function validateRouteInput(
       return { id: str(v.id, "id") };
     case "session.open":
       return { path: str(v.path, "path") };
+    case "session.stop":
+      return { path: str(v.path, "path"),
+        ...(v.projectId === undefined ? {} : { projectId: str(v.projectId, "projectId") }),
+      };
     case "session.import":
       return {};
     case "session.rename":

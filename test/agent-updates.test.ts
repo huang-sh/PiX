@@ -66,7 +66,9 @@ test("missed updates and a reloaded decoder request one resync and accept a full
   assert.equal(decode(wire(encode(event("A", "one two three")))), undefined);
   assert.equal(decode(wire(encode(event("A", "one two three four")))), undefined);
   assert.equal(requests, 1);
-  const checkpoint: DesktopEvent = { type: "sessions", payload: { resync: true } };
+  // Production resyncs always carry the current snapshot (session.snapshot).
+  const checkpoint: DesktopEvent = { type: "sessions", payload: { resync: true,
+    current: { session: { path: "s" }, graph: { id: "s", epoch: "e", revision: 1, runs: [] } } as never } };
   decode(wire(encode(checkpoint)));
   const recovered = decode(wire(encode(event("A", "complete live text"))));
   assert.equal(agentMessageContent((recovered!.payload as any).message, "text"), "complete live text");
@@ -74,4 +76,25 @@ test("missed updates and a reloaded decoder request one resync and accept a full
   const reloaded = sessionEventDecoder(async () => { requests++; });
   assert.equal(reloaded(wire(encode(event("A", "complete live text!")))), undefined);
   assert.equal(requests, 2);
+});
+
+test("list-only session events keep progress deltas and snapshot patches incremental", () => {
+  const encode = sessionEventEncoder(), decode = sessionEventDecoder(async () => assert.fail("unexpected resync"));
+  decode(wire(encode(event("A", "one"))));
+  // A background session's list refresh carries no snapshot; it must not reset
+  // the baselines of the session streaming in view.
+  decode(wire(encode({ type: "sessions", payload: { sessions: [] } })));
+  const second = encode(event("A", "one two"));
+  assert.equal((second.payload as any).progress.baseRevision, 1);
+  assert.equal((second.payload as any).progress.text.value, " two");
+  const decoded = decode(wire(second))!;
+  assert.equal(agentMessageContent((decoded.payload as any).message, "text"), "one two");
+
+  const before = { session: { path: "s" }, entries: [], projection: { nodes: [] }, runtime: {},
+    graph: { id: "s", epoch: "e", revision: 1, runs: [] } } as any;
+  const after = { ...before, graph: { ...before.graph, revision: 2 } };
+  encode({ type: "sessions", payload: { current: before } });
+  encode({ type: "sessions", payload: { sessions: [] } });
+  const patch = encode({ type: "sessions", payload: { current: after } });
+  assert.equal((patch.payload as any).patch?.baseRevision, 1, "snapshot patching survives list-only events");
 });

@@ -26,8 +26,9 @@ import {
   skillRoots,
 } from "./skill-files.js";
 import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../shared/skills.js";
-import { pixAgentDir } from "./paths.js";
+import { canonicalPath, pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
+import { durableWrite, encodeSession } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
 import type {
@@ -49,6 +50,30 @@ import { projectSession, summarizeSession } from "../shared/session.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+
+/** Control actions that need no open session; everything else is session-scoped. */
+export const MODEL_ACTIONS = [
+  "getModels",
+  "refreshModels",
+  "addCustomModel",
+  "updateCustomModel",
+  "getCustomModels",
+  "getProviders",
+  "getSkills",
+  "getSkill",
+  "createSkill",
+  "importSkill",
+  "updateSkill",
+  "deleteSkill",
+  "setSkillManualOnly",
+  "getExtensions",
+  "installExtension",
+  "removeExtension",
+  "loginApiKey",
+  "loginOAuth",
+  "logout",
+  "setBrokerProviders",
+] as const satisfies readonly AgentControl["action"][];
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -198,14 +223,49 @@ export class PiRuntime {
   }
 
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
+    await this.replaceBrokerCatalog(await this.modelRuntime(), new Set(providers), models);
+  }
+
+  /**
+   * Re-points this runtime at another runtime's broker catalog. Remote hosts
+   * hand every catalog change to the project runtime, while an open session
+   * holds its own copy — without this it would never see a newly added model.
+   */
+  async adoptBroker(source: PiRuntime) {
+    this.modelBroker = source.modelBroker;
+    const modelRuntime = this.runtime?.session?.modelRuntime;
+    if (!modelRuntime) {
+      this.brokerProviders = new Set(source.brokerProviders);
+      this.brokerModels = [...source.brokerModels];
+      return;
+    }
+    await this.replaceBrokerCatalog(modelRuntime, new Set(source.brokerProviders), [...source.brokerModels]);
+  }
+
+  /**
+   * Pulls a catalog or credential change another runtime already applied into
+   * this one. Every runtime's model catalog is its own in-memory copy, so an
+   * open session never sees a model added, updated, or logged in elsewhere
+   * until it re-reads it. A session running the updated model adopts the new
+   * definition; a streaming one keeps it for its current response only.
+   */
+  async adoptCatalog(input: AgentControl) {
     const modelRuntime = await this.modelRuntime();
-    const next = new Set(providers);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const s = this.runtime?.session;
+    if (input.action === "updateCustomModel" && s?.model && !s.isStreaming
+      && s.model.provider === input.provider && s.model.id === input.modelId)
+      await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
+  }
+
+  /** Switches one model runtime over to a catalog, dropping the providers that left it. */
+  private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
     for (const provider of this.brokerProviders)
-      if (!next.has(provider)) {
+      if (!providers.has(provider)) {
         await modelRuntime.removeRuntimeApiKey(provider);
         modelRuntime.unregisterProvider(provider);
       }
-    this.brokerProviders = next;
+    this.brokerProviders = providers;
     this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
@@ -337,13 +397,20 @@ export class PiRuntime {
     this.bind();
   }
   async list(): Promise<SessionSummary[]> {
+    const { cwd, dir } = this;
     const pi = await this.pi(),
-      all = await pi.SessionManager.list(this.cwd, this.dir);
+      all = await pi.SessionManager.list(cwd, dir);
+    // Registry entries key on the canonical file, so rows have to spell it the
+    // same way or a running marker would never match its own session. The
+    // listing comes from one directory of plain session files, so
+    // canonicalizing that directory once spells every row without a realpath
+    // per file.
+    const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
     return all.map((s: any) => ({
       id: s.id,
-      path: s.path,
+      path: root ? join(root, basename(String(s.path))) : String(s.path),
       name: s.name,
-      cwd: s.cwd || this.cwd,
+      cwd: s.cwd || cwd,
       created: new Date(s.created).toISOString(),
       modified: new Date(s.modified).toISOString(),
       messageCount: s.messageCount,
@@ -380,6 +447,19 @@ export class PiRuntime {
     }
     this.bind();
     return this.snapshot();
+  }
+  /**
+   * Creates an empty session file without holding any runtime on it, so the
+   * registry can hand the file to a runtime of its own choosing.
+   */
+  async createSessionFile(): Promise<string> {
+    const { cwd, dir } = this;
+    const pi = await this.pi();
+    const manager = pi.SessionManager.create(cwd, dir);
+    const path = manager.getSessionFile();
+    // Open an explicitly persisted header: SDK otherwise defers the first user input.
+    durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
+    return path;
   }
   state(): RuntimeState {
     const s = this.runtime?.session;
@@ -462,28 +542,7 @@ export class PiRuntime {
   }
   private async runControl(input: AgentControl): Promise<unknown> {
     const s = this.runtime?.session;
-    const modelAction = [
-      "getModels",
-      "refreshModels",
-      "addCustomModel",
-      "updateCustomModel",
-      "getCustomModels",
-      "getProviders",
-      "getSkills",
-      "getSkill",
-      "createSkill",
-      "importSkill",
-      "updateSkill",
-      "deleteSkill",
-      "setSkillManualOnly",
-      "getExtensions",
-      "installExtension",
-      "removeExtension",
-      "loginApiKey",
-      "loginOAuth",
-      "logout",
-      "setBrokerProviders",
-    ].includes(input.action);
+    const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
     if (!this.cwd && !modelAction)
       throw new Error("Open a project first");
     if (!s && input.action !== "newSession" && !modelAction)
@@ -583,14 +642,12 @@ export class PiRuntime {
         );
       }
       case "getCustomModels": {
-        const pi = await this.pi();
         return getCustomModels(join(this.agentDir(), "models.json"));
       }
       case "addCustomModel":
       case "updateCustomModel": {
         const update = input.action === "updateCustomModel";
         if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
-        const pi = await this.pi();
         const modelRuntime = await this.modelRuntime();
         if (!update && modelRuntime.getModel(input.provider, input.modelId))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
@@ -618,6 +675,8 @@ export class PiRuntime {
       case "setModel": {
         const m = s.modelRuntime.getModel(input.provider, input.modelId);
         if (!m) throw new Error("Model not found");
+        // A switch belongs to this session's transcript, like the TUI's /model;
+        // only an explicit "set as default" writes the profile defaults.
         await s.setModel(m, { persist: input.persist });
         break;
       }

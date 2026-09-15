@@ -6,10 +6,19 @@ import type {
   RawSessionEntry,
   SessionProjection,
   SessionSummary,
+  SessionSnapshot,
 } from "./types.js";
 import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
+
+export function isSessionRunning(snapshot: SessionSnapshot): boolean {
+  const runtime = snapshot.runtime;
+  return runtime?.available !== false && Boolean(
+    snapshot.graph?.runs.some(run => run.status === "running")
+    || runtime?.isStreaming || runtime?.isCompacting || runtime?.isRetrying || runtime?.pendingMessageCount,
+  );
+}
 
 const entryIndexes = new WeakMap<RawSessionEntry[], Map<string, RawSessionEntry>>();
 export function sessionEntryIndex(entries: RawSessionEntry[]) {

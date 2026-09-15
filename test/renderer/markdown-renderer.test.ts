@@ -81,6 +81,40 @@ describe("MarkdownRenderer", () => {
     wrapper.unmount();
   });
 
+  it("resizes list gutters as streaming counters grow and shrink", async () => {
+    const wrapper = await mountWithLink("999. item", true);
+    try {
+      for (const [content, indent] of [
+        ["999. item", "5ch"],
+        ["1000. item", "6ch"],
+        ["9999. item\n10000. item", "7ch"],
+        ["999999999. item", "11ch"],
+        ["1. item", "3ch"],
+      ]) {
+        await wrapper.setProps({ content });
+        await vi.waitFor(() => expect(
+          (wrapper.get("ol").element as HTMLOListElement).style.getPropertyValue("--ms-flow-list-indent"),
+        ).toBe(indent));
+      }
+      await wrapper.setProps({ streaming: false });
+      expect(wrapper.get("li").attributes("value")).toBe("1");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("sizes nested and sibling ordered lists independently", async () => {
+    const wrapper = await mountWithLink("99999. outer\n\n       1. inner\n\n## Separate\n\n1. sibling\n\n- bullet");
+    try {
+      await vi.waitFor(() => expect(wrapper.findAll("ol").map(list =>
+        (list.element as HTMLOListElement).style.getPropertyValue("--ms-flow-list-indent"),
+      )).toEqual(["7ch", "3ch", "3ch"]));
+      expect((wrapper.get("ul").element as HTMLUListElement).style.getPropertyValue("--ms-flow-list-indent")).toBe("");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("routes plain link clicks to the built-in browser when enabled", async () => {
     useLayoutStore().settings = settingsWith(true);
     const workspace = useWorkspaceStore();

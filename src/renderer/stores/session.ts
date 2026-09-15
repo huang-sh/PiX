@@ -10,10 +10,11 @@ import type {
   PromptImage,
   SessionSnapshot,
   SessionSummary,
+  SettingsBundle,
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, projectSession } from "../../shared/session";
+import { entryAnchorForNode, isSessionRunning } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
 import { useLayoutStore } from "./layout";
@@ -54,6 +55,7 @@ interface PendingPrompt {
 export const useSessionStore = defineStore("session", {
   state: () => ({
     loading: true,
+    viewRequest: 0,
     sessions: [] as SessionSummary[],
     projects: [] as ProjectGroup[],
     activeProjectId: "",
@@ -94,16 +96,6 @@ export const useSessionStore = defineStore("session", {
     },
     selectedActivity(state): AgentActivity | undefined {
       return activityForId(state, focusId(state));
-    },
-    filtered(state) {
-      const query = state.query.toLowerCase();
-      return state.sessions.filter(
-        (session) =>
-          !query ||
-          `${session.name ?? ""} ${session.firstMessage} ${session.id}`
-            .toLowerCase()
-            .includes(query),
-      );
     },
     filteredProjects(state) {
       const query = state.query.trim().toLowerCase();
@@ -170,7 +162,10 @@ export const useSessionStore = defineStore("session", {
       sessions: SessionSummary[],
       projects: ProjectGroup[],
       current?: SessionSnapshot,
+      request?: number,
     ) {
+      request ??= ++this.viewRequest;
+      if (request !== this.viewRequest) return;
       this.adoptMarks(projects);
       this.projects = projects;
       this.activeProjectId = project ? projectId(project) : "";
@@ -195,8 +190,12 @@ export const useSessionStore = defineStore("session", {
     },
     disconnected(id: string) {
       const record = this.projects.find((item) => item.id === id);
-      if (record) record.connected = false;
+      if (record) {
+        record.connected = false;
+        record.sessions = record.sessions.map(row => ({ ...row, running: undefined }));
+      }
       if (this.activeProjectId !== id) return;
+      if (record) this.sessions = record.sessions;
       this.activity = undefined;
       this.branchActivities = {};
       if (this.current) this.current.runtime = {
@@ -230,7 +229,7 @@ export const useSessionStore = defineStore("session", {
       this.current = snapshot;
       if (snapshot.session.path)
         this.sessions = [
-          snapshot.session,
+          { ...snapshot.session, running: isSessionRunning(snapshot) || undefined },
           ...this.sessions.filter((item) => item.path !== snapshot.session.path),
         ];
       this.syncProject();
@@ -265,8 +264,18 @@ export const useSessionStore = defineStore("session", {
         this.focusedNode = null;
     },
     async refresh() {
-      this.sessions = await desktop.invoke<SessionSummary[]>("session.list");
+      const project = this.activeProjectId, request = this.viewRequest;
+      const sessions = await desktop.invoke<SessionSummary[]>("session.list");
+      if (project !== this.activeProjectId || request !== this.viewRequest) return;
+      this.sessions = sessions;
       this.syncProject();
+    },
+    // Decorated project groups arrive when a background session settles in any
+    // project: rows, marks, and running markers all stay current out of view.
+    applyProjects(projects: ProjectGroup[]) {
+      this.adoptMarks(projects);
+      this.projects = projects;
+      this.sessions = projects.find(record => record.id === this.activeProjectId)?.sessions ?? this.sessions;
     },
     // Commands are session-scoped: no usable session means none to offer.
     async loadCommands() {
@@ -293,22 +302,58 @@ export const useSessionStore = defineStore("session", {
       this.models = models;
       return models;
     },
-    async open(path: string) {
+    // A deliberate pick in a model menu is what "last set" means: it becomes the
+    // profile default every new session starts from, while the open session keeps
+    // its own transcript model — the same split as the TUI's set-as-default.
+    // Nodes that merely inherit a model never come through here.
+    async setDefaultModel(model: RuntimeModel) {
+      try {
+        const settings = await desktop.invoke<SettingsBundle>("settings.update", {
+          scope: "global",
+          patch: { defaultProvider: model.provider, defaultModel: model.id },
+        });
+        useLayoutStore().applySettings(settings);
+      } catch (error) {
+        useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+    async open(path: string, request?: number) {
+      request ??= ++this.viewRequest;
+      if (request !== this.viewRequest) return;
       this.loading = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
+        if (request !== this.viewRequest) return;
         this.applySnapshot(snapshot);
         this.focusedNode = snapshot.projection.activeNodeId;
+        if (snapshot.runtime.isStreaming || snapshot.graph?.runs.some(run => run.status === "running")) {
+          // Switching back mid-run: the snapshot resync replays the session's
+          // live progress so partial text shows before the next token.
+          void desktop.invoke("session.snapshot").catch(() => {});
+        }
         await Promise.all([
           this.refresh(),
           this.loadCommands(),
           this.loadModels().catch(() => {}),
         ]);
-      } finally { this.loading = false; }
+      } catch (error) {
+        if (request === this.viewRequest) throw error;
+      } finally { if (request === this.viewRequest) this.loading = false; }
+    },
+    async stop(path: string, projectId?: string) {
+      try {
+        await desktop.invoke("session.stop", { path, ...(projectId ? { projectId } : {}) });
+      } catch (error) {
+        useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
+        return;
+      }
+      await this.refresh();
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
+      const project = this.activeProjectId, path = this.current?.session.path, request = this.viewRequest;
       const result = await desktop.invoke<T>("agent.control", input);
-      if (result && typeof result === "object" && "projection" in result)
+      if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path
+        && result && typeof result === "object" && "projection" in result)
         this.applySnapshot(result as unknown as SessionSnapshot);
       return result;
     },
@@ -339,10 +384,11 @@ export const useSessionStore = defineStore("session", {
     async deleteNode(id: string) {
       if (!this.current || this.deleteBlockedReason) return;
       const graphId = this.current.graph!.id;
+      const request = this.viewRequest;
       this.deletingNode = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("agent.control", { action: "deleteNode", nodeId: id, graphId });
-        if (this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
+        if (request === this.viewRequest && this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
       } finally { this.deletingNode = false; }
     },
     // Only explicit thinking-menu picks may update the sticky level; model-driven
@@ -351,6 +397,7 @@ export const useSessionStore = defineStore("session", {
       this.userThinking = level;
     },
     async prompt(text: string, targetNodeId?: string | null, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[]) {
+      const project = this.activeProjectId, path = this.current?.session.path, request = this.viewRequest;
       const value = text.trim();
       if (!value && !images?.length) return;
       const target = targetNodeId === undefined
@@ -375,7 +422,8 @@ export const useSessionStore = defineStore("session", {
       this.focusedNode = null;
       try {
         await this.control({ action: "prompt", text: value, ...(images?.length ? { images } : {}) });
-        this.focusedNode = this.current?.projection.activeNodeId ?? this.focusedNode;
+        if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path)
+          this.focusedNode = this.current?.projection.activeNodeId ?? this.focusedNode;
       } finally {
         if (this.pendingPrompt?.message.entryId === id) this.pendingPrompt = undefined;
       }
@@ -384,11 +432,13 @@ export const useSessionStore = defineStore("session", {
     // branch, but the primary column must keep showing the current selection.
     async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean }) {
       const current = this.current;
+      const project = this.activeProjectId, request = this.viewRequest;
       if (!current || (!text.trim() && !images?.length)) return;
       if (current.graph) {
         const requestId = crypto.randomUUID();
         const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
           provider: model?.provider, modelId: model?.id, thinkingLevel, images });
+        if (request !== this.viewRequest || project !== this.activeProjectId || current.session.path !== this.current?.session.path) return;
         const run = result.graph?.runs.find(r => r.requestId === requestId);
         const focus = run?.nodeId ?? (run?.status === "running" ? `pending:${run.runId}` : nodeId);
         if (run && options?.follow !== false) this.focusedNode = focus;
@@ -402,6 +452,8 @@ export const useSessionStore = defineStore("session", {
         await this.control({ action: "navigateTree", entryId: anchor });
       }
       if (model && (this.current?.runtime.model?.provider !== model.provider || this.current.runtime.model.id !== model.id))
+        // Session-scoped, like the TUI's model switch: the profile default stays
+        // put, so a new session still starts from whatever Pi resolved for it.
         await this.control({ action: "setModel", provider: model.provider, modelId: model.id });
       if (thinkingLevel && this.current?.runtime.thinkingLevel !== thinkingLevel)
         await this.control({ action: "setThinking", level: thinkingLevel });
@@ -416,7 +468,14 @@ export const useSessionStore = defineStore("session", {
         );
         return;
       }
-      this.applySnapshot(await this.control<SessionSnapshot>({ action: "newSession" }));
+      const request = ++this.viewRequest;
+      const project = this.activeProjectId;
+      const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
+      if (request !== this.viewRequest || project !== this.activeProjectId) return;
+      // The reply is authoritative for the new file, and the broadcast event may
+      // still be in flight: without adopting it here the list and slash commands
+      // would keep serving the session that was just replaced.
+      if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
       this.focusedNode = this.current?.projection.activeNodeId ?? null;
       await Promise.all([this.refresh(), this.loadCommands()]);
     },

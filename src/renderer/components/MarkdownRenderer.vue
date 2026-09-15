@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import NodeRenderer from "markstream-vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { colorScheme } from "../theme";
 import { useI18n } from "vue-i18n";
 import { useLayoutStore } from "../stores/layout";
@@ -18,6 +19,39 @@ const codeBlockOptions = readCodeTypography();
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
 const { t } = useI18n();
+const markdown = ref<HTMLElement | null>(null);
+let listObserver: MutationObserver | undefined;
+
+function updateListIndents() {
+  for (const list of markdown.value?.querySelectorAll("ol.list-node") ?? []) {
+    let digits = 1;
+    for (const item of list.children) {
+      if (item instanceof HTMLLIElement)
+        digits = Math.max(digits, String(item.value).length);
+    }
+    // Include punctuation and a gap; ch also follows compact/hover font sizes.
+    (list as HTMLOListElement).style.setProperty("--ms-flow-list-indent", `${digits + 2}ch`);
+  }
+}
+
+onMounted(() => {
+  if (!markdown.value) return;
+  // The renderer patches descendants asynchronously. Only list structure and
+  // counter changes matter; prose tokens and our own style writes do not.
+  listObserver = new MutationObserver(records => {
+    if (records.some(record => record.type === "attributes"
+      || record.target instanceof HTMLOListElement
+      || [...record.addedNodes].some(node => node instanceof Element
+        && (node.matches("ol.list-node") || node.querySelector("ol.list-node")))))
+      updateListIndents();
+  });
+  listObserver.observe(markdown.value, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ["value"],
+  });
+  updateListIndents();
+});
+
+onBeforeUnmount(() => listObserver?.disconnect());
 
 // Markdown links split into two families. Absolute http/https links render
 // with target="_blank", which the main process hands to the OS browser;
@@ -146,7 +180,7 @@ function decodePath(value: string): string {
 </script>
 
 <template>
-  <div class="agent-markdown" :data-streaming="streaming" @click="onContentClick">
+  <div ref="markdown" class="agent-markdown" :data-streaming="streaming" @click="onContentClick">
     <NodeRenderer
       :is-dark="colorScheme === 'dark'"
       :content="content"
