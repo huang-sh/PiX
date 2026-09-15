@@ -32,6 +32,20 @@ Also:
 - User-facing strings live in `src/renderer/i18n.ts` and must be updated in both Chinese and English.
 - Follow [AGENTS.md](AGENTS.md): fix root causes, and remove obsolete code and outdated comments.
 
+## Testing Notes
+
+### VueFlow viewport animations in jsdom
+
+jsdom has no layout engine, so the graph pane reports a zero `clientWidth`/`clientHeight`. d3-zoom derives its extent from those values, and an animated transform (`setCenter`/`setViewport` with `duration > 0`) recovers its per-frame scale as `w / l[2]` — with a zero-sized extent this is `0 / 0`, and the viewport turns `{NaN, NaN, NaN}` mid-animation. Instant transforms (`duration: 0`) bypass the tween and are unaffected, and the real app always has a non-zero pane.
+
+Existing graph tests avoid this by spying on the store (`vi.spyOn(flow, "setCenter").mockResolvedValue(true)`). To exercise a real animation in jsdom, stub the pane's client size instead — setting the store's `dimensions` ref does not help, because the tween reads the DOM element:
+
+```ts
+const pane = wrapper.element.querySelector(".vue-flow__viewport");
+Object.defineProperty(pane!, "clientWidth", { value: 1200, configurable: true });
+Object.defineProperty(pane!, "clientHeight", { value: 600, configurable: true });
+```
+
 ## Commit Style
 
 Use clear, conventional-style commits where possible:

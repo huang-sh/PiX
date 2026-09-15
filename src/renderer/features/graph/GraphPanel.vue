@@ -9,6 +9,7 @@ import {
   type NodeChange,
   type NodeMouseEvent,
   type VueFlowStore,
+  type ViewportTransform,
 } from "@vue-flow/core";
 import { MiniMap } from "@vue-flow/minimap";
 import GraphOverview from "./GraphOverview.vue";
@@ -48,6 +49,10 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
+// Sessions remember where they were left: manual card positions and the pane
+// viewport come back unchanged on return instead of re-centering.
+const rememberedLayouts = new Map<string, Map<string, ManualPosition>>();
+const rememberedViewports = new Map<string, ViewportTransform>();
 // Holding the branch modifier at any point of a drag carries the cards after it too.
 let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
@@ -162,8 +167,10 @@ function rebuild() {
     return;
   }
   if (session.highlightedNode && !value.nodes.some(node => node.id === session.highlightedNode)) session.highlightedNode = null;
+  let restoredLayout: Map<string, ManualPosition> | undefined;
   if (activeSession !== sessionKey.value) {
     dragged.clear();
+    restoredLayout = rememberedLayouts.get(sessionKey.value);
     branchOrder.clear();
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
@@ -210,6 +217,9 @@ function rebuild() {
     if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
   }
   autoPositions = positions;
+  // Returning to a session resumes the manual arrangement saved on leaving;
+  // only nodes still present here can carry their remembered slot.
+  if (restoredLayout) for (const [id, position] of restoredLayout) if (positions.has(id)) dragged.set(id, position);
   const placed = { nodes: value.nodes.map(node => ({ ...node, ...positions.get(node.id)!,
     ...dragged.get(node.id),
   })) };
@@ -635,6 +645,23 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
     document.querySelector<HTMLTextAreaElement>(".draft-node textarea")?.focus({ preventScroll: true });
 }
 
+// A session switch resumes that session's remembered viewport instead of
+// re-centering; sessions seen for the first time still focus their active node.
+async function restoreView() {
+  const saved = rememberedViewports.get(sessionKey.value);
+  if (!saved) {
+    void center(defaultFocusId(), true);
+    return;
+  }
+  // Cancel any in-flight centering so it cannot override the restore. A 1ms
+  // transition is visually instant, but it interrupts a running 280ms center
+  // animation (d3 same-name transitions), so the restore is the final word.
+  const request = ++centerRequest;
+  await nextTick();
+  if (request !== centerRequest || !flow.value) return;
+  await flow.value.setViewport(saved, { duration: 1 });
+}
+
 // The minimap colors nodes by the same running flag the pane cards use.
 // Only prompt nodes carry the flag, so gate on the node type: draft nodes
 // must never light up even if DraftNodeData grows a running field someday.
@@ -708,7 +735,11 @@ async function ready(store: VueFlowStore) {
         new Promise<void>((resolve) => setTimeout(resolve, 2000)),
       ]);
     }
-    await center(defaultFocusId(), true, false);
+    // A remount (project switch) re-enters the remembered viewport instead of
+    // resetting to the active node; first views still center on it.
+    const remembered = rememberedViewports.get(sessionKey.value);
+    if (remembered) await store.setViewport(remembered);
+    else await center(defaultFocusId(), true, false);
   } finally {
     booted.value = true;
   }
@@ -808,10 +839,17 @@ watch(
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
+    // Stash the outgoing session's arrangement and pane position before the
+    // rebuild resets per-session state.
+    if (changedSession && activeSession !== undefined) {
+      const viewport = flow.value?.getViewport();
+      if (viewport) rememberedViewports.set(activeSession, viewport);
+      rememberedLayouts.set(activeSession, new Map(dragged));
+    }
     const submittedNode = acceptSubmittedNode();
     rebuild();
     if (submittedNode) void center(submittedNode, true);
-    else if (changedSession) void center(defaultFocusId(), true);
+    else if (changedSession) void restoreView();
   },
   { immediate: true },
 );
