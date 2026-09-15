@@ -44,7 +44,6 @@ import type {
   ShellResult,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
-import { MAX_IMAGE_BYTES } from "../shared/images.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
@@ -381,7 +380,7 @@ export class SettingsService {
   }
 }
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
-const MAX_IMAGE_PREVIEW_BYTES = MAX_IMAGE_BYTES;
+export const MAX_IMAGE_PREVIEW_BYTES = 20 * 1024 * 1024;
 function readBounded(path: string, max: number): { bytes: Buffer; truncated: boolean } {
   const fd = openSync(path, "r");
   try {

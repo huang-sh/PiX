@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   GitService,
+  MAX_IMAGE_PREVIEW_BYTES,
   SessionFiles,
   SettingsService,
   ShellService,
@@ -21,7 +22,6 @@ import {
   bootstrapPixProfile,
 } from "../src/main/services.js";
 import { projectId } from "../src/shared/types.js";
-import { MAX_IMAGE_BYTES } from "../src/shared/images.js";
 const root = resolve(process.cwd(), "test", "workspace");
 test("workspace reads real files and blocks traversal", () => {
   const w = new WorkspaceService(root);
@@ -79,7 +79,7 @@ test("workspace drops oversized image previews instead of encoding them", () => 
   const temp = mkdtempSync(join(tmpdir(), "pix-big-image-"));
   try {
     const path = join(temp, "big.png");
-    writeFileSync(path, Buffer.alloc(MAX_IMAGE_BYTES + 1, 0x42));
+    writeFileSync(path, Buffer.alloc(MAX_IMAGE_PREVIEW_BYTES + 1, 0x42));
     const doc = new WorkspaceService(temp).read("big.png");
     assert.equal(doc.language, "image");
     assert.equal(doc.truncated, true);
