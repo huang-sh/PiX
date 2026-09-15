@@ -266,6 +266,16 @@ export const messages = {
       openProjectFirst: "Open a project to start a session.",
     },
     history: {
+      panel: {
+        title: "History",
+        meta: "{n} entries · {depth} undoable",
+        empty: "No operations recorded yet.",
+        currentPosition: "Current position",
+        lockedBelow: "Actions below this point are locked",
+        lockedTooltip: "This action is irreversible and locks earlier history",
+        failedTooltip: "Last undo/redo attempt failed",
+        footer: "⌘/Ctrl+Z Undo · ⌘/Ctrl+⇧+Z Redo · Esc Close",
+      },
       locked: `"{label}" is irreversible; earlier actions are locked`,
       undone: "Undid: {label}",
       redone: "Redid: {label}",
@@ -974,6 +984,16 @@ export const messages = {
       openProjectFirst: "请先打开一个项目再创建会话。",
     },
     history: {
+      panel: {
+        title: "操作历史",
+        meta: "{n} 条记录 · 可撤销 {depth} 步",
+        empty: "暂无操作记录。",
+        currentPosition: "当前位置",
+        lockedBelow: "以下操作已锁定",
+        lockedTooltip: "此操作不可撤销，且锁定了更早的历史",
+        failedTooltip: "上次撤销/重做失败",
+        footer: "⌘/Ctrl+Z 撤销 · ⌘/Ctrl+⇧+Z 重做 · Esc 关闭",
+      },
       locked: "「{label}」不可撤销，更早的操作已被锁定",
       undone: "已撤销：{label}",
       redone: "已重做：{label}",
