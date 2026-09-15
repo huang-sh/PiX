@@ -1,6 +1,7 @@
-import { computed, onBeforeUnmount, ref, toRaw, watch } from "vue";
+import { computed, onBeforeUnmount, ref, toRaw, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { normalizeTheme } from "../../../shared/theme";
+import { DEFAULT_OUTPUT_STYLE } from "../../../shared/skills";
 import type { SettingsBundle } from "../../../shared/types";
 import { desktop } from "../../api";
 import { settingsDiff } from "../../lib/settings-diff";
@@ -31,7 +32,7 @@ const defaultToolsFallback = /^Win/i.test(navigator.platform)
   ? ["read", "bash", "edit", "write", "powershell"]
   : ["read", "bash", "edit", "write"];
 
-export function useSettingsDraft() {
+export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
   const layout = useLayoutStore();
   const session = useSessionStore();
   const { locale, t, te } = useI18n();
@@ -91,6 +92,7 @@ export function useSettingsDraft() {
         ];
       case "agent":
         return [
+          { path: "outputStyle", label: "settings.rows.outputStyle", scope: "global", type: "select", options: outputStyleSkills?.value ?? [], fallback: DEFAULT_OUTPUT_STYLE, description: "settings.rows.outputStyleDesc" },
           { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
           { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
           { path: "transport", label: "settings.rows.transport", scope: "global", type: "select", options: ["auto", "sse", "websocket", "websocket-cached"], fallback: "auto" },

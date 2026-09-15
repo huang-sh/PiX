@@ -54,7 +54,10 @@ export function useSkills() {
     .map((scope) => ({ scope, count: queriedSkills.value.filter((skill) => scope === "all" || skill.scope === scope).length })));
 
   async function loadSkills(reload = false) {
-    if (layout.settingsCategory !== "skills" || skillBusy.value) return;
+    // The skills list feeds two categories: its own page and the agent
+    // page's output-style select, which lists skills by name.
+    const category = layout.settingsCategory;
+    if ((category !== "skills" && category !== "agent") || skillBusy.value) return;
     skillBusy.value = true;
     skillError.value = "";
     try {

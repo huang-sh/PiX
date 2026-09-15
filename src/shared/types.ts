@@ -286,6 +286,8 @@ export interface PiSettings {
   sessionDir?: string;
   enabledModels?: string[];
   defaultTools?: string[];
+  /** The chosen output style; names a skill whose frontmatter opts in. */
+  outputStyle?: string;
   compaction?: {
     enabled?: boolean;
     reserveTokens?: number;
@@ -384,6 +386,8 @@ export interface RuntimeSkill {
   source: string;
   scope: "user" | "project" | "temporary" | "builtin";
   disableModelInvocation: boolean;
+  /** True when the skill's frontmatter opts in as an output style. */
+  outputStyle: boolean;
   /** True when the file sits in a skills folder PiX may rewrite. */
   editable: boolean;
   /** Path of the bundled skill this one shadows by name, when it does. */

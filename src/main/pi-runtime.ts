@@ -6,6 +6,7 @@ import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { appendOutputStyle, isOutputStyleFile, type OutputStyleSkill } from "./output-style.js";
 import { getSupportedThinkingLevels, type ModelsRefreshResult } from "@earendil-works/pi-ai";
 import {
   detectWindowsBash,
@@ -300,12 +301,18 @@ export class PiRuntime {
     // powershell tool joins the active default set the same way — PiX's own
     // or a migrated pi CLI config — on Windows only; Pi resolves the
     // executable itself when the tool runs.
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
     const settingsManager = withDefaultPowershellTool(
       withDetectedBashShell(
         pi.SettingsManager.create(cwd, agentDir),
         detectBash(),
       ),
     );
+    // One loader pass resolves skills before the append-system prompt, so
+    // this holder already holds the opted-in list when the output style
+    // injection reads it. Fresh per services instance, so session and
+    // session-less services never share stale skills.
+    const outputStyleSkills: OutputStyleSkill[] = [];
     return {
       cwd,
       agentDir,
@@ -320,21 +327,32 @@ export class PiRuntime {
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
         ] as InlineExtension[],
         additionalExtensionPaths: resolveBuiltinPackages(
-          dirname(fileURLToPath(import.meta.url)),
+          moduleDir,
           settingsManager,
         ),
         // Built-in skills load as plain markdown via the same layout
         // resolution (extraResources skills/ beside the app or server);
         // pi ranks them below user skills, so same-named user copies win.
-        additionalSkillPaths: resolveBuiltinSkills(
-          dirname(fileURLToPath(import.meta.url)),
-        ),
+        additionalSkillPaths: resolveBuiltinSkills(moduleDir),
         // The manual-only overrides for those read-only files are applied
         // here. Re-read on every invocation: reload() and new loaders call
         // this closure again, so a toggled built-in takes effect without
         // recreating services.
-        skillsOverride: (base) =>
-          applyBuiltinSkillOverrides(dirname(fileURLToPath(import.meta.url)), base),
+        skillsOverride: (base) => {
+          const resolved = applyBuiltinSkillOverrides(moduleDir, base);
+          outputStyleSkills.length = 0;
+          outputStyleSkills.push(
+            ...resolved.skills.filter((skill) => isOutputStyleFile(String(skill.filePath))),
+          );
+          return resolved;
+        },
+        // The outputStyle setting names a skill; the name joins the
+        // append-system prompt sections after the user's own file, and the
+        // model resolves it against <available_skills>. Reload re-runs both
+        // closures, so a saved switch takes effect on the next reload like
+        // the other pi settings.
+        appendSystemPromptOverride: (base: string[]) =>
+          appendOutputStyle(base, outputStyleSkills, settingsManager),
       },
     };
   }
@@ -787,6 +805,7 @@ export class PiRuntime {
               ? "builtin"
               : skill.sourceInfo?.scope ?? "project",
             disableModelInvocation: Boolean(skill.disableModelInvocation),
+            outputStyle: isOutputStyleFile(String(skill.filePath)),
             editable: isEditableSkillPath(String(skill.filePath), editable),
             ...(shadowsBuiltin.has(String(skill.filePath))
               ? { shadowsBuiltin: shadowsBuiltin.get(String(skill.filePath)) }

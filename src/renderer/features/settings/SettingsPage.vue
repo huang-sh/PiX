@@ -26,10 +26,13 @@ const workspace = useWorkspaceStore();
 const session = useSessionStore();
 const { t } = useI18n();
 
-const draftCtx = useSettingsDraft();
 const inspectorFocus = createInspectorFocus();
-const modelCtx = useModels(draftCtx.draft, inspectorFocus, () => closeDetailsPanel());
+// Created before the draft: the agent category's output-style select lists
+// the loaded skills that opt in with an output-style marker.
 const skillCtx = useSkills();
+const outputStyleSkills = computed(() => skillCtx.skills.value.filter((skill) => skill.outputStyle).map((skill) => skill.name));
+const draftCtx = useSettingsDraft(outputStyleSkills);
+const modelCtx = useModels(draftCtx.draft, inspectorFocus, () => closeDetailsPanel());
 const extensionCtx = useExtensions(inspectorFocus);
 
 // The panels and inspectors read the state they render through these contexts.
