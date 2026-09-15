@@ -33,6 +33,7 @@ import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
+import { history } from "./stores/history";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
 
@@ -400,7 +401,7 @@ async function submitDelete() {
 
 async function forgetProject(record: ProjectGroup) {
   try {
-    session.projects = await desktop.invoke<ProjectGroup[]>("app.forgetProject", { id: record.id });
+    await session.forgetProject(record.id);
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
@@ -678,5 +679,8 @@ onBeforeUnmount(() => {
   >
     {{ layout.notice.message }} ×
   </button>
+  <div v-if="history.toast" class="toast toast-history" role="status" aria-live="polite">
+    {{ history.toast }}
+  </div>
   <div v-if="session.loading" class="loading-bar" />
 </template>
