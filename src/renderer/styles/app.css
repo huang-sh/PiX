@@ -681,9 +681,10 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .process-thinking > summary strong { color: var(--muted); font-size: var(--font-size-caption); }
 .process-thinking > summary::after { content: "›"; color: var(--faint); transition: transform 150ms ease; }
 .process-thinking[open] > summary::after { transform: rotate(90deg); }
-/* Process content shares the chat column's text edge with streamed and final
-   markdown; an indented edge here made running output jump left on completion. */
-.process-thinking > p { padding: 6px 0 10px; color: var(--text); }
+/* Thinking and tool output keep a light 15px inset from the column's text
+   edge: enough to read as nested under their summary rows without the full
+   21px label alignment, which shifted text hardest on completion. */
+.process-thinking > p { padding: 6px 0 10px 15px; color: var(--text); }
 .process-tool { padding: 0; }
 .process-tool > summary { display: grid; grid-template-columns: 14px auto minmax(0,1fr) auto; align-items: center; gap: 7px; min-height: 35px; padding: 0; cursor: pointer; list-style: none; }
 .process-tool > summary::-webkit-details-marker { display: none; }
@@ -691,7 +692,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .process-tool > summary code { min-width: 0; overflow: hidden; color: var(--faint); font: var(--font-size-code)/var(--line-height-code) var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .process-tool > summary::after { content: "›"; color: var(--faint); transition: transform 150ms ease; }
 .process-tool[open] > summary::after { transform: rotate(90deg); }
-.process-tool > pre { padding: 6px 0 10px; color: var(--text); }
+.process-tool > pre { padding: 6px 0 10px 15px; color: var(--text); }
 .process-tool.error > summary strong, .process-tool.error > summary > svg { color: var(--danger); }
 .process-item.waiting { color: var(--faint); }
 .process-item.error { color: var(--danger); }
