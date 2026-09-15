@@ -1,8 +1,12 @@
 import {
+  closeSync,
   cpSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   readdirSync,
   renameSync,
@@ -40,6 +44,7 @@ import type {
   ShellResult,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
+import { MAX_IMAGE_BYTES } from "../shared/images.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
@@ -375,6 +380,25 @@ export class SettingsService {
     return recentProjects;
   }
 }
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_PREVIEW_BYTES = MAX_IMAGE_BYTES;
+function readBounded(path: string, max: number): { bytes: Buffer; truncated: boolean } {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, max);
+    const bytes = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const read = readSync(fd, bytes, offset, length - offset, offset);
+      if (!read) break;
+      offset += read;
+    }
+    return { bytes, truncated: size > max };
+  } finally {
+    closeSync(fd);
+  }
+}
 export class WorkspaceService {
   root: string | null;
   constructor(p: string | null) {
@@ -439,7 +463,6 @@ export class WorkspaceService {
     const root = this.root;
     if (!root) throw new Error("Open a project first");
     const a = this.safe(p),
-      b = readFileSync(a),
       ext = extname(a).toLowerCase(),
       mime: Record<string, string> = {
         ".avif": "image/avif",
@@ -451,19 +474,20 @@ export class WorkspaceService {
         ".png": "image/png",
         ".svg": "image/svg+xml",
         ".webp": "image/webp",
-      },
-      truncated = b.length > 2 * 1024 * 1024,
-      s = truncated ? b.subarray(0, 2 * 1024 * 1024) : b;
-    if (mime[ext])
+      };
+    if (mime[ext]) {
+      const { bytes, truncated } = readBounded(a, MAX_IMAGE_PREVIEW_BYTES);
       return {
         path: relative(root, a).split(sep).join("/"),
         name: basename(a),
         content: "",
-        dataUrl: `data:${mime[ext]};base64,${b.toString("base64")}`,
+        dataUrl: truncated ? undefined : `data:${mime[ext]};base64,${bytes.toString("base64")}`,
         language: "image",
         readonly: true,
-        truncated: false,
+        truncated,
       };
+    }
+    const { bytes: s, truncated } = readBounded(a, MAX_PREVIEW_BYTES);
     if (s.includes(0)) throw new Error("Binary file");
     const language: Record<string, string> = {
       ".ts": "typescript",

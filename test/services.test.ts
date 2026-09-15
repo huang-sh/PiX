@@ -21,6 +21,7 @@ import {
   bootstrapPixProfile,
 } from "../src/main/services.js";
 import { projectId } from "../src/shared/types.js";
+import { MAX_IMAGE_BYTES } from "../src/shared/images.js";
 const root = resolve(process.cwd(), "test", "workspace");
 test("workspace reads real files and blocks traversal", () => {
   const w = new WorkspaceService(root);
@@ -57,6 +58,32 @@ test("workspace returns browser-safe image previews", () => {
     assert.equal(image.language, "image");
     assert.equal(image.readonly, true);
     assert.match(image.dataUrl ?? "", /^data:image\/png;base64,/);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace truncates text previews and only reads the preview window", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-preview-"));
+  try {
+    const path = join(temp, "large.log");
+    writeFileSync(path, "a".repeat(2 * 1024 * 1024 + 100));
+    const doc = new WorkspaceService(temp).read("large.log");
+    assert.equal(doc.truncated, true);
+    assert.equal(doc.readonly, true);
+    assert.equal(doc.content.length, 2 * 1024 * 1024);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace drops oversized image previews instead of encoding them", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-big-image-"));
+  try {
+    const path = join(temp, "big.png");
+    writeFileSync(path, Buffer.alloc(MAX_IMAGE_BYTES + 1, 0x42));
+    const doc = new WorkspaceService(temp).read("big.png");
+    assert.equal(doc.language, "image");
+    assert.equal(doc.truncated, true);
+    assert.equal(doc.dataUrl, undefined);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
