@@ -18,12 +18,14 @@ jobs:
 
       # Rewrites the section between the CONTRIBUTORS markers in both READMEs
       # from the GitHub contributors API. A failed request aborts the job
-      # rather than wiping the section.
+      # rather than wiping the section. The img tags pin width/height because
+      # the avatar CDN ignores the s= parameter for some PNG avatars and
+      # would otherwise serve the original size.
       - name: Regenerate contributor avatars
         run: |
           set -euo pipefail
           curl -sf "https://api.github.com/repos/${GITHUB_REPOSITORY}/contributors?per_page=100" \
-            | jq -r '.[] | "[![\(.login)](\(.avatar_url)&s=80)](https://github.com/\(.login))"' \
+            | jq -r '.[] | "<a href=\"https://github.com/\(.login)\"><img src=\"\(.avatar_url)&s=80\" width=\"80\" height=\"80\" alt=\"\(.login)\"></a>"' \
             > /tmp/avatars.md
           [ -s /tmp/avatars.md ]
           block=/tmp/block.md
