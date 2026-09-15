@@ -37,6 +37,12 @@ async function run() {
       cursor = entry.parentId;
     }
     exported = { header: result.header, entries: path.reverse() };
+    // A path entry can reference the past that left with its branch: a label may
+    // name an entry on an abandoned sibling. Strict validation fails closed on
+    // such a dangling target — no file is produced, sources stay intact. If this
+    // ever blocks real sessions, prune those labels with deleteNode's reparent
+    // pattern; a compaction's firstKeptEntryId must keep failing, because
+    // dropping a retained compaction changes context.
     parseStrict(encodeSession(exported));
     if (!samePersistedValue(pi.buildSessionContext(result.entries, targetLeafId),
       pi.buildSessionContext(exported.entries, targetLeafId)))
