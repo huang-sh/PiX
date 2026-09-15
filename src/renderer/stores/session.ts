@@ -391,6 +391,15 @@ export const useSessionStore = defineStore("session", {
         if (request === this.viewRequest && this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
       } finally { this.deletingNode = false; }
     },
+    // Copies the root-to-node path into a new standalone session; the source
+    // graph is untouched, so the list only gains one entry.
+    async exportBranchSession(id: string) {
+      const graphId = this.current?.graph?.id;
+      if (!graphId) return;
+      const result = await this.control<{ path: string }>({ action: "exportBranchSession", nodeId: id, graphId });
+      await this.refresh();
+      return result;
+    },
     // Only explicit thinking-menu picks may update the sticky level; model-driven
     // clamps stay local to the composer so they never pollute it.
     setUserThinking(level: string) {

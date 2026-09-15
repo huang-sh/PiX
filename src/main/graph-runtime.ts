@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
 import { PiRuntime } from "./pi-runtime.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
@@ -203,6 +203,8 @@ export class GraphRuntime extends PiRuntime {
     if (input.action === "promptAt") return this.acceptAt(input);
     if (input.action === "exportJsonl" || input.action === "exportHtml")
       return this.exclusive(async () => ({ work: this.exportTree(input.action === "exportHtml" ? input : { action: "exportJsonl" }) })).then(({ work }) => work);
+    if (input.action === "exportBranchSession")
+      return this.exclusive(async () => ({ work: this.exportBranch(input) })).then(({ work }) => work);
     if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands"].includes(input.action))
       return super.control(input);
     // Prompt lifetime stays outside admission, so creating a sibling never waits for it.
@@ -433,28 +435,20 @@ export class GraphRuntime extends PiRuntime {
       this.notify();
     }
   }
-  private exportTree(input: Extract<AgentControl, { action: "exportHtml" }> | { action: "exportJsonl" }) {
-    const graph = this.graph;
-    if (!graph || !this.runtime) throw new Error("Open a session before exporting");
-    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
-      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
-    // Capture completed SDK entries in one synchronous turn. Streaming partial
-    // tokens are not session records yet. No runtime is closed or source rewritten.
-    const branches = [...graph.records.values()].map(record => {
+  // Capture completed SDK entries in one synchronous turn. Streaming partial
+  // tokens are not session records yet. No runtime is closed or source rewritten.
+  private exportSources() {
+    return [...this.graph!.records.values()].map(record => {
       const worker = this.workers.get(record.id);
       if (!worker?.snapshot) throw new Error(`Branch source unavailable: ${record.id}`);
       return { record, data: worker.pi.runtime ? this.data(worker.pi) : {
         header: record.header, entries: worker.snapshot.entries,
       } };
     });
-    const outputPath = input.action === "exportHtml" && input.outputPath
-      ? resolve(this.cwd ?? ".", input.outputPath) : join(this.cwd ?? resolve(graph.main, ".."), `pix-tree-${randomUUID()}.${input.action === "exportHtml" ? "html" : "jsonl"}`);
-    if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
+  }
+  private runExportWorker(workerData: Record<string, unknown>) {
     return new Promise<{ path: string }>((resolve, reject) => {
-      const worker = new ExportWorker(new URL("./graph-export-worker.js", import.meta.url), {
-        workerData: { main: graph.main, data: this.data(this), branches,
-          leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: input.action === "exportHtml" },
-      });
+      const worker = new ExportWorker(new URL("./graph-export-worker.js", import.meta.url), { workerData });
       let delivered = false;
       worker.once("message", message => {
         delivered = true;
@@ -463,6 +457,36 @@ export class GraphRuntime extends PiRuntime {
       worker.once("error", reject);
       worker.once("exit", code => { if (!delivered) reject(new Error(`Export worker exited (${code})`)); });
     });
+  }
+  private exportTree(input: Extract<AgentControl, { action: "exportHtml" }> | { action: "exportJsonl" }) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a session before exporting");
+    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
+      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
+    const branches = this.exportSources();
+    const outputPath = input.action === "exportHtml" && input.outputPath
+      ? resolve(this.cwd ?? ".", input.outputPath) : join(this.cwd ?? resolve(graph.main, ".."), `pix-tree-${randomUUID()}.${input.action === "exportHtml" ? "html" : "jsonl"}`);
+    if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
+    return this.runExportWorker({ main: graph.main, data: this.data(this), branches,
+      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: input.action === "exportHtml" });
+  }
+  /** Copy the root-to-node path into a new standalone session; the graph itself stays untouched. */
+  private exportBranch(input: Extract<AgentControl, { action: "exportBranchSession" }>) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a session before exporting");
+    if (input.graphId !== graph.main) throw new Error("Open the same graph before exporting");
+    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
+      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
+    const snapshot = this.snapshot();
+    const node = snapshot.projection.nodes.find(n => n.id === input.nodeId);
+    if (!node) throw new Error("Node no longer exists");
+    // The exported session ends at the selected node; anything after it stays
+    // behind in the original graph. A running turn has no complete records yet.
+    if (node.running) throw new Error("Wait for this turn to finish before exporting it");
+    const outputPath = join(this.dir ?? dirname(graph.main), `pix-branch-${randomUUID()}.jsonl`);
+    if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
+    return this.runExportWorker({ main: graph.main, data: this.data(this), branches: this.exportSources(),
+      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: false, targetLeafId: node.leafEntryId });
   }
   override close(): Promise<void> {
     this.stopping = true;
