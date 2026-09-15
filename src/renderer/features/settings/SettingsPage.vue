@@ -154,6 +154,14 @@ function optionLabel(option: string) {
   return te(key) ? t(key) : option;
 }
 
+// Mirrors withDefaultPowershellTool in the main process: Windows agents get
+// the powershell tool appended to Pi's built-in default set, other platforms
+// keep the four. The sandboxed renderer reads the platform from the browser
+// API, same as isMac() in keyboard-shortcuts.ts.
+const defaultToolsFallback = /^Win/i.test(navigator.platform)
+  ? ["read", "bash", "edit", "write", "powershell"]
+  : ["read", "bash", "edit", "write"];
+
 function rowHint(row: Row) {
   if (row.scope === "app" && row.path === "theme") return t("settings.themeAutoSave");
   return row.description
@@ -221,7 +229,7 @@ const rows = computed<Row[]>(() => {
       ];
     case "tools":
       return [
-        { path: "defaultTools", label: "settings.rows.defaultTools", scope: "project", fallback: ["read", "bash", "edit", "write"] },
+        { path: "defaultTools", label: "settings.rows.defaultTools", scope: "project", fallback: defaultToolsFallback },
         { path: "images.autoResize", label: "settings.rows.resizeImages", scope: "global", type: "check", fallback: true },
         { path: "images.blockImages", label: "settings.rows.blockImages", scope: "global", type: "check", fallback: false },
         { path: "enableSkillCommands", label: "settings.rows.skillCommands", scope: "global", type: "check", fallback: true, description: "settings.rows.skillCommandsDesc" },
@@ -664,6 +672,10 @@ function setValue(row: Row, event: Event) {
   if (row.type === "select" && typeof row.fallback === "number") next = Number(next);
   if (["enabledModels", "defaultTools", "npmCommand"].includes(row.path))
     next = String(next).split(",").map((item) => item.trim()).filter(Boolean);
+  // Clearing defaultTools means "unset" — Pi's defaults plus PiX's powershell
+  // append — not a no-tools list; the settings diff encodes the removed key.
+  if (row.path === "defaultTools" && (next as string[]).length === 0)
+    next = undefined;
   const parts = row.path.split(".");
   let current = rootFor(row);
   if (!current) return;
