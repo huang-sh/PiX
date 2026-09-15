@@ -1,0 +1,51 @@
+name: update-contributors
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 03:00 UTC.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rewrites the section between the CONTRIBUTORS markers in both READMEs
+      # from the GitHub contributors API. A failed request aborts the job
+      # rather than wiping the section.
+      - name: Regenerate contributor avatars
+        run: |
+          set -euo pipefail
+          curl -sf "https://api.github.com/repos/${GITHUB_REPOSITORY}/contributors?per_page=100" \
+            | jq -r '.[] | "[![\(.login)](\(.avatar_url)&s=80)](https://github.com/\(.login))"' \
+            > /tmp/avatars.md
+          [ -s /tmp/avatars.md ]
+          block=/tmp/block.md
+          {
+            echo '<!-- CONTRIBUTORS:START -->'
+            cat /tmp/avatars.md
+            echo '<!-- CONTRIBUTORS:END -->'
+          } > "$block"
+          for f in README.md README.en.md; do
+            awk -v block="$block" '
+              /<!-- CONTRIBUTORS:START -->/ { while ((getline line < block) > 0) print line; close(block); skip=1; next }
+              /<!-- CONTRIBUTORS:END -->/ { skip=0; next }
+              !skip { print }
+            ' "$f" > "$f.new" && mv "$f.new" "$f"
+          done
+
+      # Pushes made with GITHUB_TOKEN do not trigger further workflow runs.
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md README.en.md
+          git diff --cached --quiet && { echo "Contributors unchanged."; exit 0; }
+          git commit -m "chore: update contributor avatars"
+          git push

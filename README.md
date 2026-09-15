@@ -95,10 +95,10 @@ npm run dev
 
 感谢所有为 PiX 做出贡献的人：
 
-<p>
-  <a href="https://github.com/huang-sh"><img src="https://avatars.githubusercontent.com/u/24741118?v=4&s=80" width="80" alt="huang-sh" /></a>
-  <a href="https://github.com/mugpeng"><img src="https://avatars.githubusercontent.com/u/52995448?v=4&s=80" width="80" alt="mugpeng" /></a>
-  <a href="https://github.com/kindredzhang"><img src="https://avatars.githubusercontent.com/u/120791467?v=4&s=80" width="80" alt="kindredzhang" /></a>
-</p>
+<!-- CONTRIBUTORS:START -->
+[![huang-sh](https://avatars.githubusercontent.com/u/24741118?v=4&s=80)](https://github.com/huang-sh)
+[![mugpeng](https://avatars.githubusercontent.com/u/52995448?v=4&s=80)](https://github.com/mugpeng)
+[![kindredzhang](https://avatars.githubusercontent.com/u/120791467?v=4&s=80)](https://github.com/kindredzhang)
+<!-- CONTRIBUTORS:END -->
 
 欢迎参与：问题反馈和功能建议请开 [issue](https://github.com/huang-sh/PiX/issues)；修 bug 或加功能请提交 Pull Request。

@@ -95,10 +95,10 @@ Join our WeChat group:
 
 Thanks to everyone who has contributed to PiX:
 
-<p>
-  <a href="https://github.com/huang-sh"><img src="https://avatars.githubusercontent.com/u/24741118?v=4&s=80" width="80" alt="huang-sh" /></a>
-  <a href="https://github.com/mugpeng"><img src="https://avatars.githubusercontent.com/u/52995448?v=4&s=80" width="80" alt="mugpeng" /></a>
-  <a href="https://github.com/kindredzhang"><img src="https://avatars.githubusercontent.com/u/120791467?v=4&s=80" width="80" alt="kindredzhang" /></a>
-</p>
+<!-- CONTRIBUTORS:START -->
+[![huang-sh](https://avatars.githubusercontent.com/u/24741118?v=4&s=80)](https://github.com/huang-sh)
+[![mugpeng](https://avatars.githubusercontent.com/u/52995448?v=4&s=80)](https://github.com/mugpeng)
+[![kindredzhang](https://avatars.githubusercontent.com/u/120791467?v=4&s=80)](https://github.com/kindredzhang)
+<!-- CONTRIBUTORS:END -->
 
 Contributions are welcome: open an [issue](https://github.com/huang-sh/PiX/issues) for bugs and ideas, or send a pull request.
