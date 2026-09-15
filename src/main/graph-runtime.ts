@@ -475,11 +475,9 @@ export class GraphRuntime extends PiRuntime {
     const snapshot = this.snapshot();
     const node = snapshot.projection.nodes.find(n => n.id === input.nodeId);
     if (!node) throw new Error("Node no longer exists");
-    // Only a tip may be exported: entries after it would have to be dropped or guessed.
-    if (node.running || snapshot.projection.nodes.some(n => n.parentId === node.id)
-      || snapshot.graph?.runs.some(run => run.status === "running"
-        && (run.nodeId === node.id || run.pending?.parentNodeId === node.id)))
-      throw new Error("Export the tip of a branch: nothing may run or branch after it");
+    // The exported session ends at the selected node; anything after it stays
+    // behind in the original graph. A running turn has no complete records yet.
+    if (node.running) throw new Error("Wait for this turn to finish before exporting it");
     const outputPath = join(this.dir ?? dirname(graph.main), `pix-branch-${randomUUID()}.jsonl`);
     if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
     return this.runExportWorker({ main: graph.main, data: this.data(this), branches: this.exportSources(),

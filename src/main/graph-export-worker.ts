@@ -24,8 +24,8 @@ async function run() {
   const pi = await adapter.pi();
   let exported = result;
   if (targetLeafId != null) {
-    // Branch export keeps only the root-to-leaf path. The caller guarantees the
-    // leaf is a branch tip, so nothing after it can be dropped this way.
+    // Branch export keeps only the root-to-leaf path: the selected node becomes
+    // the new session's tip, and every entry after it stays in the original graph.
     const byId = new Map(result.entries.map(entry => [entry.id, entry]));
     const path: RawSessionEntry[] = [];
     const seen = new Set<string>();

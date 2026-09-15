@@ -227,7 +227,7 @@ test("independent branches persist without merging; export during a run preserve
     rmSync(home, { recursive: true, force: true });
   }
 });
-test("branch export copies a root-to-tip path into a standalone session without touching the graph", { timeout: 30000 }, async () => {
+test("branch export copies a root-to-node path into a standalone session without touching the graph", { timeout: 30000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-export-branch-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
@@ -264,8 +264,15 @@ test("branch export copies a root-to-tip path into a standalone session without 
 
     await assert.rejects(runtime.control({ action: "exportBranchSession", graphId: "other", nodeId: a2 }), /same graph/);
     await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: "turn:gone" }), /no longer exists/);
-    for (const nodeId of [root, a]) await assert.rejects(
-      runtime.control({ action: "exportBranchSession", graphId, nodeId }), /tip of a branch/);
+    // Any node exports its root-to-node path; the turns after it stay behind.
+    const midExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a }) as { path: string };
+    const midRaw = readFileSync(midExport.path, "utf8");
+    assert.ok(midRaw.includes("root prompt") && midRaw.includes("A answer"));
+    for (const text of ["A next question", "B question", "main question"]) assert.ok(!midRaw.includes(text), text);
+    const rootExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: root }) as { path: string };
+    const rootRaw = readFileSync(rootExport.path, "utf8");
+    assert.ok(rootRaw.includes("root answer"));
+    assert.ok(!rootRaw.includes("A question") && !rootRaw.includes("main question"));
 
     const exported = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a2 }) as { path: string };
     const raw = readFileSync(exported.path, "utf8");
@@ -294,7 +301,7 @@ test("branch export copies a root-to-tip path into a standalone session without 
       return run?.status === "running" && Boolean(run.nodeId);
     });
     const held = runtime.snapshot().graph!.runs.find(r => r.requestId === "held")!;
-    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /tip of a branch/);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /Wait for this turn/);
     releaseHeld();
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
 
