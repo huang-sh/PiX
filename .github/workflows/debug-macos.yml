@@ -1,5 +1,7 @@
 name: debug-macos
-on: workflow_dispatch
+on:
+  push:
+    branches: [debug/macos-registry]
 jobs:
   repro:
     runs-on: macos-14
