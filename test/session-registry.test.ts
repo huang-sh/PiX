@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
@@ -36,7 +36,11 @@ async function until(check: () => boolean) {
   throw new Error("Timed out waiting for controller state");
 }
 
-const workspace = () => mkdtempSync(join(tmpdir(), "pix-registry-ws-"));
+// The controller canonicalizes session paths through realpath (junctioned
+// projects must collapse to one entry), and on macOS tmpdir() sits behind the
+// /var -> /private/var symlink — so fixtures must be canonical from birth or
+// every path the tests assert against would diverge from the registry's.
+const workspace = () => realpathSync(mkdtempSync(join(tmpdir(), "pix-registry-ws-")));
 
 test("late local opens keep the latest selection, including a project switch", async () => {
   const ws = workspace(), other = workspace();
