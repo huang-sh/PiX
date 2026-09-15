@@ -666,7 +666,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-process { margin: -4px 0 17px; }
 .agent-process > summary { display: flex; align-items: center; gap: 7px; min-height: 37px; padding: 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--font-size-caption); cursor: pointer; list-style: none; }
 .agent-process > summary::-webkit-details-marker { display: none; }
-.agent-process > summary .disclosure { flex: 0 0 auto; margin-left: auto; color: var(--faint); transition: transform 150ms ease; }
+.agent-process > summary .disclosure { flex: 0 0 auto; color: var(--faint); transition: transform 150ms ease; }
 .agent-process[open] > summary .disclosure { transform: rotate(90deg); }
 .process-items { display: grid; gap: 0; }
 .process-item { min-width: 0; padding: 10px 0; color: var(--text); font-size: var(--font-size-caption); }

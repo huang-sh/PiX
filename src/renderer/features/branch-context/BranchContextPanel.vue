@@ -411,7 +411,7 @@ onBeforeUnmount(() => {
       >
         <summary>
           <LoaderCircle :size="14" class="spin" />
-          {{ t("branch.working", { n: activity.pass }) }}
+          {{ activity.pass > 1 ? t("branch.workingPass", { n: activity.pass }) : t("branch.working") }}
           <ChevronRight class="disclosure" :size="13" />
         </summary>
         <div class="process-items">
