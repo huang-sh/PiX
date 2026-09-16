@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
-import { basename, posix, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { basename, dirname, posix, resolve } from "node:path";
+import { debugLog, logFile } from "./debug-log.js";
 import type {
   AgentControl,
   DesktopEvent,
@@ -197,7 +198,7 @@ export class MainController {
         } else {
           this.scheduleBackgroundRefresh(entry);
         }
-      } catch {}
+      } catch (e) { debugLog("controller: live snapshot refresh", e); }
     }
   }
   private readonly backgroundRefresh = new Map<SessionEntry, NodeJS.Timeout>();
@@ -216,7 +217,7 @@ export class MainController {
       if (snapshot) this.rememberSnapshot(entry.project, snapshot);
       // Decorated project groups carry running markers and fresh rows for
       // every project, not just the one in view.
-      try { this.emit({ type: "sessions", payload: { projects: this.projectGroups() } }); } catch {}
+      try { this.emit({ type: "sessions", payload: { projects: this.projectGroups() } }); } catch (e) { debugLog("controller: project groups emit", e); }
     }, 500);
     timer.unref();
     this.backgroundRefresh.set(entry, timer);
@@ -329,7 +330,7 @@ export class MainController {
   private async pushCatalogs(input: AgentControl) {
     for (const entry of this.registry.liveEntries())
       // Best-effort per session: one stale runtime must not fail the settings reply.
-      try { await entry.runtime?.adoptCatalog(input); } catch {}
+      try { await entry.runtime?.adoptCatalog(input); } catch (e) { debugLog("controller: adoptCatalog", e); }
   }
   /**
    * Re-binds an entry whose runtime moved to another session file (fork,
@@ -532,6 +533,14 @@ export class MainController {
         current: this.current,
       };
     }
+    if (route === "app.openLogs") {
+      const file = logFile();
+      mkdirSync(dirname(file), { recursive: true });
+      // Revealing the file itself points a bug report at what to send; before
+      // the first failure there is only the empty folder to show.
+      this.platform.showItemInFolder(existsSync(file) ? file : dirname(file));
+      return;
+    }
     if (route === "app.forgetProject") {
       const id = String(v.id);
       if (this.project && id === projectId(this.project))
@@ -682,7 +691,7 @@ export class MainController {
         if (!p) return null;
         try {
           await this.projectRuntime.validate(p);
-        } catch {}
+        } catch (e) { debugLog("controller: session import validation", e); }
         const imported = this.files.import(p);
         return { imported, sessions: await this.sessions() };
       }

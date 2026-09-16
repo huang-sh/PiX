@@ -1,5 +1,6 @@
 import { dirname, basename, join } from "node:path";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
+import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -348,7 +349,7 @@ export class PiRuntime {
       // throw into that call stack, or the message would not be saved.
       try {
         forwarder.push({ ...(payload as object), ...this.eventScope });
-      } catch {}
+      } catch (e) { debugLog("pi-runtime: event push", e); }
     });
     this.unsubscribe = () => { unsubscribe(); forwarder.dispose(); };
   }

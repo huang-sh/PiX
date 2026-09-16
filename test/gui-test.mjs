@@ -1188,6 +1188,13 @@ try {
         throw new Error(`Missing ${category} setting: ${setting}`);
     });
   }
+  // The log folder action is asserted, never clicked: it would open the
+  // machine's file manager during the test run.
+  await cdp.evaluate("document.querySelector('[data-settings-category=about]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-about-logs]'))")))
+      throw new Error("Missing the About page log folder action");
+  });
   await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings-models.png"), Buffer.from(screenshot.data, "base64"));

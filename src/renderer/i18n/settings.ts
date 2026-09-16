@@ -216,6 +216,8 @@ export const en = {
       checkUpdates: "Check for updates",
       sourceFeedback: "Source code & feedback",
       updatesHint: "Check for new versions on the GitHub releases page.",
+      openLogs: "Show log folder",
+      logsFailed: "Could not open the log folder. Please try again.",
       openFailed: "Could not open the link. Please try again.",
     },
     rows: {
@@ -536,6 +538,8 @@ export const zhCN: typeof en = {
       checkUpdates: "检查更新",
       sourceFeedback: "源代码与反馈",
       updatesHint: "在 GitHub 发布页面查看新版本。",
+      openLogs: "显示日志目录",
+      logsFailed: "无法打开日志目录，请重试。",
       openFailed: "无法打开链接，请重试。",
     },
     rows: {

@@ -3,6 +3,7 @@ import { randomInt } from "node:crypto";
 import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
+import { debugLog } from "./debug-log.js";
 import {
   PIX_REMOTE_PROTOCOL,
   MAX_REMOTE_PAYLOAD,
@@ -391,7 +392,7 @@ export class WslHostClient {
       return;
     }
     if (message.type === "model.request") {
-      void this.runModelRequest(message);
+      void this.runModelRequest(message).catch(e => debugLog("wsl-host-client: model request", e));
       return;
     }
     if (message.type === "model.cancel") {

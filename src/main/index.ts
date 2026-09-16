@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
+import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
@@ -23,6 +24,8 @@ const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
 let tray: Tray | undefined;
 let isQuitting = false;
+// Set once the startup chain reaches its end; anything earlier leaves no usable window.
+let started = false;
 let currentTheme: ThemePreference = "light";
 const zhUi = () => {
   const lang = controller.settings.bundle().app.language;
@@ -31,6 +34,22 @@ const zhUi = () => {
     (lang === "system" && app.getLocale().startsWith("zh"))
   );
 };
+/**
+ * A failure that leaves the app without a usable window: record the cause for
+ * support, then show it, because the user would otherwise see nothing at all.
+ */
+function reportFailure(kind: "startup" | "window", context: string, error: unknown) {
+  debugLog(context, error);
+  // A startup failure can predate the settings service, so the wording must not
+  // depend on reading it; the OS locale answers instead.
+  let zh: boolean;
+  try { zh = zhUi(); } catch { zh = app.getLocale().startsWith("zh"); }
+  const head = kind === "startup"
+    ? (zh ? "PiX 启动失败" : "PiX failed to start")
+    : (zh ? "PiX 无法打开窗口" : "PiX could not open its window");
+  const detail = error instanceof Error ? error.message : String(error);
+  dialog.showErrorBox("PiX", `${head}: ${detail}\n\n${zh ? "日志" : "Log"}: ${logFile()}`);
+}
 // The tray icon only exists while it can be needed: it appears on the first
 // close-to-tray hide and lives until quit (restore-from-tray keeps it, the
 // way tray-native apps behave).
@@ -43,8 +62,10 @@ function ensureTray() {
   tray = new Tray(icon);
   tray.setToolTip("PiX");
   const restore = () => {
-    win?.show();
-    win?.focus();
+    // macOS keeps the app alive after its last window closes, so the tray has
+    // to bring a window back rather than re-show one that no longer exists.
+    if (!win) void create().catch(e => reportFailure("window", "index: create from tray", e));
+    else { win.show(); win.focus(); }
   };
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -129,7 +150,7 @@ async function create() {
       backgroundThrottling: false,
     },
   });
-  win.once("ready-to-show", () => win.show());
+  win.once("ready-to-show", () => win?.show());
   win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
@@ -168,6 +189,10 @@ async function create() {
     win.hide();
     ensureTray();
   });
+  // Release the reference the moment the window is destroyed: every later
+  // broadcast and theme sync then no-ops instead of throwing into the agent
+  // event stream (macOS keeps the app alive after its last window closes).
+  win.on("closed", () => { win = undefined; });
   if (process.env.ELECTRON_RENDERER_URL)
     await win.loadURL(process.env.ELECTRON_RENDERER_URL);
   else await win.loadFile(join(dir, "../renderer/index.html"));
@@ -208,7 +233,7 @@ app.whenReady().then(async () => {
       await openExternal(url);
     },
     showItemInFolder(path) {
-      if (!existsSync(path)) throw new Error("Session file was not found or is inaccessible");
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
       shell.showItemInFolder(path);
     },
     quit() {
@@ -255,6 +280,13 @@ app.whenReady().then(async () => {
     clipboard.writeText(text),
   );
   await create();
+  started = true;
+}).catch(e => {
+  // A half-built window would leave the user staring at a blank page, so a
+  // startup that never completed exits once the error box is dismissed. The
+  // finally keeps that promise even when the box itself cannot be shown.
+  try { reportFailure("startup", "index: startup", e); }
+  finally { if (!started) app.quit(); }
 });
 let sessionsClosed = false;
 let closingSessions = false;
@@ -276,5 +308,5 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) void create();
+  if (BrowserWindow.getAllWindows().length === 0) void create().catch(e => reportFailure("window", "index: create from activate", e));
 });

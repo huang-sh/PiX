@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { debugLog } from "./debug-log.js";
 import type {
   AgentControl,
   BrokerModel,
@@ -288,7 +289,7 @@ export class RemoteWorkspacePool {
     if (this.remoteRecycleTimer || !this.remotePool.size) return;
     const timer = setTimeout(() => {
       this.remoteRecycleTimer = undefined;
-      void this.recycleRemote();
+      void this.recycleRemote().catch(e => debugLog("remote-pool: recycle", e));
     }, Math.min(5_000, this.remoteIdleMs));
     timer.unref();
     this.remoteRecycleTimer = timer;
