@@ -33,8 +33,10 @@ import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
-import { history } from "./stores/history";
+import { history, togglePanel } from "./stores/history";
 import HistoryPanel from "./components/HistoryPanel.vue";
+import HistoryButton from "./components/HistoryButton.vue";
+import { handleHistoryKeys } from "./history-keys";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
 
@@ -512,6 +514,7 @@ function openReleaseNotes() {
 
 function keydown(event: KeyboardEvent) {
   if (shortcutsBlocked(event)) return;
+  if (handleHistoryKeys(event)) return;
   const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
   if (action) {
     event.preventDefault();
@@ -521,6 +524,7 @@ function keydown(event: KeyboardEvent) {
       case "navigator": void layout.toggle("navigator"); break;
       case "tools": void layout.toggle("content"); break;
       case "settings": openSettings(); break;
+      case "history": togglePanel(); break;
     }
   } else if (event.key === "Escape" && layout.screen === "settings") closeSettings();
 }
@@ -684,5 +688,6 @@ onBeforeUnmount(() => {
     {{ history.toast }}
   </div>
   <HistoryPanel />
+  <HistoryButton />
   <div v-if="session.loading" class="loading-bar" />
 </template>

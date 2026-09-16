@@ -1467,6 +1467,56 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   color: var(--faint);
   text-align: center;
 }
+
+/* ── floating history button ───────────────────────────────────────── */
+
+.history-floating-btn {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 155;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: var(--shadow);
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+  cursor: pointer;
+}
+
+.history-floating-btn:hover {
+  background: var(--muted-surface);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.history-floating-btn-open {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.history-floating-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
 .update-banner { position: fixed; top: 48px; left: 50%; transform: translateX(-50%); z-index: 170; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 32px); padding: 8px 12px; border: 1px solid var(--accent); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); font-size: var(--font-size-ui); }
 .remote-disconnected { position: fixed; top: 48px; left: 50%; transform: translateX(-50%); z-index: 180; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 32px); padding: 8px 12px; border: 1px solid var(--danger); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); font-size: var(--font-size-ui); }
 .remote-stage-log { margin: 16px 0 0; padding-left: 20px; text-align: left; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.8; }
