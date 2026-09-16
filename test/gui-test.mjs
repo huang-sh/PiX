@@ -40,7 +40,7 @@ let localeSource;
 if (verifyHmr) {
   cpSync(join(root, "src"), join(testHome, "src"), { recursive: true });
   cpSync(join(root, "package.json"), join(testHome, "package.json"));
-  localeFile = join(testHome, "src/renderer/i18n.ts");
+  localeFile = join(testHome, "src/renderer/i18n/app.ts");
   localeSource = readFileSync(localeFile, "utf8");
   writeFileSync(localeFile, localeSource.replace(/^\s+(copyPath|copySessionId|revealSession):.*\r?\n/gm, ""));
   const { createServer } = await import("vite");

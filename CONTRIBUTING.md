@@ -29,7 +29,7 @@ Also:
 - Keep pi itself responsible for agent behavior, tools, sessions, model calls, and context management; PiX integrates through the embedded pi-server RPC instead of reimplementing pi internals.
 - Sessions are real Pi sessions and the graph is derived from their parent links; do not invent new formats or mutate session JSONL files directly.
 - The renderer has no Node access; IPC goes through the isolated preload with narrow, typed contracts defined in `src/shared`.
-- User-facing strings live in `src/renderer/i18n.ts` and must be updated in both Chinese and English.
+- User-facing strings live in `src/renderer/i18n/` (one domain file per feature area, each holding both locales) and must be updated in both Chinese and English.
 - Follow [AGENTS.md](AGENTS.md): fix root causes, and remove obsolete code and outdated comments.
 
 ## Testing Notes
