@@ -8,6 +8,15 @@ import { pixHome } from "./paths.js";
 export const MAX_BYTES = 1_048_576;
 const MAX_DETAIL = 1_024;
 
+// The remote host shares its machine with its owner, so the desktop owns the log
+// file and the host keeps reporting on stderr instead (docs/log.md §1).
+let enabled = true;
+
+/** Turns file logging off for processes that must not leave files behind. */
+export function setDebugLogEnabled(value: boolean) {
+  enabled = value;
+}
+
 export const logFile = () => join(pixHome(), ".pix", "log", "main.log");
 
 const describe = (error: unknown) => {
@@ -25,6 +34,7 @@ const describe = (error: unknown) => {
  * state, so another process or a hand-cleaned folder cannot desync it.
  */
 export function debugLog(context: string, error?: unknown) {
+  if (!enabled) return;
   try {
     const file = logFile();
     mkdirSync(dirname(file), { recursive: true });

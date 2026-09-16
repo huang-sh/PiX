@@ -498,7 +498,7 @@ export type DesktopRoute =
   | "app.bootstrap"
   | "app.pickProject"
   | "app.openProject"
-  | "app.openLogs"
+  | "app.revealLogs"
   | "app.forgetProject"
   | "app.openExternal"
   | "app.revealSession"

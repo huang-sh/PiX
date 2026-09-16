@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { debugLog, MAX_BYTES } from "../src/main/debug-log.js";
+import { debugLog, MAX_BYTES, setDebugLogEnabled } from "../src/main/debug-log.js";
 
 const withHome = (run: (home: string) => void | Promise<void>) => async () => {
   const previous = process.env.PIX_HOME;
@@ -111,4 +111,17 @@ test("recreates the folder when it disappears while the app runs", withHome(asyn
   debugLog("unit: after removal", "two");
   const content = await waitForText(file, "unit: after removal");
   assert.equal(content.split("\n").filter(Boolean).length, 1);
+}));
+
+test("writes nothing once the host disables file logging", withHome(async (home) => {
+  setDebugLogEnabled(false);
+  try {
+    debugLog("unit: disabled", new Error("invisible"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.ok(!existsSync(logPath(home)), "disabled logger created a file");
+  } finally {
+    setDebugLogEnabled(true);
+  }
+  debugLog("unit: re-enabled", "visible");
+  assert.match(await waitForText(logPath(home), "unit: re-enabled"), /unit: re-enabled/u);
 }));

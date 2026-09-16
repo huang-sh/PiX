@@ -22,7 +22,7 @@ async function openLink(url: string) {
 async function showLogs() {
   error.value = "";
   try {
-    await desktop.invoke("app.openLogs");
+    await desktop.invoke("app.revealLogs");
   } catch {
     error.value = t("settings.about.logsFailed");
   }

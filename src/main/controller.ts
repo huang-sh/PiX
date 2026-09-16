@@ -533,7 +533,7 @@ export class MainController {
         current: this.current,
       };
     }
-    if (route === "app.openLogs") {
+    if (route === "app.revealLogs") {
       const file = logFile();
       mkdirSync(dirname(file), { recursive: true });
       // Revealing the file itself points a bug report at what to send; before

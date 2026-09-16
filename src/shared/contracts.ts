@@ -161,7 +161,7 @@ export function validateRouteInput(
       return { id: str(v.id, "id"), path: str(v.path, "path") };
     case "app.openProject":
       return { id: str(v.id, "id") };
-    case "app.openLogs":
+    case "app.revealLogs":
       return {};
     case "app.forgetProject":
       return { id: str(v.id, "id") };

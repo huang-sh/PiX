@@ -35,13 +35,13 @@ test("the log folder action creates the directory and reveals the log once it ex
   const controller = new MainController(root, platform);
   const file = join(home, ".pix", "log", "main.log");
   try {
-    await controller.invoke("app.openLogs");
+    await controller.invoke("app.revealLogs");
     assert.deepEqual(revealed, [dirname(file)]);
     assert.ok(existsSync(dirname(file)));
 
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, "line\n");
-    await controller.invoke("app.openLogs");
+    await controller.invoke("app.revealLogs");
     assert.deepEqual(revealed, [dirname(file), file]);
   } finally {
     controller.dispose();
