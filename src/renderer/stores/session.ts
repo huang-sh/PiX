@@ -17,9 +17,20 @@ import { reduceAgentActivity } from "../../shared/agent-stream";
 import { entryAnchorForNode, isSessionRunning } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
+import { track, trackEvent } from "./history";
 import { useLayoutStore } from "./layout";
 import { useWorkspaceStore } from "./workspace";
 import { createBranchMessageCache, reuseGraphProjection } from "../lib/session-view";
+
+// Display name for a session row, falling back to the raw path when the
+// session has never been named or prompted.
+function displayName(session: SessionSummary): string {
+  return session.name || session.firstMessage || session.id;
+}
+const TRUNCATE = 24;
+function truncate(text: string): string {
+  return text.length > TRUNCATE ? `${text.slice(0, TRUNCATE)}…` : text;
+}
 
 const messageCaches = new WeakMap<object, ReturnType<typeof createBranchMessageCache>>();
 
@@ -351,11 +362,38 @@ export const useSessionStore = defineStore("session", {
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
       const project = this.activeProjectId, path = this.current?.session.path, request = this.viewRequest;
+      // Abort/lock entries are captured before the IPC settles: the abort run
+      // disappears from the snapshot, so its name must be read from the pre-stop graph.
+      const abortLabel = this.abortLabel(input);
+      const sendLabel = this.sendPromptLabel(input);
       const result = await desktop.invoke<T>("agent.control", input);
       if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path
         && result && typeof result === "object" && "projection" in result)
         this.applySnapshot(result as unknown as SessionSnapshot);
+      if (abortLabel) trackEvent({ kind: "abortRun", label: abortLabel });
+      if (sendLabel) trackEvent({ kind: "sendPrompt", label: sendLabel });
       return result;
+    },
+    // A lock entry names the run/branch it stops when one is identifiable, else
+    // it falls back to a generic label. Only abort actions resolve to one.
+    abortLabel(input: Record<string, unknown>): string | null {
+      const action = String(input.action);
+      if (action !== "abort" && action !== "branchAbort") return null;
+      const runId = typeof input.runId === "string" ? input.runId : undefined;
+      const run = this.current?.graph?.runs.find((candidate) =>
+        runId ? candidate.runId === runId : candidate.status === "running");
+      const node = run && this.current?.projection.nodes.find((item) => item.id === run.nodeId);
+      return node?.title
+        ? i18n.global.t("history.abortRun", { name: truncate(node.title) })
+        : i18n.global.t("history.abort");
+    },
+    // A submitted turn is irreversible: it seals the journal as a lock. Applies
+    // to both the plain prompt action and a pinned-column promptAt.
+    sendPromptLabel(input: Record<string, unknown>): string | null {
+      const action = String(input.action);
+      if (action !== "prompt" && action !== "promptAt") return null;
+      const text = typeof input.text === "string" && input.text.trim() ? input.text : "";
+      return i18n.global.t("history.sendPrompt", { text: truncate(text) || "…" });
     },
     messageWindow(limit: number) {
       return this.messageWindowFor(focusId(this), limit);
@@ -385,10 +423,17 @@ export const useSessionStore = defineStore("session", {
       if (!this.current || this.deleteBlockedReason) return;
       const graphId = this.current.graph!.id;
       const request = this.viewRequest;
+      const node = this.current.projection.nodes.find((item) => item.id === id);
       this.deletingNode = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("agent.control", { action: "deleteNode", nodeId: id, graphId });
-        if (request === this.viewRequest && this.current?.graph?.id === graphId) this.applySnapshot(snapshot);
+        if (request === this.viewRequest && this.current?.graph?.id === graphId) {
+          this.applySnapshot(snapshot);
+          trackEvent({
+            kind: "deleteTurn",
+            label: i18n.global.t("history.deleteTurn", { name: node?.title || id }),
+          });
+        }
       } finally { this.deletingNode = false; }
     },
     // Copies the root-to-node path into a new standalone session; the source
@@ -470,23 +515,45 @@ export const useSessionStore = defineStore("session", {
       return this.current?.projection.activeNodeId ?? undefined;
     },
     async create() {
+      const snapshot = await this.applyCreate();
+      if (!snapshot) return;
+      const createdPath = snapshot.session.path;
+      // Redo recreates a fresh session (a new path each time); the label from
+      // the original creation is reused so the entry stays readable.
+      track({
+        kind: "createSession",
+        label: i18n.global.t("history.createSession", { name: displayName(snapshot.session as SessionSummary) }),
+        undo: async () => {
+          const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>(
+            "session.delete", { path: createdPath, confirmed: true });
+          if (!result.cancelled) this.applyDeletion(createdPath, result.sessions);
+          return !result.cancelled;
+        },
+        redo: async () => {
+          await this.applyCreate();
+          return true;
+        },
+      });
+    },
+    async applyCreate(): Promise<SessionSnapshot | null> {
       if (!useWorkspaceStore().project) {
         useLayoutStore().showNotice(
           i18n.global.t("notice.openProjectFirst"),
           "warning",
         );
-        return;
+        return null;
       }
       const request = ++this.viewRequest;
       const project = this.activeProjectId;
       const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
-      if (request !== this.viewRequest || project !== this.activeProjectId) return;
+      if (request !== this.viewRequest || project !== this.activeProjectId) return null;
       // The reply is authoritative for the new file, and the broadcast event may
       // still be in flight: without adopting it here the list and slash commands
       // would keep serving the session that was just replaced.
       if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
       this.focusedNode = this.current?.projection.activeNodeId ?? null;
       await Promise.all([this.refresh(), this.loadCommands()]);
+      return snapshot;
     },
     async importSession() {
       const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(
@@ -499,6 +566,24 @@ export const useSessionStore = defineStore("session", {
       if (result.imported) await this.open(result.imported);
     },
     async rename(path: string, name: string) {
+      const previous = this.sessions.find((session) => session.path === path);
+      const prevName = previous?.name ?? "";
+      const labelName = previous ? displayName(previous) : path;
+      await this.applyRename(path, name);
+      track({
+        kind: "renameSession",
+        label: i18n.global.t("history.renameSession", { name: labelName, newname: name }),
+        undo: async () => {
+          await this.applyRename(path, prevName);
+          return true;
+        },
+        redo: async () => {
+          await this.applyRename(path, name);
+          return true;
+        },
+      });
+    },
+    async applyRename(path: string, name: string) {
       const result = await desktop.invoke<{ sessions: SessionSummary[]; current?: SessionSnapshot }>(
         "session.rename",
         { path, name },
@@ -521,20 +606,82 @@ export const useSessionStore = defineStore("session", {
       this.syncProject();
     },
     async remove(path: string, confirmed = false) {
+      const target = this.sessions.find((session) => session.path === path);
+      const labelName = target ? displayName(target) : path;
       const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>("session.delete", confirmed ? { path, confirmed } : { path });
-      if (!result.cancelled) this.applyDeletion(path, result.sessions);
+      if (!result.cancelled) {
+        this.applyDeletion(path, result.sessions);
+        trackEvent({ kind: "deleteSession", label: i18n.global.t("history.deleteSession", { name: labelName }) });
+      }
     },
-    async pin(path: string, pinned: boolean) {
+    async forgetProject(id: string) {
+      const record = this.projects.find((item) => item.id === id);
+      const labelName = record?.project.name ?? id;
+      this.projects = await desktop.invoke<ProjectGroup[]>("app.forgetProject", { id });
+      trackEvent({ kind: "removeDirectory", label: i18n.global.t("history.removeDirectory", { name: labelName }) });
+    },
+    async applyPin(path: string, pinned: boolean) {
       const result = await desktop.invoke<{ sessions?: SessionSummary[]; projects: ProjectGroup[] }>("library.pin", { path, pinned });
       this.applyLibrary(result);
     },
-    async archiveSession(path: string, archived: boolean) {
+    async pin(path: string, pinned: boolean) {
+      const target = this.sessions.find((session) => session.path === path);
+      const labelName = target ? displayName(target) : path;
+      await this.applyPin(path, pinned);
+      track({
+        kind: "pin",
+        label: i18n.global.t(pinned ? "history.pin" : "history.unpin", { name: labelName }),
+        undo: async () => {
+          await this.applyPin(path, !pinned);
+          return true;
+        },
+        redo: async () => {
+          await this.applyPin(path, pinned);
+          return true;
+        },
+      });
+    },
+    async applyArchiveSession(path: string, archived: boolean) {
       const result = await desktop.invoke<{ sessions?: SessionSummary[]; projects: ProjectGroup[] }>("library.archiveSession", { path, archived });
       this.applyLibrary(result);
     },
-    async archiveProject(id: string, archived: boolean) {
+    async archiveSession(path: string, archived: boolean) {
+      const target = this.sessions.find((session) => session.path === path);
+      const labelName = target ? displayName(target) : path;
+      await this.applyArchiveSession(path, archived);
+      track({
+        kind: archived ? "archiveSession" : "restoreSession",
+        label: i18n.global.t(archived ? "history.archiveSession" : "history.restoreSession", { name: labelName }),
+        undo: async () => {
+          await this.applyArchiveSession(path, !archived);
+          return true;
+        },
+        redo: async () => {
+          await this.applyArchiveSession(path, archived);
+          return true;
+        },
+      });
+    },
+    async applyArchiveProject(id: string, archived: boolean) {
       const result = await desktop.invoke<{ projects: ProjectGroup[] }>("library.archiveProject", { id, archived });
       this.applyLibrary(result);
+    },
+    async archiveProject(id: string, archived: boolean) {
+      const record = this.projects.find((item) => item.id === id);
+      const labelName = record?.project.name ?? id;
+      await this.applyArchiveProject(id, archived);
+      track({
+        kind: archived ? "archiveDirectory" : "restoreDirectory",
+        label: i18n.global.t(archived ? "history.archiveDirectory" : "history.restoreDirectory", { name: labelName }),
+        undo: async () => {
+          await this.applyArchiveProject(id, !archived);
+          return true;
+        },
+        redo: async () => {
+          await this.applyArchiveProject(id, archived);
+          return true;
+        },
+      });
     },
     // Library marks ride back on the invoke reply: the sessions list only
     // exists while a locally open project answers, and projects always come
