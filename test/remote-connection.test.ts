@@ -406,7 +406,7 @@ test("a successful candidate is pooled instead of closing the old host and repor
   const next = candidate(controller);
   t.mock.method(WslHostClient, "connectSsh", async () => next as any);
   await controller.connectSsh("new", "~", true);
-  const result = await controller.openRemoteProject("/new/sub");
+  const result = await controller.pool.openRemoteProject("/new/sub");
   assert.equal(result.project?.path, "/new/sub");
   assert.equal(controller.wsl, next);
   assert.equal(old.disposed, false, "switching remote projects keeps the previous host pooled");
@@ -570,9 +570,9 @@ test("cancelling while the selected folder loads preserves the active workspace"
     }
     return request(route, input);
   };
-  const opening = assert.rejects(controller.openRemoteProject("/new/sub"), /cancelled/);
+  const opening = assert.rejects(controller.pool.openRemoteProject("/new/sub"), /cancelled/);
   await loading;
-  await controller.cancelRemote();
+  await controller.pool.cancelRemote();
   finish(controller.settings.bundle());
   await opening;
   assert.equal(controller.project, project);
@@ -615,7 +615,7 @@ test("bootstrapping a connected remote workspace restores its remembered session
   };
   await controller.invoke("session.open", { path: "/old/s.jsonl" });
 
-  const bootstrapped = await controller.wslBootstrap() as { current?: typeof snapshot };
+  const bootstrapped = await controller.pool.wslBootstrap() as { current?: typeof snapshot };
 
   assert.equal(bootstrapped.current?.session.path, "/old/s.jsonl",
     "a window reload lands back on the session the workspace last showed");
