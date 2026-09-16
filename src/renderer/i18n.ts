@@ -265,6 +265,13 @@ export const messages = {
       contextCompacted: "Context compacted",
       openProjectFirst: "Open a project to start a session.",
     },
+    history: {
+      locked: `"{label}" is irreversible; earlier actions are locked`,
+      undone: "Undid: {label}",
+      redone: "Redid: {label}",
+      undoFailed: "Undo failed: {reason}",
+      redoFailed: "Redo failed: {reason}",
+    },
     renameDialog: {
       title: "Rename session",
       label: "Session name",
@@ -955,6 +962,13 @@ export const messages = {
       resourcesReloaded: "已重新加载 Pi 资源",
       contextCompacted: "已压缩上下文",
       openProjectFirst: "请先打开一个项目再创建会话。",
+    },
+    history: {
+      locked: "「{label}」不可撤销，更早的操作已被锁定",
+      undone: "已撤销：{label}",
+      redone: "已重做：{label}",
+      undoFailed: "撤销失败：{reason}",
+      redoFailed: "重做失败：{reason}",
     },
     renameDialog: {
       title: "重命名会话",
