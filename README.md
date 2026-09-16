@@ -48,17 +48,18 @@ PiX 把会话组织成一张从左到右生长的图：
   <img src="assets/images/pix-multi-chat-panels.png" alt="多 chat panel：Ctrl+双击不同分支的节点，并排固定最多 3 个聊天列对比对话">
 </p>
 
-## 远程 Node 环境
+## 内置扩展
 
-SSH 和 WSL 共用安装流程：保留正常的已选 Node；首次安装优先使用 PATH 或交互登录环境（如 nvm）中的 Linux Node，最低版本为 22.19.0。安装依赖、启动服务、WebSocket 连接和真实终端检查全部通过后，才切换当前安装。
+PiX 内置两个扩展，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
 
-找不到兼容环境时，才使用 PiX 固定版本的私有 Node；不再跟随桌面端 Node 的补丁版本重复下载。启动使用固定的可执行文件路径，Node 版本变化会重新检查；重新连接时可修复缺失或不兼容的环境。不会修改系统 Node，也不会自动删除旧安装或共享运行时。
+- **`@ff-labs/pi-fff` — 高速文件与内容搜索**：用 FFF（Rust 原生、SIMD 加速）替换内置的 `find` / `grep` 工具：`fffind` 模糊文件名搜索、`ffgrep` 内容搜索、`fff-multi-grep` 多模式搜索。会话开始时后台预索引，搜索即时返回；按 frecency 排序（常用文件靠前），git 修改与未跟踪文件加权。
+- **`@injaneity/pi-computer-use` — 桌面应用操控**：让智能体观察并操控 macOS、Windows、Linux 上的桌面应用：查找打开的应用与窗口、读取界面上的文本与控件、点击、输入、滚动、等待界面变化。适用于应用没有 API、只有图形界面的场景（macOS 助手要求 macOS 14 或更高版本）。
 
-开发测试：`node --test test/remote-runtime.test.mjs`（Windows 默认使用 Ubuntu-24.04，可设置 `PIX_TEST_WSL_DISTRO`）。构建服务端后，`node test/runtime-live-test.mjs --ssh HOST` 或 `--wsl DISTRO` 在独立临时目录验证真实 Node 复用，不切换正式安装。
+`pi-web-access` 不随安装包分发：在设置 → 扩展页可一键安装到用户配置，之后通过 `pi update` 独立更新。它为智能体提供网页搜索、URL 抓取、PDF 抽取与 GitHub 研究能力；网页搜索服务仍使用你自己的配置与凭据。
+
+此外，PiX 自身还带一个内部的 `file-changes` 扩展（不可卸载）：在智能体编辑、写入文件前后拍快照，为"变更"面板提供数据。
 
 ## 下载
-
-PiX 内置 `@injaneity/pi-computer-use` 和 `@ff-labs/pi-fff`，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。`pi-web-access` 不再随安装包分发：在设置 → 扩展页可一键安装到用户配置，之后通过 `pi update` 独立更新；网页搜索服务仍使用用户自己的配置与凭据。
 
 从 [GitHub Releases](https://github.com/huang-sh/PiX/releases) 下载对应平台的安装包：
 
