@@ -191,6 +191,8 @@ function signalWslTestHost(pid, signal) {
   if (result.status !== 0) throw new Error(`WSL test signal failed (${result.status}): ${result.stderr}`);
 }
 try {
+  // Boot budgets are generous: on a cold machine the dev server has to transform
+  // the whole renderer graph before the shell appears.
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
     const targets = await response.json();
@@ -199,7 +201,7 @@ try {
     );
     if (!page) throw new Error("Electron page target missing");
     return page;
-  });
+  }, 90_000);
   cdp = new Cdp(target.webSocketDebuggerUrl);
   await cdp.open();
   await cdp.send("Runtime.enable");
@@ -209,7 +211,7 @@ try {
       "window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))",
     );
     if (!ready) throw new Error(`PiX renderer is not ready\n${stderr}`);
-  });
+  }, 90_000);
   await retry(async () => {
     const value = await cdp.evaluate(`({
       collapsed: window.__pixTest.state().layout.collapsed,
