@@ -40,7 +40,7 @@ let localeSource;
 if (verifyHmr) {
   cpSync(join(root, "src"), join(testHome, "src"), { recursive: true });
   cpSync(join(root, "package.json"), join(testHome, "package.json"));
-  localeFile = join(testHome, "src/renderer/i18n.ts");
+  localeFile = join(testHome, "src/renderer/i18n/app.ts");
   localeSource = readFileSync(localeFile, "utf8");
   writeFileSync(localeFile, localeSource.replace(/^\s+(copyPath|copySessionId|revealSession):.*\r?\n/gm, ""));
   const { createServer } = await import("vite");
@@ -545,6 +545,44 @@ try {
         if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy full path")
           throw new Error("A second locale hot update did not reach the mounted menu");
       });
+      // Every domain file must reach the live dictionary through its own
+      // self-accept, so probe each one with a sentinel value.
+      for (const domain of ["app", "graph", "remote", "settings", "workbench"]) {
+        const file = join(testHome, "src/renderer/i18n", `${domain}.ts`);
+        const source = readFileSync(file, "utf8");
+        const probe = source.match(/\r?\n  (\w+): \{\r?\n    (\w+): "(?:[^"\\]|\\.)*",/);
+        if (!probe) throw new Error(`No probe message found in ${domain}.ts`);
+        const [, group, key] = probe;
+        const sentinel = `hmr-probe-${domain}`;
+        writeFileSync(file, source.replace(probe[0], () => probe[0].replace(/"[^"]*",$/, `"${sentinel}",`)));
+        const path = [group, key].map((part) => `[${JSON.stringify(part)}]`).join("");
+        await retry(async () => {
+          const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+          if (value !== sentinel) throw new Error(`${domain}.ts hot update did not reach en.${group}.${key} (got ${JSON.stringify(value)})`);
+        });
+        // Re-executing the index re-seeds the registry: the domain that was just
+        // hot updated has to survive and the app has to keep rendering from the
+        // same plugin instance.
+        if (domain === "settings") {
+          const indexPath = join(testHome, "src/renderer/i18n/index.ts");
+          const indexSource = readFileSync(indexPath, "utf8");
+          writeFileSync(indexPath, `${indexSource}// hmr probe\n`);
+          await retry(async () => {
+            const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+            if (value !== sentinel) throw new Error("Re-executing the i18n index dropped a hot updated domain");
+          });
+          writeFileSync(indexPath, indexSource);
+          const appFile = join(testHome, "src/renderer/i18n/app.ts");
+          const appSource = readFileSync(appFile, "utf8");
+          writeFileSync(appFile, appSource.replace('copyPath: "Copy full path"', 'copyPath: "Copy path after index"'));
+          await retry(async () => {
+            if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy path after index")
+              throw new Error("A hot update after re-executing the i18n index did not reach the rendered menu");
+          });
+          writeFileSync(appFile, appSource);
+        }
+        writeFileSync(file, source);
+      }
     }
     await cdp.evaluate("document.querySelector('[data-action=session-rename]').click()");
     await retry(async () => {
