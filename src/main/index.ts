@@ -113,7 +113,9 @@ async function create() {
         ])
       : null,
   );
-  win = new BrowserWindow({
+  // This window owns every listener below and the module-level `win` only
+  // names the current one, so a late event from it cannot clear a replacement.
+  const created = new BrowserWindow({
     icon: join(app.getAppPath(), "resources/icon.png"),
     width: 1600,
     height: 940,
@@ -150,8 +152,9 @@ async function create() {
       backgroundThrottling: false,
     },
   });
-  win.once("ready-to-show", () => win?.show());
-  win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
+  win = created;
+  created.once("ready-to-show", () => { if (win === created) created.show(); });
+  created.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
   });
@@ -160,17 +163,17 @@ async function create() {
   // known link kinds; anything that still reaches a navigation attempt goes
   // through the same protocol-allowlisted external open (and is dropped for
   // non-web protocols such as file:).
-  win.webContents.on("will-navigate", (event: Event, url: string) => {
+  created.webContents.on("will-navigate", (event, url) => {
     // A navigation to the page's own URL is the app reloading itself (vite
     // HMR full-reload in dev); it must proceed in-place, not be handed to
     // the OS browser as if it were an external link.
-    if (url === win.webContents.getURL()) return;
+    if (url === created.webContents.getURL()) return;
     event.preventDefault();
     void openExternal(url).catch(() => {});
   });
-  win.webContents.on(
+  created.webContents.on(
     "will-attach-webview",
-    (_e: unknown, p: Record<string, unknown>) => {
+    (_e, p) => {
       delete p.preload;
       p.nodeIntegration = false;
       p.contextIsolation = true;
@@ -182,20 +185,20 @@ async function create() {
   // isQuitting flag (before-quit fires before close events) or the tray
   // menu's Quit item. macOS keeps native behavior: the window closes and the
   // app stays in the dock.
-  win.on("close", (e: { preventDefault(): void }) => {
+  created.on("close", (e: { preventDefault(): void }) => {
     if (isQuitting || process.platform === "darwin") return;
     if (controller.settings.bundle().app.closeToTray === false) return;
     e.preventDefault();
-    win.hide();
+    created.hide();
     ensureTray();
   });
   // Release the reference the moment the window is destroyed: every later
   // broadcast and theme sync then no-ops instead of throwing into the agent
   // event stream (macOS keeps the app alive after its last window closes).
-  win.on("closed", () => { win = undefined; });
+  created.on("closed", () => { if (win === created) win = undefined; });
   if (process.env.ELECTRON_RENDERER_URL)
-    await win.loadURL(process.env.ELECTRON_RENDERER_URL);
-  else await win.loadFile(join(dir, "../renderer/index.html"));
+    await created.loadURL(process.env.ELECTRON_RENDERER_URL);
+  else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
   bootstrapPixProfile(pixHome());
