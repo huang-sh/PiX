@@ -65,6 +65,19 @@ export const history = readonly(state);
 
 let nextId = 1;
 
+/** Reset all mutable state to initial values.  For tests only. */
+export function resetForTest(): void {
+  state.entries.length = 0;
+  state.cursor = 0;
+  state.toast = null;
+  state.panelOpen = false;
+  state.busy = false;
+  nextId = 1;
+  // Drain any pending walk so subsequent operations start clean.
+  queue = Promise.resolve();
+  pending = 0;
+}
+
 // ── entry management ──────────────────────────────────────────────────
 
 function truncateRedo(): void {

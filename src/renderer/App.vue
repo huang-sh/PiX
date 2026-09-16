@@ -34,6 +34,7 @@ import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
 import { history } from "./stores/history";
+import HistoryPanel from "./components/HistoryPanel.vue";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
 
@@ -682,5 +683,6 @@ onBeforeUnmount(() => {
   <div v-if="history.toast" class="toast toast-history" role="status" aria-live="polite">
     {{ history.toast }}
   </div>
+  <HistoryPanel />
   <div v-if="session.loading" class="loading-bar" />
 </template>
