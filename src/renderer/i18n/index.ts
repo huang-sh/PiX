@@ -1,13 +1,13 @@
 import { createI18n } from "vue-i18n";
-import { en as appEn, zhCN as appZh } from "./app";
-import { en as graphEn, zhCN as graphZh } from "./graph";
-import { en as remoteEn, zhCN as remoteZh } from "./remote";
-import { en as settingsEn, zhCN as settingsZh } from "./settings";
-import { en as workbenchEn, zhCN as workbenchZh } from "./workbench";
+import * as app from "./app";
+import * as graph from "./graph";
+import * as remote from "./remote";
+import * as settings from "./settings";
+import * as workbench from "./workbench";
 
 export const messages = {
-  en: { ...appEn, ...graphEn, ...workbenchEn, ...remoteEn, ...settingsEn },
-  "zh-CN": { ...appZh, ...graphZh, ...workbenchZh, ...remoteZh, ...settingsZh },
+  en: { ...app.en, ...graph.en, ...workbench.en, ...remote.en, ...settings.en },
+  "zh-CN": { ...app.zhCN, ...graph.zhCN, ...workbench.zhCN, ...remote.zhCN, ...settings.zhCN },
 };
 
 const create = () => createI18n({
@@ -26,13 +26,22 @@ if (import.meta.hot?.data) {
     for (const locale of ["en", "zh-CN"] as const)
       i18n.global.setLocaleMessage(locale, updated.messages[locale]);
   });
+  // Vite hands this callback only the domain module that changed; remember the
+  // latest of each and recompose so a single-file edit still swaps both locales.
+  type Domain = { en: Record<string, any>; zhCN: Record<string, any> };
+  const domains: Record<"app" | "graph" | "remote" | "settings" | "workbench", Domain> = { app, graph, remote, settings, workbench };
+  const asDomain = (mod: unknown): Domain => mod as Domain;
   import.meta.hot.accept(
     ["./app", "./graph", "./remote", "./settings", "./workbench"],
-    ([app, graph, remote, settings, workbench]) => {
-      if (!app || !graph || !remote || !settings || !workbench) return;
-      const next = {
-        en: { ...app.en, ...graph.en, ...workbench.en, ...remote.en, ...settings.en },
-        "zh-CN": { ...app.zhCN, ...graph.zhCN, ...workbench.zhCN, ...remote.zhCN, ...settings.zhCN },
+    ([appMod, graphMod, remoteMod, settingsMod, workbenchMod]) => {
+      if (appMod) domains.app = asDomain(appMod);
+      if (graphMod) domains.graph = asDomain(graphMod);
+      if (remoteMod) domains.remote = asDomain(remoteMod);
+      if (settingsMod) domains.settings = asDomain(settingsMod);
+      if (workbenchMod) domains.workbench = asDomain(workbenchMod);
+      const next: any = {
+        en: { ...domains.app.en, ...domains.graph.en, ...domains.workbench.en, ...domains.remote.en, ...domains.settings.en },
+        "zh-CN": { ...domains.app.zhCN, ...domains.graph.zhCN, ...domains.workbench.zhCN, ...domains.remote.zhCN, ...domains.settings.zhCN },
       };
       for (const locale of ["en", "zh-CN"] as const)
         i18n.global.setLocaleMessage(locale, next[locale]);
