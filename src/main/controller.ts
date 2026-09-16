@@ -20,9 +20,9 @@ import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js"
 import { canonicalPath } from "./paths.js";
 import { isSessionRunning, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
-import { agentProgressKey, isAgentProgress, pruneAgentProgress } from "../shared/agent-updates.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { ProgressLedger } from "./progress-ledger.js";
 import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
@@ -101,9 +101,11 @@ export class MainController {
   private viewRequest = 0;
   private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
   listeners = new Set<(e: DesktopEvent) => void>();
-  private readonly liveProgress = new Map<string, DesktopEvent>();
-  /** Last-seen graph epoch per session; pruned to the live set in noteEpoch. */
-  private readonly liveProgressEpochs = new Map<string, string | undefined>();
+  /** Progress baselines of background runs, replayed when their session returns to view. */
+  readonly progress = new ProgressLedger({
+    isLiveSession: (id) => Boolean(this.registry.entry(id)),
+    viewedGraphId: () => this.current?.graph?.id,
+  });
   /** The client of the remote workspace in view, pooled or freshly connected. */
   get wsl(): WslHostClient | undefined {
     return this.activeSlot()?.client;
@@ -156,7 +158,7 @@ export class MainController {
         const current = (pushed.payload as { current?: SessionSnapshot })?.current;
         if (current && !this.registry.isActive(entry)) {
           // A background session settled: refresh history and the list, never the view.
-          this.noteEpoch(current);
+          this.progress.noteEpoch(current);
           this.scheduleBackgroundRefresh(entry);
           return;
         }
@@ -178,7 +180,7 @@ export class MainController {
       routed = { ...pushed, payload: p };
     }
     if (this.registry.isActive(entry)) this.emit(routed);
-    else this.recordProgress(routed);   // token streams of background runs are recorded for their return, never forwarded
+    else this.progress.record(routed);   // token streams of background runs are recorded for their return, never forwarded
     // GraphRuntime publishes child snapshots after updating its worker. Taking
     // one here would broadcast the old worker state, then the new state again.
     const childEvent = Boolean(p?.graphId && p.branchId && p.branchId !== "main");
@@ -361,46 +363,8 @@ export class MainController {
     return () => this.listeners.delete(listener);
   }
   emit(e: DesktopEvent) {
-    this.recordProgress(e);
-    if (e.type === "sessions") {
-      this.noteEpoch((e.payload as { current?: SessionSnapshot }).current);
-    } else if (e.type === "remote.connection" && !(e.payload as { connected: boolean }).connected) {
-      // A dropped host's runs are dead; local sessions keep their baselines.
-      for (const key of [...this.liveProgress.keys()]) {
-        const graphId = (JSON.parse(key) as unknown[])[0];
-        if (typeof graphId === "string" && !this.registry.entry(graphId)) this.liveProgress.delete(key);
-      }
-    }
+    this.progress.ingest(e);
     this.listeners.forEach((f) => f(e));
-  }
-  /**
-   * Progress baselines are keyed by graph id (= session path), so sessions
-   * running in the background keep theirs across view switches; they are
-   * replayed only when their session becomes the view again.
-   */
-  private recordProgress(e: DesktopEvent) {
-    pruneAgentProgress(e, this.liveProgress);
-    if (isAgentProgress(e)) this.liveProgress.set(agentProgressKey(e.payload as Record<string, unknown>), e);
-  }
-  /** A restarted session (new epoch) invalidates its own baselines, not other sessions'. */
-  private noteEpoch(current: SessionSnapshot | undefined) {
-    const graph = current?.graph;
-    if (!graph?.id) return;
-    const known = this.liveProgressEpochs.get(graph.id);
-    if (known !== undefined && known !== graph.epoch) {
-      for (const key of [...this.liveProgress.keys()])
-        if ((JSON.parse(key) as unknown[])[0] === graph.id) this.liveProgress.delete(key);
-    }
-    this.liveProgressEpochs.set(graph.id, graph.epoch);
-    // A record can only invalidate baselines that still exist or could be
-    // recorded again: a session that is neither live, mid-stream, nor in view
-    // is inert, so its record goes and the map stays bounded by the live set
-    // instead of every session ever opened.
-    const tracked = new Set([...this.liveProgress.keys()].map(key => (JSON.parse(key) as unknown[])[0]));
-    const viewed = this.current?.graph?.id;
-    for (const id of [...this.liveProgressEpochs.keys()])
-      if (id !== graph.id && id !== viewed && !tracked.has(id) && !this.registry.entry(id))
-        this.liveProgressEpochs.delete(id);
   }
   remoteEvent(event: DesktopEvent, project: ProjectInfo | null = this.project) {
     if (!project) return;
@@ -1138,9 +1102,7 @@ export class MainController {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
           // Replay only the session in view; other buckets wait for their turn.
-          const graphId = current.graph?.id;
-          for (const progress of this.liveProgress.values())
-            if ((progress.payload as { graphId?: string }).graphId === graphId) this.emit(progress);
+          for (const progress of this.progress.replay(current.graph?.id)) this.emit(progress);
         }
         return current;
       }
@@ -1376,7 +1338,7 @@ export class MainController {
     return Promise.all([this.closeSessions(), this.closeAllRemote()]).then(() => {});
   }
   dispose() {
-    this.liveProgress.clear();
+    this.progress.clear();
     this.shell.dispose();
     void this.closeAll().catch(() => {});
   }
