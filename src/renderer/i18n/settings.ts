@@ -1,3 +1,5 @@
+import { acceptDomainUpdate } from "./registry";
+
 export const en = {
   settings: {
     preferences: "Preferences",
@@ -637,3 +639,5 @@ export const zhCN: typeof en = {
     en: "English",
   },
 };
+
+if (import.meta.hot) import.meta.hot.accept(acceptDomainUpdate(en));

@@ -1,3 +1,5 @@
+import { acceptDomainUpdate } from "./registry";
+
 export const en = {
   remote: {
     sidebarTitle: "Remote connection",
@@ -125,3 +127,5 @@ export const zhCN: typeof en = {
     openFolder: "打开文件夹",
   },
 };
+
+if (import.meta.hot) import.meta.hot.accept(acceptDomainUpdate(en));

@@ -1,3 +1,5 @@
+import { acceptDomainUpdate } from "./registry";
+
 export const en = {
   tools: {
     files: "Files",
@@ -133,3 +135,5 @@ export const zhCN: typeof en = {
     browser: "打开浏览器",
   },
 };
+
+if (import.meta.hot) import.meta.hot.accept(acceptDomainUpdate(en));

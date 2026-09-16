@@ -1,3 +1,5 @@
+import { acceptDomainUpdate } from "./registry";
+
 export const en = {
   fileChanges: {
     oldLine: "Original line {n}", newLine: "Updated line {n}",
@@ -284,3 +286,5 @@ export const zhCN: typeof en = {
     skip: "跳过此版本",
   },
 };
+
+if (import.meta.hot) import.meta.hot.accept(acceptDomainUpdate(en));

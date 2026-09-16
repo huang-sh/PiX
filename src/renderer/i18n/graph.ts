@@ -1,3 +1,5 @@
+import { acceptDomainUpdate } from "./registry";
+
 export const en = {
   graph: {
     deleteNode: "Delete",
@@ -214,3 +216,5 @@ export const zhCN: typeof en = {
     delete: "删除",
   },
 };
+
+if (import.meta.hot) import.meta.hot.accept(acceptDomainUpdate(en));
