@@ -323,6 +323,7 @@ test("maps skills discovered by the SDK resource loader", async () => {
             sourceInfo: { source: "local", scope: "project" },
             disableModelInvocation: true,
           }],
+          diagnostics: [],
         }),
       },
     },
@@ -359,6 +360,7 @@ test("maps bundled skills as a read-only builtin category", async () => {
             sourceInfo: { source: "local" },
             disableModelInvocation: false,
           }],
+          diagnostics: [],
         }),
       },
     },
@@ -420,7 +422,7 @@ test("viewing follows the loaded list: bundled and packaged skills read, strange
       session: {
         // The listed flag is the effective one and may differ from the file
         // (an overridden bundled skill); the viewer must show the effective.
-        resourceLoader: { getSkills: () => ({ skills: [{ name: "packaged", filePath: packaged, disableModelInvocation: true }] }) },
+        resourceLoader: { getSkills: () => ({ skills: [{ name: "packaged", filePath: packaged, disableModelInvocation: true }], diagnostics: [] }) },
       },
     };
     const [builtinRoot] = resolveBuiltinSkills(dirname(fileURLToPath(import.meta.url)));

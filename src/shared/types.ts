@@ -20,8 +20,14 @@ export interface CustomModelInput {
 }
 export type BrokerModel = Pick<Model<Api>, "provider" | "id" | "name" | "api" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost">;
 
-export type PanelId = "navigator" | "chat" | "content";
-export type UtilityTab = "terminal" | "output" | "git" | "events";
+/** Panels whose collapse flag persists; the layout validation and the
+ *  PanelId union both derive from this list. */
+export const PANEL_IDS = ["navigator", "chat", "content"] as const;
+export type PanelId = (typeof PANEL_IDS)[number];
+/** Utility tabs that persist as layout.utility.activeTab; the layout
+ *  validation and the UtilityTab union both derive from this list. */
+export const UTILITY_TABS = ["terminal", "output", "git", "events"] as const;
+export type UtilityTab = (typeof UTILITY_TABS)[number];
 export interface ProjectInfo {
   name: string;
   path: string;
@@ -492,6 +498,7 @@ export type DesktopRoute =
   | "app.bootstrap"
   | "app.pickProject"
   | "app.openProject"
+  | "app.openLogs"
   | "app.forgetProject"
   | "app.openExternal"
   | "app.revealSession"

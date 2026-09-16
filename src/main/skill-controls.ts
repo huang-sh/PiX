@@ -20,6 +20,27 @@ import { isOutputStyleFile } from "./output-style.js";
 import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../shared/types.js";
 
 /**
+ * The loader surface the skill list reads. The SDK type itself stays behind
+ * pi-runtime (the architecture test pins its import there), so this mirrors
+ * only the fields the controls actually use.
+ */
+interface SkillsLoader {
+  reload(): Promise<unknown>;
+  getSkills(): {
+    skills: Array<{
+      name: string;
+      description: string;
+      filePath: string;
+      disableModelInvocation: boolean;
+      sourceInfo: { source: string; scope: RuntimeSkill["scope"] };
+    }>;
+    diagnostics: Array<{
+      collision?: { resourceType: string; winnerPath: string; loserPath: string };
+    }>;
+  };
+}
+
+/**
  * The PiRuntime surface the skill controls run against. Every member is a
  * live accessor: the cwd, the session, and the session-less services all
  * change over the runtime's lifetime, so values captured at construction
@@ -67,7 +88,7 @@ export class SkillControls {
   private async getSkills(reload?: boolean): Promise<RuntimeSkill[]> {
     const s = this.host.session();
     if (!s) await this.host.ensureModelServices();
-    const loader = s?.resourceLoader ?? this.host.modelServices()?.resourceLoader;
+    const loader = (s?.resourceLoader ?? this.host.modelServices()?.resourceLoader) as SkillsLoader;
     if (reload) await loader.reload();
     const { editable } = await this.skillFileRoots();
     const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -76,29 +97,28 @@ export class SkillControls {
     // bundled row simply absent; badge the winner so the list explains
     // itself. Pi reports these as collision diagnostics.
     const shadowsBuiltin = new Map<string, string>();
-    for (const diagnostic of (diagnostics ?? []) as any[]) {
-      const collision = diagnostic?.collision;
+    for (const diagnostic of diagnostics) {
+      const collision = diagnostic.collision;
       if (collision?.resourceType !== "skill") continue;
-      const loser = String(collision.loserPath ?? "");
-      if (isBundledSkillPath(moduleDir, loser))
-        shadowsBuiltin.set(String(collision.winnerPath ?? ""), loser);
+      if (isBundledSkillPath(moduleDir, collision.loserPath))
+        shadowsBuiltin.set(collision.winnerPath, collision.loserPath);
     }
     return loaded.map(
-      (skill: any): RuntimeSkill => ({
-        name: String(skill.name),
-        description: String(skill.description),
-        path: String(skill.filePath),
-        source: String(skill.sourceInfo?.source ?? "local"),
+      (skill): RuntimeSkill => ({
+        name: skill.name,
+        description: skill.description,
+        path: skill.filePath,
+        source: skill.sourceInfo.source,
         // Bundled skills carry no pi scope of their own; show them as a
         // read-only category instead of a misleading "project" badge.
-        scope: isBundledSkillPath(moduleDir, String(skill.filePath))
+        scope: isBundledSkillPath(moduleDir, skill.filePath)
           ? "builtin"
-          : skill.sourceInfo?.scope ?? "project",
-        disableModelInvocation: Boolean(skill.disableModelInvocation),
-        outputStyle: isOutputStyleFile(String(skill.filePath)),
-        editable: isEditableSkillPath(String(skill.filePath), editable),
-        ...(shadowsBuiltin.has(String(skill.filePath))
-          ? { shadowsBuiltin: shadowsBuiltin.get(String(skill.filePath)) }
+          : skill.sourceInfo.scope,
+        disableModelInvocation: skill.disableModelInvocation,
+        outputStyle: isOutputStyleFile(skill.filePath),
+        editable: isEditableSkillPath(skill.filePath, editable),
+        ...(shadowsBuiltin.has(skill.filePath)
+          ? { shadowsBuiltin: shadowsBuiltin.get(skill.filePath) }
           : {}),
       }),
     );
@@ -113,11 +133,11 @@ export class SkillControls {
     // is the override table's value rather than the file's frontmatter.
     const s = this.host.session();
     if (!s) await this.host.ensureModelServices();
-    const loader = s?.resourceLoader ?? this.host.modelServices()?.resourceLoader;
+    const loader = (s?.resourceLoader ?? this.host.modelServices()?.resourceLoader) as SkillsLoader;
     const requested = resolve(path);
     const listed = loader
       .getSkills()
-      .skills.find((skill: any) => resolve(String(skill.filePath)) === requested);
+      .skills.find((skill) => resolve(skill.filePath) === requested);
     const file = listed || isBundledSkillPath(dirname(fileURLToPath(import.meta.url)), requested)
       ? requested
       : (await this.skillTarget(path)).file;

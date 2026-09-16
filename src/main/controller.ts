@@ -4,6 +4,7 @@ import type {
   AgentControl,
   DesktopEvent,
   DesktopRoute,
+  LayoutState,
   ProjectGroup,
   ProjectInfo,
   SessionSnapshot,
@@ -866,7 +867,7 @@ export class MainController {
           ? this.settings.reset()
           : await this.settings.resetPi(v.scope as "global" | "project");
       case "layout.save":
-        this.settings.saveLayout(v.layout as unknown as any);
+        this.settings.saveLayout(v.layout as LayoutState);
         return { ok: true };
     }
   }
