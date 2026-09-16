@@ -8,6 +8,7 @@ import {
 } from "reka-ui";
 import { nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { i18n } from "./i18n";
 import { sessionEventDecoder } from "../shared/session-updates";
 import type {
   DesktopEvent,
@@ -548,6 +549,9 @@ onMounted(() => {
       closeChatColumn: layout.closeChatColumn,
       toggle: (panel: "navigator" | "chat" | "content") => layout.toggle(panel),
       settings: () => void (layout.screen = "settings"),
+      // The gui test asserts that a hot update of any i18n domain file reaches
+      // the dictionary the app is actually rendering from.
+      messages: (locale: "en" | "zh-CN") => JSON.parse(JSON.stringify(i18n.global.getLocaleMessage(locale))),
     },
   });
   void bootstrap();
