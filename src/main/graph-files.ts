@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import type { RawSessionEntry, PromptImage } from "../shared/types.js";
+import { debugLog } from "./debug-log.js";
 import { projectSession } from "../shared/session.js";
 
 export interface SessionData { header: Record<string, unknown>; entries: RawSessionEntry[] }
@@ -106,7 +107,7 @@ export class GraphFiles {
   private saveJson(file: string, value: unknown) {
     if (existsSync(file)) {
       const previous = readFileSync(file, "utf8");
-      try { JSON.parse(previous); durableWrite(`${file}.bak`, previous); } catch {}
+      try { JSON.parse(previous); durableWrite(`${file}.bak`, previous); } catch (e) { debugLog("graph-files: backup skipped, previous file corrupt", e); }
     }
     durableWrite(file, JSON.stringify(value) + "\n");
   }
@@ -343,7 +344,7 @@ export class GraphFiles {
   }
   readMain(migrate: (entries: unknown[]) => SessionData) {
     const original = readFileSync(this.main, "utf8");
-    try { return parseStrict(original); } catch {}
+    try { return parseStrict(original); } catch (e) { debugLog("graph-files: strict main parse failed, recovering", e); }
     const lines = original.trimEnd().split("\n");
     let incomplete = false;
     // Only a syntactically incomplete final record is eligible for automatic
@@ -383,7 +384,7 @@ export class GraphFiles {
           durableWrite(`${this.path(record.id)}.recovered`, encodeSession(data));
           this.save(record);
           return data;
-        } catch {}
+        } catch (e) { debugLog(`graph-files: branch ${record.id} prefix recovery failed`, e); }
       }
       const checkpoint = readStrict(this.checkpointPath(record.id));
       this.save(record);

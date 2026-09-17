@@ -7,5 +7,8 @@ export default defineConfig({
     environment: "jsdom",
     include: ["test/renderer/**/*.test.ts"],
     setupFiles: ["test/renderer/setup.ts"],
+    // The DOM-heavy suites run 4s+ each when healthy and get starved further
+    // under parallel environment setup; the 5s default times them out spuriously.
+    testTimeout: 15_000,
   },
 });

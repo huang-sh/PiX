@@ -110,6 +110,42 @@ jobs:
             release/*.blockmap
           if-no-files-found: error
 
+  gui:
+    name: gui smoke (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Electron needs the GTK/NSS/GBM runtime libraries and an X server, which
+      # the runner image does not provide; the gui test wraps itself in xvfb-run.
+      - name: Install Electron runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgtk-3-0 libnss3 libgbm1 libatk-bridge2.0-0 libatk1.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2
+          sudo apt-get install -y --no-install-recommends libasound2t64 || sudo apt-get install -y --no-install-recommends libasound2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install test fixtures
+        run: npm run fixtures
+
+      - name: Build
+        run: npm run build
+
+      # Runs the gui smoke test plus a hot update of every i18n domain file, so
+      # the renderer and its hot-reload wiring stay covered on every push.
+      - name: GUI smoke test with i18n hot reload
+        run: node test/gui-test.mjs --hmr
+
   release:
     name: draft release
     needs: package

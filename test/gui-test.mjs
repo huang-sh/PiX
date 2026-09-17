@@ -40,7 +40,7 @@ let localeSource;
 if (verifyHmr) {
   cpSync(join(root, "src"), join(testHome, "src"), { recursive: true });
   cpSync(join(root, "package.json"), join(testHome, "package.json"));
-  localeFile = join(testHome, "src/renderer/i18n.ts");
+  localeFile = join(testHome, "src/renderer/i18n/app.ts");
   localeSource = readFileSync(localeFile, "utf8");
   writeFileSync(localeFile, localeSource.replace(/^\s+(copyPath|copySessionId|revealSession):.*\r?\n/gm, ""));
   const { createServer } = await import("vite");
@@ -191,6 +191,8 @@ function signalWslTestHost(pid, signal) {
   if (result.status !== 0) throw new Error(`WSL test signal failed (${result.status}): ${result.stderr}`);
 }
 try {
+  // Boot budgets are generous: on a cold machine the dev server has to transform
+  // the whole renderer graph before the shell appears.
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
     const targets = await response.json();
@@ -199,7 +201,7 @@ try {
     );
     if (!page) throw new Error("Electron page target missing");
     return page;
-  });
+  }, 90_000);
   cdp = new Cdp(target.webSocketDebuggerUrl);
   await cdp.open();
   await cdp.send("Runtime.enable");
@@ -209,7 +211,7 @@ try {
       "window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))",
     );
     if (!ready) throw new Error(`PiX renderer is not ready\n${stderr}`);
-  });
+  }, 90_000);
   await retry(async () => {
     const value = await cdp.evaluate(`({
       collapsed: window.__pixTest.state().layout.collapsed,
@@ -545,6 +547,44 @@ try {
         if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy full path")
           throw new Error("A second locale hot update did not reach the mounted menu");
       });
+      // Every domain file must reach the live dictionary through its own
+      // self-accept, so probe each one with a sentinel value.
+      for (const domain of ["app", "graph", "remote", "settings", "workbench"]) {
+        const file = join(testHome, "src/renderer/i18n", `${domain}.ts`);
+        const source = readFileSync(file, "utf8");
+        const probe = source.match(/\r?\n  (\w+): \{\r?\n    (\w+): "(?:[^"\\]|\\.)*",/);
+        if (!probe) throw new Error(`No probe message found in ${domain}.ts`);
+        const [, group, key] = probe;
+        const sentinel = `hmr-probe-${domain}`;
+        writeFileSync(file, source.replace(probe[0], () => probe[0].replace(/"[^"]*",$/, `"${sentinel}",`)));
+        const path = [group, key].map((part) => `[${JSON.stringify(part)}]`).join("");
+        await retry(async () => {
+          const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+          if (value !== sentinel) throw new Error(`${domain}.ts hot update did not reach en.${group}.${key} (got ${JSON.stringify(value)})`);
+        });
+        // Re-executing the index re-seeds the registry: the domain that was just
+        // hot updated has to survive and the app has to keep rendering from the
+        // same plugin instance.
+        if (domain === "settings") {
+          const indexPath = join(testHome, "src/renderer/i18n/index.ts");
+          const indexSource = readFileSync(indexPath, "utf8");
+          writeFileSync(indexPath, `${indexSource}// hmr probe\n`);
+          await retry(async () => {
+            const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+            if (value !== sentinel) throw new Error("Re-executing the i18n index dropped a hot updated domain");
+          });
+          writeFileSync(indexPath, indexSource);
+          const appFile = join(testHome, "src/renderer/i18n/app.ts");
+          const appSource = readFileSync(appFile, "utf8");
+          writeFileSync(appFile, appSource.replace('copyPath: "Copy full path"', 'copyPath: "Copy path after index"'));
+          await retry(async () => {
+            if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy path after index")
+              throw new Error("A hot update after re-executing the i18n index did not reach the rendered menu");
+          });
+          writeFileSync(appFile, appSource);
+        }
+        writeFileSync(file, source);
+      }
     }
     await cdp.evaluate("document.querySelector('[data-action=session-rename]').click()");
     await retry(async () => {
@@ -1148,6 +1188,13 @@ try {
         throw new Error(`Missing ${category} setting: ${setting}`);
     });
   }
+  // The log folder action is asserted, never clicked: it would open the
+  // machine's file manager during the test run.
+  await cdp.evaluate("document.querySelector('[data-settings-category=about]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-about-logs]'))")))
+      throw new Error("Missing the About page log folder action");
+  });
   await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings-models.png"), Buffer.from(screenshot.data, "base64"));

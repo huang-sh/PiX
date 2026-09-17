@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, provide, ref, watch } from "vue";
-import { ArrowLeft, Bot, Box, History, Info, Keyboard, Palette, Puzzle, Save, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, FlaskConical, History, Info, Keyboard, Palette, Puzzle, Save, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import AboutPage from "./AboutPage.vue";
@@ -101,6 +101,7 @@ const categories = computed(() => [
   ["skills", t("settings.categories.skills"), Sparkles],
   ["extensions", t("settings.categories.extensions"), Puzzle],
   ["shell", t("settings.categories.shell"), Terminal],
+  ["experimental", t("settings.categories.experimental"), FlaskConical],
   ["about", t("settings.categories.about"), Info],
 ] as const);
 

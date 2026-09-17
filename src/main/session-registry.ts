@@ -1,6 +1,7 @@
 import type { ProjectInfo, SessionSnapshot } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { debugLog } from "./debug-log.js";
 import { managedSessionFile } from "./services.js";
 
 /** A cold open in flight; its project is kept so disposal can drain exactly the opens it races. */
@@ -96,7 +97,7 @@ export class SessionRegistry {
     const path = this.activeByProject.get(project);
     const entry = path ? this.settled.get(path) : undefined;
     this.activePath = entry?.path ?? "";
-    void this.evict();
+    void this.evict().catch(e => debugLog("session-registry: evict on restore", e));
     return entry;
   }
 
@@ -185,7 +186,7 @@ export class SessionRegistry {
       throw new Error("Session was closed while opening");
     if (selection === this.selection) this.setActive(entry);
     const snapshot = entry.runtime!.snapshot();
-    void this.evict();
+    void this.evict().catch(e => debugLog("session-registry: evict on open", e));
     return snapshot;
   }
 

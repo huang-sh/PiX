@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
+import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
@@ -33,6 +34,8 @@ const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
 let tray: Tray | undefined;
 let isQuitting = false;
+// Set once the startup chain reaches its end; anything earlier leaves no usable window.
+let started = false;
 let currentTheme: ThemePreference = "light";
 const zhUi = () => {
   const lang = controller.settings.bundle().app.language;
@@ -41,6 +44,22 @@ const zhUi = () => {
     (lang === "system" && app.getLocale().startsWith("zh"))
   );
 };
+/**
+ * A failure that leaves the app without a usable window: record the cause for
+ * support, then show it, because the user would otherwise see nothing at all.
+ */
+function reportFailure(kind: "startup" | "window", context: string, error: unknown) {
+  debugLog(context, error);
+  // A startup failure can predate the settings service, so the wording must not
+  // depend on reading it; the OS locale answers instead.
+  let zh: boolean;
+  try { zh = zhUi(); } catch { zh = app.getLocale().startsWith("zh"); }
+  const head = kind === "startup"
+    ? (zh ? "PiX 启动失败" : "PiX failed to start")
+    : (zh ? "PiX 无法打开窗口" : "PiX could not open its window");
+  const detail = error instanceof Error ? error.message : String(error);
+  dialog.showErrorBox("PiX", `${head}: ${detail}\n\n${zh ? "日志" : "Log"}: ${logFile()}`);
+}
 // The tray icon only exists while it can be needed: it appears on the first
 // close-to-tray hide and lives until quit (restore-from-tray keeps it, the
 // way tray-native apps behave).
@@ -53,8 +72,10 @@ function ensureTray() {
   tray = new Tray(icon);
   tray.setToolTip("PiX");
   const restore = () => {
-    win?.show();
-    win?.focus();
+    // macOS keeps the app alive after its last window closes, so the tray has
+    // to bring a window back rather than re-show one that no longer exists.
+    if (!win) void create().catch(e => reportFailure("window", "index: create from tray", e));
+    else { win.show(); win.focus(); }
   };
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -102,7 +123,9 @@ async function create() {
         ])
       : null,
   );
-  win = new BrowserWindow({
+  // This window owns every listener below and the module-level `win` only
+  // names the current one, so a late event from it cannot clear a replacement.
+  const created = new BrowserWindow({
     icon: join(app.getAppPath(), "resources/icon.png"),
     width: 1600,
     height: 940,
@@ -139,8 +162,9 @@ async function create() {
       backgroundThrottling: false,
     },
   });
-  win.once("ready-to-show", () => win.show());
-  win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
+  win = created;
+  created.once("ready-to-show", () => { if (win === created) created.show(); });
+  created.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
   });
@@ -149,17 +173,17 @@ async function create() {
   // known link kinds; anything that still reaches a navigation attempt goes
   // through the same protocol-allowlisted external open (and is dropped for
   // non-web protocols such as file:).
-  win.webContents.on("will-navigate", (event: Event, url: string) => {
+  created.webContents.on("will-navigate", (event, url) => {
     // A navigation to the page's own URL is the app reloading itself (vite
     // HMR full-reload in dev); it must proceed in-place, not be handed to
     // the OS browser as if it were an external link.
-    if (url === win.webContents.getURL()) return;
+    if (url === created.webContents.getURL()) return;
     event.preventDefault();
     void openExternal(url).catch(() => {});
   });
-  win.webContents.on(
+  created.webContents.on(
     "will-attach-webview",
-    (_e: unknown, p: Record<string, unknown>) => {
+    (_e, p) => {
       delete p.preload;
       p.nodeIntegration = false;
       p.contextIsolation = true;
@@ -171,16 +195,20 @@ async function create() {
   // isQuitting flag (before-quit fires before close events) or the tray
   // menu's Quit item. macOS keeps native behavior: the window closes and the
   // app stays in the dock.
-  win.on("close", (e: { preventDefault(): void }) => {
+  created.on("close", (e: { preventDefault(): void }) => {
     if (isQuitting || process.platform === "darwin") return;
     if (controller.settings.bundle().app.closeToTray === false) return;
     e.preventDefault();
-    win.hide();
+    created.hide();
     ensureTray();
   });
+  // Release the reference the moment the window is destroyed: every later
+  // broadcast and theme sync then no-ops instead of throwing into the agent
+  // event stream (macOS keeps the app alive after its last window closes).
+  created.on("closed", () => { if (win === created) win = undefined; });
   if (process.env.ELECTRON_RENDERER_URL)
-    await win.loadURL(process.env.ELECTRON_RENDERER_URL);
-  else await win.loadFile(join(dir, "../renderer/index.html"));
+    await created.loadURL(process.env.ELECTRON_RENDERER_URL);
+  else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
   bootstrapPixProfile(pixHome());
@@ -218,7 +246,7 @@ app.whenReady().then(async () => {
       await openExternal(url);
     },
     showItemInFolder(path) {
-      if (!existsSync(path)) throw new Error("Session file was not found or is inaccessible");
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
       shell.showItemInFolder(path);
     },
     quit() {
@@ -265,6 +293,13 @@ app.whenReady().then(async () => {
     clipboard.writeText(text),
   );
   await create();
+  started = true;
+}).catch(e => {
+  // A half-built window would leave the user staring at a blank page, so a
+  // startup that never completed exits once the error box is dismissed. The
+  // finally keeps that promise even when the box itself cannot be shown.
+  try { reportFailure("startup", "index: startup", e); }
+  finally { if (!started) app.quit(); }
 });
 let sessionsClosed = false;
 let closingSessions = false;
@@ -286,5 +321,5 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) void create();
+  if (BrowserWindow.getAllWindows().length === 0) void create().catch(e => reportFailure("window", "index: create from activate", e));
 });

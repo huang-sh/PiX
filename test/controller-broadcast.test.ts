@@ -124,7 +124,7 @@ test("epoch records are pruned to the live set", async () => {
   }) as unknown as SessionSnapshot;
   controller.createSessionRuntime = entry =>
     ({ open: async () => {}, snapshot: () => snapshotOf(entry.path), state: () => ({}), close: async () => {} }) as never;
-  const epochs = () => (controller as unknown as { liveProgressEpochs: Map<string, unknown> }).liveProgressEpochs;
+  const epochs = () => controller.progress.epochs;
   const note = (path: string) => controller.emit({ type: "sessions", payload: { current: snapshotOf(path) } });
   const stream = (graphId: string) => ({ type: "agent", payload: {
     type: "message_update", graphId, message: { role: "assistant", content: [{ type: "text", text: "streaming" }] },

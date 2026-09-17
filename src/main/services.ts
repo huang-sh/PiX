@@ -15,6 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { debugLog } from "./debug-log.js";
 import {
   basename,
   dirname,
@@ -125,7 +126,7 @@ function quarantineCorruptSettings(path: string) {
       path,
       `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "")}`,
     );
-  } catch {}
+  } catch (e) { debugLog("services: quarantine corrupt settings", e); }
 }
 /**
  * One-time bootstrap of a profile: park a corrupt GUI settings file, and on
@@ -183,6 +184,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "openLinksInApp",
     "closeToTray",
     "canvasDotGrid",
+    "experimentalHistory",
   ])
     expectBoolean(key);
   expectNumber("canvasDotGridSpacing", 8, 96);
@@ -243,6 +245,7 @@ export class SettingsService {
       canvasDotGrid: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
+      experimentalHistory: false,
     };
     // Normalize the raw file before the defaults merge, so a dropped key is
     // filled by its default instead of surfacing as undefined.
@@ -811,7 +814,7 @@ export class SessionFiles {
     // best-effort: a locked snapshot must not report a finished deletion as a
     // failure after the session file itself is already unlinked.
     for (const dir of [fileChangeDir(p), graphDir(p)]) {
-      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+      try { rmSync(dir, { recursive: true, force: true }); } catch (e) { debugLog("services: sidecar cleanup", e); }
     }
   }
 }

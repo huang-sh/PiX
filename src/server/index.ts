@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { MainController, type Platform } from "../main/controller.js";
+import { setDebugLogEnabled } from "../main/debug-log.js";
 import { pixHome } from "../main/paths.js";
 import { bootstrapPixProfile } from "../main/services.js";
 import { enrichLoginPath } from "./login-env.js";
@@ -43,6 +44,8 @@ function authorized(url: string | undefined, token: string) {
 }
 
 async function serve() {
+  // Shared hosts keep their diagnostics on stderr; the desktop owns the log file.
+  setDebugLogEnabled(false);
   const requestedCwd = option("--cwd");
   if (!requestedCwd) throw new Error("--cwd is required");
   const cwd = resolve(requestedCwd);
