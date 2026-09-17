@@ -3,7 +3,10 @@ import { acceptDomainUpdate } from "./registry";
 // Domain of the experimental operation-history module
 // (src/renderer/experimental/history); dormant while that module is disabled.
 export const en = {
+  // The gui hmr smoke probes the first `<group>: { <key>: "string"` shape in
+  // each domain file, so a plain string leaf must open the group.
   history: {
+    abort: "Stop run",
     panel: {
       title: "History",
       meta: "{n} entries · {depth} undoable",
@@ -32,13 +35,13 @@ export const en = {
     sendPrompt: `Send "{text}"`,
     deleteTurn: `Delete "{name}"`,
     abortRun: `Stop "{name}"`,
-    abort: "Stop run",
     button: { title: "Operation history (⌘/Ctrl+Shift+H)" },
   },
 };
 
 export const zhCN: typeof en = {
   history: {
+    abort: "停止运行",
     panel: {
       title: "操作历史",
       meta: "{n} 条记录 · 可撤销 {depth} 步",
@@ -67,7 +70,6 @@ export const zhCN: typeof en = {
     sendPrompt: "发送：「{text}」",
     deleteTurn: "删除「{name}」",
     abortRun: "停止「{name}」",
-    abort: "停止运行",
     button: { title: "操作历史（⌘/Ctrl+Shift+H）" },
   },
 };

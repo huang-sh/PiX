@@ -549,7 +549,7 @@ try {
       });
       // Every domain file must reach the live dictionary through its own
       // self-accept, so probe each one with a sentinel value.
-      for (const domain of ["app", "graph", "remote", "settings", "workbench"]) {
+      for (const domain of ["app", "graph", "remote", "settings", "workbench", "history"]) {
         const file = join(testHome, "src/renderer/i18n", `${domain}.ts`);
         const source = readFileSync(file, "utf8");
         const probe = source.match(/\r?\n  (\w+): \{\r?\n    (\w+): "(?:[^"\\]|\\.)*",/);
@@ -1334,21 +1334,28 @@ try {
   console.log(JSON.stringify(result, null, 2));
   }
 } finally {
-  await devServer?.close();
+  // A stalled close (e.g. vite's ws shutdown with a live HMR client) once
+  // burned the job's whole timeout with the app still running: bound every
+  // teardown await and hard-kill the child when a graceful exit misses.
+  const bounded = (promise, ms) =>
+    Promise.race([promise ?? Promise.resolve(), new Promise((resolve) => setTimeout(resolve, ms))]);
+  await bounded(devServer?.close(), 2_000);
   if (wslStoppedPid) {
     try { signalWslTestHost(wslStoppedPid, "CONT"); } catch (error) { console.error(error); }
   }
-  await cdp?.close();
+  await bounded(cdp?.close(), 2_000);
   if (process.platform === "win32" && child.pid)
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore",
     });
-  else child.kill("SIGTERM");
-  if (child.exitCode === null)
+  else {
+    child.kill("SIGTERM");
     await Promise.race([
       new Promise((resolve) => child.once("close", resolve)),
       new Promise((resolve) => setTimeout(resolve, 1_000)),
     ]);
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.unref();
