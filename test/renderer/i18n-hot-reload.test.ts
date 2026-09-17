@@ -1,19 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as app from "../../src/renderer/i18n/app";
 import * as graph from "../../src/renderer/i18n/graph";
+import * as history from "../../src/renderer/i18n/history";
 import * as remote from "../../src/renderer/i18n/remote";
 import * as settings from "../../src/renderer/i18n/settings";
 import * as workbench from "../../src/renderer/i18n/workbench";
 import { acceptDomainUpdate, composeMessages, onDomainChange, setDomains } from "../../src/renderer/i18n/registry";
 
-const domains = { app, graph, workbench, remote, settings };
+const domains = { app, graph, workbench, remote, settings, history };
 const names = Object.keys(domains) as (keyof typeof domains)[];
 const notDomain = { en: { probe: "nope" }, zhCN: { probe: "nope" } };
 
 let applies = 0;
 
 beforeEach(() => {
-  setDomains({ app, graph, workbench, remote, settings });
+  setDomains({ app, graph, workbench, remote, settings, history });
   applies = 0;
   onDomainChange(() => { applies += 1; });
 });
@@ -46,7 +47,7 @@ describe("i18n hot updates", () => {
       expect(composeMessages().en).toHaveProperty("probe", name);
       expect(composeMessages()["zh-CN"]).toHaveProperty("probe", name);
       expect(applies, name).toBe(1);
-      setDomains({ app, graph, workbench, remote, settings });
+      setDomains({ app, graph, workbench, remote, settings, history });
       applies = 0;
     }
   });
@@ -56,7 +57,7 @@ describe("i18n hot updates", () => {
       const before = Object.keys(composeMessages().en);
       acceptDomainUpdate(domains[name].zhCN)({ en: { probe: name }, zhCN: { probe: name } });
       expect(vanishedDomains(before), name).toEqual([name]);
-      setDomains({ app, graph, workbench, remote, settings });
+      setDomains({ app, graph, workbench, remote, settings, history });
       applies = 0;
     }
   });

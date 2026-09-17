@@ -133,8 +133,8 @@ export const en = {
     leaveHint: "Your keyboard shortcuts have unsaved changes.",
     discard: "Discard changes",
     saveLeave: "Save and leave",
-    actions: { commands: "Open command palette", terminal: "Open terminal", navigator: "Toggle navigator", tools: "Toggle tools panel", settings: "Open settings" },
-    descriptions: { commands: "Find and run a PiX command", terminal: "Open the terminal in the tools panel", navigator: "Show or hide projects and sessions", tools: "Show or hide the tools panel", settings: "Open PiX preferences" },
+    actions: { commands: "Open command palette", terminal: "Open terminal", navigator: "Toggle navigator", tools: "Toggle tools panel", settings: "Open settings", history: "Operation history" },
+    descriptions: { commands: "Find and run a PiX command", terminal: "Open the terminal in the tools panel", navigator: "Show or hide projects and sessions", tools: "Show or hide the tools panel", settings: "Open PiX preferences", history: "Open the operation history panel" },
   },
   compactPrompt: "Optional focus",
   update: {
@@ -276,8 +276,8 @@ export const zhCN: typeof en = {
     leaveHint: "你的键盘快捷键有尚未保存的修改。",
     discard: "放弃修改",
     saveLeave: "保存并离开",
-    actions: { commands: "打开命令面板", terminal: "打开终端", navigator: "切换导航栏", tools: "切换工具面板", settings: "打开设置" },
-    descriptions: { commands: "查找并运行 PiX 命令", terminal: "在工具面板中打开终端", navigator: "显示或隐藏项目与会话列表", tools: "显示或隐藏工具面板", settings: "打开 PiX 偏好设置" },
+    actions: { commands: "打开命令面板", terminal: "打开终端", navigator: "切换导航栏", tools: "切换工具面板", settings: "打开设置", history: "操作历史" },
+    descriptions: { commands: "查找并运行 PiX 命令", terminal: "在工具面板中打开终端", navigator: "显示或隐藏项目与会话列表", tools: "显示或隐藏工具面板", settings: "打开 PiX 偏好设置", history: "打开操作历史面板" },
   },
   compactPrompt: "可选的关注重点",
   update: {
