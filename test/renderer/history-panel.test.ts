@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryKind } from "../../src/renderer/experimental/history/store";
@@ -200,6 +201,37 @@ describe("HistoryPanel", () => {
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(h.history.panelOpen).toBe(false);
+  });
+
+  it("Esc inside an open dialog leaves the panel to the dialog", async () => {
+    h = await boot();
+    trackEntry(h);
+    h.togglePanel();
+    mountPanel();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("data-state", "open");
+    document.body.appendChild(dialog);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(h.history.panelOpen).toBe(true);
+
+    dialog.remove();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(h.history.panelOpen).toBe(false);
+  });
+
+  it("relative timestamps tick while the panel stays open", async () => {
+    h = await boot();
+    trackEntry(h);
+    h.togglePanel();
+    mountPanel();
+    const cell = () => wrapper.findAll(".history-row-time")[0]?.text();
+    expect(cell()).toBe("now");
+
+    vi.advanceTimersByTime(61_000);
+    await nextTick();
+    expect(cell()).toBe("1m");
   });
 
   it("close button closes the panel", async () => {

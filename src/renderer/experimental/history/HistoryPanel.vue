@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { Check, Lock, RotateCcw, X } from "@lucide/vue";
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { shortcutsBlocked } from "../../keyboard-shortcuts";
 import type { HistoryEntry } from "./store";
 import {
   closePanel,
@@ -14,8 +15,13 @@ import {
 
 const { t } = useI18n();
 
+// "3 minutes ago" goes stale while the panel sits open; tick the clock so
+// template reads re-render.
+const now = ref(Date.now());
+let clock: ReturnType<typeof setInterval> | undefined;
+
 function relative(ts: number): string {
-  const elapsed = Math.max(0, Date.now() - ts);
+  const elapsed = Math.max(0, now.value - ts);
   if (elapsed < 60_000) return t("time.now");
   if (elapsed < 3_600_000) return t("time.minutes", { n: Math.floor(elapsed / 60_000) });
   if (elapsed < 86_400_000) return t("time.hours", { n: Math.floor(elapsed / 3_600_000) });
@@ -104,16 +110,22 @@ function onRowClick(row: PanelRow): void {
   void (row.applied ? undoTo(row.entry.id) : redoTo(row.entry.id));
 }
 
+// Escape belongs to whatever dialog or editable owns the focus; the panel
+// only closes on an Esc nobody else claimed.
 function onGlobalKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape" && history.panelOpen) closePanel();
+  if (event.key !== "Escape" || !history.panelOpen) return;
+  if (shortcutsBlocked(event)) return;
+  closePanel();
 }
 
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKeydown);
+  clock = setInterval(() => { now.value = Date.now(); }, 30_000);
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
+  if (clock) clearInterval(clock);
 });
 </script>
 
