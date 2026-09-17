@@ -100,7 +100,7 @@ describe("theme lifecycle", () => {
     expect(layout.themeSaving).toBe(false);
   });
 
-  it.each(["dark", "teal"] as const)("auto-saves %s without discarding other draft edits or later overwriting the theme", async (theme) => {
+  it.each(["dark", "teal"] as const)("auto-saves %s without discarding other concurrent edits or overwriting the theme", async (theme) => {
     const layout = useLayoutStore(), saved = bundle();
     layout.hydrate(structuredClone(saved));
     layout.settingsCategory = "appearance";
@@ -113,17 +113,16 @@ describe("theme lifecycle", () => {
     await wrapper.get('[data-setting-path="density"] select').setValue("compact");
     await wrapper.get('[data-setting-path="theme"] select').setValue(theme);
     await flushPromises();
-    expect(saved.app.theme).toBe(theme);
-    expect(saved.app.density).toBe("comfortable");
-    expect((wrapper.get('[data-setting-path="density"] select').element as HTMLSelectElement).value).toBe("compact");
-    await wrapper.get("main > header nav button").trigger("click");
-    await flushPromises();
+    // Both edits saved themselves: each write carried only its own key, so
+    // neither the theme write nor the density write clobbered the other.
     expect(saved.app.theme).toBe(theme);
     expect(saved.app.density).toBe("compact");
+    expect((wrapper.get('[data-setting-path="density"] select').element as HTMLSelectElement).value).toBe("compact");
     expect(layout.layout.collapsed.chat).toBe(false);
     wrapper.unmount();
     const reopened = mount(SettingsPage, { global: { plugins: [i18n] } });
     expect((reopened.get('[data-setting-path="theme"] select').element as HTMLSelectElement).value).toBe(theme);
+    expect((reopened.get('[data-setting-path="density"] select').element as HTMLSelectElement).value).toBe("compact");
     reopened.unmount();
   });
 

@@ -4,7 +4,7 @@ import SettingRow from "./SettingRow.vue";
 import { useSettingsDraftContext } from "./settings-context";
 
 const layout = useLayoutStore();
-const { rows, saving } = useSettingsDraftContext();
+const { rows } = useSettingsDraftContext();
 </script>
 
 <template>
@@ -13,7 +13,7 @@ const { rows, saving } = useSettingsDraftContext();
       v-for="row in rows"
       :key="`${row.scope}:${row.path}`"
       :row="row"
-      :disabled="row.path === 'theme' && (layout.themeSaving || saving)"
+      :disabled="row.path === 'theme' && layout.themeSaving"
     />
   </section>
 </template>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { settingsDiff } from "../../src/renderer/lib/settings-diff";
+import { applyDiff, settingsDiff } from "../../src/renderer/lib/settings-diff";
 
 describe("settingsDiff", () => {
   it("returns nothing when the draft matches its base", () => {
@@ -36,5 +36,27 @@ describe("settingsDiff", () => {
     expect(settingsDiff({ sessionDir: ".pi/s" }, { sessionDir: { old: true } }))
       .toEqual({ sessionDir: ".pi/s" });
     expect(settingsDiff({}, { stale: { deep: 1 } })).toEqual({ stale: null });
+  });
+});
+
+describe("applyDiff", () => {
+  it("overlays edited keys onto adopted state, null deleting and objects descending", () => {
+    const adopted = { theme: "dark", density: "compact", compaction: { enabled: true, reserveTokens: 16384 } };
+    applyDiff(adopted, { density: "comfortable", compaction: { enabled: null } });
+    expect(adopted).toEqual({
+      theme: "dark",
+      density: "comfortable",
+      compaction: { reserveTokens: 16384 },
+    });
+  });
+
+  it("round-trips a diff onto the base it was taken from", () => {
+    const base = { compaction: { enabled: true, keepRecentTokens: 20000 }, enabledModels: ["a"] };
+    const next = structuredClone(base);
+    next.compaction.enabled = false;
+    delete next.enabledModels;
+    const restored = structuredClone(base);
+    applyDiff(restored, settingsDiff(next, base));
+    expect(restored).toEqual(next);
   });
 });

@@ -6,11 +6,13 @@ import { desktop } from "../../api";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import type { InspectorFocus } from "./inspector-focus";
+import type { Scope } from "./use-settings-draft";
 
 export function useModels(
   draft: Ref<SettingsBundle | undefined>,
   focus: InspectorFocus,
   closeDetailsPanel: () => void,
+  save: (scope: Scope) => void,
 ) {
   const layout = useLayoutStore();
   const session = useSessionStore();
@@ -203,11 +205,13 @@ export function useModels(
       ? enabled.filter((item) => item !== id)
       : [...new Set([...enabled, id])];
     draft.value.piGlobal.enabledModels = next.length === models.value.length ? undefined : next;
+    save("global");
   }
 
   function setAllCycling(enabled: boolean) {
     if (!draft.value) return;
     draft.value.piGlobal.enabledModels = enabled ? undefined : [];
+    save("global");
   }
 
   function modelThinkingOverride() {
@@ -223,6 +227,7 @@ export function useModels(
     const overrides = draft.value.piGlobal.modelThinkingLevels ??= {};
     if (level) overrides[key] = level;
     else delete overrides[key];
+    save("global");
   }
 
   // Model changes belong to draft input only; settings just record the default

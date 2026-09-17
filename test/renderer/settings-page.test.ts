@@ -43,7 +43,7 @@ function updateCalls(): UpdatePayload[] {
 HTMLElement.prototype.setPointerCapture = vi.fn();
 HTMLElement.prototype.releasePointerCapture = vi.fn();
 
-describe("SettingsPage save", () => {
+describe("SettingsPage auto-save", () => {
   beforeEach(() => {
     vi.mocked(desktop.invoke).mockReset();
     vi.mocked(desktop.invoke).mockImplementation(async () => settings);
@@ -110,7 +110,6 @@ describe("SettingsPage save", () => {
       expect(wrapper.get("#about-name").text()).toBe("PiX");
       expect(wrapper.get(".about-version").text()).toBe(`Version ${version}`);
       expect(wrapper.get(".about-logo").attributes("src")).toBe("icon.png");
-      expect(wrapper.find("main > header nav").exists()).toBe(false);
       expect(wrapper.findAll(".settings-card").filter(card => card.isVisible())).toHaveLength(0);
       await wrapper.get("[data-about-updates]").trigger("click");
       await flushPromises();
@@ -130,7 +129,6 @@ describe("SettingsPage save", () => {
       expect(wrapper.find('[role="alert"]').exists()).toBe(false);
       await wrapper.get('[data-settings-category="general"]').trigger("click");
       expect(wrapper.find(".about-page").exists()).toBe(false);
-      expect(wrapper.find("main > header nav").exists()).toBe(true);
     } finally {
       i18n.global.locale.value = previousLocale;
       wrapper.unmount();
@@ -145,7 +143,6 @@ describe("SettingsPage save", () => {
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
 
     await wrapper.get('[data-setting-path="language"] select').setValue("zh-CN");
-    await wrapper.get("main > header nav button").trigger("click");
     await flushPromises();
 
     const updates = updateCalls();
@@ -155,7 +152,66 @@ describe("SettingsPage save", () => {
     // Electron IPC serializes arguments with the structured clone algorithm,
     // which rejects Vue reactive proxies with "An object could not be cloned."
     for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
-    expect(layout.notice?.level).toBe("info");
+  });
+
+  it("saves each committed change immediately and reverts a failed write to the persisted state", async () => {
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const bundle = structuredClone(settings);
+      Object.assign(bundle.app, (payload as UpdatePayload).patch);
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // A committed change writes its own diff — there is no save button.
+    await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
+    await flushPromises();
+    expect(updateCalls().at(-1)).toMatchObject({ scope: "app", patch: { enterToSend: false } });
+    expect(layout.settings?.app.enterToSend).toBe(false);
+
+    // A failed write puts the control back to what is on disk and says why.
+    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("disk full"));
+    await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
+    await flushPromises();
+    expect((wrapper.get('[data-setting-path="closeToTray"] input').element as HTMLInputElement).checked).toBe(true);
+    expect(layout.notice?.level).toBe("error");
+    expect(layout.notice?.message).toBe("disk full");
+    wrapper.unmount();
+  });
+
+  it("keeps an edit made while a write is in flight instead of dropping it", async () => {
+    const persisted = structuredClone(settings);
+    let first = true;
+    let resolveFirst!: (bundle: SettingsBundle) => void;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      Object.assign(persisted.app, (payload as UpdatePayload).patch);
+      if (first) {
+        first = false;
+        return await new Promise<SettingsBundle>((resolve) => { resolveFirst = resolve; });
+      }
+      return structuredClone(persisted);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // The first write hangs; the second edit lands while it is in flight.
+    await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
+    await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
+    resolveFirst(structuredClone(persisted));
+    await flushPromises();
+
+    expect(updateCalls()).toEqual([
+      { scope: "app", patch: { enterToSend: false } },
+      { scope: "app", patch: { closeToTray: false } },
+    ]);
+    expect(layout.settings?.app).toMatchObject({ enterToSend: false, closeToTray: false });
+    wrapper.unmount();
   });
 
   it("clearing defaultTools removes the key instead of saving a no-tools list", async () => {
@@ -175,7 +231,8 @@ describe("SettingsPage save", () => {
     const input = wrapper.get('[data-setting-path="defaultTools"] input');
     expect((input.element as HTMLInputElement).value).toBe("read, bash, edit, write");
     await input.setValue("");
-    await wrapper.get("main > header nav button").trigger("click");
+    // Text inputs commit on change (blur/Enter), never per keystroke.
+    await input.trigger("change");
     await flushPromises();
 
     const updates = updateCalls();
@@ -183,6 +240,27 @@ describe("SettingsPage save", () => {
       defaultTools: null,
     });
     for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
+    wrapper.unmount();
+  });
+
+  it("keeps uncommitted typing in a text field while another row's save lands", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "shell";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // Typing (no change event yet) must survive the draft being replaced by
+    // another row's auto-save folding the server bundle back in.
+    const typing = wrapper.get('[data-setting-path="shellPath"] input');
+    (typing.element as HTMLInputElement).value = "/usr/bin/zs";
+    const number = wrapper.get('[data-setting-path="websocketConnectTimeoutMs"] input');
+    await number.setValue("30000");
+    await number.trigger("change");
+    await flushPromises();
+    expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { websocketConnectTimeoutMs: 30000 } });
+    expect((typing.element as HTMLInputElement).value).toBe("/usr/bin/zs");
     wrapper.unmount();
   });
 
