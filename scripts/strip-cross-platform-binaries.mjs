@@ -83,7 +83,7 @@ export default async function afterPack(context) {
   console.log(`  • pruned ${pruned} dev artifacts (declarations, maps, docs) from pi-builtin`);
   checkPackagedFiles(join(resources, "app.asar"), context.packager.info.appDir);
   checkPackagedSkills(resources);
-  if (["win32", "darwin"].includes(context.electronPlatformName))
+  if (["win32", "darwin", "linux"].includes(context.electronPlatformName))
     checkPackagedFff(resources, context.electronPlatformName, ARCH_NAMES[context.arch]);
   const keep = new Set(hostDirectories(context.electronPlatformName, context.arch));
   if (!keep.size) return; // unknown platform/arch: keep everything
