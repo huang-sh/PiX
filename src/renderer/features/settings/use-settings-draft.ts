@@ -53,6 +53,9 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
   // disabled save button could skip one.
   const queued = new Set<Scope>();
   let flushing = false;
+  // The scope section as it stood when the in-flight write's diff was
+  // computed: edits made since are exactly diff(draft, this snapshot).
+  let writing: { scope: Scope; section: Record<string, unknown> } | undefined;
 
   watch(
     () => layout.settings,
@@ -63,12 +66,16 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         return;
       }
       // A flush's own applySettings — or an external writer racing it — must
-      // not discard edits still queued: adopt the bundle, then overlay the
-      // queued scopes' own diffs so only genuinely edited keys survive.
-      // Sync so the loop's next diff already sees the advanced baseline.
+      // not discard edits still queued. Adopt the bundle, then overlay each
+      // queued scope's edits since the in-flight write began (or since the
+      // baseline, when no write is out for it): never the raw draft values a
+      // normalizing write side may have dropped. Sync so the loop's next
+      // diff already sees the advanced baseline.
       const snapshot = structuredClone(toRaw(incoming));
-      for (const scope of queued)
-        applyDiff(snapshot[sectionKeyOf(scope)] as Record<string, unknown>, settingsDiff(draft.value[sectionKeyOf(scope)] as Record<string, unknown>, base[sectionKeyOf(scope)] as Record<string, unknown>));
+      for (const scope of queued) {
+        const origin = writing?.scope === scope ? writing.section : sectionFor(scope, base)!;
+        applyDiff(sectionFor(scope, snapshot)!, settingsDiff(sectionFor(scope, draft.value)!, origin));
+      }
       draft.value = snapshot;
       base = structuredClone(toRaw(incoming));
     },
@@ -227,6 +234,35 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     void flush();
   }
 
+  // Non-app scopes only reach a running session through a reload. One per
+  // committed change would hammer the session, so bursts coalesce behind a
+  // short quiet period — and one that lands mid-stream is held until the
+  // session goes idle again, never dropped.
+  const RELOAD_QUIET_MS = 400;
+  let reloadPending = false;
+  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  const sessionIdle = () =>
+    !!session.current && !session.current.runtime.isStreaming && !session.current.runtime.isCompacting;
+
+  function scheduleReload() {
+    if (!session.current) return;
+    reloadPending = true;
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => {
+      reloadTimer = undefined;
+      // Still streaming or compacting: stay pending; the idle watcher
+      // re-arms the timer once the session settles.
+      if (!sessionIdle()) return;
+      reloadPending = false;
+      session.control({ action: "reload" }).catch((error) =>
+        layout.showNotice(error instanceof Error ? error.message : String(error), "error"));
+    }, RELOAD_QUIET_MS);
+  }
+
+  watch(sessionIdle, (idle) => {
+    if (idle && reloadPending) scheduleReload();
+  });
+
   async function flush() {
     try {
       while (queued.size && draft.value && base) {
@@ -237,6 +273,7 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
           // without proxy cloning.
           const patch = settingsDiff(sectionFor(scope, toRaw(draft.value))!, sectionFor(scope, base)!);
           if (!Object.keys(patch).length) continue;
+          writing = { scope, section: structuredClone(toRaw(sectionFor(scope, draft.value)!)) };
           try {
             const settings = await desktop.invoke<SettingsBundle>("settings.update", { scope, patch });
             // applySettings mirrors the merged bundle app-wide; the watcher
@@ -247,28 +284,20 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
               : settings.app.language;
             reload ||= scope !== "app";
           } catch (error) {
-            // The write failed: put the scope back to what is on disk so the
-            // controls show the persisted state, and say why.
+            // The write failed: restore the scope to what is on disk, then
+            // overlay the edits made since the write began — the scope is
+            // still queued, so the next round writes them.
             const key = sectionKeyOf(scope);
-            const sections = draft.value as unknown as Record<string, unknown>;
-            sections[key] = structuredClone((base as unknown as Record<string, unknown>)[key]);
+            const restored = structuredClone(sectionFor(scope, base)!) as Record<string, unknown>;
+            applyDiff(restored, settingsDiff(sectionFor(scope, draft.value)!, writing.section));
+            (draft.value as unknown as Record<string, unknown>)[key] = restored;
             if (scope === "app") applyAppearance(draft.value.app);
             layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+          } finally {
+            writing = undefined;
           }
         }
-        // Non-app scopes only take effect in a running session after a
-        // reload; idle sessions reload once per batch, never mid-stream.
-        if (
-          reload &&
-          session.current &&
-          !session.current.runtime.isStreaming &&
-          !session.current.runtime.isCompacting
-        )
-          try {
-            await session.control({ action: "reload" });
-          } catch (error) {
-            layout.showNotice(error instanceof Error ? error.message : String(error), "error");
-          }
+        if (reload) scheduleReload();
       }
     } finally {
       flushing = false;

@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../src/shared/types";
+import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import SettingsPage from "../../src/renderer/features/settings/SettingsPage.vue";
 import { i18n } from "../../src/renderer/i18n";
@@ -42,6 +42,23 @@ function updateCalls(): UpdatePayload[] {
 // jsdom ships no pointer capture; the sidebar drag only needs it not to throw.
 HTMLElement.prototype.setPointerCapture = vi.fn();
 HTMLElement.prototype.releasePointerCapture = vi.fn();
+
+// The flush loop only reloads sessions it can see; a snapshot with just the
+// runtime fields it reads is enough to steer it.
+function openSession(streaming: boolean) {
+  const session = useSessionStore();
+  session.current = {
+    session: { id: "s1", path: "/project" },
+    runtime: { isStreaming: streaming, isCompacting: false },
+  } as unknown as SessionSnapshot;
+  return session;
+}
+
+function reloadCalls() {
+  return vi
+    .mocked(desktop.invoke)
+    .mock.calls.filter(([route, payload]) => route === "agent.control" && (payload as { action?: string }).action === "reload");
+}
 
 describe("SettingsPage auto-save", () => {
   beforeEach(() => {
@@ -185,14 +202,18 @@ describe("SettingsPage auto-save", () => {
   it("keeps an edit made while a write is in flight instead of dropping it", async () => {
     const persisted = structuredClone(settings);
     let first = true;
-    let resolveFirst!: (bundle: SettingsBundle) => void;
+    let releaseFirst!: () => void;
     vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
-      Object.assign(persisted.app, (payload as UpdatePayload).patch);
+      // The reply mirrors the disk this write produced, snapshotted at write
+      // time — later edits never leak into an older write's response.
+      const bundle = structuredClone(persisted);
+      Object.assign(bundle.app, (payload as UpdatePayload).patch);
+      Object.assign(persisted.app, bundle.app);
       if (first) {
         first = false;
-        return await new Promise<SettingsBundle>((resolve) => { resolveFirst = resolve; });
+        return await new Promise<SettingsBundle>((resolve) => { releaseFirst = () => resolve(bundle); });
       }
-      return structuredClone(persisted);
+      return bundle;
     });
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -203,7 +224,7 @@ describe("SettingsPage auto-save", () => {
     // The first write hangs; the second edit lands while it is in flight.
     await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
     await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
-    resolveFirst(structuredClone(persisted));
+    releaseFirst();
     await flushPromises();
 
     expect(updateCalls()).toEqual([
@@ -212,6 +233,133 @@ describe("SettingsPage auto-save", () => {
     ]);
     expect(layout.settings?.app).toMatchObject({ enterToSend: false, closeToTray: false });
     wrapper.unmount();
+  });
+
+  it("keeps the edit queued behind a failed write and persists it on the next round", async () => {
+    const persisted = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      Object.assign(persisted.app, (payload as UpdatePayload).patch);
+      return structuredClone(persisted);
+    });
+    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("disk full"));
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // enterToSend's write fails while closeToTray is edited behind it: the
+    // failed key returns to disk state, the queued edit still writes.
+    await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
+    await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
+    await flushPromises();
+
+    expect(updateCalls()).toEqual([
+      { scope: "app", patch: { enterToSend: false } },
+      { scope: "app", patch: { closeToTray: false } },
+    ]);
+    expect((wrapper.get('[data-setting-path="enterToSend"] input').element as HTMLInputElement).checked).toBe(true);
+    expect((wrapper.get('[data-setting-path="closeToTray"] input').element as HTMLInputElement).checked).toBe(false);
+    expect(layout.notice?.message).toBe("disk full");
+    wrapper.unmount();
+  });
+
+  it("adopts a value the write side drops and keeps the edit queued behind it", async () => {
+    const persisted = structuredClone(settings);
+    let first = true;
+    let releaseFirst!: () => void;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const bundle = structuredClone(persisted);
+      const patch = { ...(payload as UpdatePayload).patch } as Record<string, unknown>;
+      // Mirror of normalizeAppSettings: out-of-range numbers never reach disk.
+      if (typeof patch.canvasDotGridSpacing === "number" && (patch.canvasDotGridSpacing < 8 || patch.canvasDotGridSpacing > 96))
+        delete patch.canvasDotGridSpacing;
+      Object.assign(bundle.app, patch);
+      Object.assign(persisted.app, bundle.app);
+      if (first) {
+        first = false;
+        return await new Promise<SettingsBundle>((resolve) => { releaseFirst = () => resolve(bundle); });
+      }
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "appearance";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // The out-of-range spacing is written (and dropped server-side); a second
+    // edit queues behind it. The control must adopt the disk value and the
+    // next write must carry only the second edit — not re-send the dropped 999.
+    const spacing = wrapper.get('[data-setting-path="canvasDotGridSpacing"] input');
+    await spacing.setValue("999");
+    await spacing.trigger("change");
+    await wrapper.get('[data-setting-path="canvasDotGrid"] input').setValue(false);
+    releaseFirst();
+    await flushPromises();
+
+    const updates = updateCalls();
+    expect(updates[0]?.patch).toEqual({ canvasDotGridSpacing: 999 });
+    expect(updates.at(-1)?.patch).toEqual({ canvasDotGrid: false });
+    expect((spacing.element as HTMLInputElement).value).toBe("24");
+    wrapper.unmount();
+  });
+
+  it("coalesces a burst of non-app saves into one session reload", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) =>
+        (payload as { action?: string }).action === "getSkills" ? [] : settings);
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(settings);
+      openSession(false);
+      layout.settingsCategory = "agent";
+      const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+      await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
+      await wrapper.get('[data-setting-path="retry.maxRetries"] input').setValue("5");
+      await wrapper.get('[data-setting-path="retry.maxRetries"] input').trigger("change");
+      await flushPromises();
+      expect(reloadCalls()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(400);
+      expect(reloadCalls()).toHaveLength(1);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds a reload that lands mid-stream until the session goes idle", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) =>
+        (payload as { action?: string }).action === "getSkills" ? [] : settings);
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(settings);
+      const session = openSession(true);
+      layout.settingsCategory = "agent";
+      const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+      await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(400);
+      // The write landed; the running session must not be reloaded mid-stream.
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { transport: "sse" } });
+      expect(reloadCalls()).toHaveLength(0);
+
+      session.current!.runtime.isStreaming = false;
+      await vi.advanceTimersByTimeAsync(400);
+      expect(reloadCalls()).toHaveLength(1);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("clearing defaultTools removes the key instead of saving a no-tools list", async () => {
