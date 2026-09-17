@@ -427,12 +427,15 @@ export const useSessionStore = defineStore("session", {
       this.deletingNode = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("agent.control", { action: "deleteNode", nodeId: id, graphId });
+        // The turn is gone from disk the moment the invoke settles, so the
+        // lock must be journaled on success alone; the snapshot adoption is
+        // the only part tied to the view still matching.
+        trackEvent({
+          kind: "deleteTurn",
+          label: i18n.global.t("history.deleteTurn", { name: node?.title || id }),
+        });
         if (request === this.viewRequest && this.current?.graph?.id === graphId) {
           this.applySnapshot(snapshot);
-          trackEvent({
-            kind: "deleteTurn",
-            label: i18n.global.t("history.deleteTurn", { name: node?.title || id }),
-          });
         }
       } finally { this.deletingNode = false; }
     },
@@ -524,10 +527,13 @@ export const useSessionStore = defineStore("session", {
         kind: "createSession",
         label: i18n.global.t("history.createSession", { name: displayName(snapshot.session as SessionSummary) }),
         undo: async () => {
-          const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>(
-            "session.delete", { path: createdPath, confirmed: true });
-          if (!result.cancelled) this.applyDeletion(createdPath, result.sessions);
-          return !result.cancelled;
+          // pristineOnly makes the backend refuse when the file grew message
+          // entries the journal never sealed behind a lock.
+          const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean; skipped?: boolean }>(
+            "session.delete", { path: createdPath, confirmed: true, pristineOnly: true });
+          if (result.cancelled || result.skipped) return false;
+          this.applyDeletion(createdPath, result.sessions);
+          return true;
         },
         redo: async () => {
           await this.applyCreate();

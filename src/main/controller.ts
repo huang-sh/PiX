@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, posix, resolve } from "node:path";
 import { debugLog, logFile } from "./debug-log.js";
 import type {
@@ -16,7 +16,7 @@ import { projectId } from "../shared/types.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
 import { canonicalPath } from "./paths.js";
-import { isSessionRunning, projectSession } from "../shared/session.js";
+import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
@@ -734,6 +734,16 @@ export class MainController {
           return { cancelled: true, sessions: await this.sessions() };
         if (resolved?.entry && this.registry.busy(resolved.entry))
           throw new Error("Stop the running session before deleting it");
+        if (v.pristineOnly === true) {
+          // Undo of "create session" must never destroy a file that grew
+          // content behind the journal's back: only a message-free file may
+          // be unlinked, and anything unreadable counts as grown.
+          let pristine = false;
+          try {
+            pristine = !parseSessionJsonl(readFileSync(p, "utf8")).entries.some(e => e.type === "message");
+          } catch {}
+          if (!pristine) return { skipped: true, sessions: await this.sessions() };
+        }
         // Disposal drains an open still in flight for this file — its late
         // settlement would otherwise resurrect the deleted session — and the
         // unlink runs inside the blocked window so no new open can build a

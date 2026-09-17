@@ -120,7 +120,50 @@ describe("history instrumentation of management actions", () => {
 
     lib.mockResolvedValue({ sessions: [] });
     await history.undoSteps(1);
-    expect(lib).toHaveBeenCalledWith("session.delete", { path: "new.jsonl", confirmed: true });
+    expect(lib).toHaveBeenCalledWith("session.delete", { path: "new.jsonl", confirmed: true, pristineOnly: true });
+  });
+
+  it("create undo refuses when the backend reports the file is no longer pristine", async () => {
+    const { history, store, workspace } = await boot();
+    workspace.hydrate(project);
+    const created = snapshot("new.jsonl");
+    lib.mockImplementation(async (route) => {
+      if (route === "agent.control") return created;
+      if (route === "session.list") return [created.session];
+      return [];
+    });
+    await store.create();
+    store.sessions = [created.session];
+
+    lib.mockResolvedValue({ skipped: true, sessions: [created.session] });
+    await history.undoSteps(1);
+    // Silent refusal: the entry stays applied and the list keeps the session.
+    expect(history.history.cursor).toBe(1);
+    expect(store.sessions).toHaveLength(1);
+  });
+
+  it("deleteNode journals its lock even when the view moved on mid-IPC", async () => {
+    const { history, store } = await boot();
+    const snap = snapshot("s1");
+    store.current = snap;
+    store.sessions = [summary("s1", "Sesh")];
+    lib.mockResolvedValue({ projects: [] });
+    await store.pin("s1", true);
+
+    const nodeId = snap.projection.nodes[0]!.id;
+    lib.mockImplementation(async (route: string, args: Record<string, unknown>) => {
+      if (route === "agent.control" && args.action === "deleteNode") {
+        store.viewRequest += 1; // the user opened another session mid-flight
+        return snap;
+      }
+      return { projects: [] };
+    });
+
+    await store.deleteNode(nodeId);
+    expect(history.history.entries.some((entry) => entry.kind === "deleteTurn")).toBe(true);
+    // The lock seals the pin below it: undo stops instead of crossing.
+    await history.undoSteps(1);
+    expect(history.history.cursor).toBe(2);
   });
 
   it("remove records a deleteSession lock", async () => {
