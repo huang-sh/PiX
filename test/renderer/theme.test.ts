@@ -28,6 +28,12 @@ describe("theme lifecycle", () => {
     stop = startTheme("light");
   });
   afterEach(() => { stop(); applyTheme("light"); vi.unstubAllGlobals(); });
+  // Electron's structured clone rejects Vue reactive proxies, so every IPC
+  // argument these tests produce must survive it.
+  afterEach(() => {
+    for (const [route, payload] of vi.mocked(desktop.invoke).mock.calls)
+      expect(() => structuredClone(payload), `${route} payload`).not.toThrow();
+  });
 
   it("follows OS changes only in system mode and removes its listener", () => {
     expect(colorScheme.value).toBe("light");

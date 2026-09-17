@@ -63,6 +63,9 @@ interface PendingPrompt {
   thinkingLevel?: string;
 }
 
+export const SETTINGS_RELOAD_QUIET_MS = 400;
+let settingsReloadTimer: ReturnType<typeof setTimeout> | undefined;
+
 export const useSessionStore = defineStore("session", {
   state: () => ({
     loading: true,
@@ -373,6 +376,25 @@ export const useSessionStore = defineStore("session", {
       if (abortLabel) trackEvent({ kind: "abortRun", label: abortLabel });
       if (sendLabel) trackEvent({ kind: "sendPrompt", label: sendLabel });
       return result;
+    },
+    // Settings writes reach a running session only through a reload. One per
+    // committed change would hammer the session, so bursts coalesce behind a
+    // quiet period. A reload that comes due mid-stream re-arms instead of
+    // dropping: the queue lives here, not on the settings page that asked for
+    // it, so closing that page cannot lose the reload.
+    scheduleSettingsReload() {
+      if (!this.current) return;
+      clearTimeout(settingsReloadTimer);
+      const fire = () => {
+        if (!this.current) return;
+        if (this.current.runtime.isStreaming || this.current.runtime.isCompacting) {
+          settingsReloadTimer = setTimeout(fire, SETTINGS_RELOAD_QUIET_MS);
+          return;
+        }
+        void this.control({ action: "reload" }).catch((error) =>
+          useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error"));
+      };
+      settingsReloadTimer = setTimeout(fire, SETTINGS_RELOAD_QUIET_MS);
     },
     // A lock entry names the run/branch it stops when one is identifiable, else
     // it falls back to a generic label. Only abort actions resolve to one.

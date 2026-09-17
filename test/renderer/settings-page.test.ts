@@ -1,12 +1,12 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import SettingsPage from "../../src/renderer/features/settings/SettingsPage.vue";
 import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
-import { useSessionStore } from "../../src/renderer/stores/session";
+import { SETTINGS_RELOAD_QUIET_MS, useSessionStore } from "../../src/renderer/stores/session";
 import { version } from "../../package.json";
 
 const settings = {
@@ -64,6 +64,14 @@ describe("SettingsPage auto-save", () => {
   beforeEach(() => {
     vi.mocked(desktop.invoke).mockReset();
     vi.mocked(desktop.invoke).mockImplementation(async () => settings);
+  });
+
+  // Electron serializes arguments with the structured clone algorithm, which
+  // rejects Vue reactive proxies. Checking every payload the mocks recorded
+  // holds the whole file to that contract instead of one assertion at a time.
+  afterEach(() => {
+    for (const [route, payload] of vi.mocked(desktop.invoke).mock.calls)
+      expect(() => structuredClone(payload), `${route} payload`).not.toThrow();
   });
 
   it("resizes the settings sidebar by drag and keyboard, persisting the width", async () => {
@@ -162,13 +170,9 @@ describe("SettingsPage auto-save", () => {
     await wrapper.get('[data-setting-path="language"] select').setValue("zh-CN");
     await flushPromises();
 
-    const updates = updateCalls();
-    expect(updates.find((payload) => payload.scope === "app")?.patch).toMatchObject({
-      language: "zh-CN",
-    });
-    // Electron IPC serializes arguments with the structured clone algorithm,
-    // which rejects Vue reactive proxies with "An object could not be cloned."
-    for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
+    // The clone-safety of every recorded payload is the afterEach sweep's
+    // job; this test pins the payload itself.
+    expect(updateCalls().at(-1)).toMatchObject({ scope: "app", patch: { language: "zh-CN" } });
   });
 
   it("saves each committed change immediately and reverts a failed write to the persisted state", async () => {
@@ -232,6 +236,49 @@ describe("SettingsPage auto-save", () => {
       { scope: "app", patch: { closeToTray: false } },
     ]);
     expect(layout.settings?.app).toMatchObject({ enterToSend: false, closeToTray: false });
+    wrapper.unmount();
+  });
+
+  it("keeps an array-valued row's mid-write edit clone-safe", async () => {
+    const persisted = structuredClone(settings);
+    let first = true;
+    let releaseFirst!: () => void;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const bundle = structuredClone(persisted);
+      Object.assign(bundle.piGlobal, (payload as UpdatePayload).patch);
+      Object.assign(persisted.piGlobal, bundle.piGlobal);
+      if (first) {
+        first = false;
+        return await new Promise<SettingsBundle>((resolve) => { releaseFirst = () => resolve(bundle); });
+      }
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "shell";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // shellPath's write hangs; npmCommand — an array-valued row — commits while
+    // it is in flight. Folding that edit into the draft must not hand the next
+    // patch a reactive array: IPC cannot clone it, and the section snapshot
+    // that write takes would throw before the write is even sent.
+    const shellPath = wrapper.get('[data-setting-path="shellPath"] input');
+    await shellPath.setValue("/a");
+    await shellPath.trigger("change");
+    await flushPromises();
+    const packages = wrapper.get('[data-setting-path="npmCommand"] input');
+    await packages.setValue("pnpm, dlx");
+    await packages.trigger("change");
+    releaseFirst();
+    await flushPromises();
+
+    expect(updateCalls()).toEqual([
+      { scope: "global", patch: { shellPath: "/a" } },
+      { scope: "global", patch: { npmCommand: ["pnpm", "dlx"] } },
+    ]);
+    expect(layout.settings?.piGlobal.npmCommand).toEqual(["pnpm", "dlx"]);
     wrapper.unmount();
   });
 
@@ -325,7 +372,7 @@ describe("SettingsPage auto-save", () => {
       await flushPromises();
       expect(reloadCalls()).toHaveLength(0);
 
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
       expect(reloadCalls()).toHaveLength(1);
       wrapper.unmount();
     } finally {
@@ -348,15 +395,45 @@ describe("SettingsPage auto-save", () => {
 
       await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
       await flushPromises();
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
       // The write landed; the running session must not be reloaded mid-stream.
       expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { transport: "sse" } });
       expect(reloadCalls()).toHaveLength(0);
 
       session.current!.runtime.isStreaming = false;
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
       expect(reloadCalls()).toHaveLength(1);
       wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a reload that came due mid-stream after the settings page closes", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) =>
+        (payload as { action?: string }).action === "getSkills" ? [] : settings);
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(settings);
+      const session = openSession(true);
+      layout.settingsCategory = "agent";
+      const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+      await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(0);
+
+      // The page closes while the stream is still running: the pending reload
+      // belongs to the session, so it must outlive the page that asked for it
+      // and fire once the session settles.
+      wrapper.unmount();
+      session.current!.runtime.isStreaming = false;
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -387,7 +464,6 @@ describe("SettingsPage auto-save", () => {
     expect(updates.find((payload) => payload.scope === "project")?.patch).toMatchObject({
       defaultTools: null,
     });
-    for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
     wrapper.unmount();
   });
 

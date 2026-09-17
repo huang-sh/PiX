@@ -71,10 +71,13 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
       // baseline, when no write is out for it): never the raw draft values a
       // normalizing write side may have dropped. Sync so the loop's next
       // diff already sees the advanced baseline.
+      // toRaw keeps the overlaid values plain: the draft is read back as a
+      // proxy, and a proxy array folded in here would fail the section clone
+      // the next write takes.
       const snapshot = structuredClone(toRaw(incoming));
       for (const scope of queued) {
         const origin = writing?.scope === scope ? writing.section : sectionFor(scope, base)!;
-        applyDiff(sectionFor(scope, snapshot)!, settingsDiff(sectionFor(scope, draft.value)!, origin));
+        applyDiff(sectionFor(scope, snapshot)!, settingsDiff(sectionFor(scope, toRaw(draft.value))!, origin));
       }
       draft.value = snapshot;
       base = structuredClone(toRaw(incoming));
@@ -234,35 +237,6 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     void flush();
   }
 
-  // Non-app scopes only reach a running session through a reload. One per
-  // committed change would hammer the session, so bursts coalesce behind a
-  // short quiet period — and one that lands mid-stream is held until the
-  // session goes idle again, never dropped.
-  const RELOAD_QUIET_MS = 400;
-  let reloadPending = false;
-  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
-  const sessionIdle = () =>
-    !!session.current && !session.current.runtime.isStreaming && !session.current.runtime.isCompacting;
-
-  function scheduleReload() {
-    if (!session.current) return;
-    reloadPending = true;
-    clearTimeout(reloadTimer);
-    reloadTimer = setTimeout(() => {
-      reloadTimer = undefined;
-      // Still streaming or compacting: stay pending; the idle watcher
-      // re-arms the timer once the session settles.
-      if (!sessionIdle()) return;
-      reloadPending = false;
-      session.control({ action: "reload" }).catch((error) =>
-        layout.showNotice(error instanceof Error ? error.message : String(error), "error"));
-    }, RELOAD_QUIET_MS);
-  }
-
-  watch(sessionIdle, (idle) => {
-    if (idle && reloadPending) scheduleReload();
-  });
-
   async function flush() {
     try {
       while (queued.size && draft.value && base) {
@@ -286,10 +260,11 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
           } catch (error) {
             // The write failed: restore the scope to what is on disk, then
             // overlay the edits made since the write began — the scope is
-            // still queued, so the next round writes them.
+            // still queued, so the next round writes them. toRaw as above:
+            // the restored section is read back as a proxy.
             const key = sectionKeyOf(scope);
             const restored = structuredClone(sectionFor(scope, base)!) as Record<string, unknown>;
-            applyDiff(restored, settingsDiff(sectionFor(scope, draft.value)!, writing.section));
+            applyDiff(restored, settingsDiff(sectionFor(scope, toRaw(draft.value))!, writing.section));
             (draft.value as unknown as Record<string, unknown>)[key] = restored;
             if (scope === "app") applyAppearance(draft.value.app);
             layout.showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -297,7 +272,7 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
             writing = undefined;
           }
         }
-        if (reload) scheduleReload();
+        if (reload) session.scheduleSettingsReload();
       }
     } finally {
       flushing = false;
