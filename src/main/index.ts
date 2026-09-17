@@ -17,8 +17,18 @@ import { MainController } from "./controller.js";
 import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
+import { applyLinuxImeWorkaround, detectRunningLinuxIm } from "./linux-ime.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
+
+applyLinuxImeWorkaround({
+  platform: process.platform,
+  env: process.env,
+  wayland: Boolean(process.env.WAYLAND_DISPLAY),
+  runningIm: detectRunningLinuxIm(),
+  appendSwitch: (name, value) => app.commandLine.appendSwitch(name, value),
+});
+
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
 let tray: Tray | undefined;
