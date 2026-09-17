@@ -1,8 +1,8 @@
 // Smoke test for a packaged PiX build (release/win-unpacked/PiX.exe, the
-// portable exe, or release/mac*/PiX.app on macOS). Drives the packaged app
-// over the Chrome DevTools protocol like test/gui-test.mjs, so the asar
-// layout, preload, IPC, and the node-pty native binary are all exercised in
-// their packaged form.
+// portable exe, release/linux-unpacked/pix, or release/mac*/PiX.app on macOS).
+// Drives the packaged app over the Chrome DevTools protocol like
+// test/gui-test.mjs, so the asar layout, preload, IPC, and the node-pty
+// native binary are all exercised in their packaged form.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,7 +15,9 @@ const exe =
 const defaultTarget =
   process.platform === "darwin"
     ? join(root, "release", "mac", "PiX.app", "Contents", "MacOS", "PiX")
-    : join(root, "release", "win-unpacked", "PiX.exe");
+    : process.platform === "linux"
+      ? join(root, "release", "linux-unpacked", "pix")
+      : join(root, "release", "win-unpacked", "PiX.exe");
 const target = exe || defaultTarget;
 if (!existsSync(target))
   throw new Error(`Packaged PiX executable not found: ${target}`);

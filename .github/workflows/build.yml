@@ -24,6 +24,8 @@ jobs:
             targets: --mac --arm64
           - os: macos-15-intel
             targets: --mac --x64
+          - os: ubuntu-latest
+            targets: --linux
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -100,6 +102,10 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.tar.gz
             release/latest*.yml
             release/*.blockmap
           if-no-files-found: error
