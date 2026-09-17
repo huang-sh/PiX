@@ -458,6 +458,14 @@ try {
     );
     console.log(JSON.stringify(remoteSshResult, null, 2));
   } else {
+  // A packaged Windows release once shipped a window that never showed: every
+  // boot assertion still passed because the renderer was alive. A hidden
+  // BrowserWindow reports document.visibilityState "hidden", so require the
+  // page to become visible — the renderer-observable form of "window shown".
+  await retry(async () => {
+    if ((await cdp.evaluate("document.visibilityState")) !== "visible")
+      throw new Error("Window did not become visible after boot");
+  });
   await cdp.evaluate(
     "Promise.all(['navigator','chat'].filter(panel => window.__pixTest.state().layout.collapsed[panel]).map(panel => window.__pixTest.toggle(panel))).then(() => window.__pixTest.state().layout.collapsed.content ? undefined : window.__pixTest.toggle('content'))",
   );

@@ -163,7 +163,17 @@ async function create() {
     },
   });
   win = created;
-  created.once("ready-to-show", () => { if (win === created) created.show(); });
+  // ready-to-show is the no-flash moment, but an Electron upgrade once
+  // stopped it from firing on Windows and the app stayed invisible; showing
+  // after load finishes is the floor below which the window must not sink.
+  let shown = false;
+  const showOnce = () => {
+    if (shown || win !== created) return;
+    shown = true;
+    created.show();
+  };
+  created.once("ready-to-show", showOnce);
+  created.webContents.once("did-finish-load", () => setTimeout(showOnce, 200));
   created.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
@@ -180,6 +190,9 @@ async function create() {
     if (url === created.webContents.getURL()) return;
     event.preventDefault();
     void openExternal(url).catch(() => {});
+  });
+  created.webContents.on("render-process-gone", (_event, details) => {
+    debugLog(`renderer: process gone (reason=${details.reason}, exitCode=${details.exitCode})`, new Error(details.reason));
   });
   created.webContents.on(
     "will-attach-webview",
