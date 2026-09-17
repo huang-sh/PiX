@@ -29,8 +29,9 @@ const badge = computed(() => (depth.value > 99 ? "99+" : depth.value > 0 ? Strin
 
 .history-floating-btn {
   position: fixed;
-  right: 14px;
-  bottom: 14px;
+  /* Stacked above the graph controls row (right: 8px, bottom: 33px + 32px tall). */
+  right: 8px;
+  bottom: 68px;
   z-index: 155;
   display: grid;
   place-items: center;

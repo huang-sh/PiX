@@ -186,7 +186,7 @@ onUnmounted(() => {
   top: 56px;
   right: 12px;
   width: 380px;
-  max-height: calc(100vh - 132px);
+  max-height: calc(100vh - 176px);
   display: flex;
   flex-direction: column;
   background: var(--surface);

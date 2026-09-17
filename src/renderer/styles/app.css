@@ -1290,10 +1290,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
   .provider-remove { margin-left: auto; }
 }
 
-/* right: 58px keeps the toast clear of the floating history button pinned to the
-   bottom-right corner (36px button + 14px inset + 8px gap); toast-history below
-   opts out to the bottom-left, so it keeps the plain 14px inset. */
-.toast { position: fixed; right: 58px; bottom: 14px; z-index: 180; max-width: 500px; min-height: 39px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
+.toast { position: fixed; right: 14px; bottom: 14px; z-index: 180; max-width: 500px; min-height: 39px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
 .toast.error { border-color: var(--danger); }
 .toast.warning { border-color: var(--warn); }
 .toast-history { left: 14px; right: auto; }
