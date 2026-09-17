@@ -180,6 +180,9 @@ export function validateRouteInput(
         path: str(v.path, "path"),
         // Set when the renderer already collected an in-app confirmation.
         ...(v.confirmed === true ? { confirmed: true } : {}),
+        // Set by undo of "create session": refuse to unlink a file that
+        // grew message entries behind the journal's back.
+        ...(v.pristineOnly === true ? { pristineOnly: true } : {}),
       };
     case "library.pin":
       return { path: str(v.path, "path"), pinned: v.pinned === true };

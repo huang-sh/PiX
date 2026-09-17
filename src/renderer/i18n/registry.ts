@@ -2,6 +2,7 @@
 // runtime import back into them would be a cycle.
 import type * as app from "./app";
 import type * as graph from "./graph";
+import type * as history from "./history";
 import type * as remote from "./remote";
 import type * as settings from "./settings";
 import type * as workbench from "./workbench";
@@ -12,6 +13,7 @@ type DomainModules = {
   workbench: typeof workbench;
   remote: typeof remote;
   settings: typeof settings;
+  history: typeof history;
 };
 type DomainName = keyof DomainModules;
 type DomainModule = DomainModules[DomainName];

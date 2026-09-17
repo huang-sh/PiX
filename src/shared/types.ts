@@ -352,6 +352,8 @@ export interface AppSettings {
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /** Experimental features are opt-in, default off, and may change or disappear. */
+  experimentalHistory: boolean;
   /** Latest release the user chose to stop being notified about. */
   updateSkippedVersion?: string;
 }

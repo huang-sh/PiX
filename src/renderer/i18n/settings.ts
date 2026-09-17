@@ -208,6 +208,7 @@ export const en = {
       skills: "Skills",
       extensions: "Extensions",
       shell: "Shell & network",
+      experimental: "Experimental",
       about: "About",
     },
     about: {
@@ -237,6 +238,8 @@ export const en = {
       openLastSessionDesc: "Automatically open the most recent session when PiX starts.",
       closeToTray: "Close to system tray",
       closeToTrayDesc: "On (Windows/Linux): closing the window keeps PiX running in the system tray; restore or quit from the tray icon. Off: closing the window quits PiX.",
+      experimentalHistory: "Operation history (undo/redo)",
+      experimentalHistoryDesc: "Undo and redo management operations (pin, archive, rename, create) from a history panel. Experimental: behavior may change or be removed.",
       theme: "PiX theme",
       density: "PiX density",
       canvasDotGrid: "Canvas dot grid",
@@ -530,6 +533,7 @@ export const zhCN: typeof en = {
       skills: "技能",
       extensions: "扩展",
       shell: "Shell 与网络",
+      experimental: "实验功能",
       about: "关于",
     },
     about: {
@@ -559,6 +563,8 @@ export const zhCN: typeof en = {
       openLastSessionDesc: "PiX 启动时自动打开最近的会话。",
       closeToTray: "关闭时最小化到系统托盘",
       closeToTrayDesc: "开启后（仅 Windows/Linux）：点击关闭按钮会将 PiX 隐藏到系统托盘继续运行，从托盘图标可恢复窗口或退出；关闭后点击关闭按钮直接退出 PiX。",
+      experimentalHistory: "操作历史（撤销/重做）",
+      experimentalHistoryDesc: "在历史面板中撤销/重做管理操作（置顶、归档、重命名、新建）。实验功能：行为可能变更或移除。",
       theme: "PiX 主题",
       density: "PiX 界面密度",
       canvasDotGrid: "画布点阵背景",

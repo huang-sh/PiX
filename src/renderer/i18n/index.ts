@@ -1,12 +1,13 @@
 import { createI18n } from "vue-i18n";
 import * as app from "./app";
 import * as graph from "./graph";
+import * as history from "./history";
 import * as remote from "./remote";
 import * as settings from "./settings";
 import * as workbench from "./workbench";
 import { composeMessages, onDomainChange, setDomains } from "./registry";
 
-setDomains({ app, graph, workbench, remote, settings });
+setDomains({ app, graph, workbench, remote, settings, history });
 
 export const messages = composeMessages();
 
