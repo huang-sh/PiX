@@ -18,8 +18,18 @@ import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
+import { applyLinuxImeWorkaround } from "./linux-ime.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
+
+applyLinuxImeWorkaround({
+  platform: process.platform,
+  env: process.env,
+  hasSwitch: (name) => app.commandLine.hasSwitch(name),
+  getSwitchValue: (name) => app.commandLine.getSwitchValue(name),
+  appendSwitch: (name, value) => app.commandLine.appendSwitch(name, value),
+});
+
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
 let tray: Tray | undefined;
