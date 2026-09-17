@@ -193,3 +193,27 @@ describe("history journal", () => {
     expect(h.history.cursor).toBe(200);
   });
 });
+
+describe("resetForTest during an in-flight walk", () => {
+  it("leaves busy false, the counter non-negative, and the cursor in range", async () => {
+    const mod = await boot();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    mod.track({
+      kind: "pin", label: "slow",
+      undo: async () => { await gate; return true; },
+      redo: async () => true,
+    });
+    const walk = mod.undoSteps(1);
+    mod.resetForTest(); // reset while the walk closure is still gated
+    release();
+    await walk;
+
+    mod.track({ kind: "pin", label: "quick", undo: async () => true, redo: async () => true });
+    await mod.undoSteps(1);
+
+    expect(mod.history.busy).toBe(false);
+    expect(mod.history.cursor).toBeGreaterThanOrEqual(0);
+    expect(mod.history.cursor).toBeLessThanOrEqual(mod.history.entries.length);
+  });
+});

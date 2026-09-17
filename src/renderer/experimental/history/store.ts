@@ -188,7 +188,9 @@ async function undoRange(toIdx: number): Promise<boolean> {
     try {
       if (!(await entry.undo())) break;
       entry.failed = false;
-      state.cursor -= 1;
+      // Clamped, not bare: a resetForTest() mid-walk re-zeroes the cursor and
+      // the closure may then settle afterwards.
+      state.cursor = Math.max(0, state.cursor - 1);
       last = entry;
     } catch (error) {
       entry.failed = true;
@@ -212,7 +214,7 @@ async function redoRange(toIdx: number): Promise<boolean> {
     try {
       if (!(await entry.redo())) break;
       entry.failed = false;
-      state.cursor += 1;
+      state.cursor = Math.min(state.entries.length, state.cursor + 1);
       last = entry;
     } catch (error) {
       entry.failed = true;
@@ -236,7 +238,9 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   pending += 1;
   state.busy = true;
   const run = queue.then(fn).finally(() => {
-    pending -= 1;
+    // Clamped: a resetForTest() mid-walk zeroes the counter, and the stale
+    // decrement would otherwise drive it negative and pin busy forever.
+    pending = Math.max(0, pending - 1);
     if (pending === 0) state.busy = false;
   });
   // Swallow completion/rejection so subsequent queued tasks run regardless.
