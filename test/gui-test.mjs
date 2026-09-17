@@ -85,8 +85,12 @@ const xvfb =
   process.platform === "linux"
     ? String(spawnSync("which", ["xvfb-run"], { encoding: "utf8" }).stdout).trim()
     : "";
+// A stalled vite close leaves watchers and sockets holding the event loop
+// open on Linux; run the wrapper as its own group so teardown can reap the
+// whole tree, and exit explicitly once the script is done.
+const grouped = Boolean(xvfb);
 const child = xvfb
-  ? spawn(xvfb, ["-a", electron, ...args], { cwd: root, env: testEnv() })
+  ? spawn(xvfb, ["-a", electron, ...args], { cwd: root, env: testEnv(), detached: grouped })
   : spawn(electron, args, { cwd: root, env: testEnv(), windowsHide: true });
 
 let stderr = "";
@@ -1349,12 +1353,17 @@ try {
       stdio: "ignore",
     });
   else {
-    child.kill("SIGTERM");
+    const signalTree = (signal) => {
+      if (!child.pid) return;
+      if (grouped) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    };
+    signalTree("SIGTERM");
     await Promise.race([
       new Promise((resolve) => child.once("close", resolve)),
       new Promise((resolve) => setTimeout(resolve, 1_000)),
     ]);
-    if (child.exitCode === null) child.kill("SIGKILL");
+    if (child.exitCode === null) signalTree("SIGKILL");
   }
   child.stdout?.destroy();
   child.stderr?.destroy();
@@ -1375,3 +1384,5 @@ try {
       { stdio: "ignore", windowsHide: true },
     );
 }
+
+process.exit(0);
