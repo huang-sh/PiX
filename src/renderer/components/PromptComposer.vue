@@ -162,7 +162,7 @@ async function addFiles(selected: File[]) {
     if (imageFiles.length && !supportsImages.value) throw new Error(t("draft.imagesUnsupported"));
     if (target.images.length + imageFiles.length > MAX_PROMPT_IMAGES) throw new Error(t("draft.imagesLimit"));
     // Documents resolve to local paths synchronously; the agent reads them itself.
-    const added = documents.map(promptFilePath);
+    const added = await Promise.all(documents.map(promptFilePath));
     if ((target.files?.length ?? 0) + added.length > MAX_PROMPT_FILES) throw new Error(t("draft.filesLimit"));
     if (imageFiles.some(file => file.size > MAX_IMAGE_BYTES)) throw new Error(t("draft.imagesSize"));
     if (imageFiles.length) {

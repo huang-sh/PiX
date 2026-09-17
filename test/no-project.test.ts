@@ -110,6 +110,23 @@ test("picking a project opens it and records it as the last project", async () =
   }
 });
 
+test("picking a project by path skips the platform dialog", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-pick-path-"));
+  const project = join(home, "project");
+  try {
+    mkdirSync(project, { recursive: true });
+    const controller = new MainController(null, platform);
+    controller.settings.appPath = join(home, "settings.json");
+    controller.sessions = async () => [];
+    const boot = (await controller.invoke("app.pickProject", { path: project })) as {
+      project: { path: string };
+    };
+    assert.equal(boot.project.path, project);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("restoring the last project still works on later runs", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-restore-"));
   const project = join(home, "project");

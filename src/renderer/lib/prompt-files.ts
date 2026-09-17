@@ -9,8 +9,9 @@ export interface PromptFile {
 
 export const MAX_PROMPT_FILES = 8;
 
-export function promptFilePath(file: File): PromptFile {
+export async function promptFilePath(file: File): Promise<PromptFile> {
   const path = desktop.filePath(file);
-  if (!path) throw new Error("draft.filesPath");
-  return { name: file.name, path };
+  if (path) return { name: file.name, path };
+  if (desktop.attachFile) return desktop.attachFile(file);
+  throw new Error("draft.filesPath");
 }

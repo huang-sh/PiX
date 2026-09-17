@@ -2,10 +2,9 @@
   "name": "pix",
   "version": "0.0.19",
   "private": true,
-  "desktopName": "pix",
   "type": "module",
-  "description": "Graph-first Electron workbench for Pi Agent",
-  "main": "out/main/index.js",
+  "description": "Graph-first web workbench for Pi Agent",
+  "main": "out/web/index.js",
   "engines": {
     "node": ">=22.19.0"
   },
@@ -15,31 +14,16 @@
     "install:server:wsl": "node scripts/install-wsl-server.mjs",
     "test:wsl": "node scripts/install-wsl-server.mjs && node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && node test/wsl-server-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && vue-tsc --noEmit -p tsconfig.app.json",
-    "build": "npm run build:server && electron-vite build",
+    "build": "npm run build:server && tsc -p tsconfig.node.json && vite build",
     "test": "node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && node --test out-test/test/*.test.js && npm run test:renderer && npm run test:terminal",
     "test:renderer": "vitest run --config vitest.config.ts",
-    "test:terminal": "node test/electron-pty-test.mjs",
+    "test:terminal": "node test/node-pty-test.mjs",
     "test:pi": "node test/pi-session-test.mjs",
-    "test:gui": "npm run build && node test/gui-test.mjs",
-    "test:gui:navigator": "npm run build && node test/navigator-gui-test.mjs",
-    "test:gui:changes": "node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && npm run build && node test/file-changes-gui-test.mjs",
-    "test:gui:slash": "npm run build && node test/slash-gui-test.mjs",
-    "test:gui:toast": "npm run build && node test/gui-toast-test.mjs",
-    "test:gui:links": "npm run build && node test/gui-link-test.mjs",
-    "test:gui:terminal": "npm run build && node test/terminal-gui-test.mjs",
-    "test:gui:typography": "npm run build && node test/typography-gui-test.mjs",
-    "test:gui:stop": "npm run build && node test/gui-stop-button-check.mjs",
-    "test:gui:wsl": "node scripts/install-wsl-server.mjs && npm run build && node test/gui-test.mjs --wsl",
-    "test:gui:ssh": "npm run build && node test/gui-test.mjs --ssh",
-    "verify": "npm run typecheck && npm test && npm run test:pi && npm run test:gui",
-    "dist": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux",
-    "test:packaged": "node test/packaged-smoke-test.mjs",
     "test:fff": "node test/builtin-fff-smoke-test.mjs",
     "test:web": "node --test test/prune-dev-artifacts.test.mjs && node test/web-extension-smoke-test.mjs",
-    "dev": "electron-vite dev -w",
-    "postinstall": "node node_modules/electron/install.js"
+    "verify": "npm run typecheck && npm test && npm run test:pi",
+    "dev": "tsc -p tsconfig.node.json && node out/web/index.js --dev",
+    "start": "node out/web/index.js"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.0",
@@ -71,9 +55,6 @@
     "@types/ws": "8.18.1",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.5.0",
-    "electron": "^44.1.1",
-    "electron-builder": "^26.15.3",
-    "electron-vite": "^5.0.0",
     "jsdom": "^30.0.1",
     "tailwindcss": "^4.3.3",
     "typescript": "5.8.3",
@@ -82,7 +63,6 @@
     "vue-tsc": "^3.3.11"
   },
   "allowScripts": {
-    "electron@44.1.1": true,
     "node-pty@1.2.0-beta.15": true
   }
 }

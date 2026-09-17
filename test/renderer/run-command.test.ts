@@ -30,12 +30,12 @@ it("dispatches every app command and sends dynamic commands to the selected chat
   } } as any;
   const control = vi.spyOn(session, "control").mockResolvedValue({ path: "export.html" } as never);
   const prompt = vi.spyOn(session, "promptAt").mockResolvedValue(undefined);
-  const effects = ["importSession", "refresh", "create", "loadCommands"] as const;
+  const effects = ["refresh", "create", "loadCommands"] as const;
   for (const effect of effects) vi.spyOn(session, effect).mockResolvedValue(undefined);
   vi.spyOn(layout, "save").mockResolvedValue(undefined);
   const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue(undefined as never);
   const copy = vi.spyOn(window.pix!, "copy").mockResolvedValue(undefined);
-  const deps = { requestRename: vi.fn().mockResolvedValue(undefined), requestCompact: vi.fn(), closeSettings: vi.fn() };
+  const deps = { requestRename: vi.fn().mockResolvedValue(undefined), requestCompact: vi.fn(), requestImport: vi.fn(), closeSettings: vi.fn() };
   let run!: (name: string) => Promise<void>;
   const wrapper = mount(defineComponent({ setup() {
     run = createRunCommand(deps).runCommand;
@@ -53,6 +53,7 @@ it("dispatches every app command and sends dynamic commands to the selected chat
   }
   expect(deps.requestRename).toHaveBeenCalledWith("session.jsonl", "Test");
   expect(deps.requestCompact).toHaveBeenCalledOnce();
+  expect(deps.requestImport).toHaveBeenCalledOnce();
   expect(deps.closeSettings).toHaveBeenCalled();
   expect(copy).toHaveBeenCalledWith("Answer");
   expect(invoke).toHaveBeenCalledWith("app.quit");

@@ -488,10 +488,10 @@ export const useSessionStore = defineStore("session", {
       this.focusedNode = this.current?.projection.activeNodeId ?? null;
       await Promise.all([this.refresh(), this.loadCommands()]);
     },
-    async importSession() {
+    async importSession(path?: string) {
       const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(
         "session.import",
-        {},
+        path ? { path } : {},
       );
       if (!result) return;
       this.sessions = result.sessions;

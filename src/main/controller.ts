@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
-import { basename, posix, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join, posix, resolve } from "node:path";
 import type {
   AgentControl,
   DesktopEvent,
@@ -33,6 +34,7 @@ import {
   configuredSessionDir,
   GitService,
   managedSessionFile,
+  saveUpload,
   SessionFiles,
   SettingsService,
   ShellService,
@@ -65,6 +67,11 @@ const SESSION_MIGRATING_ACTIONS = ["fork", "clone"];
 const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 const migratesSession = (action: unknown) =>
   action === "newSession" || (SESSION_MIGRATING_ACTIONS as readonly unknown[]).includes(action);
+const expandHome = (path: string) => {
+  if (!path || path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+};
 const unavailable = (): RuntimeState => ({
   available: false,
   model: null,
@@ -447,7 +454,8 @@ export class MainController {
     ++this.viewRequest;
     if (path) {
       path = resolve(path);
-      if (!existsSync(path)) throw new Error("Project not found");
+      if (!existsSync(path) || !statSync(path).isDirectory())
+        throw new Error("Project not found");
       this.localProjectPath = path;
       this.project = { name: basename(path), path };
       this.settings.setProject(path);
@@ -1105,7 +1113,9 @@ export class MainController {
         };
       }
       case "app.pickProject": {
-        const p = await this.platform.pickProject();
+        const p = typeof v.path === "string" && v.path
+          ? String(v.path)
+          : await this.platform.pickProject();
         if (!p) return null;
         // The remote workspace stays pooled; its host keeps serving it.
         this.configure(p);
@@ -1173,7 +1183,9 @@ export class MainController {
         return snapshot;
       }
       case "session.import": {
-        const p = await this.platform.pickSession();
+        const p = typeof v.path === "string" && v.path
+          ? String(v.path)
+          : await this.platform.pickSession();
         if (!p) return null;
         try {
           await this.projectRuntime.validate(p);
@@ -1270,7 +1282,12 @@ export class MainController {
       case "workspace.tree":
         return this.workspace.tree(String(v.path ?? ""));
       case "workspace.directories":
-        return this.workspace.directories(String(v.path));
+        return this.workspace.directories(
+          expandHome(String(v.path || "")),
+          v.files === true,
+        );
+      case "workspace.attach":
+        return { path: saveUpload(String(v.name), String(v.data)) };
       case "workspace.open": {
         const path = this.workspace.directories(String(v.path)).path;
         this.configure(path);

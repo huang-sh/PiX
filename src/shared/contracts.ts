@@ -47,11 +47,21 @@ export function validateRouteInput(
         cwd: str(v.cwd, "cwd"),
         ...(v.browse === true ? { browse: true } : {}),
       };
+    case "app.pickProject":
+      return v.path === undefined ? {} : { path: str(v.path, "path") };
+    case "session.import":
+      return v.path === undefined ? {} : { path: str(v.path, "path") };
     case "remote.openProject":
     case "remote.directories":
-    case "workspace.directories":
     case "workspace.open":
       return { path: str(v.path, "path") };
+    case "workspace.directories":
+      return {
+        path: str(v.path, "path", true) ?? "",
+        ...(v.files === true ? { files: true } : {}),
+      };
+    case "workspace.attach":
+      return { name: str(v.name, "name"), data: str(v.data, "data") };
     case "app.openExternal":
       return { url: externalUrl(v.url) };
     case "app.revealSession":
@@ -66,8 +76,6 @@ export function validateRouteInput(
       return { path: str(v.path, "path"),
         ...(v.projectId === undefined ? {} : { projectId: str(v.projectId, "projectId") }),
       };
-    case "session.import":
-      return {};
     case "session.rename":
       return { path: str(v.path, "path"), name: str(v.name, "name") };
     case "session.delete":

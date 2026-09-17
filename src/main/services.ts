@@ -398,6 +398,19 @@ function readBounded(path: string, max: number): { bytes: Buffer; truncated: boo
     closeSync(fd);
   }
 }
+/** Persist a browser-uploaded attachment so the agent can read it as a local path. */
+export function saveUpload(name: string, data: string): string {
+  const bytes = Buffer.from(data, "base64");
+  if (!bytes.length) throw new Error("File is empty");
+  if (bytes.length > 20 * 1024 * 1024) throw new Error("File is too large");
+  const safe = basename(name).replace(/[^\w.\-]+/g, "_").slice(0, 80) || "file";
+  const dir = join(pixHome(), ".pix", "uploads");
+  mkdirSync(dir, { recursive: true });
+  const dest = join(dir, `${randomUUID()}-${safe}`);
+  writeFileSync(dest, bytes);
+  return dest;
+}
+
 export class WorkspaceService {
   root: string | null;
   constructor(p: string | null) {
@@ -441,7 +454,7 @@ export class WorkspaceService {
           : [{ name, path, kind: "file", size: stat.size, modified: stat.mtime.toISOString() }];
       });
   }
-  directories(path: string): DirectoryListing {
+  directories(path: string, files = false): DirectoryListing {
     const target = realpathSync(resolve(path));
     if (!statSync(target).isDirectory()) throw new Error("Directory not found");
     const entries = readdirSync(target)
@@ -449,8 +462,11 @@ export class WorkspaceService {
       .flatMap((name): FileNode[] => {
         const entry = join(target, name);
         try {
-          return statSync(entry).isDirectory()
-            ? [{ name, path: entry.split(sep).join("/"), kind: "directory" }]
+          const stat = statSync(entry);
+          if (stat.isDirectory())
+            return [{ name, path: entry.split(sep).join("/"), kind: "directory" }];
+          return files
+            ? [{ name, path: entry.split(sep).join("/"), kind: "file", size: stat.size }]
             : [];
         } catch {
           return [];

@@ -12,6 +12,7 @@ export type CommandHandler = () => void | Promise<void>;
 export interface AppCommandDeps {
   requestRename(path: string, current: string): Promise<void>;
   requestCompact(): void;
+  requestImport(): void;
   closeSettings(): void;
 }
 
@@ -53,7 +54,7 @@ export function createRunCommand(deps: AppCommandDeps) {
     thinking: () => openSettings("models"),
     "scoped-models": () => openSettings("models"),
     export: exportSession,
-    import: () => session.importSession(),
+    import: () => deps.requestImport(),
     share: exportSession,
     copy: async () => {
       const text = [...(session.current?.projection.messages ?? [])]

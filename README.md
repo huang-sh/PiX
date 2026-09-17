@@ -56,33 +56,25 @@ SSH 和 WSL 共用安装流程：保留正常的已选 Node；首次安装优先
 
 开发测试：`node --test test/remote-runtime.test.mjs`（Windows 默认使用 Ubuntu-24.04，可设置 `PIX_TEST_WSL_DISTRO`）。构建服务端后，`node test/runtime-live-test.mjs --ssh HOST` 或 `--wsl DISTRO` 在独立临时目录验证真实 Node 复用，不切换正式安装。
 
-## 下载
+## 运行
 
-PiX 内置 `@injaneity/pi-computer-use` 和 `@ff-labs/pi-fff`，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。`pi-web-access` 不再随安装包分发：在设置 → 扩展页可一键安装到用户配置，之后通过 `pi update` 独立更新；网页搜索服务仍使用用户自己的配置与凭据。
-
-从 [GitHub Releases](https://github.com/huang-sh/PiX/releases) 下载对应平台的安装包：
-
-- **Windows**：`PiX-Setup-x.y.z.exe`（安装版）或 `PiX-Portable-x.y.z.exe`（免安装便携版），x64。
-- **macOS**：`PiX-x.y.z-arm64.dmg` 或 `PiX-x.y.z-x64.dmg`，另提供 zip 包。
-- **Linux**：`PiX-x.y.z-x86_64.AppImage`（免安装）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`，另提供 tar.gz，x64。
-
-安装包未签名：Windows SmartScreen 提示时选择"仍要运行"；macOS 首次打开需在 系统设置 → 隐私与安全性 中允许。
-
-<details>
-<summary>从源码运行</summary>
-
-需要 Node.js 22.19 或更高版本。
+需要 Node.js 22.19 或更高版本。PiX 以内嵌的本地 Web UI 运行：后端是 Node，前端在浏览器里打开。
 
 ```bash
 npm install
 npm run dev
 ```
 
-`npm run verify` 可执行完整的类型检查、测试与启动冒烟验证。
+浏览器会打开 `http://127.0.0.1:5173/`。生产构建：
 
-`npm run test:fff` 验证内置文件搜索；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络），均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；Linux 使用 `npm run dist:linux` 打包 AppImage、deb、rpm 和 tar.gz。CI 分别在 Apple Silicon、Intel 和 Ubuntu runner 上构建对应安装包，以包含正确的本机运行库。
+```bash
+npm run build
+npm start
+```
 
-</details>
+PiX 内置 `@injaneity/pi-computer-use` 和 `@ff-labs/pi-fff`，均通过 Pi 扩展机制加载。`pi-web-access` 可在设置 → 扩展页一键安装到用户配置，之后通过 `pi update` 独立更新。
+
+`npm run verify` 可执行完整的类型检查与测试。`npm run test:fff` 验证内置文件搜索；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络）。
 
 ## 交流群
 

@@ -4,31 +4,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  # External PRs run the same validation as main (typecheck, fixtures, tests);
-  # the packaging steps below stay main/tag-only.
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 jobs:
-  package:
-    name: package (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            targets: --win
-          # FFF and ffi-rs install native optional dependencies per architecture.
-          - os: macos-14
-            targets: --mac --arm64
-          - os: macos-15-intel
-            targets: --mac --x64
-          - os: ubuntu-latest
-            targets: --linux
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
+  test:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -37,28 +19,12 @@ jobs:
           node-version: 22
           cache: npm
 
-      # The two macOS runners share an OS cache partition; arch keeps their
-      # native optional dependencies and electron archives separate.
       - name: Restore node_modules
         id: node-modules
         uses: actions/cache@v4
         with:
           path: node_modules
           key: node-modules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
-
-      # The electron postinstall and electron-builder fetch platform archives
-      # into their own caches, which the npm cache does not cover.
-      - name: Cache electron archives
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/electron
-            ~/Library/Caches/electron
-            ~\AppData\Local\electron\Cache
-            ~/.cache/electron-builder
-            ~/Library/Caches/electron-builder
-            ~\AppData\Local\electron-builder\Cache
-          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules.outputs.cache-hit != 'true'
@@ -67,8 +33,6 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # npm test expects the test/workspace git fixture (baseline commit plus
-      # pending changes), which is not part of the repository.
       - name: Install test fixtures
         run: npm run fixtures
 
@@ -82,55 +46,4 @@ jobs:
         run: npm run test:web
 
       - name: Build
-        if: github.event_name != 'pull_request'
         run: npm run build
-
-      - name: Package
-        if: github.event_name != 'pull_request'
-        # The release job creates one draft with installers from all platforms.
-        run: npx electron-builder ${{ matrix.targets }} --publish never
-        env:
-          # No signing identity exists on runners; keep unsigned builds explicit.
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Upload installers
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: PiX-${{ matrix.os }}-${{ github.ref_name }}
-          path: |
-            release/*.exe
-            release/*.dmg
-            release/*.zip
-            release/*.AppImage
-            release/*.deb
-            release/*.rpm
-            release/*.tar.gz
-            release/latest*.yml
-            release/*.blockmap
-          if-no-files-found: error
-
-  release:
-    name: draft release
-    needs: package
-    # Only tag builds create drafts; branch builds stop at workflow artifacts.
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: release
-          merge-multiple: true
-
-      - name: Create GitHub release draft
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "PiX ${{ github.ref_name }}" \
-            --draft \
-            --generate-notes \
-            release/*

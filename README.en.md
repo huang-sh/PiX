@@ -56,33 +56,25 @@ Only when no compatible runtime is available does PiX use its fixed-version priv
 
 Developer checks: `node --test test/remote-runtime.test.mjs` (Windows defaults to Ubuntu-24.04; override with `PIX_TEST_WSL_DISTRO`). After building the server, run `node test/runtime-live-test.mjs --ssh HOST` or `--wsl DISTRO` to verify real Node reuse in an isolated temporary directory without switching the main installation.
 
-## Download
+## Run
 
-PiX includes `@injaneity/pi-computer-use` and `@ff-labs/pi-fff`, loaded through Pi's extension mechanism. Both carry native binaries, so they and their runtime dependencies ship with the app — no separate install is needed, and an npm copy you installed through Pi takes precedence. `pi-web-access` no longer ships with the installer: install it with one click on the Settings → Extensions page and keep it current with `pi update`. Web search services still use your own configuration and credentials.
-
-Grab the installer for your platform from [GitHub Releases](https://github.com/huang-sh/PiX/releases):
-
-- **Windows**: `PiX-Setup-x.y.z.exe` (installer) or `PiX-Portable-x.y.z.exe` (portable), x64.
-- **macOS**: `PiX-x.y.z-arm64.dmg` or `PiX-x.y.z-x64.dmg`, zip archives also available.
-- **Linux**: `PiX-x.y.z-x86_64.AppImage` (portable), `PiX-x.y.z-amd64.deb`, `PiX-x.y.z-x86_64.rpm`, plus tar.gz. x64.
-
-Installers are unsigned: if Windows SmartScreen warns, choose "Run anyway"; on macOS, allow the app in System Settings → Privacy & Security on first launch.
-
-<details>
-<summary>Run from source</summary>
-
-Requires Node.js 22.19 or newer.
+Requires Node.js 22.19 or newer. PiX is a local web UI: Node hosts the backend, and the frontend opens in your browser.
 
 ```bash
 npm install
 npm run dev
 ```
 
-`npm run verify` runs the full typecheck, test, and startup smoke suite.
+The browser opens `http://127.0.0.1:5173/`. For a production build:
 
-`npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; on Linux, `npm run dist:linux` packages AppImage, deb, rpm, and tar.gz. CI builds on separate Apple Silicon, Intel, and Ubuntu runners to include the matching native libraries.
+```bash
+npm run build
+npm start
+```
 
-</details>
+PiX includes `@injaneity/pi-computer-use` and `@ff-labs/pi-fff`, loaded through Pi's extension mechanism. Install `pi-web-access` from Settings → Extensions and keep it current with `pi update`.
+
+`npm run verify` runs the full typecheck and test suite. `npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching.
 
 ## Community
 

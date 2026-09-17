@@ -8,21 +8,23 @@ nearest user ancestors, and derives branch chat from the selected leaf path.
 `entryAnchorForNode()` returns the raw entry belonging to that node on the
 currently active branch, avoiding cross-branch navigation mistakes.
 
-## Desktop authority
+## Host authority
 
 ```text
-Renderer -> isolated preload -> MainController
-                                |- PiRuntime (project: models, skills, login)
-                                |- SessionRegistry -> one GraphRuntime per open session
-                                |- RemoteSlot pool (WSL/SSH hosts, keyed by project)
-                                |- WorkspaceService
-                                |- GitService
-                                |- ShellService
-                                `- SettingsService
+Browser -> WebSocket /pix -> MainController
+                             |- PiRuntime (project: models, skills, login)
+                             |- SessionRegistry -> one GraphRuntime per open session
+                             |- RemoteSlot pool (WSL/SSH hosts, keyed by project)
+                             |- WorkspaceService
+                             |- GitService
+                             |- ShellService
+                             `- SettingsService
 ```
 
-Routes are runtime-validated before dispatch. Workspace paths are confined to
-the active project. Browser content uses an isolated webview partition.
+The local Node process (`src/web`) serves the Vue UI and the same invoke/event
+API the Electron preload used to expose. Routes are runtime-validated before
+dispatch. Workspace paths are confined to the active project. The in-app
+browser uses an iframe.
 
 ## Session lifecycle and the remote pool
 
@@ -142,9 +144,9 @@ Skills that ship with PiX live in `skills/<name>/SKILL.md` at the repo root,
 one folder per skill with auxiliary files beside `SKILL.md`. They are plain
 markdown — no npm install, the same tree ships everywhere.
 
-- **Distribution.** electron-builder copies the tree to `<resources>/skills`
-  outside the asar; the SSH/WSL installer uploads it beside the server bundle
-  (`~/.pix/server/current/skills`); dev runs read the repo directory directly.
+- **Distribution.** Dev and the web host read the repo `skills/` directory
+  directly; the SSH/WSL installer uploads it beside the server bundle
+  (`~/.pix/server/current/skills`).
   `src/main/builtin-skills.ts` resolves all three layouts from the module
   location, and `checkPackagedSkills` (afterPack hook) fails a package whose
   tree went missing.
@@ -180,14 +182,13 @@ size, and entry count used by the verification run.
 ## Running multiple development worktrees
 
 Use a separate terminal in each worktree. Give each process its own PiX profile
-and Electron user-data directory to keep settings, sessions and browser storage
-independent. The Vite renderer selects another port if its default is occupied.
+to keep settings and sessions independent, and a free port for the web UI.
 
 ```powershell
 $env:PIX_HOME = Join-Path $PWD 'artifacts/dev-profile'
 $env:PI_CODING_AGENT_DIR = Join-Path $env:PIX_HOME '.pix/agent'
 $env:PIX_PROJECT = $PWD.Path
-npm run dev -- -- --user-data-dir="$env:PIX_HOME/electron"
+npm run dev -- --port 5174
 ```
 
 A new profile needs its own model credentials/configuration. Install dependencies

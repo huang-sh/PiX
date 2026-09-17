@@ -29,6 +29,7 @@ import ImagePreview from "./components/ImagePreview.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
+import PathPicker from "./features/workbench/PathPicker.vue";
 import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
@@ -78,6 +79,8 @@ const compactBusy = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
 const updateNotice = ref<{ version: string; url: string } | null>(null);
+const pathPickerOpen = ref(false);
+const pathPickerMode = ref<"project" | "session">("project");
 
 // The custom titlebar needs platform knowledge only for the macOS traffic
 // lights (see .platform-darwin in app.css); the sandboxed renderer gets it
@@ -130,10 +133,34 @@ async function bootstrap() {
   }
 }
 
-async function pickProject() {
+function pickProject() {
+  pathPickerMode.value = "project";
+  pathPickerOpen.value = true;
+}
+
+function requestImport() {
+  pathPickerMode.value = "session";
+  pathPickerOpen.value = true;
+}
+
+async function submitPickedPath(path: string) {
+  pathPickerOpen.value = false;
+  if (pathPickerMode.value === "session") {
+    try {
+      await session.importSession(path);
+    } catch (error) {
+      layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+    }
+    return;
+  }
   const request = ++session.viewRequest;
-  const data = await desktop.invoke<BootstrapData | null>("app.pickProject");
-  if (data) await hydrate(data, false, request);
+  try {
+    const data = await desktop.invoke<BootstrapData | null>("app.pickProject", { path });
+    if (data) await hydrate(data, false, request);
+  } catch (error) {
+    if (request !== session.viewRequest) return;
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 // wsl.exe can stall for its full timeout while the WSL service cold-starts,
@@ -438,7 +465,7 @@ async function submitCompact() {
   } finally { compactBusy.value = false; }
 }
 
-const { runCommand, openSettings } = createRunCommand({ requestRename, closeSettings,
+const { runCommand, openSettings } = createRunCommand({ requestRename, closeSettings, requestImport,
   requestCompact: () => { compactInstructions.value = ""; compactOpen.value = true; },
 });
 provide(runCommandKey, runCommand);
@@ -573,6 +600,7 @@ onBeforeUnmount(() => {
           v-if="layout.hydrated && layout.screen === 'workbench'"
           @settings="layout.screen = 'settings'"
           @pick-project="pickProject"
+          @import-session="requestImport"
           @new-session="session.create"
           @activate-project="activateProject"
           @create-project-session="createProjectSession"
@@ -649,6 +677,12 @@ onBeforeUnmount(() => {
       </DialogContent>
     </DialogPortal>
   </DialogRoot>
+  <PathPicker
+    :open="pathPickerOpen"
+    :mode="pathPickerMode"
+    @close="pathPickerOpen = false"
+    @pick="submitPickedPath"
+  />
   <WslConnectDialog
     :open="wslOpen"
     :distributions="wslDistributions"

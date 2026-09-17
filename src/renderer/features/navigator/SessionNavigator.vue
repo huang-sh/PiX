@@ -38,6 +38,7 @@ import { desktop } from "../../api";
 
 const emit = defineEmits<{
   pickProject: [];
+  importSession: [];
   activateProject: [record: ProjectGroup];
   createProjectSession: [record: ProjectGroup];
   openProjectSession: [record: ProjectGroup, path: string];
@@ -140,7 +141,7 @@ async function revealSession(record: ProjectGroup, path: string) {
       <Button class="grow justify-start" variant="ghost" @click="session.create()">
         <Plus :size="16" />{{ t("nav.newSession") }}
       </Button>
-      <Button variant="ghost" size="icon" :title="t('nav.importSession')" @click="session.importSession()">
+      <Button variant="ghost" size="icon" :title="t('nav.importSession')" @click="emit('importSession')">
         <Upload :size="16" />
       </Button>
       <Button variant="ghost" size="icon" :title="t('nav.refreshSessions')" @click="session.refresh()">

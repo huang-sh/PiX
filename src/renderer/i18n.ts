@@ -42,6 +42,15 @@ export const messages = {
         "A non-linear AI agent workbench — sessions are graphs: branch anytime, and context follows the branch",
       openProject: "Open a project",
     },
+    pathPicker: {
+      title: "Open a folder",
+      importTitle: "Import session",
+      path: "Path",
+      hint: "Type a path or browse folders on this computer",
+      importHint: "Choose a Pi session file (.jsonl) or type its path",
+      parentDirectory: "Parent directory",
+      empty: "Nothing to show here",
+    },
     nav: {
       projects: "Projects",
       pinPanel: "Pin session panel",
@@ -731,6 +740,15 @@ export const messages = {
     welcome: {
       tagline: "非线性的 AI Agent 工作台 —— 会话是一张图，随时分叉，上下文跟随分支",
       openProject: "打开项目…",
+    },
+    pathPicker: {
+      title: "打开文件夹",
+      importTitle: "导入会话",
+      path: "路径",
+      hint: "输入路径，或浏览这台电脑上的文件夹",
+      importHint: "选择 Pi 会话文件（.jsonl），或输入它的路径",
+      parentDirectory: "上级目录",
+      empty: "这里没有可显示的内容",
     },
     nav: {
       projects: "项目",

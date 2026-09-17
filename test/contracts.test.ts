@@ -62,6 +62,15 @@ test("validates remote directory operations", () => {
     { path: "/data/project" },
   );
   assert.throws(() => validateRouteInput("workspace.open", { path: "" }));
+  assert.deepEqual(validateRouteInput("app.pickProject", { path: "/data/project" }), {
+    path: "/data/project",
+  });
+  assert.deepEqual(validateRouteInput("app.pickProject", {}), {});
+  assert.deepEqual(validateRouteInput("workspace.directories", {}), { path: "" });
+  assert.deepEqual(
+    validateRouteInput("workspace.attach", { name: "notes.md", data: "YWJj" }),
+    { name: "notes.md", data: "YWJj" },
+  );
 });
 
 test("validates saved project operations", () => {

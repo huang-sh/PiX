@@ -520,6 +520,7 @@ export type DesktopRoute =
   | "workspace.tree"
   | "workspace.directories"
   | "workspace.open"
+  | "workspace.attach"
   | "workspace.read"
   | "workspace.write"
   | "git.status"
@@ -545,4 +546,5 @@ export interface DesktopApi {
   invoke<T = unknown>(route: DesktopRoute, input?: unknown): Promise<T>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
   filePath(file: File): string;
+  attachFile?(file: File): Promise<{ name: string; path: string }>;
 }

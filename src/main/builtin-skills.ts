@@ -17,10 +17,9 @@ export function resolveBuiltinSkills(moduleDir: string): string[] {
   // Multiple Electron entries move shared runtime code into out/main/chunks.
   if (basename(moduleDir) === "chunks") moduleDir = dirname(moduleDir);
   return [
-    // <resources>/skills shipped by electron-builder next to the packaged
-    // app's asar (out/main -> ../../../skills),
+    // Packaged extraResources next to the app (out/main -> ../../../skills),
     resolve(moduleDir, "..", "..", "..", "skills"),
-    // <root>/skills for dev runs (out/main) and remote server hosts
+    // <root>/skills for the web host (out/main) and remote server hosts
     // (server/dist/main), where the skills tree sits beside the app.
     resolve(moduleDir, "..", "..", "skills"),
   ].filter((candidate) => existsSync(candidate));

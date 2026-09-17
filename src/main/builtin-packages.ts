@@ -60,13 +60,13 @@ function userManagesPackage(
 
 /**
  * Locate one bundled package on disk. Candidate layouts, first match wins:
- * 1. <resources>/pi-builtin/node_modules/<name> shipped by electron-builder
- *    next to the packaged app's asar (out/main -> ../../../pi-builtin),
- * 2. <root>/node_modules/<name> for dev runs (out/main) and remote server
+ * 1. <resources>/pi-builtin/node_modules/<name> next to a packaged app
+ *    (out/main -> ../../../pi-builtin),
+ * 2. <root>/node_modules/<name> for the web host (out/main) and remote server
  *    hosts (server/dist/main), which npm-install the package as a dependency.
  */
 function resolveBuiltinPackage(moduleDir: string, name: string): string | undefined {
-  // Multiple Electron entries move shared runtime code into out/main/chunks.
+  // Bundlers may move shared runtime code into out/main/chunks.
   if (basename(moduleDir) === "chunks") moduleDir = dirname(moduleDir);
   const segments = name.split("/");
   return [

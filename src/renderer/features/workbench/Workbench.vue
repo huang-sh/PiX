@@ -19,6 +19,7 @@ import { useSessionStore } from "../../stores/session";
 const emit = defineEmits<{
   settings: [];
   pickProject: [];
+  importSession: [];
   newSession: [];
   activateProject: [record: ProjectGroup];
   createProjectSession: [record: ProjectGroup];
@@ -257,6 +258,7 @@ watch(() => layout.hydrated, async (hydrated) => {
           class="navigator"
           @menu-open-change="navigatorMenuChanged"
           @pick-project="$emit('pickProject')"
+          @import-session="$emit('importSession')"
           @activate-project="emit('activateProject', $event)"
           @create-project-session="emit('createProjectSession', $event)"
           @open-project-session="openProjectSession"

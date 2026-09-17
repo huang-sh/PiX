@@ -7,7 +7,7 @@
   "include": [
     "src/main/**/*.ts",
     "src/server/**/*.ts",
-    "src/preload/**/*.ts",
+    "src/web/**/*.ts",
     "src/shared/**/*.ts",
     "types/**/*.d.ts"
   ]
