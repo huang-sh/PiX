@@ -8,6 +8,7 @@ import type { SettingsBundle } from "../../../shared/types";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
 import { captureShortcut, isMac } from "../../keyboard-shortcuts";
+import { historyEnabled } from "../../experimental/history";
 import { useLayoutStore } from "../../stores/layout";
 
 const layout = useLayoutStore();
@@ -28,7 +29,11 @@ const fingerprint = (value: ShortcutOverrides) => JSON.stringify(SHORTCUTS.map((
 const dirty = computed(() => fingerprint(draft.value) !== fingerprint(saved.value));
 const filtered = computed(() => {
   const text = query.value.trim().toLowerCase();
-  return SHORTCUTS.filter(({ id }) => [t(`shortcuts.actions.${id}`), t(`shortcuts.descriptions.${id}`), ...shortcutBindings(id, draft.value).map(display)].join(" ").toLowerCase().includes(text));
+  return SHORTCUTS
+    // The shortcut id stays registered (persisted overrides reference ids),
+    // but a disabled experimental module advertises nothing.
+    .filter(({ id }) => id !== "history" || historyEnabled.value)
+    .filter(({ id }) => [t(`shortcuts.actions.${id}`), t(`shortcuts.descriptions.${id}`), ...shortcutBindings(id, draft.value).map(display)].join(" ").toLowerCase().includes(text));
 });
 
 watch(() => layout.settings?.app.keyboardShortcuts, (value) => {

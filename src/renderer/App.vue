@@ -34,10 +34,7 @@ import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
-import { history, togglePanel } from "./stores/history";
-import HistoryPanel from "./components/HistoryPanel.vue";
-import HistoryButton from "./components/HistoryButton.vue";
-import { handleHistoryKeys } from "./history-keys";
+import { handleHistoryKeys, history, historyEnabled, HistoryButton, HistoryPanel, togglePanel } from "./experimental/history";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
 
@@ -517,6 +514,9 @@ function keydown(event: KeyboardEvent) {
   if (shortcutsBlocked(event)) return;
   if (handleHistoryKeys(event)) return;
   const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
+  // A disabled experimental module's shortcut must fall through untouched, not
+  // be preventDefault-ed into silence.
+  if (action === "history" && !historyEnabled.value) return;
   if (action) {
     event.preventDefault();
     switch (action) {
@@ -688,10 +688,10 @@ onBeforeUnmount(() => {
   >
     {{ layout.notice.message }} ×
   </button>
-  <div v-if="history.toast" class="toast toast-history" role="status" aria-live="polite">
+  <div v-if="historyEnabled && history.toast" class="toast toast-history" role="status" aria-live="polite">
     {{ history.toast }}
   </div>
-  <HistoryPanel />
-  <HistoryButton />
+  <HistoryPanel v-if="historyEnabled" />
+  <HistoryButton v-if="historyEnabled" />
   <div v-if="session.loading" class="loading-bar" />
 </template>

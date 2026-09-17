@@ -1,9 +1,9 @@
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryKind } from "../../src/renderer/stores/history";
+import type { HistoryKind } from "../../src/renderer/experimental/history/store";
 import { i18n } from "../../src/renderer/i18n";
-import { history, resetForTest, track, togglePanel, undoDepth } from "../../src/renderer/stores/history";
-import HistoryButton from "../../src/renderer/components/HistoryButton.vue";
+import { history, resetForTest, track, togglePanel, undoDepth } from "../../src/renderer/experimental/history/store";
+import HistoryButton from "../../src/renderer/experimental/history/HistoryButton.vue";
 
 describe("HistoryButton", () => {
   let wrapper: ReturnType<typeof mount<typeof HistoryButton>>;

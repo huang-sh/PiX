@@ -1,10 +1,10 @@
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryKind } from "../../src/renderer/stores/history";
+import type { HistoryKind } from "../../src/renderer/experimental/history/store";
 import { i18n } from "../../src/renderer/i18n";
-import { resetForTest } from "../../src/renderer/stores/history";
-import HistoryPanel from "../../src/renderer/components/HistoryPanel.vue";
+import { resetForTest } from "../../src/renderer/experimental/history/store";
+import HistoryPanel from "../../src/renderer/experimental/history/HistoryPanel.vue";
 
 // resetForTest() (exported from the history module) clears all mutable state
 // on the live singleton so tests share the same module instance that
@@ -13,7 +13,7 @@ import HistoryPanel from "../../src/renderer/components/HistoryPanel.vue";
 async function boot() {
   resetForTest();
   setActivePinia(createPinia());
-  const historyMod = await import("../../src/renderer/stores/history");
+  const historyMod = await import("../../src/renderer/experimental/history/store");
   return historyMod;
 }
 

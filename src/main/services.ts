@@ -184,6 +184,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "openLinksInApp",
     "closeToTray",
     "canvasDotGrid",
+    "experimentalHistory",
   ])
     expectBoolean(key);
   expectNumber("canvasDotGridSpacing", 8, 96);
@@ -244,6 +245,7 @@ export class SettingsService {
       canvasDotGrid: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
+      experimentalHistory: false,
     };
     // Normalize the raw file before the defaults merge, so a dropped key is
     // filled by its default instead of surfacing as undefined.

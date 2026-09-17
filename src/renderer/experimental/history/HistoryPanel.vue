@@ -2,7 +2,7 @@
 import { Check, Lock, RotateCcw, X } from "@lucide/vue";
 import { computed, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
-import type { HistoryEntry } from "../stores/history";
+import type { HistoryEntry } from "./store";
 import {
   closePanel,
   history,
@@ -10,7 +10,7 @@ import {
   redoTo,
   undoDepth,
   undoTo,
-} from "../stores/history";
+} from "./store";
 
 const { t } = useI18n();
 
@@ -177,3 +177,177 @@ onUnmounted(() => {
   </div>
   </Teleport>
 </template>
+
+<style scoped>
+/* ── history panel ─────────────────────────────────────────────────── */
+
+.history-panel {
+  position: fixed;
+  top: 56px;
+  right: 12px;
+  width: 380px;
+  max-height: calc(100vh - 132px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  z-index: 160;
+  color: var(--text);
+  font-size: var(--font-size-small);
+  overflow: hidden;
+}
+
+.history-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.history-panel-title {
+  font-size: var(--font-size-ui);
+  font-weight: 700;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.history-panel-meta {
+  font-size: var(--font-size-caption);
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+.history-panel-close {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.history-panel-close:hover {
+  background: color-mix(in srgb, var(--muted-surface) 60%, transparent);
+  color: var(--text);
+}
+
+.history-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.history-panel-empty {
+  padding: 28px 14px;
+  text-align: center;
+  color: var(--faint);
+  font-size: var(--font-size-small);
+}
+
+.history-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.history-separator-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.history-separator-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0 10px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: var(--font-size-small);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.history-row:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--muted-surface) 80%, transparent);
+}
+
+.history-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.history-row-undone {
+  color: var(--muted);
+}
+
+.history-row-locked {
+  color: var(--faint);
+}
+
+.history-row-lock {
+  color: var(--muted);
+}
+
+.history-row-failed {
+  color: var(--danger);
+}
+
+.history-row-icon {
+  flex: 0 0 auto;
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.history-row-failed .history-row-icon {
+  color: var(--danger);
+}
+
+.history-row-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-row-time {
+  flex: 0 0 auto;
+  font-size: var(--font-size-caption);
+  color: var(--faint);
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.history-panel-foot {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--faint);
+  text-align: center;
+}
+</style>

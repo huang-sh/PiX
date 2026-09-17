@@ -10,8 +10,8 @@ import { mount } from "@vue/test-utils";
 import type { SessionSnapshot, SessionSummary } from "../../src/shared/types";
 import { projectSession } from "../../src/shared/session";
 import { i18n } from "../../src/renderer/i18n";
-import { resetForTest } from "../../src/renderer/stores/history";
-import HistoryPanel from "../../src/renderer/components/HistoryPanel.vue";
+import { resetForTest } from "../../src/renderer/experimental/history/store";
+import HistoryPanel from "../../src/renderer/experimental/history/HistoryPanel.vue";
 
 function summary(path: string, name?: string, firstMessage = "Hello"): SessionSummary {
   return { id: path, path, name, cwd: ".", created: "", modified: "", messageCount: 1, firstMessage };
@@ -38,8 +38,10 @@ function snapshot(path: string): SessionSnapshot {
 async function boot() {
   resetForTest();
   setActivePinia(createPinia());
-  const history = await import("../../src/renderer/stores/history");
+  const history = await import("../../src/renderer/experimental/history/store");
   const session = await import("../../src/renderer/stores/session");
+  const { useLayoutStore } = await import("../../src/renderer/stores/layout");
+  useLayoutStore().settings = { app: { experimentalHistory: true } } as never;
   return { history, store: session.useSessionStore() };
 }
 

@@ -90,6 +90,10 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
           { path: "branchSummary.reserveTokens", label: "settings.rows.branchSummaryReserve", scope: "global", type: "number", fallback: 16384 },
           { path: "branchSummary.skipPrompt", label: "settings.rows.skipBranchSummary", scope: "global", type: "check", fallback: false },
         ];
+      case "experimental":
+        return [
+          { path: "experimentalHistory", label: "settings.rows.experimentalHistory", scope: "app", type: "check", fallback: false, description: "settings.rows.experimentalHistoryDesc" },
+        ];
       case "agent":
         return [
           { path: "outputStyle", label: "settings.rows.outputStyle", scope: "global", type: "select", options: outputStyleSkills?.value ?? [], fallback: DEFAULT_OUTPUT_STYLE, description: "settings.rows.outputStyleDesc" },

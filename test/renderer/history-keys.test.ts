@@ -1,7 +1,9 @@
+import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryKind } from "../../src/renderer/stores/history";
-import { redoSteps, resetForTest, track, undoSteps } from "../../src/renderer/stores/history";
-import { handleHistoryKeys } from "../../src/renderer/history-keys";
+import { useLayoutStore } from "../../src/renderer/stores/layout";
+import type { HistoryKind } from "../../src/renderer/experimental/history/store";
+import { redoSteps, resetForTest, track, undoSteps } from "../../src/renderer/experimental/history/store";
+import { handleHistoryKeys } from "../../src/renderer/experimental/history/keys";
 
 // handleHistoryKeys operates on the live history singleton; reset between tests.
 
@@ -29,7 +31,13 @@ function makeEvent(overrides: Record<string, unknown> = {}): KeyboardEvent {
 }
 
 describe("handleHistoryKeys", () => {
-  beforeEach(() => { resetForTest(); vi.useFakeTimers(); });
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    // The module is experimental: the key handler only runs while enabled.
+    useLayoutStore().settings = { app: { experimentalHistory: true } } as never;
+    resetForTest();
+    vi.useFakeTimers();
+  });
   afterEach(() => { vi.useRealTimers(); resetForTest(); });
 
   function trackEntry(undoImpl: () => Promise<boolean> = async () => true, redoImpl: () => Promise<boolean> = async () => true) {

@@ -1,5 +1,5 @@
 import { reactive, readonly } from "vue";
-import { i18n } from "../i18n";
+import { i18n } from "../../i18n";
 
 /**
  * Linear in-memory undo/redo journal for management operations.

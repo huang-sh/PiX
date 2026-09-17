@@ -33,9 +33,11 @@ function snapshot(path: string): SessionSnapshot {
 async function boot() {
   vi.resetModules();
   setActivePinia(createPinia());
-  const history = await import("../../src/renderer/stores/history");
+  const history = await import("../../src/renderer/experimental/history/store");
   const session = await import("../../src/renderer/stores/session");
   const workspace = await import("../../src/renderer/stores/workspace");
+  const { useLayoutStore } = await import("../../src/renderer/stores/layout");
+  useLayoutStore().settings = { app: { experimentalHistory: true } } as never;
   return {
     history,
     store: session.useSessionStore(),

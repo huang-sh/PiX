@@ -1,4 +1,5 @@
-import { redoSteps, undoSteps } from "./stores/history";
+import { historyEnabled } from "./enabled";
+import { redoSteps, undoSteps } from "./store";
 
 /**
  * Handle Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo) natively.
@@ -6,6 +7,7 @@ import { redoSteps, undoSteps } from "./stores/history";
  * global shortcut registry lookup.
  */
 export function handleHistoryKeys(event: KeyboardEvent): boolean {
+  if (!historyEnabled.value) return false;
   if (!(event.metaKey || event.ctrlKey) || event.altKey) return false;
   const key = event.key.toLowerCase();
   if (key !== "z") return false;

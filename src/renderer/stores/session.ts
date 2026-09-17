@@ -17,7 +17,7 @@ import { reduceAgentActivity } from "../../shared/agent-stream";
 import { entryAnchorForNode, isSessionRunning } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
-import { track, trackEvent } from "./history";
+import { track, trackEvent } from "../experimental/history";
 import { useLayoutStore } from "./layout";
 import { useWorkspaceStore } from "./workspace";
 import { createBranchMessageCache, reuseGraphProjection } from "../lib/session-view";

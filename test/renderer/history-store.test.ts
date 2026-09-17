@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryKind } from "../../src/renderer/stores/history";
+import type { HistoryKind } from "../../src/renderer/experimental/history/store";
 import { i18n } from "../../src/renderer/i18n";
 
 // The history module is a run-scoped singleton, so every test grabs a fresh
@@ -11,7 +11,7 @@ function kind(): HistoryKind {
 
 async function boot() {
   vi.resetModules();
-  return await import("../../src/renderer/stores/history");
+  return await import("../../src/renderer/experimental/history/store");
 }
 
 type HistoryMod = Awaited<ReturnType<typeof boot>>;
