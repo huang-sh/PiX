@@ -10,14 +10,14 @@
 
 ## 根因
 
-electron 44.4.1（Chromium 152.0.7977.78）的 Windows 回归：**`show: false` 且带 `titleBarOverlay` 的窗口不触发 `ready-to-show`**。PiX 的自定义标题栏在 Windows 上正是 `titleBarStyle: "hidden"` + `titleBarOverlay`，全部命中。
+electron 44.4.0 起的 Windows 回归：**`show: false` 且带 `titleBarOverlay` 的窗口不触发 `ready-to-show`**。PiX 的自定义标题栏在 Windows 上正是 `titleBarStyle: "hidden"` + `titleBarOverlay`，全部命中。
 
-双向验证（同代码同构建，仅换 electron）：
+版本二分（同代码同构建，仅换 electron）——引入点为 **44.4.0**，且 44.3.0 与 44.4.0 用同一 Chromium 却行为相反，说明回归在 Electron 自身补丁而非 Chromium；44.4.0 的 [release notes](https://github.com/electron/electron/releases/tag/v44.4.0) 中唯一触碰 Window Controls Overlay 的改动 [#53812](https://github.com/electron/electron/pull/53812) 为头号嫌疑。截至 44.4.2（Chromium .130）仍未修复。
 
 | electron | Chromium | ready-to-show |
 |---|---|---|
-| 44.1.1 | 152.0.7977.65 | ✅ 触发 |
-| 44.4.1 | 152.0.7977.78 | ❌ 不触发（去掉 `titleBarOverlay` 即恢复） |
+| 44.1.1 / 44.2.0 / 44.3.0 | .65 / .76 / .78 | ✅ 触发 |
+| 44.4.0 / 44.4.1 / 44.4.2 | .78 / .78 / .130 | ❌ 不触发（去掉 `titleBarOverlay` 即恢复） |
 
 最小复现与上游跟踪：[electron/electron#54025](https://github.com/electron/electron/issues/54025)。
 
