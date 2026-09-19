@@ -2,6 +2,7 @@
   "name": "pix",
   "version": "0.0.20",
   "private": true,
+  "license": "MPL-2.0",
   "desktopName": "pix",
   "type": "module",
   "description": "Graph-first Electron workbench for Pi Agent",
