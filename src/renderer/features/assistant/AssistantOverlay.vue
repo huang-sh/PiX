@@ -21,9 +21,20 @@ const scroll = ref<HTMLElement>();
 const composer = ref<InstanceType<typeof PromptComposer>>();
 // null rides the CSS default (centered); the first drag pins concrete pixels.
 const position = ref<{ left: number; top: number } | null>(null);
-const cardStyle = computed(() => position.value
-  ? { left: `${position.value.left}px`, top: `${position.value.top}px` }
-  : undefined);
+// null rides the CSS default width (and content-driven height); the first
+// corner resize pins both. The stored height only applies to the expanded
+// card — the compact bar stays content-sized.
+const size = ref<{ width: number; height: number } | null>(null);
+const cardStyle = computed(() => ({
+  ...(position.value ? { left: `${position.value.left}px`, top: `${position.value.top}px` } : {}),
+  ...(size.value
+    ? {
+        width: `${size.value.width}px`,
+        maxHeight: "calc(100vh - 24px)",
+        ...(expanded.value ? { height: `${size.value.height}px` } : {}),
+      }
+    : {}),
+}));
 const following = ref(true);
 const expandedProcesses = ref(new Set<string>());
 const visibleTurnCount = ref(40);
@@ -193,7 +204,40 @@ function endDrag(event: PointerEvent) {
   if (!drag || event.pointerId !== drag.id) return;
   drag = undefined;
 }
+
+// --- Resizing -----------------------------------------------------------------
+const MIN_WIDTH = 380, MIN_HEIGHT = 240;
+let resize: { id: number; startX: number; startY: number; width: number; height: number } | undefined;
+function startResize(event: PointerEvent) {
+  if (event.button !== 0) return;
+  const rect = card.value?.getBoundingClientRect();
+  if (!rect) return;
+  resize = {
+    id: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    width: rect.width,
+    height: rect.height,
+  };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+function resizeMove(event: PointerEvent) {
+  if (!resize || event.pointerId !== resize.id) return;
+  const width = Math.min(window.innerWidth - 24, Math.max(MIN_WIDTH, resize.width + event.clientX - resize.startX));
+  const height = Math.min(window.innerHeight - 24, Math.max(MIN_HEIGHT, resize.height + event.clientY - resize.startY));
+  size.value = { width: Math.round(width), height: Math.round(height) };
+}
+function endResize(event: PointerEvent) {
+  if (!resize || event.pointerId !== resize.id) return;
+  resize = undefined;
+}
 function constrainOnResize() {
+  if (size.value) {
+    const width = Math.min(size.value.width, window.innerWidth - 24);
+    const height = Math.min(size.value.height, window.innerHeight - 24);
+    if (width !== size.value.width || height !== size.value.height)
+      size.value = { width, height };
+  }
   if (!position.value || !card.value) return;
   const { offsetWidth, offsetHeight } = card.value;
   const { left, top } = position.value;
@@ -231,6 +275,9 @@ onMounted(() => {
   document.addEventListener("pointermove", dragMove);
   document.addEventListener("pointerup", endDrag);
   document.addEventListener("pointercancel", endDrag);
+  document.addEventListener("pointermove", resizeMove);
+  document.addEventListener("pointerup", endResize);
+  document.addEventListener("pointercancel", endResize);
 });
 onBeforeUnmount(() => {
   registerAssistantOverlay(undefined);
@@ -238,6 +285,9 @@ onBeforeUnmount(() => {
   document.removeEventListener("pointermove", dragMove);
   document.removeEventListener("pointerup", endDrag);
   document.removeEventListener("pointercancel", endDrag);
+  document.removeEventListener("pointermove", resizeMove);
+  document.removeEventListener("pointerup", endResize);
+  document.removeEventListener("pointercancel", endResize);
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
 });
 // Hiding returns focus to whatever the workbench held when the card opened.
@@ -379,6 +429,15 @@ watch(() => assistant.snapshot?.session.path, () => {
           :on-submit="submitComposer"
           :on-stop="() => assistant.stop()"
         />
+        <div
+          v-if="expanded"
+          class="assistant-resize"
+          role="separator"
+          :aria-label="t('assistant.resize')"
+          :title="t('assistant.resize')"
+          @pointerdown.stop.prevent="startResize"
+          @lostpointercapture="endResize"
+        />
       </section>
     </Transition>
   </Teleport>
@@ -459,6 +518,25 @@ watch(() => assistant.snapshot?.session.path, () => {
   white-space: nowrap;
 }
 .assistant-composer { border-top: 1px solid var(--border); }
+.assistant-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.assistant-resize::before {
+  content: "";
+  position: absolute;
+  inset: 5px 5px 3px 3px;
+  border-right: 2px solid var(--border-strong);
+  border-bottom: 2px solid var(--border-strong);
+  border-radius: 0 0 3px 0;
+  opacity: 0.7;
+}
+.assistant-resize:hover::before { border-color: var(--accent); opacity: 1; }
 .assistant-card:not(.expanded) { max-height: none; }
 .assistant-card:not(.expanded) .assistant-composer :deep(textarea) { min-height: 72px; }
 

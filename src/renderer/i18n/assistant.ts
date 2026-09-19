@@ -13,6 +13,7 @@ export const en = {
     retry: "Retry",
     configureModels: "Configure models",
     dragHint: "Drag to move",
+    resize: "Resize",
   },
 };
 
@@ -29,6 +30,7 @@ export const zhCN: typeof en = {
     retry: "重试",
     configureModels: "配置模型",
     dragHint: "拖动可移动位置",
+    resize: "调整大小",
   },
 };
 
