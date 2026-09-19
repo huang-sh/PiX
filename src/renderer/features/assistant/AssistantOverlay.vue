@@ -226,6 +226,8 @@ function resizeMove(event: PointerEvent) {
   const width = Math.min(window.innerWidth - 24, Math.max(MIN_WIDTH, resize.width + event.clientX - resize.startX));
   const height = Math.min(window.innerHeight - 24, Math.max(MIN_HEIGHT, resize.height + event.clientY - resize.startY));
   size.value = { width: Math.round(width), height: Math.round(height) };
+  // A height change moves the bottom; keep following views anchored to it.
+  scrollLatest();
 }
 function endResize(event: PointerEvent) {
   if (!resize || event.pointerId !== resize.id) return;
@@ -239,9 +241,12 @@ function constrainOnResize() {
       size.value = { width, height };
   }
   if (!position.value || !card.value) return;
-  const { offsetWidth, offsetHeight } = card.value;
+  // The clamped size lands in the DOM after this pass; clamp the position with
+  // the intended size, not the still-stale rendered one.
+  const width = size.value?.width ?? card.value.offsetWidth;
+  const height = size.value?.height ?? card.value.offsetHeight;
   const { left, top } = position.value;
-  const next = clamp(left, top, offsetWidth, offsetHeight);
+  const next = clamp(left, top, width, height);
   if (next.left !== left || next.top !== top) position.value = next;
 }
 
@@ -517,7 +522,9 @@ watch(() => assistant.snapshot?.session.path, () => {
   cursor: pointer;
   white-space: nowrap;
 }
-.assistant-composer { border-top: 1px solid var(--border); }
+/* Padding clears the corner resize handle; without it the composer's footer
+   (and its send button) would reach the card corner underneath the handle. */
+.assistant-composer { border-top: 1px solid var(--border); padding: 0 10px 9px; }
 .assistant-resize {
   position: absolute;
   right: 0;
