@@ -3,6 +3,7 @@ import { ChevronDown, Folder, MessageSquare, MonitorUp, PanelLeft, PanelRight, P
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
+import { useAssistantStore } from "../../stores/assistant";
 import { useLayoutStore } from "../../stores/layout";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { formatShortcut, shortcutBindings, type ShortcutId } from "../../../shared/shortcuts";
@@ -12,11 +13,15 @@ const emit = defineEmits<{ pickProject: []; connectRemote: []; disconnectRemote:
 
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
+const assistant = useAssistantStore();
 const { t } = useI18n();
 const workspaceMenuOpen = ref(false);
 function shortcutTitle(label: string, id: ShortcutId) {
   const keys = shortcutBindings(id, layout.settings?.app.keyboardShortcuts).map((binding) => formatShortcut(binding, isMac())).join(" / ");
   return keys ? `${t(label)} (${keys})` : t(label);
+}
+function toggleAssistant() {
+  assistant.visible ? assistant.hide() : assistant.show();
 }
 
 function chooseLocal() {
@@ -55,6 +60,23 @@ function disconnectRemote() {
         <Pin v-if="layout.layout.navigatorPinned" class="navigator-pin-badge" :size="10" aria-hidden="true" />
       </Button>
       <span class="app-titlebar-brand"><img src="/icon.png" alt="" /></span>
+      <Button
+        data-action="ask-pix"
+        :class="`ask-pix-toggle${assistant.visible ? ' active' : ''}`"
+        variant="ghost"
+        size="sm"
+        :title="shortcutTitle('assistant.title', 'assistant')"
+        :aria-expanded="assistant.visible"
+        @click="toggleAssistant"
+      >
+        {{ t("assistant.title") }}
+        <span
+          v-if="!assistant.visible && (assistant.running || assistant.unread)"
+          class="ask-pix-dot"
+          :class="{ running: assistant.running }"
+          aria-hidden="true"
+        />
+      </Button>
     </div>
 
     <div class="app-titlebar-workspace">

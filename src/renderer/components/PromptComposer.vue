@@ -42,6 +42,8 @@ const props = defineProps<{
   models: RuntimeModel[];
   placeholder?: string;
   autofocus?: boolean;
+  /** Overrides the built-in app+session command list for hosts outside the graph session. */
+  commands?: RuntimeCommand[];
   onModel: (model: RuntimeModel) => void;
   // explicit=true marks a user pick from the thinking menu; explicit=false marks a
   // model-driven adjustment so hosts can avoid persisting it as a user choice.
@@ -208,6 +210,7 @@ const sendHint = computed(() => t(enterToSend.value ? "draft.sendHint" : "draft.
 const slashQuery = ref<string | null>(null);
 const slashActive = ref(0);
 const slashCommands = computed<RuntimeCommand[]>(() => {
+  if (props.commands) return props.commands;
   const map = new Map<string, RuntimeCommand>();
   // Keep builtins visible first; the unfiltered menu scrolls through every source.
   for (const command of [...APP_COMMANDS, ...(sessionStore?.commands ?? [])]) {

@@ -138,6 +138,23 @@ export function validateRouteInput(
 ): Record<string, unknown> {
   const v = input === undefined ? {} : obj(input);
   switch (route) {
+    case "assistant.ensure":
+    case "assistant.stop":
+    case "assistant.newSession":
+    case "assistant.clearHistory":
+    case "assistant.reveal":
+    case "assistant.reload":
+      return {};
+    case "assistant.send": {
+      const images = v.images === undefined ? undefined : validatePromptImages(v.images);
+      return {
+        text: str(v.text, "text", !!images?.length) ?? "",
+        ...(images?.length ? { images } : {}),
+        provider: str(v.provider, "provider", true),
+        modelId: str(v.modelId, "modelId", true),
+        thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),
+      };
+    }
     case "wsl.connect":
       return {
         distro: str(v.distro, "distro"),

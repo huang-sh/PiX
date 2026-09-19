@@ -93,6 +93,51 @@ export async function piSettingsSdk(): Promise<PiSettingsSdk> {
   return import(moduleUrl.href);
 }
 
+/** Absolute path of the pi CLI entry, for subprocess modes (assistant RPC). */
+export function piCliEntry(): string {
+  return join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
+}
+
+const PI_OPENING = "You are an expert coding assistant operating inside pi, a coding agent harness.";
+
+let pixiePrompt: Promise<string> | undefined;
+
+/**
+ * Pi's own default system prompt with only the opening identity line replaced
+ * by the given Pixie identity, passed to the assistant subprocess through
+ * --system-prompt. Everything else — tool list, guidelines, doc paths — is
+ * generated through a throwaway in-memory session, so it always reflects the
+ * installed SDK and extensions. The skills/context/cwd sections the subprocess
+ * appends to a custom prompt itself are stripped here so they are assembled
+ * once, by the real session. If the opening no longer matches, the identity is
+ * appended instead of silently renaming nothing.
+ */
+export function piPixieSystemPrompt(cwd: string, identity: string): Promise<string> {
+  return (pixiePrompt ??= (async () => {
+    const pi: any = await import("@earendil-works/pi-coding-agent");
+    const { session } = await pi.createAgentSession({
+      cwd,
+      agentDir: pixAgentDir(),
+      sessionManager: pi.SessionManager.inMemory(cwd, undefined, []),
+    });
+    try {
+      const prompt = String(session.agent.state.systemPrompt ?? "");
+      const markers = ["The following skills provide specialized instructions", "<available_skills>", "<project_context>"]
+        .map(marker => prompt.indexOf(marker)).filter(at => at > 0);
+      let core = markers.length ? prompt.slice(0, Math.min(...markers)) : prompt;
+      core = core.replace(/\n+Current working directory: [^\n]*\n?$/, "").trimEnd();
+      return core.startsWith(PI_OPENING)
+        ? identity + core.slice(PI_OPENING.length)
+        : `${core}\n\n${identity}`;
+    } finally {
+      await session.dispose?.();
+    }
+  })().catch(error => {
+    pixiePrompt = undefined;
+    throw error;
+  }));
+}
+
 export class PiRuntime {
   mod: any;
   runtime: any;

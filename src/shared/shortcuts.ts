@@ -1,4 +1,5 @@
 export const SHORTCUTS = [
+  { id: "assistant", defaults: ["Mod+e"] },
   { id: "commands", defaults: ["Mod+k", "Mod+Shift+p"] },
   { id: "terminal", defaults: ["Mod+`"] },
   { id: "navigator", defaults: ["Mod+b"] },

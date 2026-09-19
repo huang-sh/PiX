@@ -91,6 +91,18 @@ kbd {
 .navigator-toggle { position: relative; }
 .app-titlebar-side > button.navigator-toggle.pinned { color: var(--accent); }
 .navigator-pin-badge { position: absolute; right: 1px; bottom: 1px; background: var(--surface); border-radius: 2px; }
+.ask-pix-toggle { position: relative; margin-left: 6px; font-weight: 600; }
+.ask-pix-toggle .ask-pix-dot {
+  position: absolute;
+  top: 3px;
+  right: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.ask-pix-toggle .ask-pix-dot.running { animation: ask-pix-pulse 1.2s ease-in-out infinite; }
+@keyframes ask-pix-pulse { 50% { opacity: 0.35; } }
 .app-titlebar-brand { display: flex; align-items: center; gap: 8px; margin-left: 3px; }
 .app-titlebar-brand img {
   width: 25px;

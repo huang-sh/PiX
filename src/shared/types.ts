@@ -336,6 +336,15 @@ export interface PiSettings {
   warnings?: { anthropicExtraUsage?: boolean };
   [key: string]: unknown;
 }
+/** Pixie (the app-level assistant) preferences, stored in app settings. */
+export interface PixieSettings {
+  /** False boots a fresh conversation each launch instead of restoring the latest. */
+  restoreLastConversation?: boolean;
+  /** "provider/modelId" applied to new conversations; unset follows the Pi profile default. */
+  defaultModel?: string;
+  /** Appended to Pi's base prompt instead of the built-in Pixie prompt when set. */
+  systemPrompt?: string;
+}
 export interface AppSettings {
   keyboardShortcuts?: ShortcutOverrides;
   language: "system" | "zh-CN" | "en";
@@ -354,6 +363,7 @@ export interface AppSettings {
   canvasDotGridDotSize: number;
   /** Experimental features are opt-in, default off, and may change or disappear. */
   experimentalHistory: boolean;
+  pixie?: PixieSettings;
   /** Latest release the user chose to stop being notified about. */
   updateSkippedVersion?: string;
 }
@@ -498,6 +508,13 @@ export type AgentControl =
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
   | "app.bootstrap"
+  | "assistant.ensure"
+  | "assistant.send"
+  | "assistant.stop"
+  | "assistant.newSession"
+  | "assistant.clearHistory"
+  | "assistant.reveal"
+  | "assistant.reload"
   | "app.pickProject"
   | "app.openProject"
   | "app.revealLogs"
@@ -545,7 +562,7 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
+  type: "agent" | "assistant" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
   payload: unknown;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";

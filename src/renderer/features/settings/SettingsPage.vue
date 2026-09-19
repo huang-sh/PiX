@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, provide, ref, watch } from "vue";
-import { ArrowLeft, Bot, Box, FlaskConical, History, Info, Keyboard, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, FlaskConical, History, Info, Keyboard, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wand2, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import AboutPage from "./AboutPage.vue";
@@ -9,6 +9,7 @@ import ExtensionsPanel from "./ExtensionsPanel.vue";
 import ExtensionInspector from "./ExtensionInspector.vue";
 import ModelInspector from "./ModelInspector.vue";
 import ModelsPanel from "./ModelsPanel.vue";
+import PixiePanel from "./PixiePanel.vue";
 import SettingsRowsPanel from "./SettingsRowsPanel.vue";
 import SkillsPanel from "./SkillsPanel.vue";
 import { useLayoutStore } from "../../stores/layout";
@@ -98,6 +99,7 @@ const categories = computed(() => [
   ["agent", t("settings.categories.agent"), Bot],
   ["tools", t("settings.categories.tools"), Wrench],
   ["skills", t("settings.categories.skills"), Sparkles],
+  ["pixie", t("settings.categories.pixie"), Wand2],
   ["extensions", t("settings.categories.extensions"), Puzzle],
   ["shell", t("settings.categories.shell"), Terminal],
   ["experimental", t("settings.categories.experimental"), FlaskConical],
@@ -166,12 +168,14 @@ watch(
           <p v-else-if="layout.settingsCategory === 'skills'">{{ t("settings.skillsDescription", { n: skills.length }) }}</p>
           <p v-else-if="layout.settingsCategory === 'extensions'">{{ t("settings.extensionsDescription", { n: extensions.length }) }}</p>
           <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
+          <p v-else-if="layout.settingsCategory === 'pixie'">{{ t("settings.pixieDescription") }}</p>
         </div>
       </header>
 
       <KeyboardShortcuts ref="shortcutsPage" v-show="layout.settingsCategory === 'shortcuts'" />
       <ModelsPanel v-if="layout.settingsCategory === 'models'" />
       <SkillsPanel v-else-if="layout.settingsCategory === 'skills'" />
+      <PixiePanel v-else-if="layout.settingsCategory === 'pixie'" />
       <ExtensionsPanel v-else-if="layout.settingsCategory === 'extensions'" />
       <AboutPage v-else-if="layout.settingsCategory === 'about'" />
       <SettingsRowsPanel v-else-if="layout.settingsCategory !== 'shortcuts'" />

@@ -14,7 +14,7 @@ import type {
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, isSessionRunning } from "../../shared/session";
+import { entryAnchorForNode, deliversPendingTurn, isSessionRunning } from "../../shared/session";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
 import { track, trackEvent } from "../experimental/history";
@@ -247,11 +247,8 @@ export const useSessionStore = defineStore("session", {
           ...this.sessions.filter((item) => item.path !== snapshot.session.path),
         ];
       this.syncProject();
-      if (pending && snapshot.projection.messages.some((message) =>
-        message.role === "user" &&
-        message.text === pending.message.text &&
-        !pending.knownEntryIds.includes(message.entryId)
-      )) this.pendingPrompt = undefined;
+      if (pending && deliversPendingTurn(snapshot.projection.messages, pending.message.text, pending.knownEntryIds))
+        this.pendingPrompt = undefined;
       if (snapshot.graph) {
         const run = snapshot.graph.runs.find(r => this.focusedNode === `pending:${r.runId}`);
         if (run?.nodeId) this.focusedNode = run.nodeId;

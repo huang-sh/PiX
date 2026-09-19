@@ -20,6 +20,22 @@ export function isSessionRunning(snapshot: SessionSnapshot): boolean {
   );
 }
 
+/**
+ * A pending optimistic user turn is delivered once a snapshot carries its text
+ * as a user entry the send never saw. Matching only unseen entry ids keeps a
+ * re-sent text from letting the older turn clear the newer pending one — the
+ * shared invariant behind every chat surface's optimistic prompt.
+ */
+export function deliversPendingTurn(
+  messages: ReadonlyArray<{ role: string; text: string; entryId: string }>,
+  text: string,
+  knownEntryIds: Iterable<string>,
+): boolean {
+  const known = knownEntryIds instanceof Set ? knownEntryIds : new Set(knownEntryIds);
+  return messages.some(message =>
+    message.role === "user" && message.text === text && !known.has(message.entryId));
+}
+
 const entryIndexes = new WeakMap<RawSessionEntry[], Map<string, RawSessionEntry>>();
 export function sessionEntryIndex(entries: RawSessionEntry[]) {
   let index = entryIndexes.get(entries);

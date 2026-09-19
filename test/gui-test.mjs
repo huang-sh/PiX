@@ -1337,6 +1337,42 @@ try {
       throw new Error(`Empty tool panel did not close: ${JSON.stringify(value)}`);
   });
   result.emptyToolPanelClosed = true;
+  // Ask PiX: the app-level assistant overlay opens from the titlebar, prepares
+  // its own Pi session in the background, and Ctrl+E/Escape collapse it.
+  await cdp.evaluate("document.querySelector('[data-action=ask-pix]').click()");
+  await retry(async () => {
+    const value = await cdp.evaluate(`(() => {
+      const card = document.querySelector('[data-assistant-card]');
+      return {
+        visible: card?.checkVisibility() === true,
+        composer: Boolean(card?.querySelector('textarea')),
+        compact: Boolean(card) && !card.querySelector('.assistant-messages'),
+        active: document.querySelector('[data-action=ask-pix]')?.classList.contains('active') === true,
+      };
+    })()`);
+    if (!value.visible || !value.composer || !value.compact || !value.active)
+      throw new Error(`Ask PiX card did not open: ${JSON.stringify(value)}`);
+  });
+  await retry(async () => {
+    if (await cdp.evaluate(`Boolean(document.querySelector('[data-assistant-card] textarea')?.disabled)`))
+      throw new Error("Assistant composer stayed disabled while the session prepared");
+  });
+  await cdp.evaluate("window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', code: 'KeyE', ctrlKey: true }))");
+  await retry(async () => {
+    if (await cdp.evaluate(`document.querySelector('[data-assistant-card]')?.checkVisibility() !== false`))
+      throw new Error("Ctrl+E did not collapse the focused assistant card");
+  });
+  await cdp.evaluate("window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', code: 'KeyE', ctrlKey: true }))");
+  await retry(async () => {
+    if (await cdp.evaluate(`document.querySelector('[data-assistant-card]')?.checkVisibility() !== true`))
+      throw new Error("Ctrl+E did not summon the assistant card back");
+  });
+  await cdp.evaluate(`document.querySelector('[data-assistant-card] textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))`);
+  await retry(async () => {
+    if (await cdp.evaluate(`document.querySelector('[data-assistant-card]')?.checkVisibility() !== false`))
+      throw new Error("Escape did not collapse the assistant card");
+  });
+  result.askPix = true;
   result.settings = true;
   result.exitSmooth = true;
   writeFileSync(

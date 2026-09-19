@@ -1,6 +1,7 @@
 // Type-only: the domain modules import this registry for their hot accept, so a
 // runtime import back into them would be a cycle.
 import type * as app from "./app";
+import type * as assistant from "./assistant";
 import type * as graph from "./graph";
 import type * as history from "./history";
 import type * as remote from "./remote";
@@ -9,6 +10,7 @@ import type * as workbench from "./workbench";
 
 type DomainModules = {
   app: typeof app;
+  assistant: typeof assistant;
   graph: typeof graph;
   workbench: typeof workbench;
   remote: typeof remote;
