@@ -57,29 +57,38 @@ export class WslHostClient {
   private readonly disconnectListeners = new Set<(error: Error) => void>();
   private disconnectError?: Error;
   private stopping?: Promise<void>;
+  private stderrTail = "";
   private readonly heartbeat: ReturnType<typeof setInterval>;
 
   private constructor(
     readonly child: ChildProcessWithoutNullStreams,
     readonly socket: WebSocket,
     readonly hello: HostHello,
-    readonly extraChildren: ChildProcessWithoutNullStreams[] = [],
   ) {
     socket.on("message", (data) => this.receive(data.toString()));
     socket.on("close", () => this.disconnected(new Error("Remote host disconnected")));
     socket.on("error", (error) => this.disconnected(error));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-4_096);
+    });
     child.on("exit", (code) =>
-      this.disconnected(new Error(`Remote host exited with code ${code ?? "unknown"}`)),
+      this.disconnected(new Error(
+        `Remote host exited with code ${code ?? "unknown"}${this.stderrTail ? `: ${this.stderrTail.trim()}` : ""}`,
+      )),
     );
     child.on("error", (error) => this.disconnected(error));
-    let alive = true;
-    socket.on("pong", () => { alive = true; });
+    // Two missed pongs (~30s) match the SSH tunnel's ServerAliveCountMax=2:
+    // the host legitimately blocks its event loop on synchronous session
+    // creation (fsync), which is not a dead transport.
+    let missedPongs = 0;
+    socket.on("pong", () => { missedPongs = 0; });
     this.heartbeat = setInterval(() => {
-      if (!alive || socket.readyState !== WebSocket.OPEN) {
+      if (missedPongs >= 2 || socket.readyState !== WebSocket.OPEN) {
         this.disconnected(new Error("Remote host heartbeat timed out"));
         return;
       }
-      alive = false;
+      missedPongs++;
       socket.ping(undefined, undefined, (error) => {
         if (error) this.disconnected(error);
       });
@@ -283,9 +292,11 @@ export class WslHostClient {
     return new Promise((accept, reject) => {
       let stdout = "";
       let stderr = "";
+      const onStderr = (chunk: string) => { stderr = (stderr + chunk).slice(-16_384); };
       const cleanup = () => {
         clearTimeout(timer);
         child.stdout.off("data", onData);
+        child.stderr.off("data", onStderr);
         child.off("error", fail);
         child.off("exit", onExit);
         signal?.removeEventListener("abort", onAbort);
@@ -297,7 +308,7 @@ export class WslHostClient {
       ));
       const timer = setTimeout(() => fail(new Error(`Timed out starting remote host: ${stderr.trim()}`)), timeoutMs);
       child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-16_384); });
+      child.stderr.on("data", onStderr);
       child.stdout.setEncoding("utf8");
       const onData = (chunk: string) => {
         stdout += chunk;
@@ -419,7 +430,7 @@ export class WslHostClient {
     // would leave an ambiguous operation running on the host.
     const action = (input as { action?: string } | undefined)?.action;
     timeoutMs ??= route === "shell.run" || (route === "agent.control" &&
-      ["prompt", "compact", "bash", "navigateTree", "reload"].includes(action ?? "")) ? 0 : 30_000;
+      ["prompt", "compact", "bash", "navigateTree", "reload", "newSession"].includes(action ?? "")) ? 0 : 30_000;
     const id = String(++this.nextId);
     return new Promise<T>((accept, reject) => {
       const finish = (error?: Error, value?: unknown) => {
@@ -465,18 +476,17 @@ export class WslHostClient {
     this.socket.terminate();
     // Closing the socket lets the host persist its aborted turn. Killing
     // wsl.exe immediately can kill Linux before that flush has happened.
-    this.stopping = Promise.all([this.child, ...this.extraChildren].map((child) =>
-      new Promise<void>((accept) => {
-        if (child.exitCode != null || child.signalCode != null) { accept(); return; }
-        const finish = () => { clearTimeout(timer); child.off("exit", finish); accept(); };
-        const timer = setTimeout(() => {
-          if (!child.killed) child.kill();
-          finish();
-        }, 5_000);
-        timer.unref();
-        child.once("exit", finish);
-      }),
-    )).then(() => undefined);
+    this.stopping = new Promise<void>((accept) => {
+      const child = this.child;
+      if (child.exitCode != null || child.signalCode != null) { accept(); return; }
+      const finish = () => { clearTimeout(timer); child.off("exit", finish); accept(); };
+      const timer = setTimeout(() => {
+        if (!child.killed) child.kill();
+        finish();
+      }, 5_000);
+      timer.unref();
+      child.once("exit", finish);
+    });
     this.disconnectListeners.forEach((listener) => listener(error));
   }
 

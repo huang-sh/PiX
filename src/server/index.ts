@@ -114,6 +114,9 @@ async function serve() {
   };
 
   wss.on("connection", (socket) => {
+    // ws emits 'error' right before 'close'; without a listener the event
+    // throws and kills the host. The 'close' handler below does the cleanup.
+    socket.on("error", () => {});
     hadClient = true;
     const modelStreams = new Map<string, BrokerModelStream>();
     controller.projectRuntime.setModelBroker((model, context, options) => {
@@ -219,18 +222,38 @@ async function serve() {
   );
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  if (exitOnDisconnect) {
+    // --exit-on-disconnect arms only after a first client: a desktop that died
+    // between spawn and handshake would otherwise leave this host idling
+    // forever on its owner's machine.
+    const orphan = setTimeout(
+      () => { if (!hadClient) shutdown(); },
+      Number(process.env.PIX_HOST_ORPHAN_TIMEOUT_MS) || 600_000,
+    );
+    orphan.unref();
+  }
 }
 
 const command = process.argv[2];
+function report(error: unknown) {
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+  );
+}
 if (command === "version") {
   process.stdout.write(
     `${JSON.stringify({ version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL })}\n`,
   );
 } else if (command === "serve") {
+  // Node aborts the process on unhandled rejections and on stream 'error'
+  // events with no listener (e.g. an extension writing to a dead helper
+  // socket). A remote host runs third-party extension code, and its death
+  // costs the user the whole workspace — the desktop (Electron) survives the
+  // same faults, so the host logs and lives too. stderr is its diagnostics channel.
+  process.on("unhandledRejection", report);
+  process.on("uncaughtException", report);
   void serve().catch((error) => {
-    process.stderr.write(
-      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
-    );
+    report(error);
     process.exitCode = 1;
   });
 } else {

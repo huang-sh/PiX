@@ -113,10 +113,11 @@ test("long-running prompts and shell commands are not cut off by the RPC timeout
   const { client, socket } = transport(t);
   const prompt = client.request("agent.control", { action: "prompt", text: "work" });
   const shell = client.request("shell.run", { command: "long job" });
+  const newSession = client.request("agent.control", { action: "newSession" });
   t.mock.timers.tick(300_000);
-  for (const id of ["1", "2"])
+  for (const id of ["1", "2", "3"])
     socket.emit("message", JSON.stringify({ type: "response", id, ok: true, result: "done" }));
-  assert.deepEqual(await Promise.all([prompt, shell]), ["done", "done"]);
+  assert.deepEqual(await Promise.all([prompt, shell, newSession]), ["done", "done", "done"]);
 });
 
 test("heartbeat detects a half-open connection and accepts healthy pong replies", async (t) => {
@@ -127,8 +128,21 @@ test("heartbeat detects a half-open connection and accepts healthy pong replies"
   socket.emit("pong");
   t.mock.timers.tick(15_000);
   assert.equal(client.connected, true);
+  // A single missed pong is tolerated: the host may block its event loop on
+  // synchronous session creation. Two consecutive misses mean the host is gone.
+  t.mock.timers.tick(15_000);
+  assert.equal(client.connected, true);
   t.mock.timers.tick(15_000);
   assert.equal(client.connected, false);
+});
+
+test("a host exit reports its recent stderr output", async (t) => {
+  const { client, child } = transport(t);
+  const failure = new Promise<Error>(resolve => client.onDisconnect(resolve));
+  child.stderr.write("Warning: noisy banner\n");
+  child.stderr.write("Error: session graph is corrupt\n");
+  child.emit("exit", 1);
+  assert.match((await failure).message, /Remote host exited with code 1:[\s\S]*session graph is corrupt/);
 });
 
 test("startup accepts a handshake split across chunks and can be cancelled", async () => {
