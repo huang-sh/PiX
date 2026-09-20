@@ -9,6 +9,14 @@ directories:
 files:
   - out/**
   - resources/**
+  # Dev artifacts inside node_modules only: sourcemaps are read by DevTools
+  # and type declarations by the TypeScript compiler — nothing in the
+  # packaged app resolves either. Scoped to node_modules so the out/
+  # sourcemaps of PiX's own code stay in the asar for crash debugging.
+  - "!node_modules/**/*.map"
+  - "!node_modules/**/*.d.ts"
+  - "!node_modules/**/*.d.mts"
+  - "!node_modules/**/*.d.cts"
 
 # Cross-platform binary pruning (esbuild ships ~230MB of other-platform
 # binaries via pi's chord dependency).
