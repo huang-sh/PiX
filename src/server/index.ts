@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { statSync } from "node:fs";
-import { resolve } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { MainController, type Platform } from "../main/controller.js";
@@ -48,11 +48,14 @@ async function serve() {
   setDebugLogEnabled(false);
   const requestedCwd = option("--cwd");
   if (!requestedCwd) throw new Error("--cwd is required");
-  const cwd = resolve(requestedCwd);
+  let cwd: string;
   try {
+    // Match workspace.directories: both the controller and hello must use the
+    // real directory, so a symlink alias cannot create a second pooled owner.
+    cwd = realpathSync(resolve(requestedCwd)).split(sep).join("/");
     if (!statSync(cwd).isDirectory()) throw new Error();
   } catch {
-    throw new Error(`Project directory not found: ${cwd}`);
+    throw new Error(`Project directory not found: ${resolve(requestedCwd)}`);
   }
   const exitOnDisconnect = process.argv.includes("--exit-on-disconnect");
   const port = Number(option("--port") ?? 0);

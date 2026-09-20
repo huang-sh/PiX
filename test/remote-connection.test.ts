@@ -1,10 +1,12 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { WslHostClient } from "../src/main/wsl-host-client.js";
 import { MainController } from "../src/main/controller.js";
@@ -508,7 +510,73 @@ test("forgetting a project disposes its pooled host and refuses while it runs", 
   assert.equal(controller.projectGroups().some(record => record.id === projectId(project)), false);
 });
 
-test("a differently spelled path still adopts the pooled host instead of spawning a second one", async (t) => {
+for (const kind of ["ssh", "wsl"] as const) {
+  test(`${kind} symlink connections and directory browsing reuse the same real host`, { timeout: 60_000 }, async t => {
+    const { controller } = controllerFixture(t);
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-host-alias-")));
+    const project = join(root, "project");
+    const alias = join(root, "alias");
+    const canonical = project.split(sep).join("/");
+    mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
+    symlinkSync(project, alias, process.platform === "win32" ? "junction" : "dir");
+    writeFileSync(join(project, ".pi", "sessions", "saved.jsonl"), JSON.stringify({
+      type: "session", version: 3, id: "saved", cwd: alias, timestamp: new Date().toISOString(),
+    }) + "\n");
+    const clients: WslHostClient[] = [];
+    t.after(async () => {
+      await controller.pool.closeAllRemote();
+      await Promise.all(clients.map(client => client.dispose()));
+      rmSync(root, { recursive: true, force: true });
+    });
+    // Exercise the real server and WebSocket handshake; replace only SSH/WSL
+    // process launching so the regression runs without a configured remote.
+    const connect = async (cwd: string) => {
+      const child = spawn(process.execPath, [
+        fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+        "serve", "--cwd", cwd, "--exit-on-disconnect",
+      ], { env: { ...process.env, PIX_HOME: join(root, "home"),
+        PI_CODING_AGENT_DIR: join(root, "home", "agent") }, stdio: "pipe" });
+      try {
+        const ready = await (WslHostClient as any).waitForReady(child, 15_000);
+        const { socket, hello } = await (WslHostClient as any).openSocket(ready, 15_000);
+        const client = Reflect.construct(WslHostClient, [child, socket, hello]) as WslHostClient;
+        clients.push(client);
+        return client;
+      } catch (error) {
+        child.kill();
+        throw error;
+      }
+    };
+    t.mock.method(WslHostClient, "connectSsh", (_host: string, cwd: string) => connect(cwd));
+    t.mock.method(WslHostClient, "installed", (options: { cwd: string }) => connect(options.cwd));
+    const open = (cwd: string, browse = false) => kind === "ssh"
+      ? controller.connectSsh("alias-test", cwd, browse)
+      : controller.connectWsl("alias-test", cwd, browse);
+
+    const first = await open(alias);
+    const original = controller.wsl!;
+    assert.equal(original.hello.cwd, canonical, "hello expands symlinks on the host");
+    assert.equal(first.project.path, canonical);
+    assert.equal((await controller.invoke("session.list") as unknown[]).length, 1,
+      "sessions created through the alias remain visible");
+
+    await open(canonical);
+    assert.equal(clients.length, 1, "the real path matches the first slot before spawning");
+    await open(alias);
+    assert.equal(clients.length, 2);
+    assert.equal(clients[1]!.connected, false, "the redundant host is closed after hello");
+    assert.equal(controller.wsl, original);
+
+    await open(root, true);
+    await controller.invoke("remote.openProject", { path: alias });
+    assert.equal(clients[2]!.connected, false, "browsing to the alias also discards its temporary host");
+    assert.equal(controller.wsl, original);
+    assert.equal(original.connected, true, "the original host is never replaced");
+    assert.equal((await controller.invoke("session.list") as unknown[]).length, 1);
+  });
+}
+
+test("a differently spelled path reuses the pooled host after closing the redundant one", async (t) => {
   const { controller } = controllerFixture(t);
   const canonical: ProjectInfo = { name: "new", path: "/new", remote: { kind: "ssh", host: "new" } };
   const pooledClient = candidate(controller);
