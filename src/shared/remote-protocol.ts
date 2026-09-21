@@ -4,7 +4,7 @@ import type { DesktopEvent, DesktopRoute } from "./types.js";
 // hosts so pooled workspace identity never depends on the requested alias.
 // Installers compare both protocol and product version.
 export const PIX_REMOTE_PROTOCOL = 13;
-export const PIX_HOST_VERSION = "0.0.20";
+export const PIX_HOST_VERSION = "0.0.21";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
