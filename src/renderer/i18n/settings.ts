@@ -231,6 +231,8 @@ export const en = {
       openFailed: "Could not open the link. Please try again.",
     },
     rows: {
+      pixieSprite: "Floating companion",
+      pixieSpriteDesc: "Keep the animated Pixie floating on the window; click it to open the conversation, drag to move.",
       pixieRestore: "Restore last conversation",
       pixieRestoreDesc: "Off starts every launch from a fresh conversation. Past conversations stay on disk until cleared.",
       pixieDefaultModel: "Default model for new conversations",
@@ -575,6 +577,8 @@ export const zhCN: typeof en = {
       openFailed: "无法打开链接，请重试。",
     },
     rows: {
+      pixieSprite: "悬浮精灵",
+      pixieSpriteDesc: "让动画精灵常驻窗口漂浮；点击可唤出对话，拖动可移动位置。",
       pixieRestore: "启动时恢复最近对话",
       pixieRestoreDesc: "关闭后每次启动都从新对话开始；过往对话保留在磁盘上，直到被清除。",
       pixieDefaultModel: "新对话默认模型",

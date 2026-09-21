@@ -16,6 +16,10 @@ const workspace = useWorkspaceStore();
 const assistant = useAssistantStore();
 const { t } = useI18n();
 const workspaceMenuOpen = ref(false);
+// Runtime binding (not a static src, which transformAssetUrls would compile):
+// relative to the document URL, so the logo also loads over the built page's
+// file:// base where an absolute /icon.png would point at the drive root.
+const logoSrc = "icon.png";
 function shortcutTitle(label: string, id: ShortcutId) {
   const keys = shortcutBindings(id, layout.settings?.app.keyboardShortcuts).map((binding) => formatShortcut(binding, isMac())).join(" / ");
   return keys ? `${t(label)} (${keys})` : t(label);
@@ -59,7 +63,7 @@ function disconnectRemote() {
         <PanelLeft :size="17" />
         <Pin v-if="layout.layout.navigatorPinned" class="navigator-pin-badge" :size="10" aria-hidden="true" />
       </Button>
-      <span class="app-titlebar-brand"><img src="/icon.png" alt="" /></span>
+      <span class="app-titlebar-brand"><img :src="logoSrc" alt="" /></span>
       <Button
         data-action="ask-pix"
         :class="`ask-pix-toggle${assistant.visible ? ' active' : ''}`"

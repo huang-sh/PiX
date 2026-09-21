@@ -338,6 +338,8 @@ export interface PiSettings {
 }
 /** Pixie (the app-level assistant) preferences, stored in app settings. */
 export interface PixieSettings {
+  /** False hides the floating Pixie sprite from the window. */
+  sprite?: boolean;
   /** False boots a fresh conversation each launch instead of restoring the latest. */
   restoreLastConversation?: boolean;
   /** "provider/modelId" applied to new conversations; unset follows the Pi profile default. */
@@ -382,6 +384,8 @@ export interface LayoutState {
   widths: { navigator: number; chat: number; content: number; settings: number };
   /** The width chat pins widened the slot from/to, so a pinless boot restores it. */
   chatPinWidth?: { from: number; to: number };
+  /** The floating Pixie sprite's pinned window position; unset = default corner. */
+  pixieSprite?: { left: number; top: number };
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;
   utility: {

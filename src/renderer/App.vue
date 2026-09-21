@@ -27,6 +27,7 @@ import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
 import { createRunCommand, runCommandKey } from "./features/commands/runCommand";
 import AssistantOverlay from "./features/assistant/AssistantOverlay.vue";
+import PixieSprite from "./features/assistant/PixieSprite.vue";
 import ImagePreview from "./components/ImagePreview.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
@@ -610,6 +611,7 @@ onBeforeUnmount(() => {
   </div>
   <CommandPalette @run="runCommand" />
   <AssistantOverlay />
+  <PixieSprite />
   <div v-if="updateNotice" class="update-banner" role="status">
     <span>{{ t("update.available", { version: updateNotice.version }) }}</span>
     <Button data-action="update-release" variant="outline" @click="openReleaseNotes">

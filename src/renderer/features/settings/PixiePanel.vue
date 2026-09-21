@@ -34,6 +34,14 @@ watch(() => layout.settings?.app.pixie?.systemPrompt, saved => {
 // runtime splits back into its set_model command.
 const rows = computed<Row[]>(() => [
   {
+    path: "pixie.sprite",
+    label: "settings.rows.pixieSprite",
+    scope: "app",
+    type: "check",
+    fallback: true,
+    description: "settings.rows.pixieSpriteDesc",
+  },
+  {
     path: "pixie.restoreLastConversation",
     label: "settings.rows.pixieRestore",
     scope: "app",

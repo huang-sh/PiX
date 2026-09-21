@@ -13,6 +13,10 @@ export const en = {
     retry: "Retry",
     configureModels: "Configure models",
     dragHint: "Drag to move",
+    open: "Click to chat",
+    menuOpen: "Open conversation",
+    menuSettings: "Pixie settings",
+    menuHide: "Hide floating companion",
     resize: "Resize",
   },
 };
@@ -30,6 +34,10 @@ export const zhCN: typeof en = {
     retry: "重试",
     configureModels: "配置模型",
     dragHint: "拖动可移动位置",
+    open: "点击开始对话",
+    menuOpen: "打开对话",
+    menuSettings: "精灵设置",
+    menuHide: "隐藏悬浮精灵",
     resize: "调整大小",
   },
 };

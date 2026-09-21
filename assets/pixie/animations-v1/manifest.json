@@ -1,0 +1,105 @@
+{
+  "size": [
+    256,
+    256
+  ],
+  "loop": 0,
+  "source": "imagegen keyframes based on pixie-concept-v6.png",
+  "states": {
+    "idle": {
+      "label": "待机",
+      "frames": 8,
+      "durationsMs": [
+        1000,
+        180,
+        220,
+        80,
+        100,
+        100,
+        240,
+        350
+      ],
+      "durationMs": 2270,
+      "webp": "idle.webp",
+      "gif": "idle.gif",
+      "poster": "idle.png",
+      "strip": "idle-strip.png"
+    },
+    "wave": {
+      "label": "招手",
+      "frames": 8,
+      "durationsMs": [
+        650,
+        120,
+        120,
+        140,
+        140,
+        140,
+        120,
+        450
+      ],
+      "durationMs": 1880,
+      "webp": "wave.webp",
+      "gif": "wave.gif",
+      "poster": "wave.png",
+      "strip": "wave-strip.png"
+    },
+    "think": {
+      "label": "思考",
+      "frames": 8,
+      "durationsMs": [
+        600,
+        180,
+        250,
+        350,
+        650,
+        250,
+        180,
+        400
+      ],
+      "durationMs": 2860,
+      "webp": "think.webp",
+      "gif": "think.gif",
+      "poster": "think.png",
+      "strip": "think-strip.png"
+    },
+    "happy": {
+      "label": "开心",
+      "frames": 8,
+      "durationsMs": [
+        600,
+        100,
+        120,
+        180,
+        320,
+        140,
+        140,
+        450
+      ],
+      "durationMs": 2050,
+      "webp": "happy.webp",
+      "gif": "happy.gif",
+      "poster": "happy.png",
+      "strip": "happy-strip.png"
+    },
+    "sleep": {
+      "label": "休息",
+      "frames": 8,
+      "durationsMs": [
+        450,
+        450,
+        450,
+        500,
+        450,
+        450,
+        450,
+        500
+      ],
+      "durationMs": 3700,
+      "webp": "sleep.webp",
+      "gif": "sleep.gif",
+      "poster": "sleep.png",
+      "strip": "sleep-strip.png"
+    }
+  }
+}

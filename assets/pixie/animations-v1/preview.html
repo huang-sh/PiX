@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pixie · 动作预览</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#23374b;font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}main{max-width:1100px;margin:auto;padding:40px 24px}h1{font-size:30px;margin:0}p{color:#63758a;margin:6px 0 24px}.toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:20px}button,a{font:inherit}button{border:1px solid #c8d8e6;background:#fff;color:#23374b;border-radius:10px;padding:8px 16px;cursor:pointer}button[aria-pressed=true]{background:#1867b3;color:white;border-color:#1867b3}button:focus-visible,a:focus-visible{outline:3px solid #39a6e5;outline-offset:3px}.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}.card{border:1px solid #dce6ef;border-radius:18px;background:#fff;padding:12px;text-align:center}.card img{width:100%;height:auto}.card button{display:block;width:100%;margin:4px 0 12px}.card a{color:#397aa6;font-size:12px;margin:0 6px}.stage{height:340px;position:relative;overflow:hidden;border:1px solid #d6e2ed;border-radius:20px;margin-top:24px;background-color:#eef4f9;background-image:radial-gradient(#c2d3e2 1px,transparent 1px);background-size:22px 22px}.stage>span{display:block;padding:20px;color:#6b8094;pointer-events:none}.pet{position:absolute;left:42%;top:90px;padding:0;border:0;background:transparent;touch-action:none;cursor:grab;width:144px;height:144px;user-select:none}.pet:active{cursor:grabbing}.pet img{width:100%;height:100%;pointer-events:none}.dark .stage,.dark .card{background-color:#202f43;color:#e0edf7;border-color:#35465c}.dark .stage{background-image:radial-gradient(#405065 1px,transparent 1px)}.dark .stage>span{color:#b4c7d8}.dark .card a{color:#9fd4ff}small{display:block;margin-top:18px;color:#6b8094}@media(max-width:750px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:24px 16px}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style>
+<main>
+<h1>Pixie，动起来了</h1>
+<p>五种循环动作。点击动作切换下方桌宠；拖动它，试试放在界面角落。</p>
+<div class="toolbar">
+  <button id="pause" aria-pressed="false">暂停动画</button>
+  <button id="theme" aria-pressed="false">深色背景</button>
+  <label>桌宠大小 <input id="size" type="range" min="80" max="224" value="144"> <output id="sizeValue">144 px</output></label>
+</div>
+<div class="cards" id="cards"></div>
+<div class="stage" id="stage"><span id="status" aria-live="polite">待机 · 可以拖动，点击会招手</span><button class="pet" id="pet" aria-label="Pixie 桌宠，点击招手，方向键移动"><img id="petImage" alt="Pixie 待机" draggable="false"></button></div>
+<small>当前为 8 帧关键帧动画素材预览，尚未接入 PiX。透明 WebP 保留柔和边缘；GIF 用于通用预览。</small>
+</main>
+<script>
+const states={idle:'待机',wave:'招手',think:'思考',happy:'开心',sleep:'休息'};
+const cards=document.querySelector('#cards'),pet=document.querySelector('#pet'),petImage=document.querySelector('#petImage'),stage=document.querySelector('#stage');
+let current='idle',paused=matchMedia('(prefers-reduced-motion: reduce)').matches;
+cards.innerHTML=Object.entries(states).map(([name,label])=>`<article class="card"><img data-state="${name}" alt="Pixie ${label}"><button data-select="${name}" aria-pressed="${name==='idle'}">${label}</button><a href="${name}.gif" download>GIF</a><a href="${name}.webp" download>WebP</a></article>`).join('');
+function render(){
+  for(const img of document.querySelectorAll('[data-state]'))img.src=`${img.dataset.state}.${paused?'png':'webp'}`;
+  petImage.src=`${current}.${paused?'png':'webp'}`;petImage.alt=`Pixie ${states[current]}`;
+  document.querySelector('#pause').textContent=paused?'播放动画':'暂停动画';document.querySelector('#pause').setAttribute('aria-pressed',String(paused));
+}
+function select(name){current=name;petImage.src=`${name}.${paused?'png':'webp'}`;petImage.alt=`Pixie ${states[name]}`;document.querySelector('#status').textContent=`${states[name]} · 可以拖动，点击会招手`;for(const b of document.querySelectorAll('[data-select]'))b.setAttribute('aria-pressed',String(b.dataset.select===name))}
+cards.addEventListener('click',e=>{const b=e.target.closest('[data-select]');if(b)select(b.dataset.select)});
+document.querySelector('#pause').onclick=()=>{paused=!paused;render()};
+document.querySelector('#theme').onclick=e=>{const dark=document.body.classList.toggle('dark');e.target.setAttribute('aria-pressed',String(dark));e.target.textContent=dark?'浅色背景':'深色背景'};
+function move(x,y){pet.style.left=Math.max(0,Math.min(stage.clientWidth-pet.offsetWidth,x))+'px';pet.style.top=Math.max(0,Math.min(stage.clientHeight-pet.offsetHeight,y))+'px'}
+document.querySelector('#size').oninput=e=>{pet.style.width=pet.style.height=e.target.value+'px';document.querySelector('#sizeValue').textContent=e.target.value+' px';move(pet.offsetLeft,pet.offsetTop)};
+let drag=null,dragged=false;
+pet.onpointerdown=e=>{if(e.button!==0)return;drag={x:e.clientX,y:e.clientY,left:pet.offsetLeft,top:pet.offsetTop};dragged=false;pet.setPointerCapture(e.pointerId)};
+pet.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.hypot(dx,dy)>4)dragged=true;if(dragged)move(drag.left+dx,drag.top+dy)};
+pet.onpointerup=()=>{drag=null};pet.onpointercancel=()=>{drag=null;dragged=true};
+pet.onclick=()=>{if(!dragged)select('wave');dragged=false};
+pet.onkeydown=e=>{const delta={ArrowLeft:[-10,0],ArrowRight:[10,0],ArrowUp:[0,-10],ArrowDown:[0,10]}[e.key];if(delta){e.preventDefault();move(pet.offsetLeft+delta[0],pet.offsetTop+delta[1])}};
+window.onresize=()=>move(pet.offsetLeft,pet.offsetTop);
+render();
+</script>
+</html>
+

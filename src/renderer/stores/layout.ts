@@ -119,6 +119,9 @@ export const useLayoutStore = defineStore("layout", {
       // Layouts saved before the settings sidebar became resizable carry no
       // width for it; the default restores the fixed width it used to have.
       if (typeof this.layout.widths.settings !== "number") this.layout.widths.settings = 260;
+      const sprite = this.layout.pixieSprite;
+      if (!sprite || !Number.isFinite(sprite.left) || !Number.isFinite(sprite.top))
+        this.layout.pixieSprite = undefined;
       if (!this.layout.navigatorPinned) this.layout.collapsed.navigator = true;
       if ((this.layout.version ?? 0) < 4) {
         this.layout.version = 4;
@@ -159,6 +162,10 @@ export const useLayoutStore = defineStore("layout", {
     },
     async toggleMinimap() {
       this.layout.minimap = !this.layout.minimap;
+      await this.save();
+    },
+    async setPixieSprite(position: { left: number; top: number }) {
+      this.layout.pixieSprite = { left: Math.round(position.left), top: Math.round(position.top) };
       await this.save();
     },
     async openTool(section: ContentSection) {

@@ -8,6 +8,7 @@ test("layout save validates the persisted workbench shape", () => {
     navigatorPinned: true,
     branchOrders: { "D:\\p\\s.jsonl": [["turn:a", 2], ["turn:b", 1]] },
     chatPinWidth: { from: 400, to: 640 },
+    pixieSprite: { left: 240, top: 120 },
     widths: { navigator: 240, chat: 480, content: 800.5, settings: 360 },
     collapsed: { navigator: false, chat: false, content: true },
     minimap: true,
@@ -32,6 +33,11 @@ test("layout save validates the persisted workbench shape", () => {
       layout: { ...layout, branchOrders: { "D:\\p\\s.jsonl": [["turn:a"]] } },
     }),
     /branchOrders/);
+  assert.throws(() =>
+    validateRouteInput("layout.save", {
+      layout: { ...layout, pixieSprite: { left: Number.NaN, top: 120 } },
+    }),
+    /pixieSprite\.left/);
   assert.throws(() => validateRouteInput("layout.save", { layout: {} }), /widths/);
 });
 test("custom model input is validated standalone for models.json writes", () => {

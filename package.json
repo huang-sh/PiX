@@ -25,6 +25,7 @@
     "test:gui:changes": "node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && npm run build && node test/file-changes-gui-test.mjs",
     "test:gui:slash": "npm run build && node test/slash-gui-test.mjs",
     "test:gui:toast": "npm run build && node test/gui-toast-test.mjs",
+    "test:gui:pixie": "npm run build && node test/gui-pixie-test.mjs",
     "test:gui:links": "npm run build && node test/gui-link-test.mjs",
     "test:gui:terminal": "npm run build && node test/terminal-gui-test.mjs",
     "test:gui:typography": "npm run build && node test/typography-gui-test.mjs",

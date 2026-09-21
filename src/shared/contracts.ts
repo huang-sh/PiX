@@ -116,6 +116,13 @@ const layoutState = (value: unknown): LayoutState => {
       to: numberField(chatPinWidth.to, "chatPinWidth.to"),
     };
   }
+  if (v.pixieSprite !== undefined) {
+    const pixieSprite = objectField(v.pixieSprite, "pixieSprite");
+    layout.pixieSprite = {
+      left: numberField(pixieSprite.left, "pixieSprite.left"),
+      top: numberField(pixieSprite.top, "pixieSprite.top"),
+    };
+  }
   if (v.branchOrders !== undefined) {
     const orders = objectField(v.branchOrders, "branchOrders");
     for (const [branch, entries] of Object.entries(orders)) {
