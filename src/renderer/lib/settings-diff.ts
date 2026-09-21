@@ -34,3 +34,15 @@ export function settingsDiff(next: Json, base: Json): Json {
   }
   return out;
 }
+
+/**
+ * Fold a diff back into the state it was taken against — the renderer-side
+ * mirror of the merge the write path applies, null deleting the key.
+ */
+export function applyDiff(target: Json, diff: Json): void {
+  for (const [key, value] of Object.entries(diff)) {
+    if (isPlainObject(value) && isPlainObject(target[key])) applyDiff(target[key], value);
+    else if (value === null) delete target[key];
+    else target[key] = value;
+  }
+}

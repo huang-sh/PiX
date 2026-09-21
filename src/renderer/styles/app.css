@@ -786,6 +786,8 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .menu-content {
   z-index: 140;
   min-width: 178px;
+  max-height: var(--reka-dropdown-menu-content-available-height);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--border);
   border-radius: 10px;

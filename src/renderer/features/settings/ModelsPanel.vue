@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, KeyRound, RefreshCw, Save, Search, SlidersHorizontal, X } from "@lucide/vue";
+import { Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, KeyRound, RefreshCw, Search, SlidersHorizontal, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
@@ -9,7 +9,7 @@ import { useModelsContext, useSettingsDraftContext } from "./settings-context";
 
 const { t } = useI18n();
 const session = useSessionStore();
-const { draft, saving, rows, optionLabel, save } = useSettingsDraftContext();
+const { draft, rows, optionLabel } = useSettingsDraftContext();
 const {
   models, modelQuery, addingCustomModel, editingCustomModel, providers, providerFilter, runtimeBusy,
   providerBusy, runtimeError, providerFilters, filteredProviders, providerSections, providerModels,
@@ -111,7 +111,6 @@ const {
     <section id="model-preferences" class="settings-card model-options">
       <header class="model-options-header">
         <span class="model-preferences-title"><SlidersHorizontal :size="19" /><span><strong>{{ t("settings.modelPreferences") }}</strong><small>{{ t("settings.modelPreferencesHint") }}</small></span></span>
-        <Button class="model-primary-button" :disabled="saving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("common.save") }}</Button>
       </header>
       <label v-if="selectedRuntimeModel" class="setting-row" data-setting-path="modelThinkingLevels">
         <span>

@@ -1,15 +1,19 @@
-import { computed, onBeforeUnmount, ref, toRaw, watch, type Ref } from "vue";
+import { computed, ref, toRaw, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { normalizeTheme } from "../../../shared/theme";
 import { DEFAULT_OUTPUT_STYLE } from "../../../shared/skills";
 import type { SettingsBundle } from "../../../shared/types";
 import { desktop } from "../../api";
-import { settingsDiff } from "../../lib/settings-diff";
+import { applyDiff, settingsDiff } from "../../lib/settings-diff";
 import { applyAppearance } from "../../theme";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 
 export type Scope = "app" | "global" | "project";
+
+function sectionKeyOf(scope: Scope): "app" | "piGlobal" | "piProject" {
+  return scope === "app" ? "app" : scope === "global" ? "piGlobal" : "piProject";
+}
 
 export interface Row {
   path: string;
@@ -37,21 +41,48 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
   const session = useSessionStore();
   const { locale, t, te } = useI18n();
   const draft = ref<SettingsBundle>();
-  // The pristine twin of the draft, cloned at the same moment: save() diffs the
-  // two, so keys other writers saved while the page is open survive the save.
+  // The pristine twin of the draft: saves diff the two, so a write carries
+  // only the keys this page changed and never clobbers keys other writers
+  // saved meanwhile (theme picker, update banner, the pi runtime's own
+  // settings).
   let base: SettingsBundle | undefined;
-  onBeforeUnmount(() => {
-    applyAppearance(layout.settings?.app ?? {});
-  });
-  const saving = ref(false);
+
+  // Committed edits save themselves: setValue mutates the draft and queues
+  // the scope; the flush loop writes each queued scope's diff. An edit made
+  // while a write is in flight just re-queues — nothing is dropped the way a
+  // disabled save button could skip one.
+  const queued = new Set<Scope>();
+  let flushing = false;
+  // The scope section as it stood when the in-flight write's diff was
+  // computed: edits made since are exactly diff(draft, this snapshot).
+  let writing: { scope: Scope; section: Record<string, unknown> } | undefined;
 
   watch(
     () => layout.settings,
-    (settings) => {
-      draft.value = settings ? structuredClone(toRaw(settings)) : undefined;
-      base = settings ? structuredClone(toRaw(settings)) : undefined;
+    (incoming) => {
+      if (!incoming || !flushing || !draft.value || !base) {
+        draft.value = incoming ? structuredClone(toRaw(incoming)) : undefined;
+        base = incoming ? structuredClone(toRaw(incoming)) : undefined;
+        return;
+      }
+      // A flush's own applySettings — or an external writer racing it — must
+      // not discard edits still queued. Adopt the bundle, then overlay each
+      // queued scope's edits since the in-flight write began (or since the
+      // baseline, when no write is out for it): never the raw draft values a
+      // normalizing write side may have dropped. Sync so the loop's next
+      // diff already sees the advanced baseline.
+      // toRaw keeps the overlaid values plain: the draft is read back as a
+      // proxy, and a proxy array folded in here would fail the section clone
+      // the next write takes.
+      const snapshot = structuredClone(toRaw(incoming));
+      for (const scope of queued) {
+        const origin = writing?.scope === scope ? writing.section : sectionFor(scope, base)!;
+        applyDiff(sectionFor(scope, snapshot)!, settingsDiff(sectionFor(scope, toRaw(draft.value))!, origin));
+      }
+      draft.value = snapshot;
+      base = structuredClone(toRaw(incoming));
     },
-    { immediate: true },
+    { immediate: true, flush: "sync" },
   );
 
   const rows = computed<Row[]>(() => {
@@ -135,7 +166,6 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
   }
 
   function rowHint(row: Row) {
-    if (row.scope === "app" && row.path === "theme") return t("settings.themeAutoSave");
     return row.description
       ? t(row.description)
       : t("settings.storedIn", { scope: t(`settings.scope.${row.scope}`) });
@@ -196,43 +226,58 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     });
     if (row.scope === "app" && ["density", "canvasDotGrid", "canvasDotGridSpacing", "canvasDotGridDotSize"].includes(row.path) && draft.value)
       applyAppearance(draft.value.app);
+    save(row.scope);
   }
 
-  async function save() {
-    if (!draft.value || saving.value || layout.themeSaving) return;
-    saving.value = true;
+  function save(scope: Scope) {
+    if (!draft.value) return;
+    queued.add(scope);
+    if (flushing) return;
+    flushing = true;
+    void flush();
+  }
+
+  async function flush() {
     try {
-      const scopes = new Set(rows.value.map((row) => row.scope));
-      let settings = layout.settings!;
-      for (const scope of scopes) {
-        // Save only the keys the draft changed against the opening snapshot:
-        // the draft is a stale full state, and a full write would clobber keys
-        // other writers saved meanwhile (theme picker, update banner, the pi
-        // runtime's own settings). toRaw hands the diff plain values, so the
-        // patch crosses IPC without proxy cloning.
-        const patch = settingsDiff(sectionFor(scope, toRaw(draft.value))!, sectionFor(scope, base)!);
-        if (!Object.keys(patch).length) continue;
-        settings = await desktop.invoke<SettingsBundle>("settings.update", { scope, patch });
+      while (queued.size && draft.value && base) {
+        let reload = false;
+        for (const scope of [...queued]) {
+          queued.delete(scope);
+          // toRaw hands the diff plain values, so the patch crosses IPC
+          // without proxy cloning.
+          const patch = settingsDiff(sectionFor(scope, toRaw(draft.value))!, sectionFor(scope, base)!);
+          if (!Object.keys(patch).length) continue;
+          writing = { scope, section: structuredClone(toRaw(sectionFor(scope, draft.value)!)) };
+          try {
+            const settings = await desktop.invoke<SettingsBundle>("settings.update", { scope, patch });
+            // applySettings mirrors the merged bundle app-wide; the watcher
+            // above folds it into draft and base, keeping queued edits alive.
+            layout.applySettings(settings);
+            locale.value = settings.app.language === "system"
+              ? navigator.language === "zh-CN" ? "zh-CN" : "en"
+              : settings.app.language;
+            reload ||= scope !== "app";
+          } catch (error) {
+            // The write failed: restore the scope to what is on disk, then
+            // overlay the edits made since the write began — the scope is
+            // still queued, so the next round writes them. toRaw as above:
+            // the restored section is read back as a proxy.
+            const key = sectionKeyOf(scope);
+            const restored = structuredClone(sectionFor(scope, base)!) as Record<string, unknown>;
+            applyDiff(restored, settingsDiff(sectionFor(scope, toRaw(draft.value))!, writing.section));
+            (draft.value as unknown as Record<string, unknown>)[key] = restored;
+            if (scope === "app") applyAppearance(draft.value.app);
+            layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+          } finally {
+            writing = undefined;
+          }
+        }
+        if (reload) session.scheduleSettingsReload();
       }
-      layout.applySettings(settings);
-      locale.value = settings.app.language === "system"
-        ? navigator.language === "zh-CN" ? "zh-CN" : "en"
-        : settings.app.language;
-      if (
-        session.current &&
-        [...scopes].some((scope) => scope !== "app") &&
-        !session.current.runtime.isStreaming &&
-        !session.current.runtime.isCompacting
-      ) {
-        await session.control({ action: "reload" });
-      }
-      layout.showNotice(t("settings.saved"));
-    } catch (error) {
-      layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
-      saving.value = false;
+      flushing = false;
     }
   }
 
-  return { draft, saving, rows, optionLabel, rowHint, value, setValue, save };
+  return { draft, rows, optionLabel, rowHint, value, setValue, save };
 }

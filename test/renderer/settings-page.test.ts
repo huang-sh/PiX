@@ -1,12 +1,12 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SettingsBundle } from "../../src/shared/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CustomModelInput, RuntimeExtension, RuntimeModel, RuntimeProvider, RuntimeSkill, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
 import { desktop } from "../../src/renderer/api";
 import SettingsPage from "../../src/renderer/features/settings/SettingsPage.vue";
 import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
-import { useSessionStore } from "../../src/renderer/stores/session";
+import { SETTINGS_RELOAD_QUIET_MS, useSessionStore } from "../../src/renderer/stores/session";
 import { version } from "../../package.json";
 
 const settings = {
@@ -43,10 +43,35 @@ function updateCalls(): UpdatePayload[] {
 HTMLElement.prototype.setPointerCapture = vi.fn();
 HTMLElement.prototype.releasePointerCapture = vi.fn();
 
-describe("SettingsPage save", () => {
+// The flush loop only reloads sessions it can see; a snapshot with just the
+// runtime fields it reads is enough to steer it.
+function openSession(streaming: boolean) {
+  const session = useSessionStore();
+  session.current = {
+    session: { id: "s1", path: "/project" },
+    runtime: { isStreaming: streaming, isCompacting: false },
+  } as unknown as SessionSnapshot;
+  return session;
+}
+
+function reloadCalls() {
+  return vi
+    .mocked(desktop.invoke)
+    .mock.calls.filter(([route, payload]) => route === "agent.control" && (payload as { action?: string }).action === "reload");
+}
+
+describe("SettingsPage auto-save", () => {
   beforeEach(() => {
     vi.mocked(desktop.invoke).mockReset();
     vi.mocked(desktop.invoke).mockImplementation(async () => settings);
+  });
+
+  // Electron serializes arguments with the structured clone algorithm, which
+  // rejects Vue reactive proxies. Checking every payload the mocks recorded
+  // holds the whole file to that contract instead of one assertion at a time.
+  afterEach(() => {
+    for (const [route, payload] of vi.mocked(desktop.invoke).mock.calls)
+      expect(() => structuredClone(payload), `${route} payload`).not.toThrow();
   });
 
   it("resizes the settings sidebar by drag and keyboard, persisting the width", async () => {
@@ -110,7 +135,6 @@ describe("SettingsPage save", () => {
       expect(wrapper.get("#about-name").text()).toBe("PiX");
       expect(wrapper.get(".about-version").text()).toBe(`Version ${version}`);
       expect(wrapper.get(".about-logo").attributes("src")).toBe("icon.png");
-      expect(wrapper.find("main > header nav").exists()).toBe(false);
       expect(wrapper.findAll(".settings-card").filter(card => card.isVisible())).toHaveLength(0);
       await wrapper.get("[data-about-updates]").trigger("click");
       await flushPromises();
@@ -130,7 +154,6 @@ describe("SettingsPage save", () => {
       expect(wrapper.find('[role="alert"]').exists()).toBe(false);
       await wrapper.get('[data-settings-category="general"]').trigger("click");
       expect(wrapper.find(".about-page").exists()).toBe(false);
-      expect(wrapper.find("main > header nav").exists()).toBe(true);
     } finally {
       i18n.global.locale.value = previousLocale;
       wrapper.unmount();
@@ -145,17 +168,275 @@ describe("SettingsPage save", () => {
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
 
     await wrapper.get('[data-setting-path="language"] select').setValue("zh-CN");
-    await wrapper.get("main > header nav button").trigger("click");
+    await flushPromises();
+
+    // The clone-safety of every recorded payload is the afterEach sweep's
+    // job; this test pins the payload itself.
+    expect(updateCalls().at(-1)).toMatchObject({ scope: "app", patch: { language: "zh-CN" } });
+  });
+
+  it("saves each committed change immediately and reverts a failed write to the persisted state", async () => {
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const bundle = structuredClone(settings);
+      Object.assign(bundle.app, (payload as UpdatePayload).patch);
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // A committed change writes its own diff — there is no save button.
+    await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
+    await flushPromises();
+    expect(updateCalls().at(-1)).toMatchObject({ scope: "app", patch: { enterToSend: false } });
+    expect(layout.settings?.app.enterToSend).toBe(false);
+
+    // A failed write puts the control back to what is on disk and says why.
+    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("disk full"));
+    await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
+    await flushPromises();
+    expect((wrapper.get('[data-setting-path="closeToTray"] input').element as HTMLInputElement).checked).toBe(true);
+    expect(layout.notice?.level).toBe("error");
+    expect(layout.notice?.message).toBe("disk full");
+    wrapper.unmount();
+  });
+
+  it("keeps an edit made while a write is in flight instead of dropping it", async () => {
+    const persisted = structuredClone(settings);
+    let first = true;
+    let releaseFirst!: () => void;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      // The reply mirrors the disk this write produced, snapshotted at write
+      // time — later edits never leak into an older write's response.
+      const bundle = structuredClone(persisted);
+      Object.assign(bundle.app, (payload as UpdatePayload).patch);
+      Object.assign(persisted.app, bundle.app);
+      if (first) {
+        first = false;
+        return await new Promise<SettingsBundle>((resolve) => { releaseFirst = () => resolve(bundle); });
+      }
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // The first write hangs; the second edit lands while it is in flight.
+    await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
+    await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
+    releaseFirst();
+    await flushPromises();
+
+    expect(updateCalls()).toEqual([
+      { scope: "app", patch: { enterToSend: false } },
+      { scope: "app", patch: { closeToTray: false } },
+    ]);
+    expect(layout.settings?.app).toMatchObject({ enterToSend: false, closeToTray: false });
+    wrapper.unmount();
+  });
+
+  it("keeps an array-valued row's mid-write edit clone-safe", async () => {
+    const persisted = structuredClone(settings);
+    let first = true;
+    let releaseFirst!: () => void;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const bundle = structuredClone(persisted);
+      Object.assign(bundle.piGlobal, (payload as UpdatePayload).patch);
+      Object.assign(persisted.piGlobal, bundle.piGlobal);
+      if (first) {
+        first = false;
+        return await new Promise<SettingsBundle>((resolve) => { releaseFirst = () => resolve(bundle); });
+      }
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "shell";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // shellPath's write hangs; npmCommand — an array-valued row — commits while
+    // it is in flight. Folding that edit into the draft must not hand the next
+    // patch a reactive array: IPC cannot clone it, and the section snapshot
+    // that write takes would throw before the write is even sent.
+    const shellPath = wrapper.get('[data-setting-path="shellPath"] input');
+    await shellPath.setValue("/a");
+    await shellPath.trigger("change");
+    await flushPromises();
+    const packages = wrapper.get('[data-setting-path="npmCommand"] input');
+    await packages.setValue("pnpm, dlx");
+    await packages.trigger("change");
+    releaseFirst();
+    await flushPromises();
+
+    expect(updateCalls()).toEqual([
+      { scope: "global", patch: { shellPath: "/a" } },
+      { scope: "global", patch: { npmCommand: ["pnpm", "dlx"] } },
+    ]);
+    expect(layout.settings?.piGlobal.npmCommand).toEqual(["pnpm", "dlx"]);
+    wrapper.unmount();
+  });
+
+  it("keeps the edit queued behind a failed write and persists it on the next round", async () => {
+    const persisted = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      Object.assign(persisted.app, (payload as UpdatePayload).patch);
+      return structuredClone(persisted);
+    });
+    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("disk full"));
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // enterToSend's write fails while closeToTray is edited behind it: the
+    // failed key returns to disk state, the queued edit still writes.
+    await wrapper.get('[data-setting-path="enterToSend"] input').setValue(false);
+    await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
+    await flushPromises();
+
+    expect(updateCalls()).toEqual([
+      { scope: "app", patch: { enterToSend: false } },
+      { scope: "app", patch: { closeToTray: false } },
+    ]);
+    expect((wrapper.get('[data-setting-path="enterToSend"] input').element as HTMLInputElement).checked).toBe(true);
+    expect((wrapper.get('[data-setting-path="closeToTray"] input').element as HTMLInputElement).checked).toBe(false);
+    expect(layout.notice?.message).toBe("disk full");
+    wrapper.unmount();
+  });
+
+  it("adopts a value the write side drops and keeps the edit queued behind it", async () => {
+    const persisted = structuredClone(settings);
+    let first = true;
+    let releaseFirst!: () => void;
+    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+      const bundle = structuredClone(persisted);
+      const patch = { ...(payload as UpdatePayload).patch } as Record<string, unknown>;
+      // Mirror of normalizeAppSettings: out-of-range numbers never reach disk.
+      if (typeof patch.canvasDotGridSpacing === "number" && (patch.canvasDotGridSpacing < 8 || patch.canvasDotGridSpacing > 96))
+        delete patch.canvasDotGridSpacing;
+      Object.assign(bundle.app, patch);
+      Object.assign(persisted.app, bundle.app);
+      if (first) {
+        first = false;
+        return await new Promise<SettingsBundle>((resolve) => { releaseFirst = () => resolve(bundle); });
+      }
+      return bundle;
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "appearance";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // The out-of-range spacing is written (and dropped server-side); a second
+    // edit queues behind it. The control must adopt the disk value and the
+    // next write must carry only the second edit — not re-send the dropped 999.
+    const spacing = wrapper.get('[data-setting-path="canvasDotGridSpacing"] input');
+    await spacing.setValue("999");
+    await spacing.trigger("change");
+    await wrapper.get('[data-setting-path="canvasDotGrid"] input').setValue(false);
+    releaseFirst();
     await flushPromises();
 
     const updates = updateCalls();
-    expect(updates.find((payload) => payload.scope === "app")?.patch).toMatchObject({
-      language: "zh-CN",
-    });
-    // Electron IPC serializes arguments with the structured clone algorithm,
-    // which rejects Vue reactive proxies with "An object could not be cloned."
-    for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
-    expect(layout.notice?.level).toBe("info");
+    expect(updates[0]?.patch).toEqual({ canvasDotGridSpacing: 999 });
+    expect(updates.at(-1)?.patch).toEqual({ canvasDotGrid: false });
+    expect((spacing.element as HTMLInputElement).value).toBe("24");
+    wrapper.unmount();
+  });
+
+  it("coalesces a burst of non-app saves into one session reload", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) =>
+        (payload as { action?: string }).action === "getSkills" ? [] : settings);
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(settings);
+      openSession(false);
+      layout.settingsCategory = "agent";
+      const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+      await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
+      await wrapper.get('[data-setting-path="retry.maxRetries"] input').setValue("5");
+      await wrapper.get('[data-setting-path="retry.maxRetries"] input').trigger("change");
+      await flushPromises();
+      expect(reloadCalls()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(1);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds a reload that lands mid-stream until the session goes idle", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) =>
+        (payload as { action?: string }).action === "getSkills" ? [] : settings);
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(settings);
+      const session = openSession(true);
+      layout.settingsCategory = "agent";
+      const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+      await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      // The write landed; the running session must not be reloaded mid-stream.
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { transport: "sse" } });
+      expect(reloadCalls()).toHaveLength(0);
+
+      session.current!.runtime.isStreaming = false;
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(1);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a reload that came due mid-stream after the settings page closes", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) =>
+        (payload as { action?: string }).action === "getSkills" ? [] : settings);
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(settings);
+      const session = openSession(true);
+      layout.settingsCategory = "agent";
+      const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+      await wrapper.get('[data-setting-path="transport"] select').setValue("sse");
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(0);
+
+      // The page closes while the stream is still running: the pending reload
+      // belongs to the session, so it must outlive the page that asked for it
+      // and fire once the session settles.
+      wrapper.unmount();
+      session.current!.runtime.isStreaming = false;
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("clearing defaultTools removes the key instead of saving a no-tools list", async () => {
@@ -175,14 +456,35 @@ describe("SettingsPage save", () => {
     const input = wrapper.get('[data-setting-path="defaultTools"] input');
     expect((input.element as HTMLInputElement).value).toBe("read, bash, edit, write");
     await input.setValue("");
-    await wrapper.get("main > header nav button").trigger("click");
+    // Text inputs commit on change (blur/Enter), never per keystroke.
+    await input.trigger("change");
     await flushPromises();
 
     const updates = updateCalls();
     expect(updates.find((payload) => payload.scope === "project")?.patch).toMatchObject({
       defaultTools: null,
     });
-    for (const payload of updates) expect(() => structuredClone(payload)).not.toThrow();
+    wrapper.unmount();
+  });
+
+  it("keeps uncommitted typing in a text field while another row's save lands", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    layout.settingsCategory = "shell";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+
+    // Typing (no change event yet) must survive the draft being replaced by
+    // another row's auto-save folding the server bundle back in.
+    const typing = wrapper.get('[data-setting-path="shellPath"] input');
+    (typing.element as HTMLInputElement).value = "/usr/bin/zs";
+    const number = wrapper.get('[data-setting-path="websocketConnectTimeoutMs"] input');
+    await number.setValue("30000");
+    await number.trigger("change");
+    await flushPromises();
+    expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { websocketConnectTimeoutMs: 30000 } });
+    expect((typing.element as HTMLInputElement).value).toBe("/usr/bin/zs");
     wrapper.unmount();
   });
 

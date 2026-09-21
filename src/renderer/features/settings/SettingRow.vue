@@ -15,6 +15,6 @@ const { value, setValue, rowHint, optionLabel } = useSettingsDraftContext();
     <select v-else-if="row.type === 'select'" :value="String(value(row))" :disabled="disabled" @change="setValue(row, $event)">
       <option v-for="option in row.options" :key="option" :value="option">{{ optionLabel(option) }}</option>
     </select>
-    <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @input="setValue(row, $event)" />
+    <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @change="setValue(row, $event)" />
   </label>
 </template>

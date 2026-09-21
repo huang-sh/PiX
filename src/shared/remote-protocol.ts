@@ -1,11 +1,10 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// session.stop is a new project route: a host from before it rejects the
-// request as invalid, so the protocol moves to force reinstalling such hosts.
-// The product version stays with the release chore: installers compare both,
-// so a protocol change alone also triggers the reinstall.
-export const PIX_REMOTE_PROTOCOL = 12;
-export const PIX_HOST_VERSION = "0.0.20";
+// hello.cwd now resolves symlinks, matching workspace.directories. Reinstall older
+// hosts so pooled workspace identity never depends on the requested alias.
+// Installers compare both protocol and product version.
+export const PIX_REMOTE_PROTOCOL = 13;
+export const PIX_HOST_VERSION = "0.0.21";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
@@ -65,6 +64,7 @@ export interface HostHello {
   piVersion: string;
   platform: string;
   arch: string;
+  /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
 }
 

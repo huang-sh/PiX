@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, provide, ref, watch } from "vue";
-import { ArrowLeft, Bot, Box, FlaskConical, History, Info, Keyboard, Palette, Puzzle, Save, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, FlaskConical, History, Info, Keyboard, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import AboutPage from "./AboutPage.vue";
@@ -32,7 +32,7 @@ const inspectorFocus = createInspectorFocus();
 const skillCtx = useSkills();
 const outputStyleSkills = computed(() => skillCtx.skills.value.filter((skill) => skill.outputStyle).map((skill) => skill.name));
 const draftCtx = useSettingsDraft(outputStyleSkills);
-const modelCtx = useModels(draftCtx.draft, inspectorFocus, () => closeDetailsPanel());
+const modelCtx = useModels(draftCtx.draft, inspectorFocus, () => closeDetailsPanel(), draftCtx.save);
 const extensionCtx = useExtensions(inspectorFocus);
 
 // The panels and inspectors read the state they render through these contexts.
@@ -42,9 +42,8 @@ provide(settingsSkillsKey, skillCtx);
 provide(settingsExtensionsKey, extensionCtx);
 provide(settingsInspectorKey, { close: closeDetailsPanel, registerCloseButton: inspectorFocus.register });
 
-// What the shell renders itself: the root class, the header counts, and the
-// header's save button.
-const { draft, saving, save } = draftCtx;
+// What the shell renders itself: the root class and the header counts.
+const { draft } = draftCtx;
 const { selectedProvider } = modelCtx;
 const { skills } = skillCtx;
 const { extensions, selectedExtension } = extensionCtx;
@@ -168,9 +167,6 @@ watch(
           <p v-else-if="layout.settingsCategory === 'extensions'">{{ t("settings.extensionsDescription", { n: extensions.length }) }}</p>
           <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
         </div>
-        <nav v-if="!['models', 'skills', 'extensions', 'shortcuts', 'about'].includes(layout.settingsCategory)">
-          <Button :disabled="saving || layout.themeSaving" @click="save"><Save :size="15" />{{ saving ? t("settings.saving") : t("common.save") }}</Button>
-        </nav>
       </header>
 
       <KeyboardShortcuts ref="shortcutsPage" v-show="layout.settingsCategory === 'shortcuts'" />

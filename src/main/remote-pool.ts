@@ -403,7 +403,8 @@ export class RemoteWorkspacePool {
       const current = await slot.client.request("session.open", { path: slot.activePath }) as SessionSnapshot;
       if (this.host.view.isCurrent(request)) this.host.view.setCurrent(current);
       return current;
-    } catch {
+    } catch (error) {
+      debugLog("remote-pool: restore slot session", error);
       return undefined;
     }
   }
