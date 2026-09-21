@@ -1,6 +1,6 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// hello.cwd now resolves symlinks, matching workspace.open. Reinstall older
+// hello.cwd now resolves symlinks, matching workspace.directories. Reinstall older
 // hosts so pooled workspace identity never depends on the requested alias.
 // Installers compare both protocol and product version.
 export const PIX_REMOTE_PROTOCOL = 13;
@@ -64,7 +64,7 @@ export interface HostHello {
   piVersion: string;
   platform: string;
   arch: string;
-  /** Absolute real directory path, with the same spelling as workspace.open. */
+  /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
 }
 

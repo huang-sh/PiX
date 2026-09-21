@@ -56,6 +56,7 @@ export class WslHostClient {
   private modelBroker?: ModelBroker;
   private readonly disconnectListeners = new Set<(error: Error) => void>();
   private disconnectError?: Error;
+  private intentionalDisconnect = false;
   private stopping?: Promise<void>;
   private stderrTail = "";
   private readonly heartbeat: ReturnType<typeof setInterval>;
@@ -78,6 +79,14 @@ export class WslHostClient {
       )),
     );
     child.on("error", (error) => this.disconnected(error));
+    // Disconnect immediately, but wait for stdio to drain before recording
+    // diagnostics. Socket close can arrive before child exit.
+    child.once("close", (code, signal) => {
+      debugLog("wsl-host-client: child closed", `requested=${this.intentionalDisconnect} code=${code ?? "none"} signal=${signal ?? "none"}`);
+      // Keep the END of stderr within debugLog's per-entry detail budget.
+      if (this.stderrTail.trim())
+        debugLog("wsl-host-client: stderr tail", this.stderrTail.trim().slice(-1_024));
+    });
     // Two missed pongs (~30s) match the SSH tunnel's ServerAliveCountMax=2:
     // the host legitimately blocks its event loop on synchronous session
     // creation (fsync), which is not a dead transport.
@@ -531,6 +540,8 @@ export class WslHostClient {
   }
 
   async dispose() {
+    // Cleanup after a failure must not relabel that failure as a requested exit.
+    if (!this.disconnectError) this.intentionalDisconnect = true;
     this.disconnected(new Error("Remote host client disposed"));
     await this.stopping;
     this.listeners.clear();

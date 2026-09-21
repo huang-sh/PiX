@@ -4,11 +4,12 @@ import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { WslHostClient } from "../src/main/wsl-host-client.js";
+import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
 import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
@@ -146,6 +147,88 @@ test("a host exit reports its recent stderr output", async (t) => {
   child.emit("exit", 1);
   assert.match((await failure).message, /Remote host exited with code 1:[\s\S]*session graph is corrupt/);
 });
+
+async function waitForLog(text: string) {
+  for (let i = 0; i < 400; i++) {
+    const content = existsSync(logFile()) ? readFileSync(logFile(), "utf8") : "";
+    if (content.includes(text)) return content;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail(`Missing log text: ${text}`);
+}
+
+test("socket-first disconnection logs late stderr at child close without notifying twice", async t => {
+  const { client, child, socket } = transport(t);
+  const failures: Error[] = [];
+  client.onDisconnect(error => failures.push(error));
+  const rejected = assert.rejects(client.request("session.list"), /Remote host disconnected/);
+  socket.terminate();
+  await rejected;
+  assert.equal(failures.length, 1, "requests and UI fail immediately, before child exit");
+  child.exitCode = 23;
+  child.emit("exit", 23);
+  await client.dispose(); // Failure cleanup must not mark this as a requested exit.
+  child.stderr.write("earlier output ".repeat(400));
+  child.stderr.write("\nlate stderr after exit: final diagnostic\n");
+  child.stderr.end();
+  child.emit("close", 23, null);
+  const log = await waitForLog("late stderr after exit: final diagnostic");
+  assert.match(log, /child closed\] requested=false code=23 signal=none/);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.message, "Remote host disconnected");
+});
+
+test("requested disposal is distinguished from failure and retains the final signal", async t => {
+  const { client, child } = transport(t);
+  const closing = client.dispose();
+  child.exitCode = 0;
+  child.emit("exit", null, "SIGTERM");
+  await closing;
+  child.emit("close", null, "SIGTERM");
+  await waitForLog("requested=true code=none signal=SIGTERM");
+});
+
+for (const failure of ["ENOENT", "EACCES", "ELOOP", "file"] as const) {
+  test(`host startup preserves ${failure} directory diagnostics`, { timeout: 20_000 }, async t => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-host-path-error-")));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const target = join(root, "project");
+    if (failure === "file") writeFileSync(target, "not a directory");
+    // Permission errors depend on the test account/OS, and Windows junctions
+    // cannot create a symlink loop. Inject only those fs failures in the child.
+    const preload = failure === "EACCES" || failure === "ELOOP" ? `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const original = fs.realpathSync;
+      fs.realpathSync = function(path, ...args) {
+        if (String(path) === ${JSON.stringify(target)}) {
+          throw Object.assign(new Error(${JSON.stringify(`${failure}: cannot resolve ${target}`)}), { code: ${JSON.stringify(failure)} });
+        }
+        return original.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+    ` : undefined;
+    const child = spawn(process.execPath, [
+      ...(preload ? ["--import", `data:text/javascript,${encodeURIComponent(preload)}`] : []),
+      fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+      "serve", "--cwd", target, "--exit-on-disconnect",
+    ], { env: { ...process.env, PIX_HOME: join(root, "home"),
+      PI_CODING_AGENT_DIR: join(root, "home", "agent") }, stdio: "pipe" });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+    let stderr = "";
+    let stdout = "";
+    child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(code, 1);
+    assert.match(stderr, failure === "file" ? /Project path is not a directory/ : new RegExp(failure));
+    assert.ok(stderr.replaceAll("\\", "/").includes(target.split(sep).join("/")), stderr);
+    assert.doesNotMatch(stdout, /PIX_AGENT_HOST_READY/);
+  });
+}
 
 test("startup accepts a handshake split across chunks and can be cancelled", async () => {
   const child = new FakeChild();

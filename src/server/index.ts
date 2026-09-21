@@ -48,15 +48,12 @@ async function serve() {
   setDebugLogEnabled(false);
   const requestedCwd = option("--cwd");
   if (!requestedCwd) throw new Error("--cwd is required");
-  let cwd: string;
-  try {
-    // Match workspace.directories: both the controller and hello must use the
-    // real directory, so a symlink alias cannot create a second pooled owner.
-    cwd = realpathSync(resolve(requestedCwd)).split(sep).join("/");
-    if (!statSync(cwd).isDirectory()) throw new Error();
-  } catch {
-    throw new Error(`Project directory not found: ${resolve(requestedCwd)}`);
-  }
+  // Match workspace.directories: both the controller and hello must use the
+  // real directory, so a symlink alias cannot create a second pooled owner.
+  // Let filesystem errors retain their code and path (e.g. EACCES or ELOOP).
+  const cwd = realpathSync(resolve(requestedCwd)).split(sep).join("/");
+  if (!statSync(cwd).isDirectory())
+    throw new Error(`Project path is not a directory: ${cwd}`);
   const exitOnDisconnect = process.argv.includes("--exit-on-disconnect");
   const port = Number(option("--port") ?? 0);
   if (!Number.isInteger(port) || port < 0 || port > 65_535)
