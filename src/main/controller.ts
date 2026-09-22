@@ -64,6 +64,8 @@ export class MainController {
   /** Pooled remote workspaces: slots, connections, recycling, and routing. */
   pool: RemoteWorkspacePool;
   private viewRequest = 0;
+  private gitSwitches = new Set<string>();
+  private pendingAgentControls = new Map<string, number>();
   listeners = new Set<(e: DesktopEvent) => void>();
   /** Progress baselines of background runs, replayed when their session returns to view. */
   readonly progress = new ProgressLedger({
@@ -589,6 +591,8 @@ export class MainController {
         "workspace.read",
         "workspace.write",
         "git.status",
+        "git.branches",
+        "git.switch",
         "git.diff",
         "changes.read",
         "shell.run",
@@ -778,18 +782,30 @@ export class MainController {
         };
       }
       case "agent.control": {
-        const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl);
-        if (request === this.viewRequest && r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
-          this.current = r as SessionSnapshot;
-          // Mutating actions append entries after the last agent event (e.g.
-          // the node-footer usage record written when a prompt settles), and
-          // the invoke reply only reaches the page that started the action —
-          // a page reloaded mid-run loses it. Broadcast so every attached
-          // renderer converges on the settled state. A background run's reply
-          // carries its own snapshot and never drives the view.
-          this.emit({ type: "sessions", payload: { current: this.current } });
+        const owner = this.project ? projectId(this.project) : "";
+        const startsWork = ["prompt", "promptAt", "steer", "followUp", "bash", "compact"].includes(String(v.action));
+        if (startsWork && this.gitSwitches.has(owner)) throw new Error("Wait for the Git branch switch to finish");
+        if (startsWork) this.pendingAgentControls.set(owner, (this.pendingAgentControls.get(owner) ?? 0) + 1);
+        try {
+          const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl);
+          if (request === this.viewRequest && r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
+            this.current = r as SessionSnapshot;
+            // Mutating actions append entries after the last agent event (e.g.
+            // the node-footer usage record written when a prompt settles), and
+            // the invoke reply only reaches the page that started the action —
+            // a page reloaded mid-run loses it. Broadcast so every attached
+            // renderer converges on the settled state. A background run's reply
+            // carries its own snapshot and never drives the view.
+            this.emit({ type: "sessions", payload: { current: this.current } });
+          }
+          return r;
+        } finally {
+          if (startsWork) {
+            const remaining = this.pendingAgentControls.get(owner)! - 1;
+            if (remaining) this.pendingAgentControls.set(owner, remaining);
+            else this.pendingAgentControls.delete(owner);
+          }
         }
-        return r;
       }
       case "workspace.tree":
         return this.workspace.tree(String(v.path ?? ""));
@@ -806,6 +822,20 @@ export class MainController {
         return this.workspace.write(String(v.path), String(v.content));
       case "git.status":
         return this.git.status();
+      case "git.branches":
+        return this.git.branches();
+      case "git.switch": {
+        const project = this.project!;
+        if (v.cwd !== project.path) throw new Error("Project changed; choose the Git branch again");
+        const owner = projectId(project);
+        if (this.gitSwitches.has(owner)) throw new Error("Wait for the Git branch switch to finish");
+        if (this.registry.hasBusy(owner) || this.pendingAgentControls.has(owner))
+          throw new Error("Stop running tasks in this project before switching Git branches");
+        this.gitSwitches.add(owner);
+        try {
+          return await new GitService(project.path).switchBranch(String(v.branch));
+        } finally { this.gitSwitches.delete(owner); }
+      }
       case "git.diff":
         return this.git.diff(v.path as string | undefined, Boolean(v.staged));
       case "changes.read": {

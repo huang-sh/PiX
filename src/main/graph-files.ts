@@ -450,7 +450,7 @@ export class GraphFiles {
           const source = checkpoints ? checkpoints.get(id)! : readStrict(this.checkpointPath(id));
           if (source instanceof Error) throw source;
           delta = this.delta(record, source);
-          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", "pix.branch-metadata"].includes(String(e.customType)))
+          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
             || e.type === "custom_message")) throw new Error("Extension state needs a compatible export adapter; source retained");
         } catch (error) {
           throw new Error(`Cannot export branch ${id}: ${String(error)}`);

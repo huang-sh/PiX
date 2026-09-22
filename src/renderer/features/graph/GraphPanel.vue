@@ -206,7 +206,7 @@ function rebuild() {
   // Settled positions use the same measured card sizes the pane renders, so
   // lanes track real heights instead of the fixed 280×146 estimate pitch.
   // Unmeasured nodes keep the estimate until Vue Flow reports dimensions.
-  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 280, height: 146 }]));
+  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 320, height: 146 }]));
   const calculated = layoutGraph(value, sizes, branchOrder);
   const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
@@ -403,9 +403,9 @@ function rebuild() {
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : previous?.dimensions ?? (node.type === "draft" ? DRAFT_SIZE : { width: 280, height: 146 }),
+        : previous?.dimensions ?? (node.type === "draft" ? DRAFT_SIZE : { width: 320, height: 146 }),
       handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
-        source: [{ type: "source", nodeId: node.id, position: "right", x: 276, y: 69, width: 8, height: 8 }],
+        source: [{ type: "source", nodeId: node.id, position: "right", x: 316, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
       },
     });
@@ -641,7 +641,7 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   const distant = Math.hypot(position.x * zoom + viewport.x - pane.width / 2,
     position.y * zoom + viewport.y - pane.height / 2) > Math.hypot(pane.width, pane.height) * 2;
   await flow.value.setCenter(
-    position.x + (size?.width || (id.startsWith("draft:") ? DRAFT_SIZE.width : 280)) / 2,
+    position.x + (size?.width || (id.startsWith("draft:") ? DRAFT_SIZE.width : 320)) / 2,
     position.y + (size?.height || (id.startsWith("draft:") ? DRAFT_SIZE.height : 146)) / 2,
     // D3's zoom interpolation zooms far out between distant nodes, transiently
     // mounting thousands of cards. Jump directly across large branches.

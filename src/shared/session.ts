@@ -8,7 +8,7 @@ import type {
   SessionSummary,
   SessionSnapshot,
 } from "./types.js";
-import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
+import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
 
@@ -204,6 +204,12 @@ export function projectSession(
         toolInputs.set(call.id, toolInput(call.arguments));
     }
   }
+  // The git-branch extension appends its record right before the user message
+  // lands, so the message's parent is that record: pair them by the link.
+  const gitBranches = new Map<string, string>();
+  for (const entry of entries)
+    if (entry.type === "custom" && entry.customType === GIT_BRANCH_CUSTOM_TYPE && typeof rec(entry.data)?.branch === "string")
+      gitBranches.set(entry.id, rec(entry.data)!.branch as string);
   const owners = new Map<string, string>();
   const ownedEntries = new Map<string, RawSessionEntry[]>();
   const contexts = new Map<string | null, { owner: string | null; depth: number; settings: SettingsState }>();
@@ -247,9 +253,11 @@ export function projectSession(
     const finalAssistantReply = owned
       .filter((x) => x.type === "message" && role(x) === "assistant")
       .at(-1);
+    const gitBranch = gitBranches.get(e.parentId ?? "");
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
+      ...(gitBranch ? { gitBranch } : {}),
       parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
       title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
       ...(images(e).length ? { imageCount: images(e).length } : {}),

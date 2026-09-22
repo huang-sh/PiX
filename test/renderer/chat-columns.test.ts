@@ -133,13 +133,19 @@ describe("pinned chat columns", () => {
     const layout = useLayoutStore();
     layout.layout.collapsed.chat = false;
     const session = useSessionStore();
-    session.applySnapshot(snapshot("a2"));
+    const recorded = snapshot("a2");
+    recorded.projection.nodes.forEach((node, index) => { node.gitBranch = ["main", "feature/Left", "feature/Right"][index]; });
+    session.applySnapshot(recorded);
     session.focusedNode = "turn:u2";
     layout.chatColumns = ["turn:u3"];
 
     const stubs = { MarkdownRenderer: true, PromptComposer: true };
     const pinned = mount(BranchContextPanel, { props: { nodeId: "turn:u3" }, global: { plugins: [i18n], stubs } });
     const primary = mount(BranchContextPanel, { global: { plugins: [i18n], stubs } });
+    const branches = (panel: typeof pinned) => panel.findAll(".chat-git-branch").map(badge => badge.text());
+    expect(branches(primary)).toEqual(["main", "feature/Left"]);
+    expect(branches(pinned)).toEqual(["main", "feature/Right"]);
+    expect(pinned.findAll(".chat-git-branch")[1]!.attributes("title")).toContain("feature/Right");
 
     expect(pinned.find(".branch-title small").text()).toContain("right prompt");
     expect(pinned.find('[data-action="chat-column-close"]').exists()).toBe(true);
@@ -157,6 +163,8 @@ describe("pinned chat columns", () => {
     expect(replies(pinned)).toContain("right reply");
     expect(replies(primary)).toContain("shared reply");
     expect(replies(primary)).not.toContain("right reply");
+    expect(branches(primary)).toEqual(["main"]);
+    expect(branches(pinned)).toEqual(["main", "feature/Right"]);
 
     await pinned.get('[data-action="chat-column-close"]').trigger("click");
     expect(layout.chatColumns).toEqual([]);

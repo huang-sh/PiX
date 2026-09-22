@@ -2,6 +2,7 @@ import { dirname, basename, join } from "node:path";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
+import { pixGitBranchExtension } from "./extensions/git-branch.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -273,6 +274,7 @@ export class PiRuntime {
       resourceLoaderOptions: {
         extensionFactories: [
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
+          pixGitBranchExtension,
         ] as InlineExtension[],
         additionalExtensionPaths: resolveBuiltinPackages(
           moduleDir,
