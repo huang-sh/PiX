@@ -55,8 +55,11 @@ describe("draft placement", () => {
       else expect(node.position.y).toBeGreaterThanOrEqual(sibling.position.y + sibling.dimensions.height + 28);
     };
     checkOrder("draft:turn:root");
+    const settled = graph.nodes.map((node: any) => ({ ...node.position }));
     graph.syncNodeDimensions([{ type: "dimensions", id: "draft:turn:root", dimensions: { width: 360, height: 500 } }]);
-    checkOrder("draft:turn:root");
+    // A draft growing past its reserved slot overlays the cards below instead
+    // of pushing them, so typing never moves anything on the canvas.
+    expect(graph.nodes.map((node: any) => node.position)).toEqual(settled);
     const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
       const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "root", timestamp: "9", message: { role: "user", content: "new" } }];
       session.current!.entries = entries;
@@ -292,9 +295,11 @@ describe("draft placement", () => {
       expect(node("b").position.y).toBe(node("c").position.y);
     };
     expectBranchOrder();
+    const settled = graph.nodes.map((node: any) => ({ ...node.position }));
     graph.syncNodeDimensions([{ type: "dimensions", id: "draft:turn:a", dimensions: { width: 360, height: 700 } }]);
-    expectClear(graph, "draft:turn:a");
-    expectBranchOrder();
+    // Beyond its slot the draft covers the next branch instead of moving it.
+    expect(graph.nodes.map((node: any) => node.position)).toEqual(settled);
+    expect(draft().position.y + draft().dimensions.height).toBeGreaterThan(node("c").position.y);
     graph.cancelDraft(); await flushPromises();
     expect(graph.nodes.map((node: any) => node.position)).toEqual(original);
   });

@@ -39,6 +39,7 @@ const { t } = useI18n();
       :models="data.models"
       :placeholder="data.runnable ? t('draft.placeholder') : t('graph.blockedReadonly')"
       autofocus
+      auto-grow
       :on-model="data.onModel"
       :on-thinking="data.onThinking"
       :on-submit="data.onSubmit"

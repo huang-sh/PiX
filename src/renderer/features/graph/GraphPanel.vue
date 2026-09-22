@@ -69,6 +69,10 @@ const draftModel = ref<RuntimeModel | null>();
 const draftThinking = ref<string>();
 let activeSession: string | undefined;
 const readableZoom = 0.9;
+// Draft size before Vue Flow measures it, and the vertical slot the layout
+// reserves for it: a draft growing past the slot overlays the cards below
+// instead of shoving them around on every keystroke.
+const DRAFT_SIZE = { width: 440, height: 320 };
 const booted = ref(false);
 const deleteError = ref("");
 const searchOpen = ref(false);
@@ -399,7 +403,7 @@ function rebuild() {
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : previous?.dimensions ?? { width: node.type === "draft" ? 360 : 280, height: node.type === "draft" ? 280 : 146 },
+        : previous?.dimensions ?? (node.type === "draft" ? DRAFT_SIZE : { width: 280, height: 146 }),
       handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
         source: [{ type: "source", nodeId: node.id, position: "right", x: 276, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
@@ -424,7 +428,8 @@ function rebuild() {
 
 function layoutBranches(items: RenderNode[]) {
   // Runs on every rebuild and resize so settled lanes follow measured card
-  // heights; transients reserve vertical space but never widen columns.
+  // heights; transients reserve vertical space but never widen columns, and a
+  // draft's reservation is capped at its opening slot so growth only overlays.
   const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
@@ -434,7 +439,9 @@ function layoutBranches(items: RenderNode[]) {
   if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
   const pending = session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
-  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.type === "draft"
+    ? { width: node.dimensions!.width, height: DRAFT_SIZE.height }
+    : node.dimensions!])), order, transientNodeIds);
   // Cards that were not on screen yet may be moved out of a pinned card's way;
   // the ones the user can already see keep the position they have.
   const known = new Set(nodes.value.map(node => node.id));
@@ -634,8 +641,8 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   const distant = Math.hypot(position.x * zoom + viewport.x - pane.width / 2,
     position.y * zoom + viewport.y - pane.height / 2) > Math.hypot(pane.width, pane.height) * 2;
   await flow.value.setCenter(
-    position.x + (size?.width || (id.startsWith("draft:") ? 360 : 280)) / 2,
-    position.y + (size?.height || (id.startsWith("draft:") ? 280 : 146)) / 2,
+    position.x + (size?.width || (id.startsWith("draft:") ? DRAFT_SIZE.width : 280)) / 2,
+    position.y + (size?.height || (id.startsWith("draft:") ? DRAFT_SIZE.height : 146)) / 2,
     // D3's zoom interpolation zooms far out between distant nodes, transiently
     // mounting thousands of cards. Jump directly across large branches.
     { zoom: ensureReadable ? Math.max(zoom, readableZoom) : zoom, duration: animate && !distant ? 280 : 0 },
