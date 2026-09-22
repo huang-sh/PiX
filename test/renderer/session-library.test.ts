@@ -48,6 +48,24 @@ function seedRemote(session: ReturnType<typeof useSessionStore>) {
   );
 }
 
+describe("session list ordering", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it("ranks project sessions by last modification whatever order the source listed", () => {
+    const session = useSessionStore();
+    // SDK and remote hosts hand sessions over in creation order; the panel
+    // ranks them by recency, with pinned sessions still on top.
+    session.hydrate(null, [], [group([
+      sessionA("older", { modified: "2026-09-01T00:00:00Z" }),
+      sessionA("pinned", { modified: "2026-09-02T00:00:00Z", pinned: true }),
+      sessionA("freshest", { modified: "2026-09-05T00:00:00Z" }),
+    ])]);
+
+    expect(session.filteredProjects[0]!.sessions.map((item) => item.id))
+      .toEqual(["pinned", "freshest", "older"]);
+  });
+});
+
 describe("session library marks", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => vi.restoreAllMocks());

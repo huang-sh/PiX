@@ -121,10 +121,13 @@ export const useSessionStore = defineStore("session", {
           pinned: pinned.has(session.path) || undefined,
           archived: archived.has(session.path) || undefined,
         }));
-      // Pinned sessions top their project group; the sort is stable, so
-      // recency order survives inside each rank.
+      // Pinned sessions top their project group; last-modified recency orders
+      // the rest, whatever order the list's source (SDK, remote host, history
+      // snapshot) handed over.
       const ranked = (sessions: SessionSummary[]) =>
-        [...sessions].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+        [...sessions].sort((a, b) =>
+          Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
+          || b.modified.localeCompare(a.modified));
       return state.projects
         .map((record) => {
           const projectMatch = !query || `${record.project.name} ${record.project.path} ${

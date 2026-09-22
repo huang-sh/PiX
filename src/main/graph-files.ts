@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -39,7 +39,7 @@ export function parseStrict(raw: string): SessionData {
   if (!header || header.type !== "session" || typeof header.id !== "string" || !header.id || header.version !== 3)
     throw new Error("Expected a Pi v3 session header");
   const byId = new Map<string, RawSessionEntry>();
-  const types = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
+  const types = new Set(["message", "model_change", "thinking_level_change", "usage", "compaction", "branch_summary", "custom", "custom_message", "context_edit", "label", "session_info"]);
   for (const entry of values) {
     if (!entry || !types.has(entry.type) || typeof entry.id !== "string" || !entry.id || byId.has(entry.id)
       || (entry.parentId !== null && typeof entry.parentId !== "string") || typeof entry.timestamp !== "string")
@@ -51,8 +51,9 @@ export function parseStrict(raw: string): SessionData {
     byId.set(entry.id, entry);
   }
   for (const entry of values) {
-    const ref = entry.type === "label" ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
-    if ((entry.type === "label" || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
+    const hasTarget = entry.type === "label" || entry.type === "context_edit";
+    const ref = hasTarget ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
+    if ((hasTarget || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
     // branch_summary.fromId may name the abandoned path outside an SDK-extracted session.
   }
   return { header, entries: values };
@@ -69,6 +70,34 @@ export function durableWrite(file: string, text: string) {
 
 /** Branch sidecar next to the session file; removed together with it. */
 export const graphDir = (main: string) => `${resolve(main)}.pix-tree`;
+
+/**
+ * A session's last activity: the newest of the main file's mtime and the
+ * conversation writes in its branch sidecar. Lists and snapshots must agree on
+ * this value — the panel ranks rows by it, so a branch run has to float the
+ * session row even though the main file itself never changed. Only branch
+ * transcripts and checkpoints count as activity: owner.json/cursor.json are
+ * ownership and view bookkeeping written by merely opening or switching, and
+ * must not float the session. The fallback (whatever the caller knows) stands
+ * in when nothing can be stat'ed.
+ */
+export function sessionModifiedAt(main: string, fallback: string): string {
+  let newest = "";
+  const consider = (iso: string) => {
+    if (iso > newest) newest = iso;
+  };
+  try {
+    consider(statSync(main).mtime.toISOString());
+  } catch { /* deleted mid-listing */ }
+  try {
+    const dir = graphDir(main);
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl") && !name.endsWith(".checkpoint")) continue;
+      try { consider(statSync(join(dir, name)).mtime.toISOString()); } catch { /* raced delete */ }
+    }
+  } catch { /* no branch sidecar */ }
+  return newest || fallback;
+}
 
 /**
  * `canonical()` re-prefixes a branch's own entries, so an inherited value is
@@ -262,7 +291,7 @@ export class GraphFiles {
     // Metadata elsewhere can refer to an abandoned branch. Remove that metadata,
     // retaining its children and their original message ancestry.
     for (const entry of entries.values()) {
-      const ref = entry.type === "label" ? entry.targetId
+      const ref = entry.type === "label" || entry.type === "context_edit" ? entry.targetId
         : entry.type === "branch_summary" ? entry.fromId : undefined;
       if (typeof ref === "string" && removed.has(ref)) removed.add(entry.id);
       if (entry.type === "compaction" && !removed.has(entry.id) && removed.has(String(entry.firstKeptEntryId)))
@@ -450,7 +479,7 @@ export class GraphFiles {
           const source = checkpoints ? checkpoints.get(id)! : readStrict(this.checkpointPath(id));
           if (source instanceof Error) throw source;
           delta = this.delta(record, source);
-          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", "pix.branch-metadata"].includes(String(e.customType)))
+          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
             || e.type === "custom_message")) throw new Error("Extension state needs a compatible export adapter; source retained");
         } catch (error) {
           throw new Error(`Cannot export branch ${id}: ${String(error)}`);

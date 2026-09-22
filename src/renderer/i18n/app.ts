@@ -34,6 +34,8 @@ export const en = {
     minutes: "{n}m",
     hours: "{n}h",
     days: "{n}d",
+    months: "{n}mo",
+    years: "{n}y",
     aMoment: "a moment",
   },
   welcome: {
@@ -178,6 +180,8 @@ export const zhCN: typeof en = {
     minutes: "{n} 分钟",
     hours: "{n} 小时",
     days: "{n} 天",
+    months: "{n} 个月",
+    years: "{n} 年",
     aMoment: "片刻",
   },
   welcome: {

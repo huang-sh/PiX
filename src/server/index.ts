@@ -20,7 +20,6 @@ import {
 import type { DesktopEvent } from "../shared/types.js";
 import { brokerOptions, BrokerModelStream } from "../main/model-broker.js";
 
-const PI_VERSION = "0.85.0";
 const READY_MARKER = "PIX_AGENT_HOST_READY ";
 
 function option(name: string) {
@@ -79,6 +78,7 @@ async function serve() {
   await enrichLoginPath();
   bootstrapPixProfile(pixHome());
   const controller = new MainController(cwd, platform);
+  const { VERSION: piVersion } = await controller.projectRuntime.pi();
   const token = randomBytes(32).toString("base64url");
   const wss = new WebSocketServer({
     host: "127.0.0.1",
@@ -143,7 +143,7 @@ async function serve() {
       type: "hello",
       protocol: PIX_REMOTE_PROTOCOL,
       hostVersion: PIX_HOST_VERSION,
-      piVersion: PI_VERSION,
+      piVersion,
       platform: process.platform,
       arch: process.arch,
       cwd,

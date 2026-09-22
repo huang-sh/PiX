@@ -18,6 +18,7 @@ export interface WorkspaceTab {
   path?: string;
   url?: string;
   document?: FileDocument;
+  savedContent?: string;
   patch?: string;
 }
 
@@ -39,6 +40,8 @@ export const useWorkspaceStore = defineStore("workspace", {
     files: [] as FileNode[],
     filesRequest: 0,
     git: unavailableGit(),
+    gitRequest: 0,
+    gitSwitching: false,
     diff: "",
     tabs: [] as WorkspaceTab[],
     activeTab: "",
@@ -67,6 +70,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.browserUrl = browserHome || "https://pi.dev";
       if (changed) {
         this.filesRequest++;
+        this.gitRequest++;
         this.files = [];
         this.git = unavailableGit();
         this.diff = "";
@@ -120,11 +124,39 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
     },
     async loadGit() {
+      const project = this.project;
+      const request = ++this.gitRequest;
       try {
-        this.git = await desktop.invoke<GitStatus>("git.status");
+        const status = await desktop.invoke<GitStatus>("git.status");
+        if (this.project === project && this.gitRequest === request) this.git = status;
       } catch {
-        this.git = unavailableGit();
+        if (this.project === project && this.gitRequest === request) this.git = unavailableGit();
       }
+    },
+    async switchGitBranch(branch: string) {
+      const project = this.project;
+      if (!project || this.gitSwitching) return;
+      if (this.tabs.some(tab => tab.kind === "file" && tab.document?.content !== tab.savedContent))
+        throw new Error("Save your open files before switching Git branches");
+      this.gitSwitching = true;
+      try {
+        const status = await desktop.invoke<GitStatus>("git.switch", { branch, cwd: project.path });
+        if (this.project !== project) return;
+        this.gitRequest++;
+        this.git = status;
+        this.diff = "";
+        for (const tab of this.tabs.filter(tab => tab.kind === "changes")) this.closeTab(tab.id);
+        await Promise.all([this.loadFiles(), ...this.tabs.filter(tab => tab.kind === "file").map(async tab => {
+          const previous = tab.document;
+          const unchanged = () => this.project === project && tab.document === previous && previous?.content === tab.savedContent;
+          try {
+            const document = await desktop.invoke<FileDocument>("workspace.read", { path: tab.path });
+            if (unchanged()) { tab.document = document; tab.savedContent = document.content; }
+          } catch {
+            if (unchanged()) this.closeTab(tab.id);
+          }
+        })]);
+      } finally { this.gitSwitching = false; }
     },
     async openFile(path: string) {
       const old = this.tabs.find((tab) => tab.kind === "file" && tab.path === path);
@@ -138,6 +170,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         title: document.name,
         path,
         document,
+        savedContent: document.content,
       };
       this.tabs.push(tab);
       this.activeTab = tab.id;
@@ -148,6 +181,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         path: tab.path,
         content,
       });
+      tab.savedContent = tab.document.content;
     },
     async openChange(path?: string) {
       this.diff = await desktop.invoke<string>("git.diff", { path });

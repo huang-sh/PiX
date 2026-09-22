@@ -1,10 +1,9 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// hello.cwd now resolves symlinks, matching workspace.directories. Reinstall older
-// hosts so pooled workspace identity never depends on the requested alias.
+// Git branch listing and switching require an updated remote host.
 // Installers compare both protocol and product version.
-export const PIX_REMOTE_PROTOCOL = 13;
-export const PIX_HOST_VERSION = "0.0.21";
+export const PIX_REMOTE_PROTOCOL = 14;
+export const PIX_HOST_VERSION = "0.0.22";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
@@ -22,6 +21,8 @@ export const PROJECT_ROUTES = [
   "workspace.read",
   "workspace.write",
   "git.status",
+  "git.branches",
+  "git.switch",
   "git.diff",
   "changes.read",
   "shell.run",

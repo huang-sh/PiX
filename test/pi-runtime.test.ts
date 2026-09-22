@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -615,5 +615,89 @@ test("factory loads bundled packages as additional extension paths", async () =>
     assert.equal(extension.bundled, true);
   } finally {
     rmSync(join(dirname(fixtureDir), "@injaneity"), { recursive: true, force: true });
+  }
+});
+
+test("session lists come back newest-modified first, whatever order the SDK returns", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-list-"));
+  try {
+    const runtime = new PiRuntime(home, join(home, "sessions"), () => undefined, async () => undefined);
+    const row = (id: string, created: string, modified: string) => ({
+      id, path: join(home, "sessions", `${id}.jsonl`), name: id, cwd: home,
+      created, modified, messageCount: 1, firstMessage: id,
+    });
+    // A session whose main file is old but whose branch sidecar was just
+    // written: the SDK cannot see the sidecar, the listing must.
+    const branchedMain = join(home, "sessions", "branched.jsonl");
+    mkdirSync(dirname(branchedMain), { recursive: true });
+    writeFileSync(branchedMain, `${JSON.stringify({ type: "session", id: "branched", cwd: home, timestamp: "2026-09-01T00:00:00Z" })}\n`);
+    const idle = new Date("2026-09-01T00:00:00Z");
+    utimesSync(branchedMain, idle, idle);
+    mkdirSync(`${branchedMain}.pix-tree`, { recursive: true });
+    const branchFile = join(`${branchedMain}.pix-tree`, "b1.jsonl");
+    writeFileSync(branchFile, "{}\n");
+    const branchRun = new Date("2026-09-06T00:00:00Z");
+    utimesSync(branchFile, branchRun, branchRun);
+    // The SDK lists in creation order; recency is scrambled against it.
+    runtime["pi"] = async () => ({
+      SessionManager: { list: async () => [
+        row("oldest", "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+        row("branched", "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+        row("middle", "2026-09-02T00:00:00Z", "2026-09-03T00:00:00Z"),
+        row("youngest-touched", "2026-09-03T00:00:00Z", "2026-09-05T00:00:00Z"),
+      ] },
+    }) as Awaited<ReturnType<PiRuntime["pi"]>>;
+    assert.deepEqual((await runtime.list()).map((listed) => listed.id), [
+      "branched", "youngest-touched", "middle", "oldest",
+    ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a snapshot summary carries the file's mtime, not the moment of the snapshot", () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-snapshot-mtime-"));
+  try {
+    const entries = [
+      { type: "message", id: "u1", parentId: null, timestamp: "2026-09-01T00:00:01Z", message: { role: "user", content: "hi" } },
+    ];
+    const file = join(home, "session.jsonl");
+    writeFileSync(file, `${JSON.stringify({ type: "session", id: "s1", cwd: home, timestamp: "2026-09-01T00:00:00Z" })}\n`);
+    // The panel ranks by modified; a fresh "now" would float an opened session
+    // to the top until the next list refresh drops it back.
+    const settled = new Date("2026-09-02T03:04:05Z");
+    utimesSync(file, settled, settled);
+    const runtime = new PiRuntime(home, home, () => undefined, async () => undefined);
+    runtime.runtime = {
+      session: {
+        sessionFile: file,
+        sessionId: "s1",
+        sessionManager: {
+          getEntries: () => entries,
+          getLeafId: () => "u1",
+          getHeader: () => ({ type: "session", id: "s1", cwd: home, timestamp: "2026-09-01T00:00:00Z" }),
+          getCwd: () => home,
+        },
+      },
+    };
+    assert.equal(runtime.snapshot().session.modified, settled.toISOString());
+    // A branch run writes only the sidecar; the main summary must still show it.
+    const sidecar = `${file}.pix-tree`;
+    mkdirSync(sidecar, { recursive: true });
+    const branchFile = join(sidecar, "b1.jsonl");
+    writeFileSync(branchFile, "{}\n");
+    const branched = new Date("2026-09-22T21:00:00Z");
+    utimesSync(branchFile, branched, branched);
+    assert.equal(runtime.snapshot().session.modified, branched.toISOString());
+    // Opening and closing write only ownership/view bookkeeping into the
+    // sidecar; a fresh lock or cursor must not float the session.
+    for (const bookkeeping of ["owner.json", "cursor.json"]) {
+      const file = join(sidecar, bookkeeping);
+      writeFileSync(file, "{}\n");
+      utimesSync(file, new Date("2026-09-23T10:00:00Z"), new Date("2026-09-23T10:00:00Z"));
+    }
+    assert.equal(runtime.snapshot().session.modified, branched.toISOString());
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

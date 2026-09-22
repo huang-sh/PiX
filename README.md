@@ -90,7 +90,7 @@ npm run dev
 扫码加入微信交流群：
 
 <p>
-  <img src="assets/images/wechat_qr.jpeg" width="220" alt="PiX 微信交流群二维码">
+  <img src="assets/images/Weixin.png" width="220" alt="PiX 微信交流群二维码">
 </p>
 
 ## 贡献者

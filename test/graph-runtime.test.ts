@@ -94,7 +94,8 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     assert.equal(runtime.snapshot().projection.nodes.length, 0);
     assert.equal(runtime.state().model?.provider, "faux");
     assert.equal(runtime.state().model?.id, "test");
-    assert.equal(runtime.runtime.session.sessionManager.buildSessionContext().messages.length, 0);
+    assert.ok(runtime.runtime.session.sessionManager.buildSessionContext().messages.every(
+      (message: { role: string }) => message.role === "system"), "deletion leaves no conversation messages in model context");
     const fresh = await prompt("fresh", null, "fresh");
     assert.equal(runtime.snapshot().projection.nodes.length, 1);
     const failingChild = await prompt("failure-child", fresh, "failure child");
@@ -157,9 +158,18 @@ test("independent branches persist without merging; export during a run preserve
     // Real providers keep optional fields in memory which Pi omits from JSONL.
     faux.setResponses([{ ...fauxAssistantMessage("root answer"), errorMessage: undefined }]);
     await runtime.control({ action: "prompt", text: "root prompt" });
+    const manager = runtime.runtime.session.sessionManager as SessionManager;
+    const answer = manager.getEntries().find(entry => entry.type === "message" && entry.message.role === "assistant")!;
+    manager.appendContextEdit(answer.id, { content: "edited root context" });
+    manager.appendUsage("cache_warm", "faux", "test", fauxAssistantMessage("").usage);
+    await runtime.runtime.session.refreshContext();
     const root = runtime.snapshot().projection.activeNodeId!;
     faux.setResponses([
-      async () => { await new Promise<void>(r => { releaseMain = r; }); return fauxAssistantMessage("main answer"); },
+      async (context) => {
+        assert.ok(JSON.stringify(context.messages).includes("edited root context"));
+        assert.ok(!JSON.stringify(context.messages).includes("root answer"));
+        await new Promise<void>(r => { releaseMain = r; }); return fauxAssistantMessage("main answer");
+      },
       fauxAssistantMessage("A answer"),
       async (_context, options) => { await new Promise<void>(r => { releaseA = r; options?.signal?.addEventListener("abort", () => r(), { once: true }); }); return fauxAssistantMessage("A continuation"); },
       fauxAssistantMessage("B answer"),
@@ -216,6 +226,7 @@ test("independent branches persist without merging; export during a run preserve
     await runtime.close(); await runtime.open(mainFile);
     // Source files are enumerated by filename after restart, not creation order.
     assert.deepEqual(new Map(runtime.snapshot().projection.nodes.map(n => [n.id, { parentId: n.parentId, leafEntryId: n.leafEntryId }])), nodes);
+    assert.ok(JSON.stringify(runtime.runtime.session.sessionManager.buildSessionContext()).includes("edited root context"));
     runtime.runtime.session.sessionManager.resetLeaf();
     await runtime.close(); await runtime.open(mainFile);
     assert.equal(runtime.runtime.session.sessionManager.buildSessionContext().messages.length, 0,

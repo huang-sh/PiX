@@ -639,6 +639,9 @@ for (const kind of ["ssh", "wsl"] as const) {
     const first = await open(alias);
     const original = controller.wsl!;
     assert.equal(original.hello.cwd, canonical, "hello expands symlinks on the host");
+    assert.equal(original.hello.piVersion,
+      JSON.parse(readFileSync("server/package.json", "utf8")).dependencies["@earendil-works/pi-coding-agent"],
+      "hello reports the installed SDK version");
     assert.equal(first.project.path, canonical);
     assert.equal((await controller.invoke("session.list") as unknown[]).length, 1,
       "sessions created through the alias remain visible");

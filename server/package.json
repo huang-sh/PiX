@@ -1,14 +1,14 @@
 {
   "name": "@pix/server",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-server": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-server": "0.87.0",
     "@ff-labs/pi-fff": "0.10.6",
     "@injaneity/pi-computer-use": "0.5.1",
     "diff": "8.0.4",

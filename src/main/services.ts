@@ -48,6 +48,7 @@ import { projectId } from "../shared/types.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
+import { sessionModifiedAt } from "./graph-files.js";
 import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
 import { canonicalPath, pixAgentDir, pixHome } from "./paths.js";
@@ -571,7 +572,7 @@ export class GitService {
     }));
     return {
       available: true,
-      branch: head.slice(3).split("...")[0]?.split(" [")[0] || "HEAD",
+      branch: head.slice(3).replace(/^(?:No commits yet on |Initial commit on )/, "").split("...")[0]?.split(" [")[0] || "HEAD",
       ahead: Number(head.match(/ahead (\d+)/)?.[1] ?? 0),
       behind: Number(head.match(/behind (\d+)/)?.[1] ?? 0),
       changes,
@@ -594,6 +595,27 @@ export class GitService {
       windowsHide: true,
     });
     return stdout || "No changes.";
+  }
+  async branches(): Promise<string[]> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const { stdout } = await git("git", ["-c", `safe.directory=${root}`, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"],
+      { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10000 });
+    return stdout.trim().split(/\r?\n/).filter(Boolean);
+  }
+  async switchBranch(branch: string): Promise<GitStatus> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const repository = new GitService(root);
+    // Accept exact local branch names, never revision expressions or Git options.
+    if (!(await repository.branches()).includes(branch)) throw new Error("Choose an existing local Git branch");
+    try {
+      await git("git", ["-c", `safe.directory=${root}`, "switch", "--no-guess", "--", branch],
+        { cwd: root, encoding: "utf8", windowsHide: true, timeout: 30000 });
+    } catch (error) {
+      throw new Error(String((error as { stderr?: string }).stderr || (error as Error).message).trim());
+    }
+    return repository.status();
   }
 }
 export class ShellService {
@@ -751,7 +773,7 @@ export class SessionFiles {
           const s = statSync(p),
             x = parseSessionJsonl(readFileSync(p, "utf8"));
           return [
-            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
+            summarizeSession(p, x.header, x.entries, sessionModifiedAt(p, s.mtime.toISOString())),
           ];
         } catch {
           return [];

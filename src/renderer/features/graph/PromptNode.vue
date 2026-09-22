@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, GitBranch, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -9,6 +9,7 @@ import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import type { BranchDirection } from "../../graph-layout";
+import { relativeTimeUnit } from "../../lib/relative-time";
 
 interface NodeContent {
   user: string;
@@ -175,10 +176,8 @@ onBeforeUnmount(() => {
 });
 
 function relative(value: string) {
-  const minutes = Math.floor(Math.max(0, Date.now() - new Date(value).getTime()) / 60_000);
-  if (minutes < 1) return t("time.now");
-  if (minutes < 60) return t("time.minutes", { n: minutes });
-  return t("time.hours", { n: Math.floor(minutes / 60) });
+  const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
+  return t(`time.${unit}`, { n });
 }
 </script>
 
@@ -221,6 +220,12 @@ function relative(value: string) {
       class="node-footer nodrag nowheel"
       @click.stop
     >
+      <span v-if="data.node.gitBranch" class="node-footer-value node-git-branch"
+        :title="t('graph.gitBranchAtStart', { branch: data.node.gitBranch })"
+        :aria-label="t('graph.gitBranchAtStart', { branch: data.node.gitBranch })">
+        <GitBranch :size="12" aria-hidden="true" />
+        <span>{{ data.node.gitBranch }}</span>
+      </span>
       <span
         class="node-context-usage"
         :title="usage ? `${compactTokens(usage.tokens)} / ${compactTokens(usage.contextWindow)} tokens` : 'Usage will be saved after this node finishes'"

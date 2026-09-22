@@ -24,15 +24,15 @@ vi.mock("../../src/renderer/lib/frame", () => ({
 }));
 const releaseGates = () => { for (const release of gates.splice(0)) release(); };
 
-function snapshot(name: string): SessionSnapshot {
-  const entries = [
-    { type: "message", id: `${name}-root`, parentId: null, timestamp: "00", message: { role: "user", content: `${name} root` } },
-    { type: "message", id: `${name}-leaf`, parentId: `${name}-root`, timestamp: "01", message: { role: "user", content: `${name} leaf` } },
-  ];
+function snapshot(name: string, spec?: Array<[string, string | null]>, leaf?: string): SessionSnapshot {
+  const entries = (spec ?? [["root", null], ["leaf", "root"]]).map(([id, parentId], i) => ({
+    type: "message", id: `${name}-${id}`, parentId: parentId === null ? null : `${name}-${parentId}`,
+    timestamp: String(i).padStart(2, "0"), message: { role: "user", content: `${name} ${id}` },
+  }));
   return {
-    session: { id: name, path: `${name}.jsonl`, cwd: ".", created: "", modified: "", messageCount: 2, firstMessage: `${name} root` },
+    session: { id: name, path: `${name}.jsonl`, cwd: ".", created: "", modified: "", messageCount: entries.length, firstMessage: `${name} root` },
     entries,
-    projection: projectSession(entries, `${name}-leaf`),
+    projection: projectSession(entries, `${name}-${leaf ?? "leaf"}`),
     runtime: { available: true, isStreaming: false },
     graph: { id: `${name}.jsonl`, epoch: name, revision: 1, runs: [] },
   } as unknown as SessionSnapshot;
@@ -85,6 +85,86 @@ it("resumes the remembered viewport and manual card positions when a session is 
     expect(setViewport).toHaveBeenCalledWith({ x: 123, y: 45, zoom: 0.5 }, { duration: 1 });
     expect(setCenter).not.toHaveBeenCalled();
     expect(flow.findNode("turn:alpha-root").position).toEqual({ x: 900, y: 700 });
+  } finally {
+    wrapper.unmount();
+    gates.length = 0;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("resumes the measured card arrangement when a session is reopened", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  const { session, wrapper } = mountPanel();
+  try {
+    const spec: Array<[string, string | null]> = [
+      ["root", null], ["a", "root"], ["a1", "a"], ["a2", "a1"], ["b", "root"], ["b1", "b"],
+    ];
+    const heights: Record<string, number> = {
+      root: 176, a: 238, a1: 204, a2: 222, b: 190, b1: 246,
+    };
+    const graph = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
+    const positions = () => Object.fromEntries(graph.nodes
+      .filter((node: any) => node.type === "prompt")
+      .map((node: any) => [node.id, { ...node.position }]));
+    session.applySnapshot(snapshot("alpha", spec, "a2"));
+    await flushPromises();
+    // Real cards measure taller than the 146 estimate; the lanes settle on
+    // the measured pitch, not the estimate pitch.
+    graph.syncNodeDimensions(Object.entries(heights).map(([id, height]) =>
+      ({ type: "dimensions", id: `turn:alpha-${id}`, dimensions: { width: 320, height } })));
+    await flushPromises();
+    const before = positions();
+    expect(Object.keys(before)).toHaveLength(6);
+
+    session.applySnapshot(snapshot("beta"));
+    session.focusedNode = null;
+    await flushPromises();
+    // Coming back must re-enter the measured arrangement exactly: offscreen
+    // cards never re-measure, so sizes have to come back with the session.
+    session.applySnapshot(snapshot("alpha", spec, "a2"));
+    session.focusedNode = null;
+    await flushPromises();
+    expect(positions()).toEqual(before);
+  } finally {
+    wrapper.unmount();
+    gates.length = 0;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps the measured arrangement when a switch passes through an empty workspace", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  const { session, wrapper } = mountPanel();
+  try {
+    const spec: Array<[string, string | null]> = [
+      ["root", null], ["a", "root"], ["a1", "a"], ["b", "root"],
+    ];
+    const heights: Record<string, number> = { root: 176, a: 238, a1: 204, b: 190 };
+    const graph = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
+    const positions = () => Object.fromEntries(graph.nodes
+      .filter((node: any) => node.type === "prompt")
+      .map((node: any) => [node.id, { ...node.position }]));
+    session.applySnapshot(snapshot("alpha", spec, "a1"));
+    await flushPromises();
+    graph.syncNodeDimensions(Object.entries(heights).map(([id, height]) =>
+      ({ type: "dimensions", id: `turn:alpha-${id}`, dimensions: { width: 320, height } })));
+    await flushPromises();
+    const before = positions();
+
+    // Removing the open session tears the pane down without adopting another;
+    // the teardown must not erase what the session left behind.
+    session.current = undefined;
+    await flushPromises();
+    expect(wrapper.findComponent(VueFlow).exists()).toBe(false);
+    session.applySnapshot(snapshot("beta"));
+    session.focusedNode = null;
+    await flushPromises();
+    session.applySnapshot(snapshot("alpha", spec, "a1"));
+    session.focusedNode = null;
+    await flushPromises();
+    expect(positions()).toEqual(before);
   } finally {
     wrapper.unmount();
     gates.length = 0;

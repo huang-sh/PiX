@@ -1,6 +1,6 @@
 {
   "name": "pix",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "private": true,
   "license": "MPL-2.0",
   "desktopName": "pix",
@@ -43,9 +43,9 @@
     "postinstall": "node node_modules/electron/install.js"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-server": "0.85.1",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-server": "0.87.0",
     "@lucide/vue": "^1.39.0",
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",
@@ -72,7 +72,7 @@
     "@types/ws": "8.18.1",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.5.0",
-    "electron": "^44.1.1",
+    "electron": "^44.4.4",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "jsdom": "^30.0.1",
@@ -83,7 +83,7 @@
     "vue-tsc": "^3.3.11"
   },
   "allowScripts": {
-    "electron@44.4.1": true,
+    "electron@44.4.4": true,
     "node-pty@1.2.0-beta.15": true
   }
 }
