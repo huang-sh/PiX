@@ -721,10 +721,23 @@ try {
             throw new Error(`Splitter did not drag back: ${width} !== ${storeWidth}`);
         });
       }
-      // The fixture session is one linear branch, so Ctrl+clicking another
-      // node must retarget the same column — one panel per branch.
-      const otherTitle = await cdp.evaluate("[...document.querySelectorAll('.prompt-node')].at(-1).querySelector('.turn-copy strong').textContent.trim()");
-      await cdp.evaluate("[...document.querySelectorAll('.prompt-node')].at(-1).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))");
+      // Ctrl+clicking a node on the pinned column's branch retargets that
+      // column — one panel per branch. The fixture session is a tree, not a
+      // linear branch, so pick the pinned node's closest same-path rendered
+      // node with the same walk the workbench uses instead of trusting DOM
+      // order, where another branch's node may come last.
+      const pinnedId = await cdp.evaluate("window.__pixTest.state().chatColumns[0]");
+      const otherId = await cdp.evaluate(`(() => {
+        const nodes = window.__pixTest.state().current.projection.nodes;
+        const parents = new Map(nodes.map(node => [node.id, node.parentId]));
+        const onPath = (from, onto) => { for (let cur = from; cur; cur = parents.get(cur) ?? null) if (cur === onto) return true; return false; };
+        const rendered = [...document.querySelectorAll('.prompt-node')].map(node => node.closest('[data-id]')?.dataset.id);
+        return rendered.find(id => id && id !== ${JSON.stringify(pinnedId)}
+          && (onPath(id, ${JSON.stringify(pinnedId)}) || onPath(${JSON.stringify(pinnedId)}, id))) ?? null;
+      })()`);
+      if (!otherId) throw new Error("Fixture has no same-branch prompt node to retarget the pinned column with");
+      const otherTitle = await cdp.evaluate(`document.querySelector('[data-id="${otherId}"] .prompt-node .turn-copy strong').textContent.trim()`);
+      await cdp.evaluate(`document.querySelector('[data-id="${otherId}"] .prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))`);
       await retry(async () => {
         const value = await cdp.evaluate(`({
           columns: window.__pixTest.state().chatColumns,
@@ -869,7 +882,10 @@ try {
         readableAndCentered: (() => {
           const flow = document.querySelector('.session-flow').getBoundingClientRect();
           const draft = document.querySelector('.draft-node').getBoundingClientRect();
-          return draft.width >= 250 && draft.height <= 225 && Math.abs((draft.left + draft.width / 2) - (flow.left + flow.width / 2)) < 50;
+          // The auto-sizing draft opens within its reserved layout slot
+          // (GraphPanel's DRAFT_SIZE.height of 320), growing past it only
+          // as an overlay while typing.
+          return draft.width >= 250 && draft.height <= 320 && Math.abs((draft.left + draft.width / 2) - (flow.left + flow.width / 2)) < 50;
         })()
       })`);
       if (!value.draft || !value.settings || !value.connected || !value.parentStable || !value.focused || !value.fullyVisible || !value.readableAndCentered)
