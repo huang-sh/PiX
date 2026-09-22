@@ -177,6 +177,13 @@ try {
     );
     if (!ready) throw new Error(`Renderer is not ready\n${stderr}`);
   });
+  // The v0.0.20 incident was "alive but invisible": renderer fully loaded
+  // while the window never showed. The DOM check above cannot tell those
+  // apart; only visibility can (a hidden window reports "hidden").
+  await retry(async () => {
+    if ((await cdp.evaluate("document.visibilityState")) !== "visible")
+      throw new Error(`Packaged PiX window never became visible\n${stderr}`);
+  });
   const session = await retry(async () => {
     const value = await cdp.evaluate(
       "({ sessions: window.__pixTest.state().sessions.length, current: Boolean(window.__pixTest.state().current) })",
