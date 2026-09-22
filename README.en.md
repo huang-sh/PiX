@@ -90,7 +90,7 @@ npm run dev
 Join our WeChat group:
 
 <p>
-  <img src="assets/images/wechat_qr.jpeg" width="220" alt="PiX WeChat group QR code">
+  <img src="assets/images/Weixin.png" width="220" alt="PiX WeChat group QR code">
 </p>
 
 ## Contributors
