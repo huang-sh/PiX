@@ -380,16 +380,20 @@ export class PiRuntime {
     // canonicalizing that directory once spells every row without a realpath
     // per file.
     const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
-    return all.map((s: any) => ({
-      id: s.id,
-      path: root ? join(root, basename(String(s.path))) : String(s.path),
-      name: s.name,
-      cwd: s.cwd || cwd,
-      created: new Date(s.created).toISOString(),
-      modified: new Date(s.modified).toISOString(),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage,
-    }));
+    // The SDK lists sessions in creation order; the panel's contract is newest
+    // modification first, matching the SessionFiles fallback list().
+    return all
+      .map((s: any) => ({
+        id: s.id,
+        path: root ? join(root, basename(String(s.path))) : String(s.path),
+        name: s.name,
+        cwd: s.cwd || cwd,
+        created: new Date(s.created).toISOString(),
+        modified: new Date(s.modified).toISOString(),
+        messageCount: s.messageCount,
+        firstMessage: s.firstMessage,
+      }))
+      .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
   }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");

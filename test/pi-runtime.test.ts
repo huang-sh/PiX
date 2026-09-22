@@ -617,3 +617,27 @@ test("factory loads bundled packages as additional extension paths", async () =>
     rmSync(join(dirname(fixtureDir), "@injaneity"), { recursive: true, force: true });
   }
 });
+
+test("session lists come back newest-modified first, whatever order the SDK returns", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-list-"));
+  try {
+    const runtime = new PiRuntime(home, join(home, "sessions"), () => undefined, async () => undefined);
+    const row = (id: string, created: string, modified: string) => ({
+      id, path: join(home, "sessions", `${id}.jsonl`), name: id, cwd: home,
+      created, modified, messageCount: 1, firstMessage: id,
+    });
+    // The SDK lists in creation order; recency is scrambled against it.
+    runtime["pi"] = async () => ({
+      SessionManager: { list: async () => [
+        row("oldest", "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+        row("middle", "2026-09-02T00:00:00Z", "2026-09-03T00:00:00Z"),
+        row("youngest-touched", "2026-09-03T00:00:00Z", "2026-09-05T00:00:00Z"),
+      ] },
+    }) as Awaited<ReturnType<PiRuntime["pi"]>>;
+    assert.deepEqual((await runtime.list()).map((listed) => listed.id), [
+      "youngest-touched", "middle", "oldest",
+    ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
