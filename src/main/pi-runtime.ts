@@ -19,7 +19,7 @@ import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skil
 import { SkillControls } from "./skill-controls.js";
 import { canonicalPath, pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
-import { durableWrite, encodeSession } from "./graph-files.js";
+import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
 import type {
@@ -380,16 +380,25 @@ export class PiRuntime {
     // canonicalizing that directory once spells every row without a realpath
     // per file.
     const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
-    return all.map((s: any) => ({
-      id: s.id,
-      path: root ? join(root, basename(String(s.path))) : String(s.path),
-      name: s.name,
-      cwd: s.cwd || cwd,
-      created: new Date(s.created).toISOString(),
-      modified: new Date(s.modified).toISOString(),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage,
-    }));
+    // The SDK lists sessions in creation order; the panel's contract is newest
+    // modification first, matching the SessionFiles fallback list(). Modified
+    // is the mtime side of the session tree (branch sidecars included), so a
+    // branch run floats its session here too.
+    return all
+      .map((s: any) => {
+        const path = root ? join(root, basename(String(s.path))) : String(s.path);
+        return {
+          id: s.id,
+          path,
+          name: s.name,
+          cwd: s.cwd || cwd,
+          created: new Date(s.created).toISOString(),
+          modified: sessionModifiedAt(path, new Date(s.modified).toISOString()),
+          messageCount: s.messageCount,
+          firstMessage: s.firstMessage,
+        };
+      })
+      .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
   }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
@@ -490,7 +499,12 @@ export class PiRuntime {
       this.projectionCache = { manager: m, count: entries.length, leaf, projection: projectSession(entries, leaf) };
     return {
       session: {
-        ...summarizeSession(s.sessionFile ?? "", m.getHeader?.() ?? null, entries, new Date().toISOString()),
+        ...summarizeSession(
+          s.sessionFile ?? "",
+          m.getHeader?.() ?? null,
+          entries,
+          sessionModifiedAt(s.sessionFile ?? "", String(entries.at(-1)?.timestamp ?? new Date().toISOString())),
+        ),
         id: s.sessionId,
         name: m.getSessionName?.(),
         cwd: m.getCwd(),

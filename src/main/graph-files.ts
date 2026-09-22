@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -70,6 +70,34 @@ export function durableWrite(file: string, text: string) {
 
 /** Branch sidecar next to the session file; removed together with it. */
 export const graphDir = (main: string) => `${resolve(main)}.pix-tree`;
+
+/**
+ * A session's last activity: the newest of the main file's mtime and the
+ * conversation writes in its branch sidecar. Lists and snapshots must agree on
+ * this value — the panel ranks rows by it, so a branch run has to float the
+ * session row even though the main file itself never changed. Only branch
+ * transcripts and checkpoints count as activity: owner.json/cursor.json are
+ * ownership and view bookkeeping written by merely opening or switching, and
+ * must not float the session. The fallback (whatever the caller knows) stands
+ * in when nothing can be stat'ed.
+ */
+export function sessionModifiedAt(main: string, fallback: string): string {
+  let newest = "";
+  const consider = (iso: string) => {
+    if (iso > newest) newest = iso;
+  };
+  try {
+    consider(statSync(main).mtime.toISOString());
+  } catch { /* deleted mid-listing */ }
+  try {
+    const dir = graphDir(main);
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl") && !name.endsWith(".checkpoint")) continue;
+      try { consider(statSync(join(dir, name)).mtime.toISOString()); } catch { /* raced delete */ }
+    }
+  } catch { /* no branch sidecar */ }
+  return newest || fallback;
+}
 
 /**
  * `canonical()` re-prefixes a branch's own entries, so an inherited value is
