@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -637,6 +637,37 @@ test("session lists come back newest-modified first, whatever order the SDK retu
     assert.deepEqual((await runtime.list()).map((listed) => listed.id), [
       "youngest-touched", "middle", "oldest",
     ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a snapshot summary carries the file's mtime, not the moment of the snapshot", () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-snapshot-mtime-"));
+  try {
+    const entries = [
+      { type: "message", id: "u1", parentId: null, timestamp: "2026-09-01T00:00:01Z", message: { role: "user", content: "hi" } },
+    ];
+    const file = join(home, "session.jsonl");
+    writeFileSync(file, `${JSON.stringify({ type: "session", id: "s1", cwd: home, timestamp: "2026-09-01T00:00:00Z" })}\n`);
+    // The panel ranks by modified; a fresh "now" would float an opened session
+    // to the top until the next list refresh drops it back.
+    const settled = new Date("2026-09-02T03:04:05Z");
+    utimesSync(file, settled, settled);
+    const runtime = new PiRuntime(home, home, () => undefined, async () => undefined);
+    runtime.runtime = {
+      session: {
+        sessionFile: file,
+        sessionId: "s1",
+        sessionManager: {
+          getEntries: () => entries,
+          getLeafId: () => "u1",
+          getHeader: () => ({ type: "session", id: "s1", cwd: home, timestamp: "2026-09-01T00:00:00Z" }),
+          getCwd: () => home,
+        },
+      },
+    };
+    assert.equal(runtime.snapshot().session.modified, settled.toISOString());
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

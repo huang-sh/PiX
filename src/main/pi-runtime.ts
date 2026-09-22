@@ -1,4 +1,5 @@
 import { dirname, basename, join } from "node:path";
+import { statSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
@@ -63,6 +64,20 @@ export const MODEL_ACTIONS = [
   "logout",
   "setBrokerProviders",
 ] as const satisfies readonly AgentControl["action"][];
+
+/**
+ * A snapshot summary's modified must match what the session lists report, or
+ * the opened session jumps to the panel top until the next refresh corrects
+ * it. The file's mtime is that value; the last entry's timestamp stands in
+ * when the file cannot be stat'ed.
+ */
+export function sessionFileModified(path: string, entries: RawSessionEntry[]): string {
+  try {
+    return statSync(path).mtime.toISOString();
+  } catch {
+    return String(entries.at(-1)?.timestamp ?? new Date().toISOString());
+  }
+}
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -494,7 +509,12 @@ export class PiRuntime {
       this.projectionCache = { manager: m, count: entries.length, leaf, projection: projectSession(entries, leaf) };
     return {
       session: {
-        ...summarizeSession(s.sessionFile ?? "", m.getHeader?.() ?? null, entries, new Date().toISOString()),
+        ...summarizeSession(
+          s.sessionFile ?? "",
+          m.getHeader?.() ?? null,
+          entries,
+          sessionFileModified(s.sessionFile ?? "", entries),
+        ),
         id: s.sessionId,
         name: m.getSessionName?.(),
         cwd: m.getCwd(),
