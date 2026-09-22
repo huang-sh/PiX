@@ -352,7 +352,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .session-flow .vue-flow__minimap { right: auto; bottom: 5px; left: 5px; margin: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 12px rgba(28,36,48,.06); }
 .session-flow.booting { opacity: 0; pointer-events: none; }
 .vue-flow__node-prompt { width: 280px; border: 0; background: transparent; box-shadow: none; }
-.vue-flow__node-draft { width: 360px; border: 0; background: transparent; box-shadow: none; z-index: 12 !important; }
+.vue-flow__node-draft { width: 440px; border: 0; background: transparent; box-shadow: none; z-index: 12 !important; }
 .prompt-node {
   position: relative;
   width: 280px;
@@ -432,7 +432,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .node-hover-card .message-images { grid-column: 2; }
 .node-hover-card > section:last-child > svg { color: var(--accent); }
 .node-hover-card .agent-markdown { --markdown-body-size: var(--font-size-ui); --markdown-h1-size: 20px; --markdown-h2-size: 18px; --markdown-h3-size: 16px; }
-.draft-node { width: 360px; padding: 14px; border: 1px dashed var(--accent); border-radius: 14px; background: var(--surface); box-shadow: 0 0 0 2px var(--ring), 0 4px 12px rgba(28,36,48,.06); text-align: left; }
+.draft-node { width: 440px; padding: 14px; border: 1px dashed var(--accent); border-radius: 14px; background: var(--surface); box-shadow: 0 0 0 2px var(--ring), 0 4px 12px rgba(28,36,48,.06); text-align: left; }
 .draft-node > header i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--ring); }
 .draft-node > header button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--faint); }
 .draft-node > header button:hover { background: var(--muted-surface); color: var(--text); }
@@ -589,7 +589,8 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .chat-composer .node-footer-select { height: 30px; padding: 0 7px; border-radius: 8px; color: var(--text); }
 .chat-composer .node-footer-select > span { color: var(--text); font-size: var(--font-size-caption); }
 .chat-composer .node-thinking-select > svg:first-child { color: var(--text); }
-.draft-node .prompt-composer textarea { min-height: 120px; max-height: 260px; }
+/* The draft grows with its text up to this cap, then scrolls inside. */
+.draft-node .prompt-composer textarea { min-height: 160px; max-height: 400px; resize: none; }
 .branch-message { margin: 0 0 19px; }
 .branch-message.user { width: fit-content; max-width: calc(100% - 28px); margin-left: auto; }
 .branch-message.user > .copy-button { display: flex; margin-left: auto; }
