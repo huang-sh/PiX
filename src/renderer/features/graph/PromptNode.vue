@@ -9,6 +9,7 @@ import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import type { BranchDirection } from "../../graph-layout";
+import { relativeTimeUnit } from "../../lib/relative-time";
 
 interface NodeContent {
   user: string;
@@ -175,10 +176,8 @@ onBeforeUnmount(() => {
 });
 
 function relative(value: string) {
-  const minutes = Math.floor(Math.max(0, Date.now() - new Date(value).getTime()) / 60_000);
-  if (minutes < 1) return t("time.now");
-  if (minutes < 60) return t("time.minutes", { n: minutes });
-  return t("time.hours", { n: Math.floor(minutes / 60) });
+  const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
+  return t(`time.${unit}`, { n });
 }
 </script>
 
