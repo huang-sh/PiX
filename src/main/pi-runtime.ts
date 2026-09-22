@@ -1,5 +1,4 @@
 import { dirname, basename, join } from "node:path";
-import { statSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
@@ -20,7 +19,7 @@ import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skil
 import { SkillControls } from "./skill-controls.js";
 import { canonicalPath, pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
-import { durableWrite, encodeSession } from "./graph-files.js";
+import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
 import type {
@@ -64,20 +63,6 @@ export const MODEL_ACTIONS = [
   "logout",
   "setBrokerProviders",
 ] as const satisfies readonly AgentControl["action"][];
-
-/**
- * A snapshot summary's modified must match what the session lists report, or
- * the opened session jumps to the panel top until the next refresh corrects
- * it. The file's mtime is that value; the last entry's timestamp stands in
- * when the file cannot be stat'ed.
- */
-export function sessionFileModified(path: string, entries: RawSessionEntry[]): string {
-  try {
-    return statSync(path).mtime.toISOString();
-  } catch {
-    return String(entries.at(-1)?.timestamp ?? new Date().toISOString());
-  }
-}
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -396,18 +381,23 @@ export class PiRuntime {
     // per file.
     const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
     // The SDK lists sessions in creation order; the panel's contract is newest
-    // modification first, matching the SessionFiles fallback list().
+    // modification first, matching the SessionFiles fallback list(). Modified
+    // is the mtime side of the session tree (branch sidecars included), so a
+    // branch run floats its session here too.
     return all
-      .map((s: any) => ({
-        id: s.id,
-        path: root ? join(root, basename(String(s.path))) : String(s.path),
-        name: s.name,
-        cwd: s.cwd || cwd,
-        created: new Date(s.created).toISOString(),
-        modified: new Date(s.modified).toISOString(),
-        messageCount: s.messageCount,
-        firstMessage: s.firstMessage,
-      }))
+      .map((s: any) => {
+        const path = root ? join(root, basename(String(s.path))) : String(s.path);
+        return {
+          id: s.id,
+          path,
+          name: s.name,
+          cwd: s.cwd || cwd,
+          created: new Date(s.created).toISOString(),
+          modified: sessionModifiedAt(path, new Date(s.modified).toISOString()),
+          messageCount: s.messageCount,
+          firstMessage: s.firstMessage,
+        };
+      })
       .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
   }
   async open(path: string) {
@@ -513,7 +503,7 @@ export class PiRuntime {
           s.sessionFile ?? "",
           m.getHeader?.() ?? null,
           entries,
-          sessionFileModified(s.sessionFile ?? "", entries),
+          sessionModifiedAt(s.sessionFile ?? "", String(entries.at(-1)?.timestamp ?? new Date().toISOString())),
         ),
         id: s.sessionId,
         name: m.getSessionName?.(),

@@ -48,6 +48,7 @@ import { projectId } from "../shared/types.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
+import { sessionModifiedAt } from "./graph-files.js";
 import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
 import { canonicalPath, pixAgentDir, pixHome } from "./paths.js";
@@ -772,7 +773,7 @@ export class SessionFiles {
           const s = statSync(p),
             x = parseSessionJsonl(readFileSync(p, "utf8"));
           return [
-            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
+            summarizeSession(p, x.header, x.entries, sessionModifiedAt(p, s.mtime.toISOString())),
           ];
         } catch {
           return [];

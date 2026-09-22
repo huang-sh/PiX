@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
-import { PiRuntime, sessionFileModified } from "./pi-runtime.js";
+import { sessionModifiedAt } from "./graph-files.js";
+import { PiRuntime } from "./pi-runtime.js";
 import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, type BranchRecord, type SessionData } from "./graph-files.js";
@@ -135,7 +136,7 @@ export class GraphRuntime extends PiRuntime {
   private fileSnapshot(record: BranchRecord, data: SessionData): SessionSnapshot {
     const path = this.graph!.path(record.id);
     return { session: { id: String(data.header.id), path, cwd: String(data.header.cwd),
-      created: String(data.header.timestamp), modified: sessionFileModified(path, data.entries), messageCount: data.entries.length, firstMessage: record.request.text },
+      created: String(data.header.timestamp), modified: sessionModifiedAt(path, String(data.header.timestamp)), messageCount: data.entries.length, firstMessage: record.request.text },
       entries: data.entries, projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null),
       runtime: { ...super.state(), isStreaming: false, isCompacting: false, isRetrying: false } };
   }
