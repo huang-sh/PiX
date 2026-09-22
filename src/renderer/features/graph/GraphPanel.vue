@@ -49,9 +49,12 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
-// Sessions remember where they were left: manual card positions and the pane
-// viewport come back unchanged on return instead of re-centering.
+// Sessions remember where they were left: manual card positions, measured card
+// sizes, and the pane viewport come back unchanged on return instead of
+// re-centering. Sizes matter because only visible cards ever measure — without
+// them the return would re-stack the lanes from the flat estimate pitch.
 const rememberedLayouts = new Map<string, Map<string, ManualPosition>>();
+const rememberedDimensions = new Map<string, Map<string, Dimensions>>();
 const rememberedViewports = new Map<string, ViewportTransform>();
 // Holding the branch modifier at any point of a drag carries the cards after it too.
 let dragFollowsBranch = false;
@@ -172,9 +175,11 @@ function rebuild() {
   }
   if (session.highlightedNode && !value.nodes.some(node => node.id === session.highlightedNode)) session.highlightedNode = null;
   let restoredLayout: Map<string, ManualPosition> | undefined;
+  let restoredSizes: Map<string, Dimensions> | undefined;
   if (activeSession !== sessionKey.value) {
     dragged.clear();
     restoredLayout = rememberedLayouts.get(sessionKey.value);
+    restoredSizes = rememberedDimensions.get(sessionKey.value);
     branchOrder.clear();
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
@@ -205,8 +210,9 @@ function rebuild() {
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   // Settled positions use the same measured card sizes the pane renders, so
   // lanes track real heights instead of the fixed 280×146 estimate pitch.
-  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions.
-  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 320, height: 146 }]));
+  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions; a
+  // returning session starts from the sizes it left with.
+  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? restoredSizes?.get(n.id) ?? { width: 320, height: 146 }]));
   const calculated = layoutGraph(value, sizes, branchOrder);
   const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
@@ -403,7 +409,7 @@ function rebuild() {
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : previous?.dimensions ?? (node.type === "draft" ? DRAFT_SIZE : { width: 320, height: 146 }),
+        : previous?.dimensions ?? restoredSizes?.get(node.id) ?? (node.type === "draft" ? DRAFT_SIZE : { width: 320, height: 146 }),
       handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
         source: [{ type: "source", nodeId: node.id, position: "right", x: 316, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
@@ -847,11 +853,17 @@ watch(
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
     // Stash the outgoing session's arrangement and pane position before the
-    // rebuild resets per-session state.
-    if (changedSession && activeSession !== undefined) {
+    // rebuild resets per-session state. A teardown (no projection) clears the
+    // cards without adopting a new session, so the next fire must not overwrite
+    // the good snapshot with the torn-down state; rendered sessions always
+    // carry at least the draft card, so empty means torn down.
+    if (changedSession && activeSession !== undefined && nodes.value.length) {
       const viewport = flow.value?.getViewport();
       if (viewport) rememberedViewports.set(activeSession, viewport);
       rememberedLayouts.set(activeSession, new Map(dragged));
+      rememberedDimensions.set(activeSession, new Map(nodes.value
+        .filter(node => node.dimensions?.width)
+        .map(node => [node.id, node.dimensions!])));
     }
     const submittedNode = acceptSubmittedNode();
     rebuild();
