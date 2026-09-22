@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, GitBranch, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -221,6 +221,12 @@ function relative(value: string) {
       class="node-footer nodrag nowheel"
       @click.stop
     >
+      <span v-if="data.node.gitBranch" class="node-footer-value node-git-branch"
+        :title="t('graph.gitBranchAtStart', { branch: data.node.gitBranch })"
+        :aria-label="t('graph.gitBranchAtStart', { branch: data.node.gitBranch })">
+        <GitBranch :size="12" aria-hidden="true" />
+        <span>{{ data.node.gitBranch }}</span>
+      </span>
       <span
         class="node-context-usage"
         :title="usage ? `${compactTokens(usage.tokens)} / ${compactTokens(usage.contextWindow)} tokens` : 'Usage will be saved after this node finishes'"

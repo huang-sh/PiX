@@ -79,6 +79,7 @@ export interface RawSessionEntry {
   [key: string]: unknown;
 }
 export const NODE_FOOTER_CUSTOM_TYPE = "pix.node-footer";
+export const GIT_BRANCH_CUSTOM_TYPE = "pix.git-branch";
 export interface ContextUsageSnapshot {
   tokens: number | null;
   contextWindow: number;
@@ -90,6 +91,8 @@ export interface NodeFooterState {
   thinkingLevel: string;
 }
 export interface GraphNode {
+  /** Git branch at turn start, recorded as the pix.git-branch entry the user message hangs off. */
+  gitBranch?: string;
   fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
@@ -533,6 +536,8 @@ export type DesktopRoute =
   | "workspace.read"
   | "workspace.write"
   | "git.status"
+  | "git.branches"
+  | "git.switch"
   | "git.diff"
   | "changes.read"
   | "shell.run"

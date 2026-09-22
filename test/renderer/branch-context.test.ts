@@ -66,6 +66,7 @@ describe("BranchContextPanel streaming scroll", () => {
     const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true, PromptComposer: true } } });
     const scope = { graphId: "s", branchId: "A", runId: "a1" };
     try {
+      expect(wrapper.find('.chat-git-branch').exists()).toBe(false);
       expect(wrapper.text()).not.toContain("Worked");
       expect(wrapper.find('.process-item.waiting[role="status"]').text()).toContain("Running");
       expect(wrapper.find('.final-response').exists()).toBe(false);

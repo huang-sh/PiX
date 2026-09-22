@@ -152,7 +152,7 @@ describe("draft placement", () => {
     try { await graph.submitDraft("done"); await flushPromises(); }
     finally { promptAt.mockRestore(); }
     const child = graph.nodes.find((node: any) => node.id === "turn:done");
-    expect(child.position).toEqual({ x: manual.x + 372, y: manual.y });
+    expect(child.position).toEqual({ x: manual.x + 412, y: manual.y });
     expectClear(graph, "turn:done");
   });
 
@@ -322,7 +322,7 @@ describe("draft placement", () => {
     await graph.compose("turn:c"); await flushPromises();
     const parent = graph.nodes.find((node: any) => node.id === "turn:c");
     const draft = graph.nodes.find((node: any) => node.id === "draft:turn:c");
-    expect(draft.position.x).toBe(parent.position.x + 280 + 92);
+    expect(draft.position.x).toBe(parent.position.x + 320 + 92);
     expect(draft.position.y + draft.dimensions.height / 2).toBe(parent.position.y + parent.dimensions.height / 2);
     expectClear(graph, draft.id);
   });

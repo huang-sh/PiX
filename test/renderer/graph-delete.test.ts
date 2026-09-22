@@ -105,7 +105,7 @@ describe("graph node context menu deletion", () => {
     // The user dragged turn:d two rows down and turn:b aside; deleting the middle
     // sibling must compact the freed slot instead of leaving a stale hole.
     const flow = wrapper.findComponent({ name: "VueFlow" });
-    flow.vm.$emit("nodeDragStop", { node: { id: "turn:d", position: { x: 420, y: 600 } } });
+    flow.vm.$emit("nodeDragStop", { node: { id: "turn:d", position: { x: 460, y: 600 } } });
     flow.vm.$emit("nodeDragStop", { node: { id: "turn:b", position: { x: 840, y: 48 } } });
     await flushPromises();
     await wrapper.find('[data-id="turn:c"] .prompt-node').trigger("contextmenu", { clientX: 150, clientY: 90, button: 2 });
@@ -114,7 +114,7 @@ describe("graph node context menu deletion", () => {
     await flushPromises();
     // The reflow settles once the post-delete recenter animation finishes;
     // Vue Flow unmounts off-viewport nodes while it pans.
-    await vi.waitFor(() => expect(nodeTransform(wrapper, "turn:d")).toEqual({ x: 420, y: 222 }), { timeout: 2000 });
+    await vi.waitFor(() => expect(nodeTransform(wrapper, "turn:d")).toEqual({ x: 460, y: 222 }), { timeout: 2000 });
     // turn:b's auto slot is untouched by the deletion, so its manual pick stays.
     expect(nodeTransform(wrapper, "turn:b")).toEqual({ x: 840, y: 48 });
     wrapper.unmount();
