@@ -332,6 +332,26 @@ export function projectSession(
         timestamp: e.timestamp,
       });
   }
+  // Context edits are branch-local and last-write-wins. Compaction drops the
+  // older prefix (including its edits); paged history may start after that boundary.
+  // Badge-only divergences from the SDK projection, tracked in #22: an off-branch
+  // firstKeptEntryId (hand-edited files only — the SDK always picks it from the
+  // current path) clamps keptFrom to 0 instead of the SDK's summary-only reading,
+  // and an older compaction inside the newest retained range stays unbadged even
+  // though the SDK projects older compactions to no model messages.
+  const path = activeBranchEntryIds.map(id => byId.get(id)!);
+  const compaction = [...path].reverse().find(entry => entry.type === "compaction");
+  const keptFrom = compaction ? Math.max(0, activeBranchEntryIds.indexOf(String(compaction.firstKeptEntryId))) : 0;
+  const kept = new Set(activeBranchEntryIds.slice(keptFrom));
+  const edits = new Map<string, NonNullable<BranchMessage["contextStatus"]>>();
+  for (const entry of path.slice(keptFrom)) {
+    if (entry.type === "context_edit" && typeof entry.targetId === "string" && kept.has(entry.targetId))
+      edits.set(entry.targetId, entry.replacement === null ? "excluded" : "modified");
+  }
+  for (const message of messages) {
+    const status = kept.has(message.entryId) ? edits.get(message.entryId) : "excluded";
+    if (status) message.contextStatus = status;
+  }
   return {
     nodes,
     edges,

@@ -5,6 +5,7 @@ import type { BranchMessage } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import ContextStatus from "./ContextStatus.vue";
 import FileChanges from "./FileChanges.vue";
 import type { FileChange } from "../../../shared/file-changes";
 
@@ -37,7 +38,10 @@ const { t } = useI18n();
         <article v-if="turn.user" class="branch-message user">
           <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
           <MessageImages :images="turn.user.images" />
-          <CopyButton :text="turn.user.text" />
+          <div class="message-actions">
+            <ContextStatus :status="turn.user.contextStatus" />
+            <CopyButton :text="turn.user.text" />
+          </div>
         </article>
 
         <details v-if="turn.process.length || turn.terminal?.thinking" class="agent-process"
@@ -50,7 +54,7 @@ const { t } = useI18n();
           <div v-if="expandedProcesses.has(turn.id)" class="process-items">
             <template v-for="message in processMessages.get(turn.id)" :key="message.entryId">
               <details v-if="message.thinking" class="process-item process-thinking">
-                <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
+                <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}<ContextStatus :status="message.contextStatus" /></strong></summary>
                 <p>{{ message.thinking }}</p>
               </details>
               <details
@@ -60,18 +64,21 @@ const { t } = useI18n();
               >
                 <summary>
                   <Terminal :size="13" />
-                  <strong>{{ message.toolName || t("branch.tool") }}</strong>
+                  <strong>{{ message.toolName || t("branch.tool") }}<ContextStatus :status="message.contextStatus" /></strong>
                   <code v-if="message.toolInput" :title="message.toolInput">{{ message.toolInput }}</code>
                 </summary>
                 <pre>{{ message.text || t("common.noOutput") }}</pre>
               </details>
               <div v-else-if="message.text" class="process-item assistant">
                 <MarkdownRenderer :content="message.text" :custom-id="message.entryId" />
-                <CopyButton :text="message.text" />
+                <div class="message-actions">
+                  <ContextStatus :status="message.contextStatus" />
+                  <CopyButton :text="message.text" />
+                </div>
               </div>
             </template>
             <details v-if="turn.terminal?.thinking" class="process-item process-thinking">
-              <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
+              <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}<ContextStatus :status="turn.terminal.contextStatus" /></strong></summary>
               <p>{{ turn.terminal.thinking }}</p>
             </details>
           </div>
@@ -79,13 +86,19 @@ const { t } = useI18n();
 
         <article v-if="turn.terminal?.isError" class="branch-message assistant error-response">
           <p class="error-message">{{ errorText(turn.terminal) }}</p>
-          <CopyButton :text="errorText(turn.terminal)" />
+          <div class="message-actions">
+            <ContextStatus :status="turn.terminal.contextStatus" />
+            <CopyButton :text="errorText(turn.terminal)" />
+          </div>
         </article>
 
         <article v-if="turn.terminal?.text" class="branch-message assistant"
           :class="turn.running || turn.terminal.isError ? 'progress-response' : 'final-response'">
           <MarkdownRenderer :content="turn.terminal.text" :custom-id="turn.terminal.entryId" />
-          <CopyButton :text="turn.terminal.text" />
+          <div class="message-actions">
+            <ContextStatus :status="turn.terminal.contextStatus" />
+            <CopyButton :text="turn.terminal.text" />
+          </div>
         </article>
         <FileChanges v-if="!turn.running && turn.fileChanges?.length && sessionPath" :changes="turn.fileChanges" :session-path="sessionPath" />
       </section>

@@ -39,7 +39,7 @@ export function parseStrict(raw: string): SessionData {
   if (!header || header.type !== "session" || typeof header.id !== "string" || !header.id || header.version !== 3)
     throw new Error("Expected a Pi v3 session header");
   const byId = new Map<string, RawSessionEntry>();
-  const types = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
+  const types = new Set(["message", "model_change", "thinking_level_change", "usage", "compaction", "branch_summary", "custom", "custom_message", "context_edit", "label", "session_info"]);
   for (const entry of values) {
     if (!entry || !types.has(entry.type) || typeof entry.id !== "string" || !entry.id || byId.has(entry.id)
       || (entry.parentId !== null && typeof entry.parentId !== "string") || typeof entry.timestamp !== "string")
@@ -51,8 +51,9 @@ export function parseStrict(raw: string): SessionData {
     byId.set(entry.id, entry);
   }
   for (const entry of values) {
-    const ref = entry.type === "label" ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
-    if ((entry.type === "label" || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
+    const hasTarget = entry.type === "label" || entry.type === "context_edit";
+    const ref = hasTarget ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
+    if ((hasTarget || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
     // branch_summary.fromId may name the abandoned path outside an SDK-extracted session.
   }
   return { header, entries: values };
@@ -262,7 +263,7 @@ export class GraphFiles {
     // Metadata elsewhere can refer to an abandoned branch. Remove that metadata,
     // retaining its children and their original message ancestry.
     for (const entry of entries.values()) {
-      const ref = entry.type === "label" ? entry.targetId
+      const ref = entry.type === "label" || entry.type === "context_edit" ? entry.targetId
         : entry.type === "branch_summary" ? entry.fromId : undefined;
       if (typeof ref === "string" && removed.has(ref)) removed.add(entry.id);
       if (entry.type === "compaction" && !removed.has(entry.id) && removed.has(String(entry.firstKeptEntryId)))

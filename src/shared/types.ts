@@ -125,6 +125,7 @@ export interface BranchMessage {
   toolInput?: string;
   isError?: boolean;
   errorMessage?: string;
+  contextStatus?: "excluded" | "modified";
 }
 export interface AgentActivityItem {
   id: string;

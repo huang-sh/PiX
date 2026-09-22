@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, type BranchRecord, type SessionData } from "../src/main/graph-files.js";
 
 const header = { type: "session", version: 3, id: "test", cwd: "/test", timestamp: "2026-01-01" };
@@ -78,7 +79,8 @@ test("deleting a main-tree fork removes dangling metadata while preserving the s
     const data: SessionData = { header, entries: [...initial.entries, user("remove", "root"),
       { type: "label", id: "label", parentId: "root", timestamp: "now", targetId: "remove", label: "deleted label" },
       { type: "branch_summary", id: "summary", parentId: "label", timestamp: "now", fromId: "remove", summary: "deleted summary" },
-      user("keep", "summary")] };
+      { type: "context_edit", id: "edit", parentId: "summary", timestamp: "now", targetId: "remove", replacement: { content: "deleted replacement" } },
+      user("keep", "edit")] };
     durableWrite(graph.main, encodeSession(data));
     graph.deleteNode("remove", "keep");
     const kept = parseStrict(readFileSync(graph.main, "utf8"));
@@ -138,11 +140,46 @@ test("an origin that collapses two entries onto one id is refused instead of cor
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("strict validation rejects malformed lines, duplicates, orphans and broken compaction refs", () => {
+test("strict validation rejects malformed lines, duplicates, orphans and dangling references", () => {
   for (const raw of [encodeSession(initial) + "{broken\n", encodeSession({ header, entries: [user("x", "missing")] }),
     encodeSession({ header, entries: [user("root", null), user("root", null)] }),
-    encodeSession({ header, entries: [...initial.entries, { type: "compaction", id: "c", parentId: "root", timestamp: "now", firstKeptEntryId: "absent" }] })])
+    encodeSession({ header, entries: [...initial.entries, { type: "compaction", id: "c", parentId: "root", timestamp: "now", firstKeptEntryId: "absent" }] }),
+    encodeSession({ header, entries: [...initial.entries, { type: "context_edit", id: "edit", parentId: "root", timestamp: "now", targetId: "absent", replacement: null }] })])
     assert.throws(() => parseStrict(raw));
+});
+
+test("SDK usage and context edits survive branch persistence and export without changing raw history", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-context-edits-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const manager = SessionManager.inMemory(dir, undefined, [a.header, ...a.baseline] as any);
+    const question = manager.appendMessage({ role: "user", content: "original question", timestamp: 1 });
+    const answer = manager.appendMessage(fauxAssistantMessage("original answer"));
+    manager.appendContextEdit("root", { content: "branch root" });
+    manager.appendContextEdit(question, { content: "edited question" });
+    manager.appendContextEdit(answer, null);
+    const usage = manager.appendUsage("cache_warm", "faux", "test", fauxAssistantMessage("").usage);
+    const data = { header: a.header, entries: manager.getEntries().map(entry => ({ ...entry })) };
+    graph.create(a, data);
+    assert.deepEqual(graph.seal(a, data), data);
+    graph.records.clear(); graph.load();
+    assert.deepEqual(graph.recoveryMessages, []);
+    const exported = graph.candidate(initial);
+    const restored = SessionManager.inMemory(dir, undefined, [exported.header, ...exported.entries] as any);
+    restored.branch(`A:${usage.id}`);
+    assert.deepEqual(restored.buildSessionContext(), manager.buildSessionContext());
+    assert.ok(JSON.stringify(restored.buildSessionContext()).includes("edited question"));
+    assert.ok(!JSON.stringify(restored.buildSessionContext()).includes("original answer"));
+    assert.ok(encodeSession(exported).includes("original answer"));
+    restored.branch("root");
+    const mainMessage = restored.buildSessionContext().messages[0];
+    assert.equal(mainMessage?.role === "user" && mainMessage.content, "root", "branch edits stay off the main branch");
+    const compact = manager.appendCompaction("summary only", null, 100);
+    const compacted = { header: a.header, entries: manager.getEntries().map(entry => ({ ...entry })) };
+    assert.equal(parseStrict(encodeSession(compacted)).entries.at(-1)?.firstKeptEntryId, compact);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("persistence checks use Pi JSON semantics but still reject changed or missing data", () => {

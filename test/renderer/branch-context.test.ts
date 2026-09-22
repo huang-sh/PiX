@@ -8,6 +8,47 @@ import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
 import type { RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
 
+it("shows localized context-status icons without changing history and clears them on branch switches", async () => {
+  const pinia = createPinia(); setActivePinia(pinia);
+  useLayoutStore().layout.collapsed.chat = false;
+  const session = useSessionStore();
+  const entries: RawSessionEntry[] = [
+    { id: "u", parentId: null, type: "message", timestamp: "1", message: { role: "user", content: "original prompt" } },
+    { id: "a", parentId: "u", type: "message", timestamp: "2", message: { role: "assistant", content: "original answer" } },
+    { id: "t", parentId: "a", type: "message", timestamp: "3", message: { role: "toolResult", toolName: "read", content: "original tool output" } },
+    { id: "A", parentId: "t", type: "message", timestamp: "4", message: { role: "user", content: "branch A" } },
+    { id: "omit", parentId: "A", type: "context_edit", timestamp: "5", targetId: "u", replacement: null },
+    { id: "edit", parentId: "omit", type: "context_edit", timestamp: "6", targetId: "a", replacement: { content: "changed input" } },
+    { id: "tool", parentId: "edit", type: "context_edit", timestamp: "7", targetId: "t", replacement: null },
+    { id: "B", parentId: "t", type: "message", timestamp: "8", message: { role: "user", content: "branch B" } },
+  ];
+  session.applySnapshot({ session: { path: "s" }, entries, projection: projectSession(entries, "tool"),
+    runtime: { available: true, isStreaming: false } } as SessionSnapshot);
+  session.focusedNode = "turn:A";
+  const locale = i18n.global.locale.value;
+  i18n.global.locale.value = "zh-CN";
+  const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true, PromptComposer: true } } });
+  try {
+    const excluded = wrapper.get('.branch-message.user [data-context-status="excluded"]');
+    expect(excluded.attributes("title")).toBe("已从模型上下文排除");
+    expect(excluded.attributes("aria-label")).toBe(excluded.attributes("title"));
+    expect(excluded.attributes("tabindex")).toBe("0");
+    expect(wrapper.get('.final-response [data-context-status="modified"]').attributes("title")).toBe("模型接收内容已调整");
+    expect(wrapper.get('.final-response markdown-renderer-stub').attributes("content")).toBe("original answer");
+    await wrapper.get('.branch-message.user .copy-button').trigger("click");
+    expect(vi.mocked(window.pix!.copy!)).toHaveBeenLastCalledWith("original prompt");
+    const process = wrapper.get('.agent-process');
+    (process.element as HTMLDetailsElement).open = true; await process.trigger("toggle");
+    expect(wrapper.get('.process-tool [data-context-status="excluded"]').attributes("title")).toBe("已从模型上下文排除");
+    i18n.global.locale.value = "en"; await flushPromises();
+    expect(excluded.attributes("title")).toBe("Excluded from model context");
+    await session.selectNode("turn:B"); await flushPromises();
+    expect(wrapper.find('.context-status').exists()).toBe(false);
+    await session.selectNode("turn:A"); await flushPromises();
+    expect(wrapper.find('.context-status').exists()).toBe(true);
+  } finally { wrapper.unmount(); i18n.global.locale.value = locale; }
+});
+
 describe("BranchContextPanel streaming scroll", () => {
   it("keeps missing-stream runs visibly running and recovers output across node switches", async () => {
     const pinia = createPinia(); setActivePinia(pinia); useLayoutStore().layout.collapsed.chat = false;
