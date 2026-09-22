@@ -26,6 +26,7 @@ import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
+import { sessionModifiedAt } from "./graph-files.js";
 import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
@@ -471,7 +472,7 @@ export class MainController {
         path: resolve(path),
         cwd: String(x.header?.cwd ?? files.cwd ?? path),
         created: String(x.header?.timestamp ?? new Date().toISOString()),
-        modified: new Date().toISOString(),
+        modified: sessionModifiedAt(resolve(path), new Date().toISOString()),
         messageCount: x.entries.filter((e) => e.type === "message").length,
         firstMessage: "",
       },

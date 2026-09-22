@@ -689,6 +689,14 @@ test("a snapshot summary carries the file's mtime, not the moment of the snapsho
     const branched = new Date("2026-09-22T21:00:00Z");
     utimesSync(branchFile, branched, branched);
     assert.equal(runtime.snapshot().session.modified, branched.toISOString());
+    // Opening and closing write only ownership/view bookkeeping into the
+    // sidecar; a fresh lock or cursor must not float the session.
+    for (const bookkeeping of ["owner.json", "cursor.json"]) {
+      const file = join(sidecar, bookkeeping);
+      writeFileSync(file, "{}\n");
+      utimesSync(file, new Date("2026-09-23T10:00:00Z"), new Date("2026-09-23T10:00:00Z"));
+    }
+    assert.equal(runtime.snapshot().session.modified, branched.toISOString());
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

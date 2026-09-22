@@ -72,12 +72,14 @@ export function durableWrite(file: string, text: string) {
 export const graphDir = (main: string) => `${resolve(main)}.pix-tree`;
 
 /**
- * A session's last activity: the newest of the main file's mtime and every
- * write in its branch sidecar. Lists and snapshots must agree on this value —
- * the panel ranks rows by it, so a branch run has to float the session row
- * even though the main file itself never changed. The fallback (the last
- * entry's timestamp, or whatever the caller knows) stands in when nothing can
- * be stat'ed.
+ * A session's last activity: the newest of the main file's mtime and the
+ * conversation writes in its branch sidecar. Lists and snapshots must agree on
+ * this value — the panel ranks rows by it, so a branch run has to float the
+ * session row even though the main file itself never changed. Only branch
+ * transcripts and checkpoints count as activity: owner.json/cursor.json are
+ * ownership and view bookkeeping written by merely opening or switching, and
+ * must not float the session. The fallback (whatever the caller knows) stands
+ * in when nothing can be stat'ed.
  */
 export function sessionModifiedAt(main: string, fallback: string): string {
   let newest = "";
@@ -90,6 +92,7 @@ export function sessionModifiedAt(main: string, fallback: string): string {
   try {
     const dir = graphDir(main);
     for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl") && !name.endsWith(".checkpoint")) continue;
       try { consider(statSync(join(dir, name)).mtime.toISOString()); } catch { /* raced delete */ }
     }
   } catch { /* no branch sidecar */ }
