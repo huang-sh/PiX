@@ -91,6 +91,16 @@ const heatWeeks = computed(() => {
 const maxDayTokens = computed(() =>
   Math.max(1, ...(overview.value?.days.map((day) => day.tokens) ?? [0])),
 );
+// The bar chart's cost scale; a paid day never fully disappears and a free
+// one stays flat.
+const maxDayCost = computed(() =>
+  Math.max(0.000001, ...(overview.value?.days.map((day) => day.cost) ?? [0])),
+);
+const barHeight = (cost: number) =>
+  cost <= 0 ? "0%" : `${Math.max(3, (cost / maxDayCost.value) * 100)}%`;
+// Tooltip of one bar: cost leads because the bar height tracks it.
+const barTitle = (day: UsageDayRow) =>
+  `${day.day}: ${fmtCost(day.cost)}${day.estimatedCost > 0 ? ` (≈${fmtCost(day.estimatedCost)})` : ""} · ${fmtTokens(day.tokens)}`;
 // Five steps against the busiest day; days without usage stay hollow.
 // Fills are GitHub's contribution greens (light scheme, with a dark-scheme
 // set below), keyed by data attribute so plain colors style the cells.
@@ -206,6 +216,17 @@ watch([range, scope], load);
                 :title="day ? dayTitle(day) : undefined"
               ></div>
             </div>
+          </div>
+        </div>
+        <div class="usage-chart" role="img" :aria-label="t('settings.usage.dailyCostBars')">
+          <div
+            v-for="day in overview.days"
+            :key="day.day"
+            class="usage-bar-col"
+            :title="barTitle(day)"
+          >
+            <div class="usage-bar" :style="{ height: barHeight(day.cost) }"></div>
+            <small v-if="day === overview.days[0] || day === overview.days.at(-1)">{{ day.day.slice(5) }}</small>
           </div>
         </div>
       </div>
@@ -343,6 +364,21 @@ watch([range, scope], load);
 .usage-heat-grid { display: flex; gap: 2px; }
 .usage-heat-week { display: grid; grid-template-rows: repeat(7, 13px); gap: 2px; }
 .usage-heat-cell { width: 13px; height: 13px; border-radius: 3px; }
+.usage-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 96px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow-x: auto;
+}
+.usage-bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; min-width: 0; }
+.usage-bar { width: 100%; max-width: 26px; border-radius: 3px 3px 0 0; background: #40c463; }
+:global(:root[data-color-scheme="dark"]) .usage-bar { background: #26a641; }
+.usage-bar-col small { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .usage-heat-cell.empty { border: 1px solid var(--border); }
 .usage-heat-cell[data-heat-level="1"] { background: #9be9a8; }
 .usage-heat-cell[data-heat-level="2"] { background: #40c463; }
