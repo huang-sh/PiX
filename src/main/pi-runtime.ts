@@ -193,14 +193,15 @@ const MAX_SESSION_FILES_PER_DIR = 5000;
 
 /** Every .jsonl under a session directory, top level first, sidecars after.
  *  .pix-tree holds the graph model's worker/branch sessions; .pix-graph is
- *  its orphaned predecessor and stays out of the accounting. */
+ *  its orphaned predecessor (a "<session>.jsonl.pix-graph" sibling) and stays
+ *  out of the accounting. */
 function sessionFilesUnder(root: string): string[] {
   const files: string[] = [];
   const queue: string[] = [root];
   while (queue.length && files.length < MAX_SESSION_FILES_PER_DIR) {
     const dir = queue.shift()!;
     for (const name of readdirSync(dir).sort()) {
-      if (name === ".pix-graph") continue;
+      if (name.endsWith(".pix-graph")) continue;
       const path = join(dir, name);
       try {
         if (statSync(path).isDirectory()) queue.push(path);
