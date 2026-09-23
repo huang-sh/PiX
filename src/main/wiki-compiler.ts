@@ -17,7 +17,8 @@ const clip = (value: unknown, max: number) => { const s = String(value ?? ""); r
 const cell = (value: unknown) => String(value ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 const blocks = (content: unknown) => typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
 // Tool results that read the wiki itself must not become evidence for the
-// wiki: summaries would gradually cite themselves. Detect and skip them.
+// wiki: summaries would gradually cite themselves. Detection prefers the
+// CALL's arguments (via toolCallId); the result-body match is only a fallback.
 const WIKI_SELF_READ = /(?:\.pi[\\/]wiki|\.pix(?:-tree)?[\\/]wiki)/u;
 const WIKI_SELF_READ_NOTE = "[wiki 读取结果，已跳过以防自引用]";
 const STATUS = /<!-- pix-wiki:status:start -->[\s\S]*?<!-- pix-wiki:status:end -->\s*/g;
@@ -26,7 +27,7 @@ const references = (value: string) => [...value.matchAll(/`(turn:[^`\r\n]+)`/g)]
 const section = (body: string, name: string) => body.match(new RegExp(`^## ${name}\\r?\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))`, "m"))?.[1]?.trim() ?? "";
 
 /** The workspace wiki lives inside the project, one per workspace. */
-export const workspaceWikiDir = (projectRoot: string) => join(resolve(projectRoot), ".pi", "wiki");
+export const workspaceWikiDir = (projectRoot: string) => join(resolve(projectRoot), ".pix", "wiki");
 export const sessionPageRel = (sessionId: string, branchId: string) => `sessions/${sessionId}/branches/${branchId}.md`;
 
 export interface WikiSourceInfo {
@@ -81,6 +82,8 @@ export interface WikiSnapshot {
   contexts: Map<string, RawSessionEntry[]>;
   records: Map<string, BranchRecord>;
   messages: Map<string, RawSessionEntry[]>;
+  /** Tool call id → whether the call's arguments target the wiki itself. */
+  selfReadCalls: Map<string, boolean>;
   localEntryIds: Map<string, Map<string, string>>;
   branchOf: (node: GraphNode) => string;
   leaves: GraphNode[];
@@ -105,14 +108,16 @@ const WIKI_POLICY = `# Wiki 规则（policy）
 // The policy lives in code; SCHEMA.md is its rendered copy for wiki readers.
 const POLICY_REVISION = hash(WIKI_POLICY);
 
-/** Read every storage branch and build the merged canonical snapshot. Read-only. */
+/** Read every storage branch and build the merged canonical snapshot. Read-only.
+ *  A session without `.pix-tree` storage is a plain Pi session: it compiles as
+ *  the main branch alone, and no graph storage is created for it. */
 export function loadWikiSnapshot(mainPath: string): WikiSnapshot {
   mainPath = resolve(mainPath);
   const dir = `${mainPath}.pix-tree`;
   if (!existsSync(mainPath)) throw new Error(`Session file is gone: ${basename(mainPath)}`);
   const tracked = new Map<string, string>();
   const read = (file: string) => { const raw = text(file); tracked.set(file, raw); return raw; };
-  const names = () => readdirSync(dir).filter(n => /\.jsonl(?:\.origin\.json)?$/.test(n)).sort();
+  const names = () => existsSync(dir) ? readdirSync(dir).filter(n => /\.jsonl(?:\.origin\.json)?$/.test(n)).sort() : [];
   const originalNames = names();
   const ids = originalNames.filter(n => n.endsWith(".jsonl")).map(n => n.slice(0, -6));
   if (originalNames.filter(n => n.endsWith(".origin.json")).length !== ids.length) throw new Error("Missing branch file/origin; settle or recover in PiX first");
@@ -155,6 +160,15 @@ export function loadWikiSnapshot(mainPath: string): WikiSnapshot {
     if (!messages.has(turn)) messages.set(turn, []);
     messages.get(turn)!.push(e);
   }
+  // A tool result whose CALL targeted the wiki is derived memory even when
+  // the returned text never mentions a wiki path: bind detection to the
+  // call arguments, not to the result body.
+  const selfReadCalls = new Map<string, boolean>();
+  for (const e of entries) if (e.type === "message") {
+    const m = e.message as { role?: string; content?: unknown };
+    if (m?.role !== "assistant") continue;
+    for (const b of blocks(m.content)) if (b.type === "toolCall" && b.id) selfReadCalls.set(String(b.id), WIKI_SELF_READ.test(JSON.stringify(b.arguments ?? {})));
+  }
   const chain = (start: string): RawSessionEntry[] => {
     const result: RawSessionEntry[] = [];
     for (let e = byId.get(start); e; e = e.parentId ? byId.get(e.parentId) : undefined) result.push(e);
@@ -189,7 +203,7 @@ export function loadWikiSnapshot(mainPath: string): WikiSnapshot {
   };
   const session = { id: String(data.get("main")!.header.id), path: mainPath, name: String([...locals.get("main")!].reverse().find(e => e.type === "session_info")?.name ?? basename(mainPath)) };
   return {
-    dir, mainPath, sessionKey: session.id, ids: ["main", ...ids], nodes, nodeById, byId, sources, scopes, locals, contexts, records, messages, localEntryIds,
+    dir, mainPath, sessionKey: session.id, ids: ["main", ...ids], nodes, nodeById, byId, sources, scopes, locals, contexts, records, messages, selfReadCalls, localEntryIds,
     branchOf, leaves, lanePath, evidenceState,
     revisionThrough(branchId, canonicalEntryId) {
       const local = locals.get(branchId);
@@ -241,7 +255,12 @@ export function lintPage(rel: string, page: WikiPage, snap: WikiSnapshot) {
 function pageState(page: WikiPage, receipt: WikiReceipt | undefined, snap: WikiSnapshot, policy: string): WikiPageState {
   if (lintPage(sessionPageRel(page.sessionId, page.branchId!), page, snap).length) return "invalid";
   if (!receipt || receipt.policyRevision !== policy || receipt.semanticRevision !== page.semanticRevision) return "dirty";
-  return receipt.compiledRevision === snap.sources[page.branchId!]?.sourceRevision ? "fresh" : "dirty";
+  if (receipt.compiledRevision !== snap.sources[page.branchId!]?.sourceRevision) return "dirty";
+  // The compiled revision proves the sources did not change, not that every
+  // turn was summarized: a size-capped batch can stop mid-branch, so fresh
+  // additionally requires complete coverage.
+  const turns = snap.sources[page.branchId!]?.turns ?? [];
+  return turns.length === receipt.coveredTurns.length ? "fresh" : "dirty";
 }
 
 function renderMessageEntry(e: RawSessionEntry, snap: WikiSnapshot, id: string): string {
@@ -249,10 +268,11 @@ function renderMessageEntry(e: RawSessionEntry, snap: WikiSnapshot, id: string):
   let value = `### ${m.role} · entry:${e.id}\n\n原件 localEntryId=${snap.localEntryIds.get(id)!.get(e.id)}\n\n`;
   if (tool) value += `工具=${m.toolName ?? "unknown"} · toolCallId=${m.toolCallId ?? "unknown"} · isError=${m.isError ?? "unknown"}\n\n`;
   if (m.role === "assistant") value += `stopReason=${m.stopReason ?? "unknown"}${m.errorMessage ? ` · errorMessage=${clip(m.errorMessage, 400)}` : ""}\n\n`;
+  const selfRead = tool && (snap.selfReadCalls.get(String(m.toolCallId ?? "")) || false);
   for (const b of blocks(m.content)) {
     if (b.type === "thinking") continue;
     if (b.type === "text") {
-      if (tool && WIKI_SELF_READ.test(String(b.text ?? ""))) value += `${WIKI_SELF_READ_NOTE}\n\n`;
+      if (tool && (selfRead || WIKI_SELF_READ.test(String(b.text ?? "")))) value += `${WIKI_SELF_READ_NOTE}\n\n`;
       else value += (tool ? clip(b.text, 400) : String(b.text ?? "")) + "\n\n";
     }
     else if (b.type === "toolCall") value += `工具调用 ${String(b.name ?? "")} · callId=${String(b.id ?? "unknown")}\n\n${clip(JSON.stringify(b.arguments ?? {}), 400)}\n\n`;
@@ -498,7 +518,8 @@ function renderEvidenceTurn(turn: string, snap: WikiSnapshot, branchId: string):
       out += "### user\n\n" + clip(blocks(m.content).filter(b => b.type === "text").map(b => String(b.text ?? "")).join("\n"), USER_CLIP) + "\n\n";
     } else if (m.role === "toolResult") {
       const toolText = blocks(m.content).filter(b => b.type === "text").map(b => String(b.text ?? "")).join("\n");
-      out += `### 工具结果 ${m.toolName ?? "unknown"}${m.isError ? "（isError）" : ""}\n\n` + (WIKI_SELF_READ.test(toolText) ? WIKI_SELF_READ_NOTE : clip(toolText, 400)) + "\n\n";
+      const selfRead = snap.selfReadCalls.get(String(m.toolCallId ?? "")) || WIKI_SELF_READ.test(toolText);
+      out += `### 工具结果 ${m.toolName ?? "unknown"}${m.isError ? "（isError）" : ""}\n\n` + (selfRead ? WIKI_SELF_READ_NOTE : clip(toolText, 400)) + "\n\n";
     }
   }
   return out;
@@ -555,22 +576,22 @@ export function prepareCompile(wikiRoot: string, mainPath: string, branchId: str
   const coveredSet = new Set(covered);
   const uncovered = info.turns.filter(t => !coveredSet.has(t));
   if (!uncovered.length) return null;
-  // Fit the newest turns first; older leftovers stay uncovered for the next run.
+  // Advance in contiguous chronological batches from the oldest uncovered
+  // turn; whatever does not fit stays uncovered, keeps the page dirty, and is
+  // picked up by the next run. This guarantees coverage grows as a prefix.
   const order = [...uncovered].sort((a, b) => (localOrder.get(leafOf(a) ?? "") ?? -1) - (localOrder.get(leafOf(b) ?? "") ?? -1));
   const selected: string[] = [];
   let used = 0, truncatedNote = "";
-  for (let i = order.length - 1; i >= 0; i--) {
-    const turn = order[i]!;
+  for (const turn of order) {
     const rendered = renderEvidenceTurn(turn, snap, branchId);
     if (selected.length && (used + rendered.length > EVIDENCE_MAX_CHARS || selected.length >= MAX_TURNS_PER_COMPILE)) {
       truncatedNote = `\n（注意：还有 ${order.length - selected.length} 个未收录轮次因篇幅未纳入本次输入，留待下次更新。）`;
       break;
     }
-    selected.unshift(turn);
+    selected.push(turn);
     used += rendered.length;
     if (used > EVIDENCE_MAX_CHARS) truncatedNote = `\n（注意：输入接近篇幅上限。）`;
   }
-  if (!selected.length) selected.push(order.at(-1)!);
   const includedTurns = selected;
   const includedEntries = includedTurns.flatMap(turn => (snap.messages.get(turn) ?? []).filter(e => snap.locals.get(branchId)!.some(l => l.id === e.id)));
   const lastIncludedEntryId = leafOf(includedTurns.at(-1)!)!;
@@ -684,6 +705,11 @@ export function publishSummary(
   // Incremental publishes extend the previous coverage; resets replace it.
   const coveredTotal = new Set<string>(plan.mode === "incremental" ? [...(manifest.pages[plan.pageRel]?.coveredTurns ?? []), ...plan.includedTurns] : plan.includedTurns);
   receipt.coveredTurns = info.turns.filter(t => coveredTotal.has(t));
+  // Anchor the read range at the NEWEST covered entry, not just this batch:
+  // a backfill batch ends earlier than the coverage it completes.
+  const newestLeaf = snap.nodeById.get(receipt.coveredTurns.at(-1) ?? "")?.leafEntryId ?? null;
+  const rangeRevision = newestLeaf ? snap.revisionThrough(plan.branchId, newestLeaf) : null;
+  if (rangeRevision) receipt.compiledRevision = rangeRevision;
   const usage0 = manifest.usage ?? { input: 0, output: 0, calls: 0, cost: null };
   manifest.usage = {
     input: usage0.input + (usage.inputTokens ?? 0),

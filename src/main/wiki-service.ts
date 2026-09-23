@@ -37,7 +37,12 @@ interface BranchTask {
   error?: string;
   timer?: ReturnType<typeof setTimeout>;
 }
-interface SessionTasks { tasks: Map<string, BranchTask>; cancelled: boolean }
+interface SessionTasks {
+  tasks: Map<string, BranchTask>;
+  cancelled: boolean;
+  /** Wiki root this session's tasks belong to, bound at enqueue time. */
+  root?: string;
+}
 
 const RETRY_DELAYS_MS = [5_000, 20_000, 60_000];
 
@@ -51,18 +56,29 @@ export class WikiService {
     this.retries = deps.retryDelaysMs ?? RETRY_DELAYS_MS;
   }
 
-  /** GraphRuntime persistence hooks. Never awaited by the caller. */
-  handleGraphEvent(main: string, event: WikiGraphEvent) {
+  /**
+   * GraphRuntime persistence hooks. Never awaited by the caller. The event
+   * carries the session's OWNING project wiki root; null means the runtime
+   * belongs to a remote project, which keeps no local wiki.
+   */
+  handleGraphEvent(main: string, event: WikiGraphEvent, wikiRoot?: string | null) {
     try {
+      if (wikiRoot === null) return;
+      if (wikiRoot) this.sessionOf(main).root = wikiRoot;
       if (event.kind === "opened") this.onOpened(main);
       else if (event.kind === "settled") this.onSettled(main, event.branchId);
       else if (event.kind === "deleted") this.onDeleted(main);
     } catch { /* wiki must never break the runtime */ }
   }
 
+  /** The wiki root bound to this session; the current project only as a fallback. */
+  private rootOf(main: string): string | null {
+    return this.sessions.get(main)?.root ?? this.deps.wikiRoot();
+  }
+
   /** Deterministic refresh plus re-enqueue of anything not yet covered. */
   private onOpened(main: string) {
-    const root = this.deps.wikiRoot();
+    const root = this.rootOf(main);
     if (!root || !existsSync(main)) return;
     let result: ReturnType<typeof refreshSessionWiki> | null = null;
     try { result = refreshSessionWiki(root, main); } catch { /* broken sources keep the last state */ }
@@ -77,7 +93,7 @@ export class WikiService {
     if (this.deps.settings().enabled) this.enqueue(main, branchId);
   }
   private onDeleted(main: string) {
-    const root = this.deps.wikiRoot();
+    const root = this.rootOf(main);
     if (!root || !existsSync(main)) return;
     // Deleted turns make affected pages invalid; compile treats invalid as a
     // full rebuild. Fresh branches cost nothing (no model call).
@@ -91,7 +107,11 @@ export class WikiService {
 
   enqueue(main: string, branchId: string) {
     const session = this.sessionOf(main);
-    if (session.cancelled || !this.deps.wikiRoot() || !existsSync(main)) return;
+    const root = this.rootOf(main);
+    if (session.cancelled || !root || !existsSync(main)) return;
+    // Bind the owning root at enqueue time: executing later under another
+    // project's view must never redirect this session's tasks.
+    if (!session.root) session.root = root;
     let task = session.tasks.get(branchId);
     if (!task) {
       task = { branchId, queued: false, running: false, again: false, failures: 0 };
@@ -123,7 +143,8 @@ export class WikiService {
   private async runJob(main: string, branchId: string) {
     const session = this.sessions.get(main);
     const task = session?.tasks.get(branchId);
-    const root = this.deps.wikiRoot();
+    // Only the root bound at enqueue time; never the project currently in view.
+    const root = session?.root ?? null;
     if (!session || !task || session.cancelled || !root) return;
     task.running = true;
     task.queued = false;
@@ -167,7 +188,10 @@ export class WikiService {
           });
           // Reuse the publish-time snapshot: nothing can change the sources between
           // that synchronous verification and this refresh.
-          refreshSessionWiki(root, main, published.snap);
+          const refreshed = refreshSessionWiki(root, main, published.snap);
+          // A size-capped batch leaves turns uncovered and the page dirty:
+          // keep draining the backlog without waiting for a new event.
+          if (refreshed.manifest.pageStatus[plan.pageRel] === "dirty") this.enqueue(main, branchId);
         } finally { this.aborts.delete(main); }
       }
     } catch (error) {
@@ -197,7 +221,7 @@ export class WikiService {
 
   /** Manual deterministic refresh; safe regardless of the auto-update setting. */
   refresh(main: string): WikiStatus {
-    const root = this.deps.wikiRoot();
+    const root = this.rootOf(main);
     if (root && existsSync(main)) {
       try { refreshSessionWiki(root, main); } catch { /* keep the persisted state */ }
     }
@@ -205,7 +229,7 @@ export class WikiService {
   }
   /** Manual update: enqueue dirty (or one) branch even when auto-update is off. */
   update(main: string, branchId?: string): WikiStatus {
-    const root = this.deps.wikiRoot();
+    const root = this.rootOf(main);
     if (!root || !existsSync(main)) return this.emitStatus(main);
     let result: ReturnType<typeof refreshSessionWiki> | null = null;
     try { result = refreshSessionWiki(root, main); } catch { /* keep the persisted state */ }
@@ -240,8 +264,9 @@ export class WikiService {
   }
   /** A deleted session leaves the workspace wiki entirely. */
   forget(main: string) {
+    // Capture the owning root before cancel() drops the session record.
+    const root = this.rootOf(main);
     this.cancel(main);
-    const root = this.deps.wikiRoot();
     if (!root) return;
     try { removeSessionWiki(root, main); } catch { /* keep the last state */ }
   }
@@ -259,7 +284,7 @@ export class WikiService {
   }
   private buildStatus(main: string): WikiStatus {
     const settings = this.deps.settings();
-    const root = this.deps.wikiRoot();
+    const root = this.rootOf(main);
     const manifest = root && existsSync(main) ? readManifest(root) : null;
     const session = this.sessions.get(main);
     const entry = manifest && Object.entries(manifest.sessions).find(([, value]) => value.path === main);

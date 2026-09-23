@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import type { RawSessionEntry } from "../src/shared/types.js";
 import type { WikiStatus } from "../src/shared/wiki.js";
 import {
-  parseModelSummary, prepareCompile, publishSummary, readManifest,
+  MAX_TURNS_PER_COMPILE, parseModelSummary, prepareCompile, publishSummary, readManifest,
   refreshSessionWiki, removeSessionWiki, workspaceWikiDir,
 } from "../src/main/wiki-compiler.js";
 import { WikiService } from "../src/main/wiki-service.js";
@@ -271,6 +271,7 @@ test("queue dedupes repeated notifications and merges turns arriving mid-run", {
 test("a turn landing mid-call does not waste the finished work; unseen turns are not citable", { timeout: 15000 }, async () => {
   const f = fixture(test);
   refreshSessionWiki(f.wiki, f.main);
+  const gate = deferred();
   const { value, calls, statuses } = service(test, f, async () => {
     // The turn lands on disk while the first call runs; the reply also tries to
     // cite the unseen turn, which must be dropped from the published page.
@@ -278,19 +279,20 @@ test("a turn landing mid-call does not waste the finished work; unseen turns are
       f.appendMain(msg("u3", "a2", "user", "late"));
       f.appendMain(msg("a3", "u3", "assistant", "late answer"));
     }
+    if (calls.length === 2) await gate.promise;
     return { text: summaryJson(["turn:u1", "turn:u2", "turn:u3"]) };
   });
   value.handleGraphEvent(f.main, { kind: "settled", branchId: "main" });
-  await until(() => statuses.some(s => s.branches.some(b => b.branchId === "main" && b.status === "dirty")));
-  assert.equal(calls.length, 1);
+  // The unfinished backlog auto-continues into a second call without a new event.
+  await until(() => calls.length === 2);
   const manifest = readManifest(f.wiki)!;
   // The published receipt covers exactly the read range (round 20, not 21).
   assert.deepEqual(manifest.pages[A_MAIN]!.coveredTurns, ["turn:u1", "turn:u2"]);
   assert.doesNotMatch(read(join(f.wiki, A_MAIN)), /turn:u3/);
-  // The next queued run picks up the delta and reaches fresh.
-  value.handleGraphEvent(f.main, { kind: "settled", branchId: "main" });
+  gate.resolve();
   await until(() => statuses.some(s => s.branches.some(b => b.branchId === "main" && b.status === "fresh")));
   assert.deepEqual(readManifest(f.wiki)!.pages[A_MAIN]!.coveredTurns, ["turn:u1", "turn:u2", "turn:u3"]);
+  assert.equal(calls.length, 2);
 });
 
 test("budget exhaustion pauses model summaries but never blocks the program layer", { timeout: 15000 }, async () => {
@@ -458,4 +460,115 @@ test("wiki self-reads never become evidence (recursion guard)", () => {
   const exported = read(join(f.wiki, "sessions", SID_A, "sources", "main.md"));
   assert.match(exported, /wiki 读取结果，已跳过以防自引用/);
   assert.doesNotMatch(exported, /支付回调验签机密内容/);
+});
+
+test("wiki reads are skipped by call target even when the result text is clean", () => {
+  const f = fixture(test);
+  refreshSessionWiki(f.wiki, f.main);
+  // The call targets the wiki; the returned text itself never mentions a wiki path.
+  f.appendMain(msg("u3", "a2", "user", "读一下 wiki"));
+  const entry = (id: string, parentId: string | null, message: Record<string, unknown>) =>
+    ({ type: "message", id, parentId, timestamp: "2026-09-01T10:00:00.000Z", message }) as unknown as RawSessionEntry;
+  f.appendMain(entry("c8", "u3", { role: "assistant", stopReason: "stop",
+    content: [{ type: "toolCall", id: "c9", name: "read", arguments: { path: ".pix/wiki/sessions/session-a/branches/main.md" } }] }));
+  f.appendMain(entry("t8", "c8", { role: "toolResult", toolName: "read", toolCallId: "c9",
+    content: [{ type: "text", text: "纯正文结论：支付回调验签机密内容，不含任何 wiki 路径" }] }));
+  refreshSessionWiki(f.wiki, f.main);
+  const plan = prepareCompile(f.wiki, f.main, "main")!;
+  assert.match(plan.userPrompt, /wiki 读取结果，已跳过以防自引用/);
+  assert.doesNotMatch(plan.userPrompt, /支付回调验签机密内容/);
+  const exported = read(join(f.wiki, "sessions", SID_A, "sources", "main.md"));
+  assert.match(exported, /wiki 读取结果，已跳过以防自引用/);
+  assert.doesNotMatch(exported, /支付回调验签机密内容/);
+});
+
+test("size-capped batches stay dirty, advance contiguously, and finish the backlog", () => {
+  const f = fixture(test);
+  // Two more turns than one batch can hold.
+  for (let i = 3; i <= MAX_TURNS_PER_COMPILE + 2; i++) {
+    f.appendMain(msg(`u${i}`, `a${i - 1}`, "user", `第 ${i} 个问题`));
+    f.appendMain(msg(`a${i}`, `u${i}`, "assistant", `第 ${i} 个回答`));
+  }
+  refreshSessionWiki(f.wiki, f.main);
+  // The first batch is the OLDEST contiguous run, newest turns left for later.
+  const first = prepareCompile(f.wiki, f.main, "main")!;
+  assert.deepEqual(first.includedTurns, Array.from({ length: MAX_TURNS_PER_COMPILE }, (_, i) => `turn:u${i + 1}`));
+  publishSummary(f.wiki, first, parseModelSummary(summaryJson(["turn:u1"])), { inputTokens: 1, outputTokens: 1, cost: null });
+  // Partial coverage must not pass as fresh.
+  refreshSessionWiki(f.wiki, f.main);
+  assert.equal(readManifest(f.wiki)!.pageStatus[A_MAIN], "dirty");
+  const second = prepareCompile(f.wiki, f.main, "main")!;
+  assert.ok(second);
+  assert.equal(second.mode, "incremental");
+  assert.deepEqual(second.includedTurns, ["turn:u25", "turn:u26"]);
+  publishSummary(f.wiki, second, parseModelSummary(summaryJson(["turn:u25"])), { inputTokens: 1, outputTokens: 1, cost: null });
+  refreshSessionWiki(f.wiki, f.main);
+  assert.equal(readManifest(f.wiki)!.pageStatus[A_MAIN], "fresh");
+  assert.equal(readManifest(f.wiki)!.pages[A_MAIN]!.coveredTurns.length, MAX_TURNS_PER_COMPILE + 2);
+  assert.equal(prepareCompile(f.wiki, f.main, "main"), null);
+});
+
+test("a capped backlog keeps queueing until every turn is covered", { timeout: 15000 }, async () => {
+  const f = fixture(test);
+  for (let i = 3; i <= MAX_TURNS_PER_COMPILE + 2; i++) {
+    f.appendMain(msg(`u${i}`, `a${i - 1}`, "user", `第 ${i} 个问题`));
+    f.appendMain(msg(`a${i}`, `u${i}`, "assistant", `第 ${i} 个回答`));
+  }
+  refreshSessionWiki(f.wiki, f.main);
+  // One settled event must drain the whole backlog across batches.
+  const { value, calls, statuses } = service(test, f, async () =>
+    ({ text: summaryJson(calls.length === 1 ? ["turn:u1"] : ["turn:u25"]) }));
+  value.handleGraphEvent(f.main, { kind: "settled", branchId: "main" });
+  await until(() => statuses.some(s => s.branches.some(b => b.branchId === "main" && b.status === "fresh")));
+  assert.equal(calls.length, 2);
+  assert.equal(readManifest(f.wiki)!.pages[A_MAIN]!.coveredTurns.length, MAX_TURNS_PER_COMPILE + 2);
+});
+
+test("queued tasks compile into their own project's wiki, not the current view", { timeout: 15000 }, async () => {
+  const f = fixture(test);
+  const otherRoot = workspaceWikiDir(mkdtempSync(join(tmpdir(), "pix-wiki-other-")));
+  refreshSessionWiki(f.wiki, f.main);
+  let current: string | null = f.wiki;
+  let calls = 0;
+  const gate = deferred();
+  const value = new WikiService({
+    wikiRoot: () => current,
+    settings: () => ({ enabled: true }),
+    defaultModel: () => ({ provider: "p", id: "m" }),
+    callModel: async () => {
+      calls += 1;
+      await gate.promise;
+      return { text: summaryJson(["turn:u1", "turn:u2"]), usage: null };
+    },
+    emit: () => {},
+    retryDelaysMs: [5, 5, 5],
+  });
+  // Remote projects (null root) keep no wiki at all.
+  value.handleGraphEvent(f.main, { kind: "settled", branchId: "main" }, null);
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(calls, 0);
+  // The task is enqueued with project A's root bound at event time...
+  value.handleGraphEvent(f.main, { kind: "settled", branchId: "main" }, f.wiki);
+  await until(() => calls === 1);
+  // ...and the view switches to project B before the model replies.
+  current = otherRoot;
+  gate.resolve();
+  await until(() => Boolean(readManifest(f.wiki)?.pages[A_MAIN]));
+  assert.ok(readManifest(f.wiki)!.pages[A_MAIN]);
+  assert.ok(!existsSync(otherRoot));
+});
+
+test("plain sessions without .pix-tree compile without fake graph storage", () => {
+  const f = fixture(test);
+  const plain = join(f.project, ".pi", "sessions", "c.jsonl");
+  writeFileSync(plain, encode("session-c", [...B_TURN]));
+  const result = refreshSessionWiki(f.wiki, plain);
+  assert.equal(result.snap.ids.join(), "main");
+  assert.ok(!existsSync(`${plain}.pix-tree`));
+  const plan = prepareCompile(f.wiki, plain, "main")!;
+  publishSummary(f.wiki, plan, parseModelSummary(summaryJson(["turn:u9"])), { inputTokens: 1, outputTokens: 1, cost: null });
+  refreshSessionWiki(f.wiki, plain);
+  assert.equal(readManifest(f.wiki)!.pageStatus["sessions/session-c/branches/main.md"], "fresh");
+  assert.ok(existsSync(join(f.wiki, "sessions", "session-c", "tree.md")));
+  assert.ok(!existsSync(`${plain}.pix-tree`));
 });

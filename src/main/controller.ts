@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, dirname, join, posix, resolve } from "node:path";
+import { basename, dirname, posix, resolve } from "node:path";
 import { debugLog, logFile } from "./debug-log.js";
 import type {
   AgentControl,
@@ -21,6 +21,7 @@ import { sessionEventEncoder } from "../shared/session-updates.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { WikiService, type WikiModelReply } from "./wiki-service.js";
+import { workspaceWikiDir } from "./wiki-compiler.js";
 import type { WikiStatus } from "../shared/wiki.js";
 import { ProgressLedger } from "./progress-ledger.js";
 import { RemoteWorkspacePool, migratesSession, unavailable, type RemoteSlot } from "./remote-pool.js";
@@ -141,7 +142,7 @@ export class MainController {
     });
     this.wiki = new WikiService({
       wikiRoot: () => this.project && !this.project.remote
-        ? join(this.project.path, ".pix", "wiki")
+        ? workspaceWikiDir(this.project.path)
         : null,
       settings: () => this.settings.bundle().app.wiki ?? {},
       defaultModel: () => {
@@ -163,7 +164,10 @@ export class MainController {
     runtime.modelBroker = this.projectRuntime.modelBroker;
     runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
     runtime.brokerModels = [...this.projectRuntime.brokerModels];
-    runtime.wikiNotify = (main, event) => this.wiki.handleGraphEvent(main, event);
+    // Wiki events carry the session's OWN project root, not the current view:
+    // a background session must never compile into another project's wiki.
+    const wikiRoot = entry.project.remote ? null : workspaceWikiDir(entry.project.path);
+    runtime.wikiNotify = (main, event) => this.wiki.handleGraphEvent(main, event, wikiRoot);
     return runtime;
   }
   private routeSessionEvent(entry: SessionEntry, e: unknown) {

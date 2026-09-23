@@ -1,6 +1,6 @@
 // Wiki feature contracts shared by the main process and the renderer.
-// The wiki is a derived, read-only view of a session graph stored under
-// `<session>.jsonl.pix-tree/wiki`; source sessions are never modified.
+// The wiki is a derived, read-only view of session graphs stored under
+// `<project>/.pix/wiki`; source sessions are never modified.
 
 export type WikiPageState = "fresh" | "dirty" | "invalid";
 
