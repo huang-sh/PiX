@@ -330,6 +330,16 @@ export class MainController {
     for (const entry of this.registry.liveEntries())
       await entry.runtime?.adoptBroker(this.projectRuntime);
   }
+  /**
+   * Boots the Pixie subprocess and the model catalog ahead of first use, so
+   * the first message skips the whole cold-start chain. Failures stay in the
+   * debug log: ensure() is single-flight and retryable, so a failed prewarm
+   * just falls back to the lazy boot on first use.
+   */
+  prewarmPixie(): void {
+    void this.pixie.ensure().catch(e => debugLog("prewarm: pixie", e));
+    void this.projectRuntime.control({ action: "getModels" }).catch(e => debugLog("prewarm: models", e));
+  }
   /** Re-reads the project runtime's catalog change into every open session. */
   private async pushCatalogs(input: AgentControl) {
     for (const entry of this.registry.liveEntries())

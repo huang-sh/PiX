@@ -100,20 +100,17 @@ export function piCliEntry(): string {
 
 const PI_OPENING = "You are an expert coding assistant operating inside pi, a coding agent harness.";
 
-let pixiePrompt: Promise<string> | undefined;
+let pixieBasePrompt: Promise<string> | undefined;
 
 /**
- * Pi's own default system prompt with only the opening identity line replaced
- * by the given Pixie identity, passed to the Pixie subprocess through
- * --system-prompt. Everything else — tool list, guidelines, doc paths — is
- * generated through a throwaway in-memory session, so it always reflects the
- * installed SDK and extensions. The skills/context/cwd sections the subprocess
- * appends to a custom prompt itself are stripped here so they are assembled
- * once, by the real session. If the opening no longer matches, the identity is
- * appended instead of silently renaming nothing.
+ * Pi's default system prompt, generated through a throwaway in-memory session
+ * so it always reflects the installed SDK and extensions. The identity-free
+ * core is what is expensive to build, so it is memoized per process; the
+ * skills/context/cwd sections the subprocess appends to a custom prompt itself
+ * are stripped here so they are assembled once, by the real session.
  */
-export function piPixieSystemPrompt(cwd: string, identity: string): Promise<string> {
-  return (pixiePrompt ??= (async () => {
+function piBaseSystemPrompt(cwd: string): Promise<string> {
+  return (pixieBasePrompt ??= (async () => {
     const pi: any = await import("@earendil-works/pi-coding-agent");
     const { session } = await pi.createAgentSession({
       cwd,
@@ -124,17 +121,29 @@ export function piPixieSystemPrompt(cwd: string, identity: string): Promise<stri
       const prompt = session.systemPrompt;
       const markers = ["The following skills provide specialized instructions", "<available_skills>", "<project_context>", "<cwd>"]
         .map(marker => prompt.indexOf(marker)).filter(at => at > 0);
-      const core = markers.length ? prompt.slice(0, Math.min(...markers)) : prompt;
-      return core.startsWith(PI_OPENING)
-        ? identity + core.slice(PI_OPENING.length)
-        : `${core}\n\n${identity}`;
+      return markers.length ? prompt.slice(0, Math.min(...markers)) : prompt;
     } finally {
       await session.dispose?.();
     }
   })().catch(error => {
-    pixiePrompt = undefined;
+    pixieBasePrompt = undefined;
     throw error;
   }));
+}
+
+/**
+ * The base prompt with only the opening identity line replaced by the given
+ * Pixie identity, passed to the Pixie subprocess through --system-prompt. The
+ * identity is composed per call — never memoized — so a reload after a
+ * settings change starts the new identity instead of the first one seen. If
+ * the opening no longer matches, the identity is appended instead of silently
+ * renaming nothing.
+ */
+export async function piPixieSystemPrompt(cwd: string, identity: string): Promise<string> {
+  const core = await piBaseSystemPrompt(cwd);
+  return core.startsWith(PI_OPENING)
+    ? identity + core.slice(PI_OPENING.length)
+    : `${core}\n\n${identity}`;
 }
 
 export class PiRuntime {

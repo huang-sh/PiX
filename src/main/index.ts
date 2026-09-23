@@ -36,6 +36,8 @@ let tray: Tray | undefined;
 let isQuitting = false;
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
 let started = false;
+// Holds Pixie's delayed prewarm so a quit in flight can cancel it.
+let prewarmTimer: ReturnType<typeof setTimeout> | undefined;
 let currentTheme: ThemePreference = "light";
 const zhUi = () => {
   const lang = controller.settings.bundle().app.language;
@@ -307,6 +309,10 @@ app.whenReady().then(async () => {
   );
   await create();
   started = true;
+  // Pixie's cold start (SDK import, subprocess spawn, session restore) runs
+  // here, off the first-paint path, so the user's first message never pays
+  // for it.
+  prewarmTimer = setTimeout(() => controller.prewarmPixie(), 3_000);
 }).catch(e => {
   // A half-built window would leave the user staring at a blank page, so a
   // startup that never completed exits once the error box is dismissed. The
@@ -318,6 +324,8 @@ let sessionsClosed = false;
 let closingSessions = false;
 app.on("before-quit", (event) => {
   isQuitting = true;
+  // A prewarm firing mid-quit would spawn a fresh Pixie for a dying app.
+  clearTimeout(prewarmTimer);
   if (!sessionsClosed && controller) {
     event.preventDefault();
     if (!closingSessions) {

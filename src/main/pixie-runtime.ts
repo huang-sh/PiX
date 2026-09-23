@@ -82,6 +82,8 @@ export class PixieRuntime {
   /** Cumulative assistant content by part index, rebuilt from wire deltas. */
   private parts = new Map<number, { kind: "text" | "thinking"; body: string }>();
   private idleWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
+  /** The in-flight turn's timing: prompt dispatch → first delta → settle. */
+  private turnTiming?: { promptAt: number; firstDeltaAt?: number };
 
   constructor(
     private readonly emit: (event: DesktopEvent) => void,
@@ -100,6 +102,7 @@ export class PixieRuntime {
 
   private onWireEvent(event: RpcLine) {
     if (event.type === "message_update") {
+      if (this.turnTiming && !this.turnTiming.firstDeltaAt) this.turnTiming.firstDeltaAt = Date.now();
       this.emitAgent(this.cumulativeUpdate(event));
       return;
     }
@@ -177,6 +180,7 @@ export class PixieRuntime {
   }
 
   private async boot(): Promise<SessionSnapshot> {
+    const startedAt = Date.now();
     mkdirSync(join(pixieWorkspace(), "sessions"), { recursive: true });
     await this.startAgent();
     // A restored conversation keeps its own model; a fresh boot starts from
@@ -187,7 +191,9 @@ export class PixieRuntime {
       await this.rpc.request({ type: "switch_session", sessionPath: latest });
     else
       await this.applyDefaultModel();
-    return this.snapshot();
+    const snapshot = await this.snapshot();
+    debugLog(`pixie: booted in ${Date.now() - startedAt}ms`);
+    return snapshot;
   }
 
   /** "provider/modelId" — the first slash splits; model ids may contain more. */
@@ -260,6 +266,8 @@ export class PixieRuntime {
       await this.rpc.request({ type: "set_model", provider: input.provider, modelId: input.modelId });
     if (input.thinkingLevel && state.thinkingLevel !== input.thinkingLevel)
       await this.rpc.request({ type: "set_thinking_level", level: input.thinkingLevel });
+    const timing: { promptAt: number; firstDeltaAt?: number } = { promptAt: Date.now() };
+    this.turnTiming = timing;
     const idle = this.whenIdle();
     try {
       await this.rpc.request({ type: "prompt", message: input.text, ...(input.images?.length ? { images: input.images } : {}) });
@@ -269,6 +277,9 @@ export class PixieRuntime {
       throw error;
     }
     await idle;
+    this.turnTiming = undefined;
+    const first = timing.firstDeltaAt ? `, first delta ${timing.firstDeltaAt - timing.promptAt}ms` : "";
+    debugLog(`pixie: turn ${Date.now() - timing.promptAt}ms${first}`);
     return this.snapshot();
   }
 

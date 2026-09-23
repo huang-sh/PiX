@@ -90,11 +90,10 @@ export const usePixieStore = defineStore("pixie", {
       }
     },
     async initialize() {
-      const [snapshot] = await Promise.all([
-        desktop.invoke<SessionSnapshot>("pixie.ensure"),
-        this.loadModels(),
-      ]);
-      this.applySnapshot(snapshot);
+      // Models don't gate input: the picker fills in behind the snapshot, and
+      // a catalog failure must not block the first send.
+      void this.loadModels().catch(() => {});
+      this.applySnapshot(await desktop.invoke<SessionSnapshot>("pixie.ensure"));
     },
     async loadModels() {
       this.models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });

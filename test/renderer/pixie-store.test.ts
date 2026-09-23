@@ -40,10 +40,11 @@ describe("pixie store", () => {
 
   it("initializes through pixie.ensure once and retries after a failure", async () => {
     const pixie = usePixieStore();
-    const invoke = vi.spyOn(desktop, "invoke")
-      .mockRejectedValueOnce(new Error("no pi today"))
-      .mockImplementation(async route =>
-        route === "agent.control" ? [model] : snapshot("a1"));
+    let ensureCalls = 0;
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async route => {
+      if (route === "pixie.ensure" && ++ensureCalls === 1) throw new Error("no pi today");
+      return route === "agent.control" ? [model] : snapshot("a1");
+    });
 
     await pixie.ensure();
     expect(pixie.error).toBe("no pi today");
@@ -53,6 +54,19 @@ describe("pixie store", () => {
     expect(pixie.error).toBe("");
     expect(pixie.snapshot?.session.path).toBe("pixie.jsonl");
     expect(invoke).toHaveBeenCalledTimes(4); // failed pair, then ensure + models
+  });
+
+  it("initializes without the model catalog; a catalog failure never blocks input", async () => {
+    const pixie = usePixieStore();
+    vi.spyOn(desktop, "invoke").mockImplementation(async route => {
+      if (route === "agent.control") throw new Error("catalog down");
+      return snapshot("a1");
+    });
+
+    await pixie.ensure();
+    expect(pixie.error).toBe("");
+    expect(pixie.snapshot?.session.path).toBe("pixie.jsonl");
+    expect(pixie.models).toEqual([]);
   });
 
   it("sends with Pixie's model and thinking choices and clears the pending turn", async () => {
