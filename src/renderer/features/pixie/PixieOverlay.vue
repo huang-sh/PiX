@@ -10,10 +10,10 @@ import MessageImages from "../../components/MessageImages.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useRunCommand } from "../commands/runCommand";
 import BranchHistory, { type HistoryTurn as Turn } from "../branch-context/BranchHistory.vue";
-import { registerAssistantOverlay } from "../../stores/assistant";
-import { useAssistantStore } from "../../stores/assistant";
+import { registerPixieOverlay } from "../../stores/pixie";
+import { usePixieStore } from "../../stores/pixie";
 
-const assistant = useAssistantStore();
+const pixie = usePixieStore();
 const runCommand = useRunCommand();
 const { t } = useI18n();
 const card = ref<HTMLElement>();
@@ -45,18 +45,18 @@ let scrollFrame: number | undefined;
 
 // The compact bar stays until a first message exists; the expanded card keeps
 // the composer in place and grows the transcript above it.
-const messages = computed(() => assistant.snapshot?.projection.messages ?? []);
+const messages = computed(() => pixie.snapshot?.projection.messages ?? []);
 const expanded = computed(() =>
-  Boolean(messages.value.length || assistant.pending || assistant.activity));
-const activity = computed(() => assistant.activity);
-const composerRunnable = computed(() => Boolean(assistant.snapshot));
+  Boolean(messages.value.length || pixie.pending || pixie.activity));
+const activity = computed(() => pixie.activity);
+const composerRunnable = computed(() => Boolean(pixie.snapshot));
 const composerModel = computed<RuntimeModel | null>(() =>
-  assistant.model ?? assistant.snapshot?.runtime.model ?? null);
+  pixie.model ?? pixie.snapshot?.runtime.model ?? null);
 const composerThinking = computed(() =>
-  assistant.thinking ?? assistant.snapshot?.runtime.thinkingLevel ?? "off");
-const composerPlaceholder = computed(() => assistant.snapshot
-  ? t("assistant.placeholder")
-  : assistant.error ? t("assistant.retryHint") : t("assistant.preparing"));
+  pixie.thinking ?? pixie.snapshot?.runtime.thinkingLevel ?? "off");
+const composerPlaceholder = computed(() => pixie.snapshot
+  ? t("pixie.placeholder")
+  : pixie.error ? t("pixie.retryHint") : t("pixie.preparing"));
 
 const turns = computed<Turn[]>(() => {
   const grouped: Array<{ id: string; user?: BranchMessage; body: BranchMessage[] }> = [];
@@ -146,31 +146,31 @@ function scrollLatest() {
 }
 watch(() => [
   messages.value.length,
-  assistant.pending?.timestamp,
+  pixie.pending?.timestamp,
   activity.value?.items.map(item => `${item.text.length}:${item.thinking?.length ?? 0}:${item.status}`).join(":"),
 ], scrollLatest);
-watch(() => assistant.pending, pending => {
+watch(() => pixie.pending, pending => {
   if (pending) following.value = true;
   scrollLatest();
 });
 
 // --- Composer ----------------------------------------------------------------
 function selectModel(model: RuntimeModel) {
-  assistant.model = model;
-  if (model.reasoning === false) assistant.thinking = "off";
+  pixie.model = model;
+  if (model.reasoning === false) pixie.thinking = "off";
 }
 function setThinking(level: string, explicit: boolean) {
-  if (explicit) assistant.thinking = level;
+  if (explicit) pixie.thinking = level;
 }
 // The prompt itself runs in the background: the composer stays editable for
 // the next draft while the live activity carries the stream. A failed send
 // puts the text back — unless the user already typed something new.
 async function submitComposer(text: string, images?: PromptImage[]) {
-  if (assistant.running) return false;
-  void assistant.send(text, images).then(delivered => {
-    if (delivered || assistant.draft.text.trim() || assistant.draft.images.length) return;
-    assistant.draft.text = text;
-    assistant.draft.images = images ?? [];
+  if (pixie.running) return false;
+  void pixie.send(text, images).then(delivered => {
+    if (delivered || pixie.draft.text.trim() || pixie.draft.images.length) return;
+    pixie.draft.text = text;
+    pixie.draft.images = images ?? [];
   });
   return true;
 }
@@ -256,7 +256,7 @@ async function focusComposer() {
   composer.value?.focus();
 }
 function collapse() {
-  assistant.hide();
+  pixie.hide();
 }
 // Escape collapses the card, but only from inside it, and only after inner
 // menus had their chance — the model dropdowns portal to body, so the check
@@ -269,7 +269,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  registerAssistantOverlay({
+  registerPixieOverlay({
     containsFocus: () => Boolean(card.value?.contains(document.activeElement)),
     focus: () => {
       previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -285,7 +285,7 @@ onMounted(() => {
   document.addEventListener("pointercancel", endResize);
 });
 onBeforeUnmount(() => {
-  registerAssistantOverlay(undefined);
+  registerPixieOverlay(undefined);
   window.removeEventListener("resize", constrainOnResize);
   document.removeEventListener("pointermove", dragMove);
   document.removeEventListener("pointerup", endDrag);
@@ -296,59 +296,59 @@ onBeforeUnmount(() => {
   if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
 });
 // Hiding returns focus to whatever the workbench held when the card opened.
-watch(() => assistant.visible, visible => {
+watch(() => pixie.visible, visible => {
   if (!visible && previousFocus?.isConnected) previousFocus.focus();
   previousFocus = null;
 });
 // A card opened while the session was still preparing shows a disabled input,
 // so the show-time focus landed nowhere; put the cursor in it once usable.
-watch(() => assistant.snapshot?.session.path, () => {
-  if (assistant.visible && !card.value?.contains(document.activeElement)) void focusComposer();
+watch(() => pixie.snapshot?.session.path, () => {
+  if (pixie.visible && !card.value?.contains(document.activeElement)) void focusComposer();
 }, { flush: "post" });
 </script>
 
 <template>
   <Teleport to="body">
-    <Transition name="assistant-card">
+    <Transition name="pixie-card">
       <section
-        v-show="assistant.visible"
+        v-show="pixie.visible"
         ref="card"
-        class="assistant-card"
+        class="pixie-card"
         :class="{ expanded }"
         :style="cardStyle"
         role="complementary"
-        :aria-label="t('assistant.title')"
-        data-assistant-card
+        :aria-label="t('pixie.title')"
+        data-pixie-card
         @keydown="onKeydown"
       >
-        <header class="assistant-header" :title="t('assistant.dragHint')" @pointerdown="startDrag" @lostpointercapture="endDrag">
-          <span class="assistant-title"><Sparkles :size="14" /> {{ t("assistant.title") }}</span>
-          <span class="assistant-scope">{{ t("assistant.scope") }}</span>
+        <header class="pixie-header" :title="t('pixie.dragHint')" @pointerdown="startDrag" @lostpointercapture="endDrag">
+          <span class="pixie-title"><Sparkles :size="14" /> {{ t("pixie.title") }}</span>
+          <span class="pixie-scope">{{ t("pixie.scope") }}</span>
           <button
             type="button"
-            class="assistant-action"
-            data-action="assistant-new-session"
-            :disabled="assistant.running"
-            :title="t('assistant.newSession')"
-            :aria-label="t('assistant.newSession')"
-            @click="assistant.newSession()"
+            class="pixie-action"
+            data-action="pixie-new-session"
+            :disabled="pixie.running"
+            :title="t('pixie.newSession')"
+            :aria-label="t('pixie.newSession')"
+            @click="pixie.newSession()"
           ><MessageSquarePlus :size="15" /></button>
           <button
             type="button"
-            class="assistant-action"
-            data-action="assistant-collapse"
-            :title="t('assistant.collapse')"
-            :aria-label="t('assistant.collapse')"
+            class="pixie-action"
+            data-action="pixie-collapse"
+            :title="t('pixie.collapse')"
+            :aria-label="t('pixie.collapse')"
             @click="collapse"
           ><Minimize :size="15" /></button>
         </header>
 
-        <div v-if="expanded" ref="scroll" class="assistant-messages" @scroll="updateFollow">
+        <div v-if="expanded" ref="scroll" class="pixie-messages" @scroll="updateFollow">
           <button v-if="messages.length >= visibleTurnCount * 2" type="button" class="load-earlier-turns" @click="showEarlierTurns">
             {{ t("branch.loadEarlier") }}
           </button>
           <BranchHistory
-            view-key="assistant"
+            view-key="pixie"
             :turns="turns"
             :process-messages="processMessages"
             :expanded-processes="expandedProcesses"
@@ -356,12 +356,12 @@ watch(() => assistant.snapshot?.session.path, () => {
             :error-text="errorText"
             @toggle="toggleProcess"
           />
-          <article v-if="assistant.pending" class="branch-message user">
-            <p>{{ assistant.pending.text }}</p>
-            <MessageImages :images="assistant.pending.images" />
-            <CopyButton :text="assistant.pending.text" />
+          <article v-if="pixie.pending" class="branch-message user">
+            <p>{{ pixie.pending.text }}</p>
+            <MessageImages :images="pixie.pending.images" />
+            <CopyButton :text="pixie.pending.text" />
           </article>
-          <div v-if="assistant.running && !activity" class="process-item waiting" role="status">
+          <div v-if="pixie.running && !activity" class="process-item waiting" role="status">
             <LoaderCircle :size="14" class="spin" /> {{ t("branch.working") }}
           </div>
           <details v-if="activity" class="agent-process live" :open="activity.active" @toggle="scrollLatest()">
@@ -393,7 +393,7 @@ watch(() => assistant.snapshot?.session.path, () => {
                 <div v-else-if="item.text" class="process-item assistant">
                   <MarkdownRenderer
                     :content="item.status === 'running' ? liveText(item.text) : item.text"
-                    custom-id="assistant-live"
+                    custom-id="pixie-live"
                     :streaming="item.status === 'running'"
                   />
                   <CopyButton :text="item.text" />
@@ -408,38 +408,38 @@ watch(() => assistant.snapshot?.session.path, () => {
             </div>
           </details>
         </div>
-        <p v-else class="assistant-hint">{{ t("assistant.hint") }}</p>
+        <p v-else class="pixie-hint">{{ t("pixie.hint") }}</p>
 
-        <p v-if="assistant.error" class="assistant-error" role="alert">
-          <span>{{ assistant.error }}</span>
-          <button type="button" data-action="assistant-retry" @click="assistant.ensure()">{{ t("assistant.retry") }}</button>
-          <button v-if="!assistant.models.length" type="button" data-action="assistant-configure" @click="runCommand?.('settings')">
-            {{ t("assistant.configureModels") }}
+        <p v-if="pixie.error" class="pixie-error" role="alert">
+          <span>{{ pixie.error }}</span>
+          <button type="button" data-action="pixie-retry" @click="pixie.ensure()">{{ t("pixie.retry") }}</button>
+          <button v-if="!pixie.models.length" type="button" data-action="pixie-configure" @click="runCommand?.('settings')">
+            {{ t("pixie.configureModels") }}
           </button>
         </p>
 
         <PromptComposer
           ref="composer"
-          class="assistant-composer"
-          :draft-state="assistant.draft"
+          class="pixie-composer"
+          :draft-state="pixie.draft"
           :runnable="composerRunnable"
           :model="composerModel"
           :thinking-level="composerThinking"
-          :models="assistant.models"
+          :models="pixie.models"
           :placeholder="composerPlaceholder"
           :commands="[]"
-          :running="assistant.running"
+          :running="pixie.running"
           :on-model="selectModel"
           :on-thinking="setThinking"
           :on-submit="submitComposer"
-          :on-stop="() => assistant.stop()"
+          :on-stop="() => pixie.stop()"
         />
         <div
           v-if="expanded"
-          class="assistant-resize"
+          class="pixie-resize"
           role="separator"
-          :aria-label="t('assistant.resize')"
-          :title="t('assistant.resize')"
+          :aria-label="t('pixie.resize')"
+          :title="t('pixie.resize')"
           @pointerdown.stop.prevent="startResize"
           @lostpointercapture="endResize"
         />
@@ -449,7 +449,7 @@ watch(() => assistant.snapshot?.session.path, () => {
 </template>
 
 <style scoped>
-.assistant-card {
+.pixie-card {
   position: fixed;
   left: 50%;
   top: 28vh;
@@ -465,8 +465,8 @@ watch(() => assistant.snapshot?.session.path, () => {
   box-shadow: var(--shadow);
   overflow: hidden;
 }
-.assistant-card[style*="left:"] { transform: none; }
-.assistant-header {
+.pixie-card[style*="left:"] { transform: none; }
+.pixie-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -477,10 +477,10 @@ watch(() => assistant.snapshot?.session.path, () => {
   user-select: none;
   touch-action: none;
 }
-.assistant-header:active { cursor: grabbing; }
-.assistant-title { display: flex; align-items: center; gap: 7px; font-size: var(--font-size-ui); font-weight: 600; }
-.assistant-scope { flex: 1; color: var(--muted); font-size: var(--font-size-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assistant-action {
+.pixie-header:active { cursor: grabbing; }
+.pixie-title { display: flex; align-items: center; gap: 7px; font-size: var(--font-size-ui); font-weight: 600; }
+.pixie-scope { flex: 1; color: var(--muted); font-size: var(--font-size-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pixie-action {
   display: grid;
   place-items: center;
   width: 28px;
@@ -491,18 +491,18 @@ watch(() => assistant.snapshot?.session.path, () => {
   color: var(--muted);
   cursor: pointer;
 }
-.assistant-action:hover:not(:disabled) { background: var(--surface-subtle); color: var(--text); }
-.assistant-action:disabled { opacity: 0.45; cursor: default; }
-.assistant-hint { margin: 0; padding: 10px 12px 0; color: var(--muted); font-size: var(--font-size-caption); }
-.assistant-messages {
+.pixie-action:hover:not(:disabled) { background: var(--surface-subtle); color: var(--text); }
+.pixie-action:disabled { opacity: 0.45; cursor: default; }
+.pixie-hint { margin: 0; padding: 10px 12px 0; color: var(--muted); font-size: var(--font-size-caption); }
+.pixie-messages {
   flex: 1 1 auto;
   min-height: 120px;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 12px;
 }
-.assistant-messages :deep(.branch-history) { display: block; }
-.assistant-error {
+.pixie-messages :deep(.branch-history) { display: block; }
+.pixie-error {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -511,8 +511,8 @@ watch(() => assistant.snapshot?.session.path, () => {
   color: var(--danger);
   font-size: var(--font-size-ui);
 }
-.assistant-error span { flex: 1; overflow-wrap: anywhere; }
-.assistant-error button {
+.pixie-error span { flex: 1; overflow-wrap: anywhere; }
+.pixie-error button {
   padding: 3px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -524,8 +524,8 @@ watch(() => assistant.snapshot?.session.path, () => {
 }
 /* Padding clears the corner resize handle; without it the composer's footer
    (and its send button) would reach the card corner underneath the handle. */
-.assistant-composer { border-top: 1px solid var(--border); padding: 0 10px 9px; }
-.assistant-resize {
+.pixie-composer { border-top: 1px solid var(--border); padding: 0 10px 9px; }
+.pixie-resize {
   position: absolute;
   right: 0;
   bottom: 0;
@@ -534,7 +534,7 @@ watch(() => assistant.snapshot?.session.path, () => {
   cursor: nwse-resize;
   touch-action: none;
 }
-.assistant-resize::before {
+.pixie-resize::before {
   content: "";
   position: absolute;
   inset: 5px 5px 3px 3px;
@@ -543,10 +543,10 @@ watch(() => assistant.snapshot?.session.path, () => {
   border-radius: 0 0 3px 0;
   opacity: 0.7;
 }
-.assistant-resize:hover::before { border-color: var(--accent); opacity: 1; }
-.assistant-card:not(.expanded) { max-height: none; }
-.assistant-card:not(.expanded) .assistant-composer :deep(textarea) { min-height: 72px; }
+.pixie-resize:hover::before { border-color: var(--accent); opacity: 1; }
+.pixie-card:not(.expanded) { max-height: none; }
+.pixie-card:not(.expanded) .pixie-composer :deep(textarea) { min-height: 72px; }
 
-.assistant-card-enter-active, .assistant-card-leave-active { transition: opacity 0.14s ease; }
-.assistant-card-enter-from, .assistant-card-leave-to { opacity: 0; }
+.pixie-card-enter-active, .pixie-card-leave-active { transition: opacity 0.14s ease; }
+.pixie-card-enter-from, .pixie-card-leave-to { opacity: 0; }
 </style>

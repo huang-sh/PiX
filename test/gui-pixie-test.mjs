@@ -130,7 +130,7 @@ const spriteRect = (cdp) => cdp.evaluate(`(() => {
   return { left: r.left, top: r.top, width: r.width, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom };
 })()`);
 const spriteSrc = (cdp) => cdp.evaluate(`document.querySelector("[data-pixie-sprite] img")?.getAttribute("src")`);
-const cardVisible = (cdp) => cdp.evaluate(`document.querySelector("[data-assistant-card]")?.checkVisibility() === true`);
+const cardVisible = (cdp) => cdp.evaluate(`document.querySelector("[data-pixie-card]")?.checkVisibility() === true`);
 const spriteCenter = (cdp) => cdp.evaluate(`(() => {
   const r = document.querySelector("[data-pixie-sprite]").getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };

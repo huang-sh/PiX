@@ -1,5 +1,5 @@
 /**
- * The Pixie identity line. The assistant's system prompt is Pi's own default,
+ * The Pixie identity line. Pixie's system prompt is Pi's own default,
  * generated dynamically from the installed SDK, with only its opening
  * identity line replaced by this text (or the user's). Shared so the settings
  * editor's default never drifts from what the runtime swaps in.

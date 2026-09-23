@@ -1,13 +1,13 @@
 import { acceptDomainUpdate } from "./registry";
 
 export const en = {
-  assistant: {
+  pixie: {
     title: "Pixie",
-    placeholder: "Chat with the PiX assistant…",
+    placeholder: "Chat with Pixie…",
     hint: "A conversation independent of the current graph",
     scope: "Local · not tied to the current project",
-    preparing: "Preparing the assistant…",
-    retryHint: "The assistant failed to start",
+    preparing: "Preparing Pixie…",
+    retryHint: "Pixie failed to start",
     newSession: "New conversation",
     collapse: "Collapse",
     retry: "Retry",
@@ -22,13 +22,13 @@ export const en = {
 };
 
 export const zhCN: typeof en = {
-  assistant: {
+  pixie: {
     title: "精灵",
-    placeholder: "和 PiX 助手聊聊……",
+    placeholder: "和 Pixie 聊聊……",
     hint: "独立于当前 graph 的对话",
     scope: "本机运行 · 不跟随当前项目",
-    preparing: "正在准备助手…",
-    retryHint: "助手启动失败",
+    preparing: "正在准备 Pixie…",
+    retryHint: "Pixie 启动失败",
     newSession: "新对话",
     collapse: "收起",
     retry: "重试",

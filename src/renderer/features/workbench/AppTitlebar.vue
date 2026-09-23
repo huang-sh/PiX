@@ -3,7 +3,7 @@ import { ChevronDown, Folder, MessageSquare, MonitorUp, PanelLeft, PanelRight, P
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
-import { useAssistantStore } from "../../stores/assistant";
+import { usePixieStore } from "../../stores/pixie";
 import { useLayoutStore } from "../../stores/layout";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { formatShortcut, shortcutBindings, type ShortcutId } from "../../../shared/shortcuts";
@@ -13,7 +13,7 @@ const emit = defineEmits<{ pickProject: []; connectRemote: []; disconnectRemote:
 
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
-const assistant = useAssistantStore();
+const pixie = usePixieStore();
 const { t } = useI18n();
 const workspaceMenuOpen = ref(false);
 // Runtime binding (not a static src, which transformAssetUrls would compile):
@@ -24,8 +24,8 @@ function shortcutTitle(label: string, id: ShortcutId) {
   const keys = shortcutBindings(id, layout.settings?.app.keyboardShortcuts).map((binding) => formatShortcut(binding, isMac())).join(" / ");
   return keys ? `${t(label)} (${keys})` : t(label);
 }
-function toggleAssistant() {
-  assistant.visible ? assistant.hide() : assistant.show();
+function togglePixie() {
+  pixie.visible ? pixie.hide() : pixie.show();
 }
 
 function chooseLocal() {
@@ -66,18 +66,18 @@ function disconnectRemote() {
       <span class="app-titlebar-brand"><img :src="logoSrc" alt="" /></span>
       <Button
         data-action="ask-pix"
-        :class="`ask-pix-toggle${assistant.visible ? ' active' : ''}`"
+        :class="`ask-pix-toggle${pixie.visible ? ' active' : ''}`"
         variant="ghost"
         size="sm"
-        :title="shortcutTitle('assistant.title', 'assistant')"
-        :aria-expanded="assistant.visible"
-        @click="toggleAssistant"
+        :title="shortcutTitle('pixie.title', 'pixie')"
+        :aria-expanded="pixie.visible"
+        @click="togglePixie"
       >
-        {{ t("assistant.title") }}
+        {{ t("pixie.title") }}
         <span
-          v-if="!assistant.visible && (assistant.running || assistant.unread)"
+          v-if="!pixie.visible && (pixie.running || pixie.unread)"
           class="ask-pix-dot"
-          :class="{ running: assistant.running }"
+          :class="{ running: pixie.running }"
           aria-hidden="true"
         />
       </Button>

@@ -189,6 +189,13 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     expectBoolean(key);
   expectNumber("canvasDotGridSpacing", 8, 96);
   expectNumber("canvasDotGridDotSize", 1, 6);
+  // The Pixie shortcut id was "assistant" before the rename; carry a saved
+  // binding over so the rename never resets the user's customization.
+  const shortcuts = out.keyboardShortcuts as Record<string, unknown> | undefined;
+  if (shortcuts && shortcuts.assistant !== undefined) {
+    const { assistant, ...rest } = shortcuts;
+    out.keyboardShortcuts = rest.pixie === undefined ? { ...rest, pixie: assistant } : rest;
+  }
   try {
     if (out.keyboardShortcuts !== undefined) validateShortcutOverrides(out.keyboardShortcuts);
   } catch {

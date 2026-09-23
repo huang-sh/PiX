@@ -16,7 +16,7 @@ export interface RpcLine {
  * binary as Node (ELECTRON_RUN_AS_NODE), which works identically in dev and
  * packaged builds with no external runtime requirement.
  */
-export class AssistantRpc {
+export class PixieRpc {
   private child?: ChildProcess;
   private pending = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void }>();
   private listeners = new Set<(event: RpcLine) => void>();
@@ -61,7 +61,7 @@ export class AssistantRpc {
       }
     });
     child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", chunk => debugLog("assistant-rpc:", chunk.toString().trim()));
+    child.stderr?.on("data", chunk => debugLog("pixie-rpc:", chunk.toString().trim()));
     const fail = (error: Error) => {
       if (this.child !== child) return;
       this.exitError ??= error;
@@ -69,12 +69,12 @@ export class AssistantRpc {
     };
     child.once("exit", (code, signal) => {
       if (this.child !== child) return;
-      const error = this.exitError ??= new Error(`Assistant process exited (code=${code} signal=${signal})`);
+      const error = this.exitError ??= new Error(`Pixie process exited (code=${code} signal=${signal})`);
       this.rejectPending(error);
       for (const listener of [...this.exitListeners]) listener(error);
     });
-    child.once("error", error => fail(new Error(`Assistant process error: ${error.message}`)));
-    child.stdin?.on("error", error => fail(new Error(`Assistant process stdin error: ${error.message}`)));
+    child.once("error", error => fail(new Error(`Pixie process error: ${error.message}`)));
+    child.stdin?.on("error", error => fail(new Error(`Pixie process stdin error: ${error.message}`)));
   }
 
   private dispatch(line: string) {
@@ -90,7 +90,7 @@ export class AssistantRpc {
       if (!pending) return;
       this.pending.delete(id);
       if (data.success === false)
-        pending.reject(new Error(typeof data.error === "string" ? data.error : "Assistant command failed"));
+        pending.reject(new Error(typeof data.error === "string" ? data.error : "Pixie command failed"));
       else pending.resolve(data.data);
       return;
     }
@@ -98,7 +98,7 @@ export class AssistantRpc {
       try {
         listener(data);
       } catch (error) {
-        debugLog("assistant-rpc: event listener", error);
+        debugLog("pixie-rpc: event listener", error);
       }
     }
   }
@@ -112,12 +112,12 @@ export class AssistantRpc {
   request(command: RpcLine, timeoutMs = 30_000): Promise<unknown> {
     const stdin = this.child?.stdin;
     if (!this.running || !stdin || this.exitError)
-      return Promise.reject(this.exitError ?? new Error("Assistant process is not running"));
+      return Promise.reject(this.exitError ?? new Error("Pixie process is not running"));
     const id = `pix-${++this.sequence}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("Assistant command timed out"));
+        reject(new Error("Pixie command timed out"));
       }, timeoutMs);
       this.pending.set(id, {
         resolve: data => { clearTimeout(timer); resolve(data); },
@@ -136,7 +136,7 @@ export class AssistantRpc {
     const child = this.child;
     if (!child) return;
     this.child = undefined;
-    this.rejectPending(new Error("Assistant process was stopped"));
+    this.rejectPending(new Error("Pixie process was stopped"));
     child.kill();
     await new Promise<void>(resolve => {
       const timer = setTimeout(resolve, 2_000);

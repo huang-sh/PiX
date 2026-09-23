@@ -19,7 +19,7 @@ import { canonicalPath } from "./paths.js";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
-import { AssistantRuntime, assistantWorkspace } from "./assistant-runtime.js";
+import { PixieRuntime, pixieWorkspace } from "./pixie-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { ProgressLedger } from "./progress-ledger.js";
 import { RemoteWorkspacePool, migratesSession, unavailable, type RemoteSlot } from "./remote-pool.js";
@@ -57,8 +57,8 @@ export class MainController {
   files: SessionFiles;
   /** View-independent runtime: model catalog, skills, login — never opens a session. */
   projectRuntime: PiRuntime;
-  /** Pixie, the assistant: app-level, local-only, one session in its own workspace. */
-  assistant: AssistantRuntime;
+  /** Pixie, the app assistant: app-level, local-only, one session in its own workspace. */
+  pixie: PixieRuntime;
   /** Live session runtimes; opening a session switches the view, never closes another. */
   registry: SessionRegistry;
   current?: SessionSnapshot;
@@ -97,7 +97,7 @@ export class MainController {
       : null;
     this.files = new SessionFiles(path, dir);
     this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url));
-    this.assistant = new AssistantRuntime((e) => this.emit(e), () => this.settings.bundle().app.pixie ?? {});
+    this.pixie = new PixieRuntime((e) => this.emit(e), () => this.settings.bundle().app.pixie ?? {});
     this.registry = new SessionRegistry({
       createRuntime: entry => this.createSessionRuntime(entry),
       onEvent: (entry, event) => this.routeSessionEvent(entry, event),
@@ -335,7 +335,7 @@ export class MainController {
     for (const entry of this.registry.liveEntries())
       // Best-effort per session: one stale runtime must not fail the settings reply.
       try { await entry.runtime?.adoptCatalog(input); } catch (e) { debugLog("controller: adoptCatalog", e); }
-    try { await this.assistant.reload(); } catch (e) { debugLog("controller: assistant reload", e); }
+    try { await this.pixie.reload(); } catch (e) { debugLog("controller: pixie reload", e); }
   }
   /**
    * Re-binds an entry whose runtime moved to another session file (fork,
@@ -510,26 +510,26 @@ export class MainController {
     if (route === "wsl.list") return WslHostClient.distributions();
     if (route === "wsl.names") return WslHostClient.names();
     if (route === "ssh.list") return listSshHosts();
-    // Assistant routes resolve before the project-view dispatch: the assistant
-    // is app-level and stays on the local host even in a remote workspace.
-    if (route === "assistant.ensure") return this.assistant.ensure();
-    if (route === "assistant.send")
-      return this.assistant.send(v as Parameters<AssistantRuntime["send"]>[0]);
-    if (route === "assistant.stop") return this.assistant.stop();
-    if (route === "assistant.newSession") return this.assistant.newSession();
-    if (route === "assistant.reveal") {
-      this.platform.showItemInFolder(assistantWorkspace());
+    // Pixie routes resolve before the project-view dispatch: Pixie is
+    // app-level and stays on the local host even in a remote workspace.
+    if (route === "pixie.ensure") return this.pixie.ensure();
+    if (route === "pixie.send")
+      return this.pixie.send(v as Parameters<PixieRuntime["send"]>[0]);
+    if (route === "pixie.stop") return this.pixie.stop();
+    if (route === "pixie.newSession") return this.pixie.newSession();
+    if (route === "pixie.reveal") {
+      this.platform.showItemInFolder(pixieWorkspace());
       return;
     }
-    if (route === "assistant.clearHistory") {
+    if (route === "pixie.clearHistory") {
       if (
         this.settings.bundle().app.confirmDestructiveActions &&
-        !(await this.platform.confirm("Delete every Pixie conversation?", assistantWorkspace()))
+        !(await this.platform.confirm("Delete every Pixie conversation?", pixieWorkspace()))
       )
         return { cancelled: true };
-      return this.assistant.clearHistory();
+      return this.pixie.clearHistory();
     }
-    if (route === "assistant.reload") return this.assistant.reload();
+    if (route === "pixie.reload") return this.pixie.reload();
     if (route === "remote.cancel") return this.pool.cancelRemote();
     if (route === "remote.directories") return this.pool.browseDirectories(v);
     if (route === "wsl.connect")
@@ -920,9 +920,9 @@ export class MainController {
     this.flushBackgroundRefresh();
     return this.registry.disposeAll();
   }
-  /** Full shutdown: local sessions, the assistant, and every pooled host, awaited together. */
+  /** Full shutdown: local sessions, Pixie, and every pooled host, awaited together. */
   closeAll(): Promise<void> {
-    return Promise.all([this.closeSessions(), this.assistant.close(), this.pool.closeAllRemote()]).then(() => {});
+    return Promise.all([this.closeSessions(), this.pixie.close(), this.pool.closeAllRemote()]).then(() => {});
   }
   dispose() {
     this.progress.clear();

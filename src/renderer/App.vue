@@ -26,8 +26,8 @@ import { desktop } from "./api";
 import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
 import { createRunCommand, runCommandKey } from "./features/commands/runCommand";
-import AssistantOverlay from "./features/assistant/AssistantOverlay.vue";
-import PixieSprite from "./features/assistant/PixieSprite.vue";
+import PixieOverlay from "./features/pixie/PixieOverlay.vue";
+import PixieSprite from "./features/pixie/PixieSprite.vue";
 import ImagePreview from "./components/ImagePreview.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
@@ -36,7 +36,7 @@ import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
-import { useAssistantStore } from "./stores/assistant";
+import { usePixieStore } from "./stores/pixie";
 import { handleHistoryKeys, history, historyEnabled, HistoryButton, HistoryPanel, togglePanel } from "./experimental/history";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
@@ -56,7 +56,7 @@ function closeSettings() { settingsPage.value?.close(); }
 const session = useSessionStore();
 const workspace = useWorkspaceStore();
 const layout = useLayoutStore();
-const assistant = useAssistantStore();
+const pixie = usePixieStore();
 const { locale, t } = useI18n();
 let unsubscribe: (() => void) | undefined;
 const wslOpen = ref(false);
@@ -460,10 +460,10 @@ watch(
 
 const decodeSessionEvent = sessionEventDecoder(() => desktop.invoke("session.snapshot"));
 function onEvent(wireEvent: DesktopEvent) {
-  // Assistant events are already scoped to their own runtime; they must not
+  // Pixie events are already scoped to their own runtime; they must not
   // reach the graph session store's decoder.
-  if (wireEvent.type === "assistant") {
-    assistant.onEvent(wireEvent.payload as { type?: string; payload?: unknown });
+  if (wireEvent.type === "pixie") {
+    pixie.onEvent(wireEvent.payload as { type?: string; payload?: unknown });
     return;
   }
   const event = decodeSessionEvent(wireEvent);
@@ -530,7 +530,7 @@ function keydown(event: KeyboardEvent) {
   if (action) {
     event.preventDefault();
     switch (action) {
-      case "assistant": assistant.activate(); break;
+      case "pixie": pixie.activate(); break;
       case "commands": layout.commandOpen = true; break;
       case "terminal": void layout.openTool("terminal"); break;
       case "navigator": void layout.toggle("navigator"); break;
@@ -610,7 +610,7 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <CommandPalette @run="runCommand" />
-  <AssistantOverlay />
+  <PixieOverlay />
   <PixieSprite />
   <div v-if="updateNotice" class="update-banner" role="status">
     <span>{{ t("update.available", { version: updateNotice.version }) }}</span>

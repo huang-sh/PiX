@@ -145,14 +145,14 @@ export function validateRouteInput(
 ): Record<string, unknown> {
   const v = input === undefined ? {} : obj(input);
   switch (route) {
-    case "assistant.ensure":
-    case "assistant.stop":
-    case "assistant.newSession":
-    case "assistant.clearHistory":
-    case "assistant.reveal":
-    case "assistant.reload":
+    case "pixie.ensure":
+    case "pixie.stop":
+    case "pixie.newSession":
+    case "pixie.clearHistory":
+    case "pixie.reveal":
+    case "pixie.reload":
       return {};
-    case "assistant.send": {
+    case "pixie.send": {
       const images = v.images === undefined ? undefined : validatePromptImages(v.images);
       return {
         text: str(v.text, "text", !!images?.length) ?? "",

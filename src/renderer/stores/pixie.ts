@@ -13,18 +13,18 @@ import { desktop } from "../api";
 // The overlay card registers its DOM handle here: focus moves and the
 // focus-state check behind Ctrl+E belong to whichever card is mounted, while
 // the runtime state below must survive the card being hidden.
-export interface AssistantOverlayHandle {
+export interface PixieOverlayHandle {
   containsFocus(): boolean;
   focus(): void;
 }
-let overlay: AssistantOverlayHandle | undefined;
-export function registerAssistantOverlay(handle?: AssistantOverlayHandle) {
+let overlay: PixieOverlayHandle | undefined;
+export function registerPixieOverlay(handle?: PixieOverlayHandle) {
   overlay = handle;
 }
 
 // Composer draft shape shared with PromptComposer's draftState, so the text
 // (and attachments) survive hiding the card.
-export interface AssistantDraft {
+export interface PixieDraft {
   text: string;
   images: PromptImage[];
   busy: boolean;
@@ -32,14 +32,14 @@ export interface AssistantDraft {
   error: string;
 }
 
-export const useAssistantStore = defineStore("assistant", {
+export const usePixieStore = defineStore("pixie", {
   state: () => ({
     visible: false,
     snapshot: undefined as SessionSnapshot | undefined,
     activity: undefined as AgentActivity | undefined,
     /** Optimistic user turn, shown until the send reply carries the real entry. */
     pending: undefined as { text: string; images?: PromptImage[]; timestamp: string; knownEntryIds: Set<string> } | undefined,
-    draft: { text: "", images: [], busy: false, readingImages: false, error: "" } as AssistantDraft,
+    draft: { text: "", images: [], busy: false, readingImages: false, error: "" } as PixieDraft,
     models: [] as RuntimeModel[],
     /** Local model/thinking overrides; undefined follows the session's own. */
     model: undefined as RuntimeModel | null | undefined,
@@ -91,7 +91,7 @@ export const useAssistantStore = defineStore("assistant", {
     },
     async initialize() {
       const [snapshot] = await Promise.all([
-        desktop.invoke<SessionSnapshot>("assistant.ensure"),
+        desktop.invoke<SessionSnapshot>("pixie.ensure"),
         this.loadModels(),
       ]);
       this.applySnapshot(snapshot);
@@ -127,7 +127,7 @@ export const useAssistantStore = defineStore("assistant", {
         knownEntryIds: new Set(this.snapshot.entries.map(entry => entry.id)),
       };
       try {
-        const snapshot = await desktop.invoke<SessionSnapshot>("assistant.send", {
+        const snapshot = await desktop.invoke<SessionSnapshot>("pixie.send", {
           text,
           ...(images?.length ? { images } : {}),
           ...(this.model ? { provider: this.model.provider, modelId: this.model.id } : {}),
@@ -152,7 +152,7 @@ export const useAssistantStore = defineStore("assistant", {
     },
     async stop() {
       try {
-        await desktop.invoke("assistant.stop");
+        await desktop.invoke("pixie.stop");
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       }
@@ -160,14 +160,14 @@ export const useAssistantStore = defineStore("assistant", {
     async newSession() {
       if (this.running) return;
       try {
-        this.applySnapshot(await desktop.invoke<SessionSnapshot>("assistant.newSession"));
+        this.applySnapshot(await desktop.invoke<SessionSnapshot>("pixie.newSession"));
         this.model = undefined;
         this.thinking = undefined;
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       }
     },
-    // Pi events arrive re-tagged as desktop "assistant" events; the payload is
+    // Pi events arrive re-tagged as desktop "pixie" events; the payload is
     // the runtime's own {type: "agent" | "notice", payload} event.
     onEvent(event: { type?: string; payload?: unknown } | undefined) {
       if (!event) return;

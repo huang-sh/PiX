@@ -512,13 +512,13 @@ export type AgentControl =
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
   | "app.bootstrap"
-  | "assistant.ensure"
-  | "assistant.send"
-  | "assistant.stop"
-  | "assistant.newSession"
-  | "assistant.clearHistory"
-  | "assistant.reveal"
-  | "assistant.reload"
+  | "pixie.ensure"
+  | "pixie.send"
+  | "pixie.stop"
+  | "pixie.newSession"
+  | "pixie.clearHistory"
+  | "pixie.reveal"
+  | "pixie.reload"
   | "app.pickProject"
   | "app.openProject"
   | "app.revealLogs"
@@ -566,7 +566,7 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "assistant" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
+  type: "agent" | "pixie" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
   payload: unknown;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";

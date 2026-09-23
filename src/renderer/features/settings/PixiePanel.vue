@@ -6,7 +6,7 @@ import { PIXIE_IDENTITY } from "../../../shared/pixie-prompt";
 import type { SessionSnapshot } from "../../../shared/types";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
-import { useAssistantStore } from "../../stores/assistant";
+import { usePixieStore } from "../../stores/pixie";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useSettingsDraftContext } from "./settings-context";
@@ -15,7 +15,7 @@ import SettingRow from "./SettingRow.vue";
 
 const { t } = useI18n();
 const { value, setValue, rowHint, optionLabel } = useSettingsDraftContext();
-const assistant = useAssistantStore();
+const pixie = usePixieStore();
 const session = useSessionStore();
 const layout = useLayoutStore();
 const clearing = ref(false);
@@ -65,19 +65,19 @@ const modelRow = computed(() => rows.value.find(row => row.path === "pixie.defau
 const modelOptionsReady = computed(() => (modelRow.value?.options?.length ?? 0) > 1);
 
 function revealWorkspace() {
-  void desktop.invoke("assistant.reveal").catch(() => {});
+  void desktop.invoke("pixie.reveal").catch(() => {});
 }
 
 // An empty draft or one matching the built-in identity removes the override
 // (null is the patch language's remove); a saved identity restarts the idle
-// assistant so it takes effect immediately.
+// Pixie so it takes effect immediately.
 async function savePrompt() {
   if (promptSaving.value) return;
   promptSaving.value = true;
   try {
     const text = promptDraft.value.trim();
     await layout.updateAppSettings({ pixie: { systemPrompt: text && text !== PIXIE_IDENTITY.trim() ? text : null } });
-    await desktop.invoke("assistant.reload");
+    await desktop.invoke("pixie.reload");
     layout.showNotice(t("settings.pixiePromptApplied"));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -95,8 +95,8 @@ async function clearHistory() {
   if (clearing.value) return;
   clearing.value = true;
   try {
-    const result = await desktop.invoke<SessionSnapshot | { cancelled: true }>("assistant.clearHistory");
-    if (result && "projection" in result) assistant.applySnapshot(result);
+    const result = await desktop.invoke<SessionSnapshot | { cancelled: true }>("pixie.clearHistory");
+    if (result && "projection" in result) pixie.applySnapshot(result);
     else if (result?.cancelled) return;
     layout.showNotice(t("settings.pixieCleared"));
   } catch (error) {

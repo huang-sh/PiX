@@ -1,21 +1,34 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { DesktopEvent, PixieSettings, PromptImage, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 import { PIXIE_IDENTITY } from "../shared/pixie-prompt.js";
 import { pixAgentDir } from "./paths.js";
 import { piPixieSystemPrompt } from "./pi-runtime.js";
-import { AssistantRpc, type RpcLine } from "./assistant-rpc.js";
+import { PixieRpc, type RpcLine } from "./pixie-rpc.js";
 
-export const assistantWorkspace = () => join(pixAgentDir(), "assistant");
+export const pixieWorkspace = () => join(pixAgentDir(), "pixie");
 
 /** Where pi's CLI files new sessions for a given cwd (getDefaultSessionDirPath). */
 const cliSessionDir = (cwd: string) =>
   join(pixAgentDir(), "sessions", `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 
-/** The assistant's sessions can predate the RPC substrate, so both dirs are scanned. */
+/**
+ * The workspace was ~/.pix/agent/assistant before the rename; it and its
+ * pre-RPC session dir move once so existing conversations follow along.
+ */
+function migrateLegacyWorkspace(): void {
+  const legacy = join(pixAgentDir(), "assistant");
+  if (existsSync(legacy) && !existsSync(pixieWorkspace()))
+    renameSync(legacy, pixieWorkspace());
+  const legacySessions = cliSessionDir(legacy);
+  if (existsSync(legacySessions) && !existsSync(cliSessionDir(pixieWorkspace())))
+    renameSync(legacySessions, cliSessionDir(pixieWorkspace()));
+}
+
+/** Pixie's sessions can predate the RPC substrate, so both dirs are scanned. */
 function sessionDirs(): string[] {
-  return [join(assistantWorkspace(), "sessions"), cliSessionDir(assistantWorkspace())];
+  return [join(pixieWorkspace(), "sessions"), cliSessionDir(pixieWorkspace())];
 }
 
 /** The newest session file, preferring ones that already hold a conversation. */
@@ -56,8 +69,8 @@ interface RpcState {
  * cumulative snapshots like every other chat surface, so message_update events
  * are rebuilt cumulatively here before they are forwarded.
  */
-export class AssistantRuntime {
-  private readonly rpc = new AssistantRpc();
+export class PixieRuntime {
+  private readonly rpc = new PixieRpc();
   private starting?: Promise<SessionSnapshot>;
   /** Cumulative assistant content by part index, rebuilt from wire deltas. */
   private parts = new Map<number, { kind: "text" | "thinking"; body: string }>();
@@ -90,7 +103,7 @@ export class AssistantRuntime {
       // extension fails fast with a visible reason instead of hanging.
       this.rpc.write({ type: "extension_ui_response", id: String(event.id), cancelled: true });
       const title = typeof event.title === "string" ? event.title : typeof event.message === "string" ? event.message : "";
-      this.emit({ type: "assistant", payload: { type: "notice", payload: {
+      this.emit({ type: "pixie", payload: { type: "notice", payload: {
         level: "warning",
         message: `Extension dialog unsupported: ${title || String(event.method ?? "")}`,
       } } });
@@ -118,7 +131,7 @@ export class AssistantRuntime {
   }
 
   private emitAgent(event: unknown) {
-    this.emit({ type: "assistant", payload: { type: "agent", payload: event } });
+    this.emit({ type: "pixie", payload: { type: "agent", payload: event } });
     if ((event as { type?: string }).type === "agent_settled") {
       for (const waiter of this.idleWaiters) waiter.resolve();
       this.idleWaiters.clear();
@@ -147,14 +160,15 @@ export class AssistantRuntime {
    */
   private async startAgent(): Promise<void> {
     const identity = this.settings().systemPrompt?.trim() || PIXIE_IDENTITY;
-    const prompt = await piPixieSystemPrompt(assistantWorkspace(), identity);
-    await this.rpc.start(assistantWorkspace(), { PI_CODING_AGENT_DIR: pixAgentDir() }, [
+    const prompt = await piPixieSystemPrompt(pixieWorkspace(), identity);
+    await this.rpc.start(pixieWorkspace(), { PI_CODING_AGENT_DIR: pixAgentDir() }, [
       "--system-prompt", prompt,
     ]);
   }
 
   private async boot(): Promise<SessionSnapshot> {
-    mkdirSync(join(assistantWorkspace(), "sessions"), { recursive: true });
+    migrateLegacyWorkspace();
+    mkdirSync(join(pixieWorkspace(), "sessions"), { recursive: true });
     await this.startAgent();
     // A restored conversation keeps its own model; a fresh boot starts from
     // the Pixie default when one is set.
@@ -187,7 +201,7 @@ export class AssistantRuntime {
         ...summarizeSession(state.sessionFile ?? "", null, list, new Date().toISOString()),
         id: state.sessionId,
         name: state.sessionName,
-        cwd: assistantWorkspace(),
+        cwd: pixieWorkspace(),
       },
       entries: list,
       projection: projectSession(list, entries.leafId ?? null),
@@ -229,7 +243,7 @@ export class AssistantRuntime {
   }): Promise<SessionSnapshot> {
     await this.ensure();
     // Session-scoped switches, like the plain chat's promptAt: the profile
-    // default stays put, so changing the assistant model never leaks into new
+    // default stays put, so changing the Pixie model never leaks into new
     // graph sessions.
     const state = await this.rpc.request({ type: "get_state" }) as RpcState;
     if (input.provider && input.modelId &&
@@ -261,12 +275,12 @@ export class AssistantRuntime {
     return this.snapshot();
   }
 
-  /** Deletes every assistant conversation and boots a fresh one. */
+  /** Deletes every Pixie conversation and boots a fresh one. */
   async clearHistory(): Promise<SessionSnapshot> {
     if (this.rpc.running) {
       const state = await this.rpc.request({ type: "get_state" }).catch(() => undefined) as RpcState | undefined;
       if (state?.isStreaming || state?.isCompacting)
-        throw new Error("Stop the assistant before clearing its conversations");
+        throw new Error("Stop Pixie before clearing its conversations");
       await this.rpc.stop();
     }
     for (const dir of sessionDirs()) rmSync(dir, { recursive: true, force: true });
@@ -275,7 +289,7 @@ export class AssistantRuntime {
 
   /**
    * Neither prompt nor catalog changes can be pushed into the subprocess (the
-   * RPC protocol has no reload), so an idle assistant restarts into the same
+   * RPC protocol has no reload), so an idle Pixie restarts into the same
    * session file; a busy one picks the change up on its next lifecycle.
    */
   async reload(): Promise<void> {

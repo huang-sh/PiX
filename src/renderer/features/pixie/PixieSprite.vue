@@ -3,7 +3,7 @@ import { ContextMenuContent, ContextMenuItem, ContextMenuPortal, ContextMenuRoot
 import { EyeOff, MessageSquare, MessageSquarePlus, Settings } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { useAssistantStore } from "../../stores/assistant";
+import { usePixieStore } from "../../stores/pixie";
 import { useLayoutStore } from "../../stores/layout";
 
 // Moods map 1:1 onto resources/pixie (built from assets/pixie/animations-v1):
@@ -17,7 +17,7 @@ const SIZE = 96;
 // wakes it. Sleep is derived, not a mood, so a run or a greeting overrides it.
 const SLEEP_AFTER_MS = 10 * 60_000;
 
-const assistant = useAssistantStore();
+const pixie = usePixieStore();
 const layout = useLayoutStore();
 const { t } = useI18n();
 
@@ -132,7 +132,7 @@ function toggle() {
     suppressClick = false;
     return;
   }
-  assistant.visible ? assistant.hide() : assistant.show();
+  pixie.visible ? pixie.hide() : pixie.show();
 }
 function openPixieSettings() {
   layout.settingsCategory = "pixie";
@@ -194,13 +194,13 @@ onBeforeUnmount(() => {
 
 // A finished run celebrates — unless it failed — and summoning the card greets;
 // a new or ongoing run always thinks.
-watch(() => assistant.running, (running, wasRunning) => {
+watch(() => pixie.running, (running, wasRunning) => {
   if (running) {
     clearTimeout(moodTimer);
     mood.value = "think";
-  } else if (wasRunning && !assistant.error) playOnce("happy", 2);
+  } else if (wasRunning && !pixie.error) playOnce("happy", 2);
 });
-watch(() => assistant.visible, visible => {
+watch(() => pixie.visible, visible => {
   if (visible) playOnce("wave", 2);
 });
 </script>
@@ -214,8 +214,8 @@ watch(() => assistant.visible, visible => {
           type="button"
           class="pixie-sprite"
           :style="position ? { left: `${position.left}px`, top: `${position.top}px` } : undefined"
-          :title="`${t('assistant.open')} · ${t('assistant.dragHint')}`"
-          :aria-label="t('assistant.title')"
+          :title="`${t('pixie.open')} · ${t('pixie.dragHint')}`"
+          :aria-label="t('pixie.title')"
           data-pixie-sprite
           @pointerdown="startDrag"
           @lostpointercapture="endDrag"
@@ -227,21 +227,21 @@ watch(() => assistant.visible, visible => {
       <ContextMenuPortal>
         <ContextMenuContent class="menu-content" data-pixie-menu>
           <ContextMenuItem class="menu-item" data-action="pixie-menu-toggle" @select="toggle">
-            <MessageSquare :size="14" /> {{ assistant.visible ? t("assistant.collapse") : t("assistant.menuOpen") }}
+            <MessageSquare :size="14" /> {{ pixie.visible ? t("pixie.collapse") : t("pixie.menuOpen") }}
           </ContextMenuItem>
           <ContextMenuItem
             class="menu-item"
             data-action="pixie-menu-new"
-            :disabled="assistant.running"
-            @select="assistant.newSession()"
+            :disabled="pixie.running"
+            @select="pixie.newSession()"
           >
-            <MessageSquarePlus :size="14" /> {{ t("assistant.newSession") }}
+            <MessageSquarePlus :size="14" /> {{ t("pixie.newSession") }}
           </ContextMenuItem>
           <ContextMenuItem class="menu-item" data-action="pixie-menu-settings" @select="openPixieSettings">
-            <Settings :size="14" /> {{ t("assistant.menuSettings") }}
+            <Settings :size="14" /> {{ t("pixie.menuSettings") }}
           </ContextMenuItem>
           <ContextMenuItem class="menu-item" data-action="pixie-menu-hide" @select="hideSprite">
-            <EyeOff :size="14" /> {{ t("assistant.menuHide") }}
+            <EyeOff :size="14" /> {{ t("pixie.menuHide") }}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenuPortal>
@@ -250,7 +250,7 @@ watch(() => assistant.visible, visible => {
 </template>
 
 <style scoped>
-/* Above workbench panels, under the assistant card (140), dialogs, and toasts. */
+/* Above workbench panels, under the Pixie card (140), dialogs, and toasts. */
 .pixie-sprite {
   position: fixed;
   right: 18px;

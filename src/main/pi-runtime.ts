@@ -93,7 +93,7 @@ export async function piSettingsSdk(): Promise<PiSettingsSdk> {
   return import(moduleUrl.href);
 }
 
-/** Absolute path of the pi CLI entry, for subprocess modes (assistant RPC). */
+/** Absolute path of the pi CLI entry, for subprocess modes (Pixie RPC). */
 export function piCliEntry(): string {
   return join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
 }
@@ -104,7 +104,7 @@ let pixiePrompt: Promise<string> | undefined;
 
 /**
  * Pi's own default system prompt with only the opening identity line replaced
- * by the given Pixie identity, passed to the assistant subprocess through
+ * by the given Pixie identity, passed to the Pixie subprocess through
  * --system-prompt. Everything else — tool list, guidelines, doc paths — is
  * generated through a throwaway in-memory session, so it always reflects the
  * installed SDK and extensions. The skills/context/cwd sections the subprocess
