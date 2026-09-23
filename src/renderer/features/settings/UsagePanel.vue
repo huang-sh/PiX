@@ -2,7 +2,7 @@
 import { RefreshCw } from "@lucide/vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { UsageOverview, UsageRange } from "../../../shared/usage";
+import type { UsageDayRow, UsageOverview, UsageRange } from "../../../shared/usage";
 import { USAGE_RANGES } from "../../../shared/usage";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
@@ -11,6 +11,7 @@ import { useLayoutStore } from "../../stores/layout";
 const { t } = useI18n();
 const layout = useLayoutStore();
 const range = ref<UsageRange>("30d");
+const scope = ref<"project" | "all">("project");
 const overview = ref<UsageOverview>();
 const loading = ref(false);
 const error = ref("");
@@ -39,25 +40,60 @@ const rangeLabels: Record<UsageRange, string> = {
   "30d": "settings.usage.range30d",
   all: "settings.usage.rangeAll",
 };
+const scopeLabels: Record<"project" | "all", string> = {
+  project: "settings.usage.scopeProject",
+  all: "settings.usage.scopeAll",
+};
 
 // Costs below a dollar still matter for cheap models, so they keep their
 // sub-cent precision instead of collapsing to $0.00.
 const fmtCost = (value: number) =>
   value > 0 ? `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}` : "$0";
-// Tooltip suffix marking the estimated portion of one day's cost.
-const dayCostTitle = (day: { day: string; cost: number; estimatedCost: number; tokens: number }) =>
-  `${day.day}: ${fmtCost(day.cost)}${day.estimatedCost > 0 ? ` (≈${fmtCost(day.estimatedCost)})` : ""} · ${fmtTokens(day.tokens)}`;
 const fmtTokens = (value: number) =>
   new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
 const fmtDate = (iso: string) =>
   iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+const fmtMonth = new Intl.DateTimeFormat(undefined, { month: "short" }).format;
+// Tooltip of one heatmap day: tokens lead because the cell color tracks them.
+const dayTitle = (day: UsageDayRow) =>
+  `${day.day}: ${fmtTokens(day.tokens)} · ${fmtCost(day.cost)}${day.estimatedCost > 0 ? ` (≈${fmtCost(day.estimatedCost)})` : ""}`;
 
-const maxDayCost = computed(() =>
-  Math.max(0.000001, ...(overview.value?.days.map((day) => day.cost) ?? [0])),
+// GitHub-contributions-style weeks: Monday-first columns, month initials on
+// the columns where a month begins, hollow cells for days without usage.
+const heatWeeks = computed(() => {
+  const days = overview.value?.days ?? [];
+  const weeks: Array<{ label: string; cells: Array<UsageDayRow | null> }> = [];
+  let week: Array<UsageDayRow | null> = [];
+  if (days.length)
+    for (let i = 0; i < (new Date(`${days[0]!.day}T00:00:00`).getDay() + 6) % 7; i++)
+      week.push(null);
+  for (const day of days) {
+    week.push(day);
+    if (week.length === 7) {
+      weeks.push({ label: "", cells: week });
+      week = [];
+    }
+  }
+  if (week.length) weeks.push({ label: "", cells: week });
+  let lastMonth = -1;
+  for (const column of weeks) {
+    const first = column.cells.find(Boolean);
+    if (!first) continue;
+    const date = new Date(`${first.day}T00:00:00`);
+    if (date.getMonth() !== lastMonth) {
+      lastMonth = date.getMonth();
+      column.label = fmtMonth(date);
+    }
+  }
+  return weeks;
+});
+const maxDayTokens = computed(() =>
+  Math.max(1, ...(overview.value?.days.map((day) => day.tokens) ?? [0])),
 );
-// A paid day never fully disappears in the chart; a free one stays flat.
-const barHeight = (cost: number) =>
-  cost <= 0 ? "0%" : `${Math.max(3, (cost / maxDayCost.value) * 100)}%`;
+// Five steps against the busiest day; any usage reads as at least one step.
+const heatLevel = (day: UsageDayRow) =>
+  day.tokens <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((4 * day.tokens) / maxDayTokens.value)));
+const HEAT_MIX = ["10%", "28%", "50%", "74%", "100%"];
 
 async function load() {
   loading.value = true;
@@ -65,6 +101,7 @@ async function load() {
   try {
     overview.value = await desktop.invoke<UsageOverview>("usage.overview", {
       range: range.value,
+      scope: scope.value,
     });
   } catch (e) {
     overview.value = undefined;
@@ -75,7 +112,7 @@ async function load() {
 }
 
 onMounted(load);
-watch(range, load);
+watch([range, scope], load);
 </script>
 
 <template>
@@ -93,9 +130,23 @@ watch(range, load);
           {{ t(rangeLabels[option]) }}
         </button>
       </div>
-      <Button variant="outline" size="sm" :disabled="loading" data-action="usage-refresh" @click="load">
-        <RefreshCw :size="14" :class="{ spin: loading }" /> {{ t(loading ? "settings.usage.refreshing" : "settings.usage.refresh") }}
-      </Button>
+      <div class="usage-toolbar-right">
+        <div class="usage-ranges" role="group" :aria-label="t('settings.usage.scopeLabel')">
+          <button
+            v-for="option in (['project', 'all'] as const)"
+            :key="option"
+            type="button"
+            :class="{ active: scope === option }"
+            :data-usage-scope="option"
+            @click="scope = option"
+          >
+            {{ t(scopeLabels[option]) }}
+          </button>
+        </div>
+        <Button variant="outline" size="sm" :disabled="loading" data-action="usage-refresh" @click="load">
+          <RefreshCw :size="14" :class="{ spin: loading }" /> {{ t(loading ? "settings.usage.refreshing" : "settings.usage.refresh") }}
+        </Button>
+      </div>
     </div>
 
     <p v-if="error" class="usage-feedback" role="alert">{{ error }}</p>
@@ -142,17 +193,53 @@ watch(range, load);
 
       <div v-if="overview.days.length" class="usage-block">
         <h3>{{ t("settings.usage.dailyTitle") }}</h3>
-        <div class="usage-chart" role="img" :aria-label="t('settings.usage.dailyCostLabel')">
-          <div
-            v-for="day in overview.days"
-            :key="day.day"
-            class="usage-bar-col"
-            :title="dayCostTitle(day)"
-          >
-            <div class="usage-bar" :style="{ height: barHeight(day.cost) }"></div>
-            <small v-if="day === overview.days[0] || day === overview.days.at(-1)">{{ day.day.slice(5) }}</small>
+        <div class="usage-heat" role="img" :aria-label="t('settings.usage.dailyCostLabel')">
+          <div class="usage-heat-months">
+            <span v-for="(column, index) in heatWeeks" :key="index">{{ column.label }}</span>
+          </div>
+          <div class="usage-heat-grid">
+            <div v-for="(column, index) in heatWeeks" :key="index" class="usage-heat-week">
+              <div
+                v-for="(day, slot) in column.cells"
+                :key="slot"
+                class="usage-heat-cell"
+                :class="{ empty: !day }"
+                :style="day ? { background: `color-mix(in srgb, var(--accent) ${HEAT_MIX[heatLevel(day)]}%, transparent)` } : undefined"
+                :title="day ? dayTitle(day) : undefined"
+              ></div>
+            </div>
           </div>
         </div>
+      </div>
+
+      <div v-if="scope === 'all' && overview.projects.length" class="usage-block">
+        <h3>{{ t("settings.usage.projectsTitle") }}</h3>
+        <table class="usage-table">
+          <thead>
+            <tr>
+              <th>{{ t("settings.usage.colProject") }}</th>
+              <th>{{ t("settings.usage.sessions") }}</th>
+              <th>{{ t("settings.usage.colTokensIn") }}</th>
+              <th>{{ t("settings.usage.colTokensOut") }}</th>
+              <th>{{ t("settings.usage.colCost") }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in overview.projects" :key="row.id">
+              <td class="usage-model" :title="row.path">{{ row.name }}</td>
+              <td>{{ row.sessions }}</td>
+              <td>{{ fmtTokens(row.usage.input) }}</td>
+              <td>{{ fmtTokens(row.usage.output) }}</td>
+              <td>
+                {{ fmtCost(row.usage.cost) }}<em
+                  v-if="row.estimatedCost > 0"
+                  class="usage-est-mark"
+                  :title="t('settings.usage.estimatedTip', { v: fmtCost(row.estimatedCost) })"
+                >≈</em>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <div v-if="overview.models.length" class="usage-block">
@@ -215,7 +302,10 @@ watch(range, load);
           </thead>
           <tbody>
             <tr v-for="row in overview.sessions" :key="row.path">
-              <td class="usage-model" :title="row.path">{{ row.name || row.firstMessage || row.id }}</td>
+              <td class="usage-model" :title="row.path">
+                <em v-if="scope === 'all' && row.project" class="usage-project-tag">{{ row.project.name }}</em>
+                {{ row.name || row.firstMessage || row.id }}
+              </td>
               <td>{{ fmtDate(row.modified) }}</td>
               <td>{{ row.messageCount }}</td>
               <td>{{ fmtTokens(row.usage.input) }}</td>
@@ -239,7 +329,8 @@ watch(range, load);
 
 <style scoped>
 .usage-panel { display: grid; gap: 18px; }
-.usage-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.usage-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.usage-toolbar-right { display: flex; align-items: center; gap: 10px; }
 .usage-ranges { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .usage-ranges button {
   padding: 5px 12px;
@@ -269,19 +360,27 @@ watch(range, load);
 .usage-est-mark { margin-left: 4px; color: var(--muted); font-style: normal; cursor: help; }
 .usage-block { display: grid; gap: 8px; }
 .usage-block h3 { margin: 0; font-size: 13px; font-weight: 600; }
-.usage-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 120px;
-  padding: 8px 10px;
+.usage-heat {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
+  overflow-x: auto;
 }
-.usage-bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; min-width: 0; }
-.usage-bar { width: 100%; max-width: 26px; border-radius: 3px 3px 0 0; background: var(--accent); opacity: 0.85; }
-.usage-bar-col small { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.usage-heat-months { display: flex; gap: 2px; }
+.usage-heat-months span {
+  width: 13px;
+  flex: 0 0 13px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.usage-heat-grid { display: flex; gap: 2px; }
+.usage-heat-week { display: grid; grid-template-rows: repeat(7, 13px); gap: 2px; }
+.usage-heat-cell { width: 13px; height: 13px; border-radius: 3px; }
+.usage-heat-cell.empty { border: 1px solid var(--border); background: transparent; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .usage-table th {
   position: sticky;
@@ -301,7 +400,16 @@ watch(range, load);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.usage-model { font-family: var(--font-mono, monospace); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.usage-model { font-family: var(--font-mono, monospace); max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.usage-project-tag {
+  margin-right: 7px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+}
 .usage-sub {
   margin-left: 7px;
   padding: 1px 7px;

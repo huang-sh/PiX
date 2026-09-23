@@ -38,6 +38,13 @@ export interface UsageRecord {
   source?: CostSource;
 }
 
+/** The project a session's usage is attributed to in the all-projects scope. */
+export interface UsageProjectRef {
+  id: string;
+  name: string;
+  path: string;
+}
+
 /** A session file reduced to identity plus its billed events. */
 export interface UsageSessionInput {
   id: string;
@@ -48,6 +55,7 @@ export interface UsageSessionInput {
   messageCount: number;
   firstMessage: string;
   records: UsageRecord[];
+  project?: UsageProjectRef;
 }
 
 export interface UsageSessionRow {
@@ -60,10 +68,20 @@ export interface UsageSessionRow {
   usage: UsageAmount;
   /** Portion of usage.cost estimated from price tables. */
   estimatedCost: number;
+  project?: UsageProjectRef;
 }
 
 export interface UsageModelRow {
   model: string;
+  usage: UsageAmount;
+  estimatedCost: number;
+}
+
+export interface UsageProjectRow {
+  id: string;
+  name: string;
+  path: string;
+  sessions: number;
   usage: UsageAmount;
   estimatedCost: number;
 }
@@ -87,6 +105,7 @@ export interface UsageOverview {
   sessionCount: number;
   days: UsageDayRow[];
   models: UsageModelRow[];
+  projects: UsageProjectRow[];
   sessions: UsageSessionRow[];
 }
 
@@ -164,12 +183,16 @@ export function estimateUsageCosts(
     }
 }
 
+const sumAmount = (target: UsageAmount, source: UsageAmount) => {
+  target.input += source.input;
+  target.output += source.output;
+  target.cacheRead += source.cacheRead;
+  target.cacheWrite += source.cacheWrite;
+  target.cost += source.cost;
+};
+
 const addAmount = (sum: UsageAmount, record: UsageRecord) => {
-  sum.input += record.usage.input;
-  sum.output += record.usage.output;
-  sum.cacheRead += record.usage.cacheRead;
-  sum.cacheWrite += record.usage.cacheWrite;
-  sum.cost += record.usage.cost;
+  sumAmount(sum, record.usage);
 };
 
 const estimatedCostOf = (record: UsageRecord) =>
@@ -218,6 +241,7 @@ export function aggregateUsage(
   const today = emptyAmount();
   const byModel = new Map<string, UsageBucket>();
   const byDay = new Map<string, UsageBucket>();
+  const byProject = new Map<string, { project: UsageProjectRef; bucket: UsageBucket; sessions: number }>();
   const rows: UsageSessionRow[] = [];
 
   for (const session of sessions) {
@@ -234,6 +258,19 @@ export function aggregateUsage(
       addRecord(bucketFor(byDay, dayKey), record);
     }
     if (usageTokens(inRange.amount) === 0 && inRange.amount.cost === 0) continue;
+    if (session.project) {
+      const entry =
+        byProject.get(session.project.id) ??
+        (byProject.set(session.project.id, {
+          project: session.project,
+          bucket: { amount: emptyAmount(), estimated: 0 },
+          sessions: 0,
+        }),
+        byProject.get(session.project.id)!);
+      sumAmount(entry.bucket.amount, inRange.amount);
+      entry.bucket.estimated += inRange.estimated;
+      entry.sessions++;
+    }
     rows.push({
       id: session.id,
       path: session.path,
@@ -243,6 +280,7 @@ export function aggregateUsage(
       messageCount: session.messageCount,
       usage: inRange.amount,
       estimatedCost: inRange.estimated,
+      ...(session.project ? { project: session.project } : {}),
     });
   }
 
@@ -289,6 +327,18 @@ export function aggregateUsage(
         estimatedCost: bucket.estimated,
       }))
       .filter((row) => usageTokens(row.usage) > 0 || row.usage.cost > 0)
+      .sort(
+        (a, b) =>
+          b.usage.cost - a.usage.cost ||
+          usageTokens(b.usage) - usageTokens(a.usage),
+      ),
+    projects: [...byProject.values()]
+      .map(({ project, bucket, sessions }) => ({
+        ...project,
+        sessions,
+        usage: bucket.amount,
+        estimatedCost: bucket.estimated,
+      }))
       .sort(
         (a, b) =>
           b.usage.cost - a.usage.cost ||

@@ -32,6 +32,7 @@ import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
   GitService,
+  historySessionDir,
   managedSessionFile,
   SessionFiles,
   SettingsService,
@@ -452,6 +453,27 @@ export class MainController {
       ...old.filter((session) => session.path !== snapshot.session.path),
     ]);
   }
+  /**
+   * Session directories behind the usage panel's all-projects scope: every
+   * local project in the history, the project in view first. Remote projects
+   * stay on their hosts, which answer the same route with their own scans.
+   */
+  private usageScans(bundle: SettingsBundle): Array<{ project: { id: string; name: string; path: string }; dir: string }> {
+    const current = this.project && !this.project.remote ? this.project : null;
+    const projects = [
+      ...(current ? [current] : []),
+      ...this.settings
+        .projectHistory()
+        .filter((record) => !record.project.remote && record.project.path !== current?.path)
+        .map((record) => record.project),
+    ];
+    return projects
+      .map((project) => ({
+        project: { id: projectId(project), name: project.name, path: project.path },
+        dir: historySessionDir(project, bundle),
+      }))
+      .filter((scan) => existsSync(scan.dir));
+  }
   async sessions() {
     const files = this.files;
     const running = this.registry.runningPaths();
@@ -799,11 +821,27 @@ export class MainController {
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
       }
-      case "usage.overview":
+      case "usage.overview": {
+        const bundle = this.settings.bundle();
+        const scans =
+          v.scope === "all"
+            ? this.usageScans(bundle)
+            : this.project && !this.project.remote && this.files.dir
+              ? [{
+                  project: {
+                    id: projectId(this.project),
+                    name: this.project.name,
+                    path: this.project.path,
+                  },
+                  dir: this.files.dir,
+                }]
+              : undefined;
         return this.projectRuntime.usageOverview(
           v.range as UsageRange,
-          this.settings.bundle().app.usage?.unbilledProviders ?? [],
+          bundle.app.usage?.unbilledProviders ?? [],
+          scans,
         );
+      }
       case "library.pin":
       case "library.archiveSession":
       case "library.archiveProject": {

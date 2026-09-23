@@ -42,6 +42,7 @@ import {
   estimateUsageCosts,
   usageAmount,
   type UsageOverview,
+  type UsageProjectRef,
   type UsageRange,
   type UsageRecord,
   type UsageSessionInput,
@@ -155,7 +156,12 @@ const usageMessageText = (message: any): string => {
 };
 
 /** Reduces one open session manager to the identity + billed events aggregateUsage takes. */
-function sessionUsage(manager: any, path: string, modified: string): UsageSessionInput {
+function sessionUsage(
+  manager: any,
+  path: string,
+  modified: string,
+  project?: UsageProjectRef,
+): UsageSessionInput {
   const header = manager.getHeader(),
     entries = manager.getEntries();
   const firstUser = usageMessageText(
@@ -175,7 +181,58 @@ function sessionUsage(manager: any, path: string, modified: string): UsageSessio
     messageCount: entries.filter((e: any) => e.type === "message").length,
     firstMessage: clip(firstUser, 120),
     records: usageRecordsOf(entries),
+    ...(project ? { project } : {}),
   };
+}
+
+/**
+ * Parsed session usage keyed by canonical file path, invalidated by mtime and
+ * size so repeated panel opens skip re-parsing unchanged files. Estimation
+ * mutates records in place, so hits (and the first read) hand out clones and
+ * the cache only ever holds untouched originals.
+ */
+const usageSessionCache = new Map<
+  string,
+  { mtimeMs: number; size: number; session: UsageSessionInput }
+>();
+const USAGE_SESSION_CACHE_MAX = 400;
+
+const cloneUsageSession = (session: UsageSessionInput): UsageSessionInput => ({
+  ...session,
+  records: session.records.map((record) => ({
+    ...record,
+    usage: { ...record.usage },
+  })),
+});
+
+function cachedSessionUsage(
+  pi: any,
+  path: string,
+  dir: string,
+  cwd: string,
+  project: UsageProjectRef | undefined,
+): UsageSessionInput {
+  const stat = statSync(path);
+  const cached = usageSessionCache.get(path);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
+    return cloneUsageSession(cached.session);
+  const session = sessionUsage(
+    pi.SessionManager.open(path, dir, cwd),
+    path,
+    stat.mtime.toISOString(),
+    project,
+  );
+  usageSessionCache.set(path, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    session,
+  });
+  // Map order is insertion order: drop the longest-unused entries first.
+  for (const key of usageSessionCache.keys()) {
+    if (usageSessionCache.size <= USAGE_SESSION_CACHE_MAX) break;
+    usageSessionCache.delete(key);
+  }
+  return cloneUsageSession(session);
 }
 
 export class PiRuntime {
@@ -485,37 +542,34 @@ export class PiRuntime {
       .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
   }
   /**
-   * Aggregated usage across the project's session files, for the settings
-   * page's usage panel. Read-only: each file is opened through the SDK's
-   * SessionManager and reduced in place; an unreadable file is skipped like
-   * the session list skips it. Costs the provider did not report are
+   * Aggregated usage across session files, for the settings page's usage
+   * panel. Read-only: each file is opened through the SDK's SessionManager
+   * (cached by mtime) and reduced in place; an unreadable file is skipped
+   * like the session list skips it. Costs the provider did not report are
    * estimated from the cached public price table while the scan runs;
-   * subscription-billed providers the user marked cost nothing.
+   * subscription-billed providers the user marked cost nothing. Scans default
+   * to this runtime's project; the controller passes one entry per local
+   * project for the all-projects scope.
    */
   async usageOverview(
     range: UsageRange,
     unbilledProviders: readonly string[] = [],
+    scans?: Array<{ project?: UsageProjectRef; dir: string }>,
   ): Promise<UsageOverview> {
     const { cwd, dir } = this;
     if (!cwd || !dir) throw new Error("Open a project first");
     const pi = await this.pi();
     const pricing = loadPricingTable();
-    const root = canonicalPath(dir);
-    const names = existsSync(root)
-      ? readdirSync(root).filter((n) => n.endsWith(".jsonl"))
-      : [];
+    const targets = scans?.length ? scans : [{ dir }];
     const sessions: UsageSessionInput[] = [];
-    for (const name of names) {
-      const path = join(root, name);
-      try {
-        sessions.push(
-          sessionUsage(
-            pi.SessionManager.open(path, dir, cwd),
-            path,
-            statSync(path).mtime.toISOString(),
-          ),
-        );
-      } catch (e) { debugLog("pi-runtime: usage scan", e); }
+    for (const target of targets) {
+      const root = canonicalPath(target.dir);
+      if (!existsSync(root)) continue;
+      for (const name of readdirSync(root).filter((n) => n.endsWith(".jsonl"))) {
+        try {
+          sessions.push(cachedSessionUsage(pi, join(root, name), target.dir, cwd, target.project));
+        } catch (e) { debugLog("pi-runtime: usage scan", e); }
+      }
     }
     const table = await pricing;
     estimateUsageCosts(sessions, model => resolvePricing(table, model), new Set(unbilledProviders));

@@ -863,3 +863,17 @@ export function configuredSessionDir(
     return isAbsolute(v) ? resolve(v) : resolve(project, v);
   return join(project, ".pi", "sessions");
 }
+/**
+ * A historical project's session directory for the usage panel's
+ * all-projects scope: only sessionDir differs from the bundle in effect,
+ * and the project's own settings file wins over the global default.
+ */
+export function historySessionDir(project: ProjectInfo, bundle: SettingsBundle) {
+  const own = readJson<PiSettings>(join(project.path, ".pi", "settings.json")).sessionDir;
+  const effective =
+    typeof own === "string" && own.trim() ? own : bundle.piGlobal.sessionDir;
+  return configuredSessionDir(project.path, {
+    ...bundle,
+    effective: { ...bundle.effective, sessionDir: effective },
+  });
+}

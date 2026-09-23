@@ -182,8 +182,30 @@ test("subscription-marked providers cost nothing, even when reported", () => {
   assert.equal(overview.totals.input, 180);
 });
 
-test("usage.overview validates its range and defaults", () => {
-  assert.deepEqual(validateRouteInput("usage.overview", {}), { range: "30d" });
-  assert.deepEqual(validateRouteInput("usage.overview", { range: "all" }), { range: "all" });
-  assert.deepEqual(validateRouteInput("usage.overview", { range: "bogus" }), { range: "30d" });
+test("usage.overview validates its range and scope", () => {
+  assert.deepEqual(validateRouteInput("usage.overview", {}), { range: "30d", scope: "project" });
+  assert.deepEqual(validateRouteInput("usage.overview", { range: "all", scope: "all" }), { range: "all", scope: "all" });
+  assert.deepEqual(validateRouteInput("usage.overview", { range: "bogus", scope: "bogus" }), { range: "30d", scope: "project" });
+});
+
+test("the all-projects scope attributes usage to projects", () => {
+  const one = {
+    ...session("a", [record(day(0), "zai/glm-5.3", { input: 100, cost: 0.3 })], day(0)),
+    project: { id: "p1", name: "One", path: "D:\one" },
+  };
+  const two = {
+    ...session("b", [record(day(0), "openai/gpt-x", { input: 50, cost: 0.1 })], day(0)),
+    project: { id: "p2", name: "Two", path: "D:\two" },
+  };
+  const untagged = session("c", [record(day(0), "zai/glm-5.3", { input: 7, cost: 0.02 })], day(0));
+  const overview = aggregateUsage([one, two, untagged], "today", now);
+  assert.deepEqual(
+    overview.projects.map((p) => p.name),
+    ["One", "Two"],
+  );
+  assert.ok(near(overview.projects[0]!.usage.cost, 0.3));
+  assert.equal(overview.projects[0]!.sessions, 1);
+  assert.ok(near(overview.totals.cost, 0.42));
+  assert.equal(overview.sessions.find((r) => r.id === "a")!.project!.name, "One");
+  assert.equal(overview.sessions.find((r) => r.id === "c")!.project, undefined);
 });
