@@ -244,7 +244,9 @@ export const en = {
       colCost: "Cost",
       includesEstimated: "includes {v} estimated",
       estimatedTip: "Includes {v} estimated from public model prices; the provider reports no cost for these replies.",
-      costSourceNote: "Costs are what your providers report per reply. When a provider reports none, PiX estimates from public model prices (LiteLLM); models without price data count tokens only.",
+      subMark: "Subscription",
+      subMarkTitle: "Mark this provider as subscription-billed (e.g. a coding plan): its costs stop counting toward every total and are never estimated; tokens still count.",
+      costSourceNote: "Costs are what your providers report per reply. When a provider reports none, PiX estimates from public model prices (LiteLLM); models without price data count tokens only. Subscription-billed providers can be marked in the model table to exclude their costs.",
     },
     about: {
       builtOn: "Built on Pi Coding Agent",
@@ -604,7 +606,9 @@ export const zhCN: typeof en = {
       colCost: "费用",
       includesEstimated: "含估算 {v}",
       estimatedTip: "其中 {v} 按公开模型价格估算——这些回复服务方未上报费用。",
-      costSourceNote: "费用优先取服务方逐次回复上报的数值；未上报时按公开模型价格（LiteLLM）估算；无价格数据的模型仅统计 token。",
+      subMark: "订阅",
+      subMarkTitle: "将该提供商标记为订阅/套餐计费（如 Coding Plan）：其费用不再计入任何汇总、也不会估算，token 仍正常统计。",
+      costSourceNote: "费用优先取服务方逐次回复上报的数值；未上报时按公开模型价格（LiteLLM）估算；无价格数据的模型仅统计 token。订阅/套餐计费的提供商可在模型表中标记，标记后费用不计入统计。",
     },
     about: {
       builtOn: "基于 Pi Coding Agent 构建",

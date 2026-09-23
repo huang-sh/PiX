@@ -6,12 +6,32 @@ import type { UsageOverview, UsageRange } from "../../../shared/usage";
 import { USAGE_RANGES } from "../../../shared/usage";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
+import { useLayoutStore } from "../../stores/layout";
 
 const { t } = useI18n();
+const layout = useLayoutStore();
 const range = ref<UsageRange>("30d");
 const overview = ref<UsageOverview>();
 const loading = ref(false);
 const error = ref("");
+
+// Subscription-billed providers (coding plans) the user marked as not billed
+// per token; persisted with the app settings, applied by the main process.
+const unbilled = computed(
+  () => new Set((layout.settings?.app.usage?.unbilledProviders ?? []).map(p => p.toLowerCase())),
+);
+const providerOf = (model: string) => model.slice(0, model.indexOf("/")) || model;
+async function toggleBilling(provider: string) {
+  if (!provider) return;
+  const next = new Set(unbilled.value);
+  next.has(provider.toLowerCase()) ? next.delete(provider.toLowerCase()) : next.add(provider.toLowerCase());
+  try {
+    await layout.updateAppSettings({ usage: { unbilledProviders: [...next] } });
+    await load();
+  } catch (e) {
+    layout.showNotice(e instanceof Error ? e.message : String(e), "error");
+  }
+}
 
 const rangeLabels: Record<UsageRange, string> = {
   today: "settings.usage.rangeToday",
@@ -150,17 +170,30 @@ watch(range, load);
           </thead>
           <tbody>
             <tr v-for="row in overview.models" :key="row.model">
-              <td class="usage-model">{{ row.model }}</td>
+              <td class="usage-model">
+                {{ row.model }}
+                <button
+                  type="button"
+                  class="usage-sub"
+                  :class="{ on: unbilled.has(providerOf(row.model)) }"
+                  :title="t('settings.usage.subMarkTitle')"
+                  :data-usage-sub="providerOf(row.model)"
+                  @click="toggleBilling(providerOf(row.model))"
+                >{{ t("settings.usage.subMark") }}</button>
+              </td>
               <td>{{ fmtTokens(row.usage.input) }}</td>
               <td>{{ fmtTokens(row.usage.output) }}</td>
               <td>{{ fmtTokens(row.usage.cacheRead) }}</td>
               <td>{{ fmtTokens(row.usage.cacheWrite) }}</td>
               <td>
-                {{ fmtCost(row.usage.cost) }}<em
-                  v-if="row.estimatedCost > 0"
-                  class="usage-est-mark"
-                  :title="t('settings.usage.estimatedTip', { v: fmtCost(row.estimatedCost) })"
-                >≈</em>
+                <template v-if="unbilled.has(providerOf(row.model))">—</template>
+                <template v-else>
+                  {{ fmtCost(row.usage.cost) }}<em
+                    v-if="row.estimatedCost > 0"
+                    class="usage-est-mark"
+                    :title="t('settings.usage.estimatedTip', { v: fmtCost(row.estimatedCost) })"
+                  >≈</em>
+                </template>
               </td>
             </tr>
           </tbody>
@@ -269,6 +302,19 @@ watch(range, load);
   white-space: nowrap;
 }
 .usage-model { font-family: var(--font-mono, monospace); max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.usage-sub {
+  margin-left: 7px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.usage-sub:hover { border-color: var(--accent); color: var(--text); }
+.usage-sub.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-strong, var(--accent)); }
 .usage-note { margin: 0; color: var(--muted); font-size: var(--font-size-caption); }
 .spin { animation: usage-spin 1s linear infinite; }
 @keyframes usage-spin { to { transform: rotate(360deg); } }

@@ -800,7 +800,10 @@ export class MainController {
         return { sessions };
       }
       case "usage.overview":
-        return this.projectRuntime.usageOverview(v.range as UsageRange);
+        return this.projectRuntime.usageOverview(
+          v.range as UsageRange,
+          this.settings.bundle().app.usage?.unbilledProviders ?? [],
+        );
       case "library.pin":
       case "library.archiveSession":
       case "library.archiveProject": {

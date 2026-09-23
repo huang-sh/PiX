@@ -489,9 +489,13 @@ export class PiRuntime {
    * page's usage panel. Read-only: each file is opened through the SDK's
    * SessionManager and reduced in place; an unreadable file is skipped like
    * the session list skips it. Costs the provider did not report are
-   * estimated from the cached public price table while the scan runs.
+   * estimated from the cached public price table while the scan runs;
+   * subscription-billed providers the user marked cost nothing.
    */
-  async usageOverview(range: UsageRange): Promise<UsageOverview> {
+  async usageOverview(
+    range: UsageRange,
+    unbilledProviders: readonly string[] = [],
+  ): Promise<UsageOverview> {
     const { cwd, dir } = this;
     if (!cwd || !dir) throw new Error("Open a project first");
     const pi = await this.pi();
@@ -514,7 +518,7 @@ export class PiRuntime {
       } catch (e) { debugLog("pi-runtime: usage scan", e); }
     }
     const table = await pricing;
-    estimateUsageCosts(sessions, model => resolvePricing(table, model));
+    estimateUsageCosts(sessions, model => resolvePricing(table, model), new Set(unbilledProviders));
     return aggregateUsage(sessions, range);
   }
   async open(path: string) {

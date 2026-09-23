@@ -16,8 +16,9 @@ export interface UsageAmount {
 }
 
 /** Where a record's cost came from: the provider's own number, a price-table
- * estimate (the provider reports none), or nothing (no price data either). */
-export type CostSource = "actual" | "estimated" | "none";
+ * estimate (the provider reports none), a subscription plan the user marked
+ * as not billed per token, or nothing (no price data either). */
+export type CostSource = "actual" | "estimated" | "unbilled" | "none";
 
 /** Per-token rates for the estimated source. */
 export interface ModelPricing {
@@ -125,16 +126,25 @@ export const usageTokens = (amount: UsageAmount) =>
   amount.input + amount.output + amount.cacheRead + amount.cacheWrite;
 
 /**
- * Fills in each record's cost source: provider-reported costs stay as-is
+ * Fills in each record's cost source: subscription-billed providers (coding
+ * plans) cost nothing by user marking; provider-reported costs stay as-is
  * (actual); where the provider reports none, the record's cost becomes a
  * price-table estimate; with no pricing match either, it stays zero (none).
  */
 export function estimateUsageCosts(
   sessions: UsageSessionInput[],
   resolve: (model: string) => ModelPricing | undefined,
+  unbilled: ReadonlySet<string> = new Set(),
 ): void {
+  const unbilledProviders = new Set([...unbilled].map(provider => provider.toLowerCase()));
   for (const session of sessions)
     for (const record of session.records) {
+      const provider = record.model.slice(0, record.model.indexOf("/"));
+      if (provider && unbilledProviders.has(provider.toLowerCase())) {
+        record.usage = { ...record.usage, cost: 0 };
+        record.source = "unbilled";
+        continue;
+      }
       if (record.usage.cost > 0) {
         record.source = "actual";
         continue;

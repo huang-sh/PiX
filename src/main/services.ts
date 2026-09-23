@@ -195,6 +195,18 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
   } catch {
     drop("keyboardShortcuts");
   }
+  if (out.usage !== undefined) {
+    const providers = (out.usage as { unbilledProviders?: unknown }).unbilledProviders;
+    const unbilled = [
+      ...new Set(
+        (Array.isArray(providers) ? providers : []).filter(
+          (p): p is string => typeof p === "string" && /^[^/\s]+$/u.test(p),
+        ),
+      ),
+    ];
+    if (unbilled.length) out.usage = { unbilledProviders: unbilled };
+    else drop("usage");
+  }
   return out;
 }
 

@@ -158,6 +158,30 @@ test("estimateUsageCosts keeps actual costs and fills estimates by source", () =
   assert.ok(near(overview.days[0]!.estimatedCost, unreported.usage.cost));
 });
 
+test("subscription-marked providers cost nothing, even when reported", () => {
+  const planReply = record(day(0), "zai/glm-5.3", { input: 100, cost: 0.5 });
+  const planUnknown = record(day(0), "zai/some-model", { input: 70 });
+  const paid = record(day(0), "openai/gpt-x", { input: 10, cost: 0.2 });
+  const sessions = [session("plan", [planReply, planUnknown, paid], day(0))];
+  estimateUsageCosts(
+    sessions,
+    (model) => (model === "zai/some-model" ? { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } : undefined),
+    new Set(["ZAI"]),
+  );
+  // Reported and estimable alike: a subscription plan is not billed per token.
+  assert.equal(planReply.source, "unbilled");
+  assert.equal(planReply.usage.cost, 0);
+  assert.equal(planUnknown.source, "unbilled");
+  assert.equal(planUnknown.usage.cost, 0);
+  assert.equal(paid.source, "actual");
+
+  const overview = aggregateUsage(sessions, "today", now);
+  assert.ok(near(overview.totals.cost, 0.2));
+  assert.equal(overview.estimatedCost, 0);
+  // Tokens still count for the subscription models.
+  assert.equal(overview.totals.input, 180);
+});
+
 test("usage.overview validates its range and defaults", () => {
   assert.deepEqual(validateRouteInput("usage.overview", {}), { range: "30d" });
   assert.deepEqual(validateRouteInput("usage.overview", { range: "all" }), { range: "all" });
