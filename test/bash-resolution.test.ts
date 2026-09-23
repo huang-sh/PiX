@@ -8,6 +8,7 @@ import {
   detectWindowsBash,
   findExecutableOnPath,
   memoizeOnce,
+  withDefaultPowershellTool,
   withDetectedBashShell,
 } from "../src/main/bash-resolution.js";
 
@@ -186,4 +187,84 @@ test("withDetectedBashShell falls back only when no shellPath is configured", ()
   assert.equal(fallback.settingCount(), 1);
   manager.configured = "C:\\custom\\bash.exe";
   assert.equal(fallback.getShellPath(), "C:\\custom\\bash.exe");
+});
+
+test("withDefaultPowershellTool appends powershell to any default set", () => {
+  const manager = {
+    configured: undefined as string[] | undefined,
+    getDefaultTools(): string[] | undefined {
+      return this.configured;
+    },
+    settingCount(): number {
+      return 1;
+    },
+  };
+  assert.equal(withDefaultPowershellTool(manager, "linux"), manager);
+  const fallback = withDefaultPowershellTool(manager, "win32");
+  assert.notEqual(fallback, manager);
+  assert.deepEqual(fallback.getDefaultTools(), [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "powershell",
+  ]);
+  assert.equal(fallback.settingCount(), 1);
+  // A migrated pi CLI config that lists tools without powershell still gets
+  // it appended, without rewriting the configured order.
+  manager.configured = ["read", "bash", "edit", "write"];
+  assert.deepEqual(fallback.getDefaultTools(), [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "powershell",
+  ]);
+  // An explicit list already containing powershell passes through untouched.
+  manager.configured = ["read", "powershell", "edit", "write"];
+  assert.deepEqual(fallback.getDefaultTools(), [
+    "read",
+    "powershell",
+    "edit",
+    "write",
+  ]);
+  // An explicitly empty list is a deliberate "no built-in tools"; forcing a
+  // shell back on would grant execution the user turned away.
+  manager.configured = [];
+  assert.deepEqual(fallback.getDefaultTools(), []);
+});
+
+test("wrappers read settings mutated through the wrapper", () => {
+  const manager = {
+    settings: {} as { defaultTools?: string[]; shellPath?: string },
+    getDefaultTools(): string[] | undefined {
+      return this.settings.defaultTools;
+    },
+    getShellPath(): string | undefined {
+      return this.settings.shellPath;
+    },
+    // Mirrors Pi's SettingsManager.applyOverrides/reload: fresh state lands
+    // as own properties of whatever object the method runs on.
+    applyOverrides(overrides: { defaultTools?: string[]; shellPath?: string }) {
+      this.settings = { ...this.settings, ...overrides };
+    },
+  };
+  const wrapped = withDefaultPowershellTool(
+    withDetectedBashShell(manager, "D:\\software\\Git\\bin\\bash.exe"),
+    "win32",
+  );
+  assert.deepEqual(wrapped.getDefaultTools(), [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "powershell",
+  ]);
+  assert.equal(wrapped.getShellPath(), "D:\\software\\Git\\bin\\bash.exe");
+  wrapped.applyOverrides({ shellPath: "C:\\custom\\bash.exe" });
+  assert.equal(wrapped.getShellPath(), "C:\\custom\\bash.exe");
+  wrapped.applyOverrides({ defaultTools: ["read", "grep"] });
+  assert.deepEqual(wrapped.getDefaultTools(), ["read", "grep", "powershell"]);
+  wrapped.applyOverrides({ defaultTools: [] });
+  assert.deepEqual(wrapped.getDefaultTools(), []);
 });

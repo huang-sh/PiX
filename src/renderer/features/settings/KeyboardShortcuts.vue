@@ -8,6 +8,7 @@ import type { SettingsBundle } from "../../../shared/types";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
 import { captureShortcut, isMac } from "../../keyboard-shortcuts";
+import { historyEnabled } from "../../experimental/history";
 import { useLayoutStore } from "../../stores/layout";
 
 const layout = useLayoutStore();
@@ -28,7 +29,11 @@ const fingerprint = (value: ShortcutOverrides) => JSON.stringify(SHORTCUTS.map((
 const dirty = computed(() => fingerprint(draft.value) !== fingerprint(saved.value));
 const filtered = computed(() => {
   const text = query.value.trim().toLowerCase();
-  return SHORTCUTS.filter(({ id }) => [t(`shortcuts.actions.${id}`), t(`shortcuts.descriptions.${id}`), ...shortcutBindings(id, draft.value).map(display)].join(" ").toLowerCase().includes(text));
+  return SHORTCUTS
+    // The shortcut id stays registered (persisted overrides reference ids),
+    // but a disabled experimental module advertises nothing.
+    .filter(({ id }) => id !== "history" || historyEnabled.value)
+    .filter(({ id }) => [t(`shortcuts.actions.${id}`), t(`shortcuts.descriptions.${id}`), ...shortcutBindings(id, draft.value).map(display)].join(" ").toLowerCase().includes(text));
 });
 
 watch(() => layout.settings?.app.keyboardShortcuts, (value) => {
@@ -141,7 +146,7 @@ defineExpose({ requestClose });
     <div class="shortcut-toolbar">
       <label class="settings-search"><Search :size="17" aria-hidden="true" /><input v-model="query" :placeholder="t('shortcuts.search')" :aria-label="t('shortcuts.search')" /></label>
       <Button variant="outline" :disabled="busy || !Object.keys(draft).length" data-shortcut-reset-all @click="reset()"><RotateCcw :size="15" />{{ t('shortcuts.resetAll') }}</Button>
-      <Button :disabled="busy || !dirty" data-shortcut-save @click="save"><Save :size="15" />{{ t(busy ? 'settings.saving' : 'settings.saveChanges') }}</Button>
+      <Button :disabled="busy || !dirty" data-shortcut-save @click="save"><Save :size="15" />{{ t(busy ? 'settings.saving' : 'common.save') }}</Button>
     </div>
     <p class="shortcut-scope">{{ t('shortcuts.scope') }}</p>
     <p v-if="error" class="settings-error" role="alert">{{ error }}</p>

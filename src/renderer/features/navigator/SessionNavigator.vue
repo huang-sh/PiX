@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import {
+  Archive,
+  ArchiveRestore,
+  CircleStop,
   Folder,
   FolderOpen,
   FolderSync,
@@ -11,6 +14,7 @@ import {
   Search,
   Settings,
   SquarePen,
+  Star,
   Upload,
 } from "@lucide/vue";
 import {
@@ -31,6 +35,7 @@ import NavigatorMenu from "./NavigatorMenu.vue";
 import { useSessionStore } from "../../stores/session";
 import { useLayoutStore } from "../../stores/layout";
 import { desktop } from "../../api";
+import { relativeTimeUnit } from "../../lib/relative-time";
 
 const emit = defineEmits<{
   pickProject: [];
@@ -65,11 +70,8 @@ watch(
 );
 
 function relative(value: string) {
-  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
-  if (elapsed < 60_000) return t("time.now");
-  if (elapsed < 3_600_000) return t("time.minutes", { n: Math.floor(elapsed / 60_000) });
-  if (elapsed < 86_400_000) return t("time.hours", { n: Math.floor(elapsed / 3_600_000) });
-  return t("time.days", { n: Math.floor(elapsed / 86_400_000) });
+  const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
+  return t(`time.${unit}`, { n });
 }
 
 function visible(record: ProjectGroup) {
@@ -183,6 +185,11 @@ async function revealSession(record: ProjectGroup, path: string) {
                   <DropdownMenuItem class="menu-item" @select="emit('activateProject', record)">
                     {{ t("nav.openProject") }}
                   </DropdownMenuItem>
+                  <DropdownMenuItem data-action="project-archive" class="menu-item" @select="session.archiveProject(record.id, !record.archived)">
+                    <Archive v-if="!record.archived" :size="14" />
+                    <ArchiveRestore v-else :size="14" />
+                    {{ t(record.archived ? "nav.unarchiveProject" : "nav.archiveProject") }}
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     class="menu-item danger"
                     :disabled="record.id === session.activeProjectId"
@@ -212,24 +219,33 @@ async function revealSession(record: ProjectGroup, path: string) {
                 <button
                   type="button"
                   class="session-item"
-                  :class="{ active: record.id === session.activeProjectId && session.current?.session.path === item.path }"
+                  :class="{ active: record.id === session.activeProjectId && session.current?.session.path === item.path, archived: item.archived }"
                   :title="item.name || item.firstMessage || item.id"
                   @click="emit('openProjectSession', record, item.path)"
                 >
                   <span>
                     <strong>{{ item.name || item.firstMessage || item.id }}</strong>
+                    <Star v-if="item.pinned" class="session-pin" :size="12" aria-hidden="true" />
                     <small>{{ relative(item.modified) }}</small>
+                    <small v-if="item.archived" class="archived-tag">{{ t("nav.archived") }}</small>
                   </span>
                   <i
                     :class="{
-                      running: record.id === session.activeProjectId && session.current?.session.path === item.path && session.activity?.active,
+                      running: item.running,
                       current: record.id === session.activeProjectId && session.current?.session.path === item.path,
                     }"
+                    :title="item.running ? t('nav.stopSession') : undefined"
                   />
                 </button>
               </ContextMenuTrigger>
               <ContextMenuPortal>
                 <ContextMenuContent data-navigator-menu class="menu-content" :side-offset="5">
+                  <ContextMenuItem v-if="item.running" data-action="session-stop" class="menu-item danger" @select="session.stop(item.path, record.id)">
+                    <CircleStop :size="14" />{{ t("nav.stopSession") }}
+                  </ContextMenuItem>
+                  <ContextMenuItem data-action="session-pin" class="menu-item" @select="session.pin(item.path, !item.pinned)">
+                    <Star :size="14" />{{ t(item.pinned ? "nav.unpinSession" : "nav.pinSession") }}
+                  </ContextMenuItem>
                   <ContextMenuItem data-action="session-copy-path" class="menu-item" @select="copy(item.path)">
                     {{ t("nav.copyPath") }}
                   </ContextMenuItem>
@@ -247,6 +263,11 @@ async function revealSession(record: ProjectGroup, path: string) {
                   </ContextMenuItem>
                   <ContextMenuItem data-action="session-rename" class="menu-item" @select="emit('rename', record, item.path, item.name ?? '')">
                     {{ t("common.rename") }}
+                  </ContextMenuItem>
+                  <ContextMenuItem data-action="session-archive" class="menu-item" @select="session.archiveSession(item.path, !item.archived)">
+                    <Archive v-if="!item.archived" :size="14" />
+                    <ArchiveRestore v-else :size="14" />
+                    {{ t(item.archived ? "nav.unarchiveSession" : "nav.archiveSession") }}
                   </ContextMenuItem>
                   <ContextMenuItem data-action="session-delete" class="menu-item danger" @select="emit('removeProjectSession', record, item.path)">
                     {{ t("common.delete") }}
@@ -270,6 +291,16 @@ async function revealSession(record: ProjectGroup, path: string) {
     </nav>
 
     <footer class="navigator-footer">
+      <Button
+        data-action="navigator-show-archived"
+        variant="ghost"
+        class="justify-start"
+        :class="session.showArchived ? 'text-[var(--accent)]' : ''"
+        :aria-pressed="session.showArchived"
+        @click="session.showArchived = !session.showArchived"
+      >
+        <Archive :size="16" />{{ t(session.showArchived ? "nav.hideArchived" : "nav.showArchived") }}
+      </Button>
       <Button variant="ghost" class="justify-start" @click="emit('settings')">
         <Settings :size="16" />{{ t("nav.settings") }}
       </Button>

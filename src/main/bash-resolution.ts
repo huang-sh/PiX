@@ -98,6 +98,38 @@ export function memoizeOnce<T>(detector: () => T): () => T {
   };
 }
 
+/** Pi's built-in defaults when defaultTools is unset. */
+const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
+
+/**
+ * Offer the powershell tool alongside whatever default set is active —
+ * PiX's own or a migrated pi CLI config — by appending it to defaultTools
+ * when missing. An explicitly empty list stays empty: that is a deliberate
+ * "no built-in tools", and forcing a shell back on would grant execution
+ * the user turned away. Only the platform is gated here; Pi resolves the
+ * executable itself when the tool runs. The prototype chain keeps every
+ * other SettingsManager behavior (reads and saves) on the real manager,
+ * and the configured list stays untouched on disk.
+ */
+export function withDefaultPowershellTool<
+  T extends { getDefaultTools(): string[] | undefined },
+>(settingsManager: T, platform: NodeJS.Platform = process.platform): T {
+  if (platform !== "win32") return settingsManager;
+  const base = settingsManager.getDefaultTools;
+  const fallback: T = Object.create(settingsManager);
+  // Pi's reload()/applyOverrides() store fresh settings as own properties of
+  // whatever object they run on, so the override must read through the
+  // wrapper (`this`), never through the captured manager.
+  fallback.getDefaultTools = function (this: T) {
+    const configured = base.call(this) ?? DEFAULT_TOOLS;
+    if (configured.length === 0) return configured;
+    return configured.includes("powershell")
+      ? configured
+      : [...configured, "powershell"];
+  };
+  return fallback;
+}
+
 /**
  * Fall back to the detected bash whenever Pi has no explicit shellPath
  * configured; an explicit user setting always wins. The prototype chain keeps
@@ -107,7 +139,10 @@ export function withDetectedBashShell<
   T extends { getShellPath(): string | undefined },
 >(settingsManager: T, detected: string | undefined): T {
   if (!detected) return settingsManager;
+  const base = settingsManager.getShellPath;
   const fallback: T = Object.create(settingsManager);
-  fallback.getShellPath = () => settingsManager.getShellPath() ?? detected;
+  fallback.getShellPath = function (this: T) {
+    return base.call(this) ?? detected;
+  };
   return fallback;
 }

@@ -1,12 +1,9 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// The skill management actions (getSkill, createSkill, …) ride agent.control.
-// A host from before them does not know those actions and would answer with a
-// session snapshot, so the protocol moves to force reinstalling such hosts.
-// The product version stays with the release chore: installers compare both,
-// so a protocol change alone triggers the reinstall.
-export const PIX_REMOTE_PROTOCOL = 11;
-export const PIX_HOST_VERSION = "0.0.14";
+// Git branch listing and switching require an updated remote host.
+// Installers compare both protocol and product version.
+export const PIX_REMOTE_PROTOCOL = 14;
+export const PIX_HOST_VERSION = "0.0.23";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
@@ -14,6 +11,7 @@ export const PROJECT_ROUTES = [
   "session.list",
   "session.snapshot",
   "session.open",
+  "session.stop",
   "session.rename",
   "session.delete",
   "agent.control",
@@ -23,6 +21,8 @@ export const PROJECT_ROUTES = [
   "workspace.read",
   "workspace.write",
   "git.status",
+  "git.branches",
+  "git.switch",
   "git.diff",
   "changes.read",
   "shell.run",
@@ -65,6 +65,7 @@ export interface HostHello {
   piVersion: string;
   platform: string;
   arch: string;
+  /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
 }
 

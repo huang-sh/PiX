@@ -50,8 +50,9 @@ export function createBranchMessageCache() {
       ? old.result : { messages: projectSession(window, leaf).messages, hasEarlier };
     cache.delete(key);
     cache.set(key, { entries: window, result });
-    // Bound view caching independently of the number of historical graph nodes.
-    if (cache.size > 16) cache.delete(cache.keys().next().value!);
+    // Bound view caching independently of the number of historical graph nodes;
+    // up to three chat panels page through history at the same time.
+    if (cache.size > 32) cache.delete(cache.keys().next().value!);
     return result;
   };
 }

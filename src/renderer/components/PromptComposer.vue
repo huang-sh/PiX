@@ -42,6 +42,9 @@ const props = defineProps<{
   models: RuntimeModel[];
   placeholder?: string;
   autofocus?: boolean;
+  // Fit the editor's height to its text (clamped by CSS min/max-height);
+  // the graph draft node opts in, the chat composer stays manually resizable.
+  autoGrow?: boolean;
   onModel: (model: RuntimeModel) => void;
   // explicit=true marks a user pick from the thinking menu; explicit=false marks a
   // model-driven adjustment so hosts can avoid persisting it as a user choice.
@@ -310,6 +313,22 @@ function onKeydown(event: KeyboardEvent) {
   void submit();
 }
 
+function fitEditor() {
+  const el = editor.value;
+  if (!el) return;
+  // Reset first so scrollHeight reports the content's needs, not the last fit;
+  // CSS min/max-height still clamp both ends, so the box never collapses or
+  // grows past the cap (where it scrolls inside instead).
+  el.style.height = "auto";
+  // scrollHeight excludes the border while the box is border-box sized; without
+  // adding it back the box lands a hair short and shows a spurious scrollbar.
+  el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+}
+
+watch(draft, () => {
+  if (props.autoGrow) fitEditor();
+}, { flush: "post" });
+
 async function focusEditor() {
   await nextTick();
   editor.value?.focus();
@@ -317,6 +336,7 @@ async function focusEditor() {
 
 onMounted(() => {
   if (props.autofocus) editor.value?.focus();
+  if (props.autoGrow) fitEditor();
 });
 
 watch(() => props.autofocus, (value) => {

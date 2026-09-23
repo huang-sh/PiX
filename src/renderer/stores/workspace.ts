@@ -18,6 +18,7 @@ export interface WorkspaceTab {
   path?: string;
   url?: string;
   document?: FileDocument;
+  savedContent?: string;
   patch?: string;
 }
 
@@ -29,12 +30,18 @@ const unavailableGit = (): GitStatus => ({
   clean: true,
 });
 
+// The shell/preview buffer must stay bounded like the desktop-side aggregate;
+// past the cap the oldest output is dropped and only recent lines are kept.
+export const MAX_UTILITY_OUTPUT = 2 * 1024 * 1024;
+
 export const useWorkspaceStore = defineStore("workspace", {
   state: () => ({
     project: undefined as ProjectInfo | undefined,
     files: [] as FileNode[],
     filesRequest: 0,
     git: unavailableGit(),
+    gitRequest: 0,
+    gitSwitching: false,
     diff: "",
     tabs: [] as WorkspaceTab[],
     activeTab: "",
@@ -63,6 +70,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.browserUrl = browserHome || "https://pi.dev";
       if (changed) {
         this.filesRequest++;
+        this.gitRequest++;
         this.files = [];
         this.git = unavailableGit();
         this.diff = "";
@@ -116,11 +124,39 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
     },
     async loadGit() {
+      const project = this.project;
+      const request = ++this.gitRequest;
       try {
-        this.git = await desktop.invoke<GitStatus>("git.status");
+        const status = await desktop.invoke<GitStatus>("git.status");
+        if (this.project === project && this.gitRequest === request) this.git = status;
       } catch {
-        this.git = unavailableGit();
+        if (this.project === project && this.gitRequest === request) this.git = unavailableGit();
       }
+    },
+    async switchGitBranch(branch: string) {
+      const project = this.project;
+      if (!project || this.gitSwitching) return;
+      if (this.tabs.some(tab => tab.kind === "file" && tab.document?.content !== tab.savedContent))
+        throw new Error("Save your open files before switching Git branches");
+      this.gitSwitching = true;
+      try {
+        const status = await desktop.invoke<GitStatus>("git.switch", { branch, cwd: project.path });
+        if (this.project !== project) return;
+        this.gitRequest++;
+        this.git = status;
+        this.diff = "";
+        for (const tab of this.tabs.filter(tab => tab.kind === "changes")) this.closeTab(tab.id);
+        await Promise.all([this.loadFiles(), ...this.tabs.filter(tab => tab.kind === "file").map(async tab => {
+          const previous = tab.document;
+          const unchanged = () => this.project === project && tab.document === previous && previous?.content === tab.savedContent;
+          try {
+            const document = await desktop.invoke<FileDocument>("workspace.read", { path: tab.path });
+            if (unchanged()) { tab.document = document; tab.savedContent = document.content; }
+          } catch {
+            if (unchanged()) this.closeTab(tab.id);
+          }
+        })]);
+      } finally { this.gitSwitching = false; }
     },
     async openFile(path: string) {
       const old = this.tabs.find((tab) => tab.kind === "file" && tab.path === path);
@@ -134,6 +170,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         title: document.name,
         path,
         document,
+        savedContent: document.content,
       };
       this.tabs.push(tab);
       this.activeTab = tab.id;
@@ -144,6 +181,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         path: tab.path,
         content,
       });
+      tab.savedContent = tab.document.content;
     },
     async openChange(path?: string) {
       this.diff = await desktop.invoke<string>("git.diff", { path });
@@ -183,10 +221,14 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.tabs = this.tabs.filter((tab) => tab.id !== id);
       this.activeTab = this.tabs.at(-1)?.id ?? "";
     },
+    appendUtility(text: string) {
+      if (!text) return;
+      this.utilityOutput = `${this.utilityOutput}${text}`.slice(-MAX_UTILITY_OUTPUT);
+    },
     async runShell(command: string) {
-      this.utilityOutput += `\n$ ${command}\n`;
+      this.appendUtility(`\n$ ${command}\n`);
       const result = await desktop.invoke<ShellResult>("shell.run", { command });
-      this.utilityOutput += result.output;
+      this.appendUtility(result.output);
     },
     record(event: DesktopEvent) {
       if (event.type === "terminal") return;
@@ -207,12 +249,12 @@ export const useWorkspaceStore = defineStore("workspace", {
       if (this.events.length > 200) this.events.length = 200;
       if (event.type === "shell") {
         const payload = event.payload as { chunk?: string };
-        if (payload.chunk) this.utilityOutput += payload.chunk;
+        if (payload.chunk) this.appendUtility(payload.chunk);
       }
       if (event.type === "notice") {
         const payload = event.payload as { source?: string; message?: string };
         if (payload.source === "extension" && payload.message)
-          this.utilityOutput += `${payload.message}\n`;
+          this.appendUtility(`${payload.message}\n`);
       }
     },
   },

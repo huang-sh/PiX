@@ -447,18 +447,18 @@ try {
       section: window.__pixTest.state().contentSection,
       fileTab: Boolean(document.querySelector('[data-file-tab="README.md"]')),
       fileTabActive: document.querySelector('[data-file-tab="README.md"]')?.classList.contains('active'),
-      editor: Boolean(document.querySelector('.code-editor')),
-      editorText: document.querySelector('.code-editor')?.textContent?.slice(0, 60)
+      preview: Boolean(document.querySelector('[data-markdown-preview]')),
+      previewText: document.querySelector('[data-markdown-preview]')?.textContent?.slice(0, 60)
     })`);
-    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.editor)
+    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.preview)
       throw new Error(
         `Relative link did not open the file in the Files tool: ${JSON.stringify(value)}`,
       );
     return value;
   });
   result.fileOpenedInTool = true;
-  result.editorText = await cdp.evaluate(
-    "document.querySelector('.code-editor')?.textContent?.slice(0, 60)",
+  result.previewText = await cdp.evaluate(
+    "document.querySelector('[data-markdown-preview]')?.textContent?.slice(0, 60)",
   );
   result.probe = await cdp.evaluate("window.__linkProbe");
 
@@ -509,9 +509,9 @@ try {
       section: window.__pixTest.state().contentSection,
       fileTab: Boolean(document.querySelector('[data-file-tab="NOTES.md"]')),
       fileTabActive: document.querySelector('[data-file-tab="NOTES.md"]')?.classList.contains('active'),
-      editor: Boolean(document.querySelector('.code-editor'))
+      preview: Boolean(document.querySelector('[data-markdown-preview]'))
     })`);
-    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.editor)
+    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.preview)
       throw new Error(
         `Absolute-path link did not open the file in the Files tool: ${JSON.stringify(value)}`,
       );

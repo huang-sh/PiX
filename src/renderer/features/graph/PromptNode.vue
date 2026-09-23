@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Image, LoaderCircle, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, GitBranch, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -9,6 +9,7 @@ import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import type { BranchDirection } from "../../graph-layout";
+import { relativeTimeUnit } from "../../lib/relative-time";
 
 interface NodeContent {
   user: string;
@@ -28,8 +29,15 @@ export interface PromptNodeData {
   searchHit?: boolean;
   content: () => NodeContent;
   onCompose: (direction?: BranchDirection) => void;
+  /** Opens this node in a pinned chat column; graph sessions only. */
+  onOpenPanel?: () => void;
   /** Present only on failed turns: reopens the prompt as an editable draft. */
   onRetry?: () => void;
+  /** Copies the root-to-node path into a new standalone session; graph sessions only. */
+  onExportSession?: () => void;
+  /** Live id of the node the chat panel shows; focus moves do not re-render cards. */
+  viewedNodeId?: () => string | null;
+  exportBlockedReason?: string;
   onDelete?: () => void;
   deleteBlockedReason?: string;
 }
@@ -48,6 +56,12 @@ const CLOSE_DELAY_MS = 500;
 let previewObserver: ResizeObserver | undefined;
 const displayModel = computed(() => props.data.node.footer?.model);
 const usage = computed(() => props.data.node.footer?.contextUsage);
+// Focus moves never rebuild the cards, so the viewed-node check stays live here.
+const exportBlocked = computed(() => {
+  if (props.data.viewedNodeId && props.data.viewedNodeId() !== props.data.node.id)
+    return t("graph.exportBranchBlockedNotCurrent");
+  return props.data.exportBlockedReason ? t(props.data.exportBlockedReason) : undefined;
+});
 
 function clearTimers() {
   window.clearTimeout(openTimer);
@@ -162,10 +176,8 @@ onBeforeUnmount(() => {
 });
 
 function relative(value: string) {
-  const minutes = Math.floor(Math.max(0, Date.now() - new Date(value).getTime()) / 60_000);
-  if (minutes < 1) return t("time.now");
-  if (minutes < 60) return t("time.minutes", { n: minutes });
-  return t("time.hours", { n: Math.floor(minutes / 60) });
+  const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
+  return t(`time.${unit}`, { n });
 }
 </script>
 
@@ -208,6 +220,12 @@ function relative(value: string) {
       class="node-footer nodrag nowheel"
       @click.stop
     >
+      <span v-if="data.node.gitBranch" class="node-footer-value node-git-branch"
+        :title="t('graph.gitBranchAtStart', { branch: data.node.gitBranch })"
+        :aria-label="t('graph.gitBranchAtStart', { branch: data.node.gitBranch })">
+        <GitBranch :size="12" aria-hidden="true" />
+        <span>{{ data.node.gitBranch }}</span>
+      </span>
       <span
         class="node-context-usage"
         :title="usage ? `${compactTokens(usage.tokens)} / ${compactTokens(usage.contextWindow)} tokens` : 'Usage will be saved after this node finishes'"
@@ -254,6 +272,13 @@ function relative(value: string) {
   <ContextMenuPortal>
     <ContextMenuContent class="menu-content nodrag nowheel" :side-offset="4" @close-auto-focus.prevent>
       <ContextMenuItem
+        v-if="data.onOpenPanel"
+        class="menu-item"
+        data-action="node-open-chat"
+        :title="t('graph.openInPanelHint')"
+        @select="data.onOpenPanel()"
+      ><MessageSquare :size="14" />{{ t('graph.openInPanel') }}</ContextMenuItem>
+      <ContextMenuItem
         v-if="data.node.hasError"
         class="menu-item"
         data-action="node-retry"
@@ -261,6 +286,14 @@ function relative(value: string) {
         :title="t('graph.retryTurnHint')"
         @select="data.onRetry?.()"
       ><RotateCcw :size="14" />{{ t('graph.retryTurn') }}</ContextMenuItem>
+      <ContextMenuItem
+        v-if="data.onExportSession"
+        class="menu-item"
+        data-action="node-export-session"
+        :disabled="Boolean(exportBlocked)"
+        :title="exportBlocked || t('graph.exportBranchHint')"
+        @select="data.onExportSession()"
+      ><FolderOutput :size="14" />{{ t('graph.exportBranch') }}</ContextMenuItem>
       <ContextMenuItem
         class="menu-item danger"
         data-action="node-delete"

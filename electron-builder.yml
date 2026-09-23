@@ -9,6 +9,14 @@ directories:
 files:
   - out/**
   - resources/**
+  # Dev artifacts inside node_modules only: sourcemaps are read by DevTools
+  # and type declarations by the TypeScript compiler — nothing in the
+  # packaged app resolves either. Scoped to node_modules so the out/
+  # sourcemaps of PiX's own code stay in the asar for crash debugging.
+  - "!node_modules/**/*.map"
+  - "!node_modules/**/*.d.ts"
+  - "!node_modules/**/*.d.mts"
+  - "!node_modules/**/*.d.cts"
 
 # Cross-platform binary pruning (esbuild ships ~230MB of other-platform
 # binaries via pi's chord dependency).
@@ -99,6 +107,45 @@ mac:
   target:
     - target: dmg
     - target: zip
+
+linux:
+  icon: build/icon.png
+  category: Development
+  executableName: pix
+  syncDesktopName: true
+  maintainer: PiX <pix@earendil.works>
+  synopsis: Graph-first workbench for Pi Agent
+  artifactName: PiX-${version}-${arch}.${ext}
+  extraResources:
+    - from: node_modules/@injaneity/pi-computer-use
+      to: pi-builtin/node_modules/@injaneity/pi-computer-use
+      filter:
+        - "**/*"
+        - "!prebuilt/macos/**"
+        - "!prebuilt/windows/**"
+    - from: node_modules/@ff-labs/pi-fff
+      to: pi-builtin/node_modules/@ff-labs/pi-fff
+    - from: node_modules/@ff-labs/fff-node
+      to: pi-builtin/node_modules/@ff-labs/fff-node
+    - from: node_modules/@ff-labs/fff-bin-linux-${arch}-gnu
+      to: pi-builtin/node_modules/@ff-labs/fff-bin-linux-${arch}-gnu
+    - from: node_modules/ffi-rs
+      to: pi-builtin/node_modules/ffi-rs
+    - from: node_modules/@yuuang/ffi-rs-linux-${arch}-gnu
+      to: pi-builtin/node_modules/@yuuang/ffi-rs-linux-${arch}-gnu
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+    - target: rpm
+      arch:
+        - x64
+    - target: tar.gz
+      arch:
+        - x64
 
 nsis:
   oneClick: false

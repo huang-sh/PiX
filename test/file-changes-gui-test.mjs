@@ -40,7 +40,6 @@ writeFileSync(join(testHome, ".pix", "gui.settings.json"), JSON.stringify({
     version: 4,
     widths: { navigator: 248, chat: 356, content: 320 },
     collapsed: { navigator: true, chat: false, content: true },
-    composer: { open: false },
     minimap: false,
     utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
   },

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BookOpen, Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, RefreshCw, Square, Terminal, TriangleAlert } from "@lucide/vue";
+import { BookOpen, Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, RefreshCw, Square, Terminal, TriangleAlert, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
@@ -8,6 +8,7 @@ import type { WikiBranchStatus } from "../../../shared/wiki";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import BranchHistory, { type HistoryTurn as Turn } from "./BranchHistory.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
@@ -15,15 +16,20 @@ import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useWorkspaceStore } from "../../stores/workspace";
 
+// A pinned column binds every view to one node; the primary column (no nodeId)
+// keeps following the graph selection.
+const props = defineProps<{ nodeId?: string | null }>();
 const session = useSessionStore();
-const selectedRun = computed(() => session.selectedRun);
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
+const panelNodeId = computed(() => props.nodeId ?? session.focusedNode ?? session.current?.projection.activeNodeId ?? null);
+const panelNode = computed(() => session.nodeFor(panelNodeId.value));
+const selectedRun = computed(() => session.runFor(panelNodeId.value));
 // Every branch's store updates immediately; only the visible view is frame-paced.
-const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.selectedActivity);
+const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.activityFor(panelNodeId.value));
 const activity = shallowRef<AgentActivity>();
 let activityFrame: number | undefined;
-const { submitDraft } = useDraftSubmit();
+const { submitDraft, submittedNodeId } = useDraftSubmit();
 const { t } = useI18n();
 const scroll = ref<HTMLElement>();
 const content = ref<HTMLElement>();
@@ -41,9 +47,8 @@ let restoreTicket = 0;
 let restoringPosition = false;
 let scrollFrame: number | undefined;
 let lastScrollTop = 0;
-const history = computed(() => session.messageWindow(visibleTurnCount.value));
-const historyKey = computed(() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch,
-  session.focusedNode ?? session.current?.projection.activeNodeId]));
+const history = computed(() => session.messageWindowFor(panelNodeId.value, visibleTurnCount.value));
+const historyKey = computed(() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch, panelNodeId.value]));
 watch([latestActivity, historyKey, () => selectedRun.value?.runId], ([latest, key, run], previous) => {
   const showLatest = () => {
     if (activityFrame !== undefined) cancelAnimationFrame(activityFrame);
@@ -73,15 +78,15 @@ const composerThinking = ref<string>();
 
 const composerRunnable = computed(() =>
   Boolean(session.current?.runtime.available && (session.current.graph
-    ? session.selectedNode?.forkable !== false && !session.focusedNode?.startsWith("pending:")
+    ? panelNode.value?.forkable !== false && !panelNodeId.value?.startsWith("pending:")
     : !session.current.runtime.isStreaming)));
 const composerModelValue = computed(() => {
   if (composerModel.value !== undefined) return composerModel.value;
-  return session.selectedNode?.footer?.model ?? session.current?.runtime.model ?? null;
+  return panelNode.value?.footer?.model ?? session.current?.runtime.model ?? null;
 });
 const composerThinkingValue = computed(() =>
   composerThinking.value
-  ?? session.selectedNode?.footer?.thinkingLevel
+  ?? panelNode.value?.footer?.thinkingLevel
   ?? session.userThinking
   ?? session.current?.runtime.thinkingLevel
   ?? "off");
@@ -100,12 +105,12 @@ function stopComposer() {
   else void session.control({ action: "abort" });
 }
 const composerTarget = computed(() =>
-  session.selectedNode
-    ? t("branch.composerFrom", { title: session.selectedNode.title })
+  panelNode.value
+    ? t("branch.composerFrom", { title: panelNode.value.title })
     : t("branch.composerRoot"));
 
 watch(
-  [() => session.current?.session.path, () => session.selectedNode?.id],
+  [() => session.current?.session.path, () => panelNode.value?.id],
   () => {
     composerModel.value = undefined;
     composerThinking.value = undefined;
@@ -115,6 +120,7 @@ watch(
 function setComposerModel(model: RuntimeModel) {
   composerModel.value = model;
   if (model.reasoning === false) composerThinking.value = "off";
+  void session.setDefaultModel(model);
 }
 
 function setComposerThinking(level: string, explicit: boolean) {
@@ -123,13 +129,43 @@ function setComposerThinking(level: string, explicit: boolean) {
 }
 
 // The host admits the prompt and its model settings as one branch operation.
+// A pinned column submits without moving the global focus, then follows its
+// own branch to the new node; the primary column keeps the current selection.
 async function submitComposer(text: string, images?: PromptImage[]) {
-  return submitDraft(session.selectedNode?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
+  if (!props.nodeId)
+    return submitDraft(panelNode.value?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
+  const delivered = await submitDraft(props.nodeId, text, composerModelValue.value, composerThinkingValue.value, images, { follow: false });
+  if (delivered && submittedNodeId.value) layout.advanceChatColumn(props.nodeId, submittedNodeId.value);
+  return delivered;
 }
+
+// Each column's composer expands independently. A pinned column remounts
+// when its node advances, so its expansion is kept in the store to survive
+// that remount; the primary column never remounts.
+const composer = ref<InstanceType<typeof PromptComposer>>();
+const composerOpen = ref(props.nodeId ? layout.chatColumnComposers[props.nodeId] ?? false : false);
+// Register the live state up front, so a record entry always mirrors a mounted
+// column and an advance can tell a live column from an id no column holds.
+if (props.nodeId) layout.chatColumnComposers[props.nodeId] = composerOpen.value;
+async function openComposer() {
+  composerOpen.value = true;
+  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = true;
+  await nextTick();
+  void composer.value?.focus();
+}
+function closeComposer() {
+  composerOpen.value = false;
+  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = false;
+}
+// Reopening the chat panel puts the cursor back in the primary column's
+// composer when it is expanded; pinned columns leave the focus alone.
+watch(() => layout.layout.collapsed.chat, (collapsed) => {
+  if (!collapsed && !props.nodeId) void composer.value?.focus();
+});
 
 const showingActivity = computed(() => Boolean(
   activity.value &&
-  (session.current?.graph || !session.selectedNode || session.selectedNode.id === session.current?.projection.activeNodeId),
+  (session.current?.graph || !panelNode.value || panelNode.value.id === session.current?.projection.activeNodeId),
 ));
 
 // --- Session wiki region -------------------------------------------------
@@ -206,9 +242,11 @@ const visibleTurns = computed<Turn[]>(() =>
     // message the projection reads for node.hasError. An empty final reply is a
     // failure, never the earlier text that happened to precede it.
     const terminal = [...body].reverse().find((message) => message.role === "assistant");
+    const node = session.nodeFor(id);
     return {
       id,
-      fileChanges: session.current?.projection.nodes.find(node => node.id === id)?.fileChanges,
+      gitBranch: node?.gitBranch,
+      fileChanges: node?.fileChanges,
       user,
       terminal,
       running: selectedRun.value?.status === "running" && id === selectedRun.value.nodeId,
@@ -295,7 +333,7 @@ function scrollLatest() {
 }
 
 watch([() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch]),
-  () => session.focusedNode ?? session.current?.projection.activeNodeId], ([scope, id], previous) => {
+  () => panelNodeId.value], ([scope, id], previous) => {
   const version = ++viewVersion;
   if (scrollFrame !== undefined) { cancelAnimationFrame(scrollFrame); scrollFrame = undefined; }
   if (readingScope !== scope) { readingPositions.clear(); readingScope = scope; }
@@ -375,11 +413,17 @@ onBeforeUnmount(() => {
     <header class="panel-header">
       <span class="branch-title">
         <MessageSquare :size="17" />
-        <span>
-          <strong>{{ t("branch.title") }}</strong>
-          <small>{{ session.selectedNode?.title ?? t("branch.noNodeSelected") }}</small>
-        </span>
+        <small>{{ panelNode?.title ?? t("branch.noNodeSelected") }}</small>
       </span>
+      <GitBranchPicker />
+      <button
+        type="button"
+        class="branch-close"
+        :data-action="nodeId ? 'chat-column-close' : 'chat-panel-close'"
+        :aria-label="nodeId ? t('branch.closePanel') : t('branch.closeChat')"
+        :title="nodeId ? t('branch.closePanel') : t('branch.closeChat')"
+        @click="nodeId ? layout.closeChatColumn(nodeId) : layout.setCollapsed('chat', true)"
+      ><X :size="14" /></button>
     </header>
     <div v-if="selectedRun?.error" class="graph-storage-state" role="status">
       <small>{{ selectedRun.error }}</small>
@@ -482,7 +526,7 @@ onBeforeUnmount(() => {
       >
         <summary>
           <LoaderCircle :size="14" class="spin" />
-          {{ t("branch.working", { n: activity.pass }) }}
+          {{ activity.pass > 1 ? t("branch.workingPass", { n: activity.pass }) : t("branch.working") }}
           <ChevronRight class="disclosure" :size="13" />
         </summary>
         <div class="process-items">
@@ -539,12 +583,12 @@ onBeforeUnmount(() => {
     </div>
 
     <footer v-if="session.current" class="chat-composer">
-      <div v-if="!layout.layout.composer.open" class="composer-bar">
+      <div v-if="!composerOpen" class="composer-bar">
         <button
           type="button"
           class="composer-collapsed"
           :title="composerTarget"
-          @click="layout.setComposerOpen(true)"
+          @click="openComposer"
         >
           <MessageSquarePlus :size="14" />
           <span>{{ composerTarget }}</span>
@@ -569,19 +613,19 @@ onBeforeUnmount(() => {
             type="button"
             :title="t('branch.composerClose')"
             :aria-label="t('branch.composerClose')"
-            @click="layout.setComposerOpen(false)"
+            @click="closeComposer"
           >
             <ChevronDown :size="14" />
           </button>
         </div>
         <PromptComposer
+          ref="composer"
           :runnable="composerRunnable"
           :model="composerModelValue"
           :thinking-level="composerThinkingValue"
           :models="session.models"
           :placeholder="composerPlaceholder"
           :running="composerRunning"
-          autofocus
           :on-model="setComposerModel"
           :on-thinking="setComposerThinking"
           :on-submit="submitComposer"

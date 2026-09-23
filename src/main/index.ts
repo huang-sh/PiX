@@ -11,17 +11,33 @@ import {
   Tray,
 } from "electron";
 import { dirname, join, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
+import { debugLog, logFile } from "./debug-log.js";
+import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
+import { applyLinuxImeWorkaround } from "./linux-ime.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
+
+applyLinuxImeWorkaround({
+  platform: process.platform,
+  env: process.env,
+  hasSwitch: (name) => app.commandLine.hasSwitch(name),
+  getSwitchValue: (name) => app.commandLine.getSwitchValue(name),
+  appendSwitch: (name, value) => app.commandLine.appendSwitch(name, value),
+});
+
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
 let tray: Tray | undefined;
 let isQuitting = false;
+// Set once the startup chain reaches its end; anything earlier leaves no usable window.
+let started = false;
 let currentTheme: ThemePreference = "light";
 const zhUi = () => {
   const lang = controller.settings.bundle().app.language;
@@ -30,6 +46,22 @@ const zhUi = () => {
     (lang === "system" && app.getLocale().startsWith("zh"))
   );
 };
+/**
+ * A failure that leaves the app without a usable window: record the cause for
+ * support, then show it, because the user would otherwise see nothing at all.
+ */
+function reportFailure(kind: "startup" | "window", context: string, error: unknown) {
+  debugLog(context, error);
+  // A startup failure can predate the settings service, so the wording must not
+  // depend on reading it; the OS locale answers instead.
+  let zh: boolean;
+  try { zh = zhUi(); } catch { zh = app.getLocale().startsWith("zh"); }
+  const head = kind === "startup"
+    ? (zh ? "PiX 启动失败" : "PiX failed to start")
+    : (zh ? "PiX 无法打开窗口" : "PiX could not open its window");
+  const detail = error instanceof Error ? error.message : String(error);
+  dialog.showErrorBox("PiX", `${head}: ${detail}\n\n${zh ? "日志" : "Log"}: ${logFile()}`);
+}
 // The tray icon only exists while it can be needed: it appears on the first
 // close-to-tray hide and lives until quit (restore-from-tray keeps it, the
 // way tray-native apps behave).
@@ -42,8 +74,10 @@ function ensureTray() {
   tray = new Tray(icon);
   tray.setToolTip("PiX");
   const restore = () => {
-    win?.show();
-    win?.focus();
+    // macOS keeps the app alive after its last window closes, so the tray has
+    // to bring a window back rather than re-show one that no longer exists.
+    if (!win) void create().catch(e => reportFailure("window", "index: create from tray", e));
+    else { win.show(); win.focus(); }
   };
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -91,7 +125,9 @@ async function create() {
         ])
       : null,
   );
-  win = new BrowserWindow({
+  // This window owns every listener below and the module-level `win` only
+  // names the current one, so a late event from it cannot clear a replacement.
+  const created = new BrowserWindow({
     icon: join(app.getAppPath(), "resources/icon.png"),
     width: 1600,
     height: 940,
@@ -128,8 +164,19 @@ async function create() {
       backgroundThrottling: false,
     },
   });
-  win.once("ready-to-show", () => win.show());
-  win.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
+  win = created;
+  // ready-to-show is the no-flash moment, but an Electron upgrade once
+  // stopped it from firing on Windows and the app stayed invisible; showing
+  // after load finishes is the floor below which the window must not sink.
+  let shown = false;
+  const showOnce = () => {
+    if (shown || win !== created) return;
+    shown = true;
+    created.show();
+  };
+  created.once("ready-to-show", showOnce);
+  created.webContents.once("did-finish-load", () => setTimeout(showOnce, 200));
+  created.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
       void openExternal(url).catch(() => {});
     return { action: "deny" };
   });
@@ -138,17 +185,20 @@ async function create() {
   // known link kinds; anything that still reaches a navigation attempt goes
   // through the same protocol-allowlisted external open (and is dropped for
   // non-web protocols such as file:).
-  win.webContents.on("will-navigate", (event: Event, url: string) => {
+  created.webContents.on("will-navigate", (event, url) => {
     // A navigation to the page's own URL is the app reloading itself (vite
     // HMR full-reload in dev); it must proceed in-place, not be handed to
     // the OS browser as if it were an external link.
-    if (url === win.webContents.getURL()) return;
+    if (url === created.webContents.getURL()) return;
     event.preventDefault();
     void openExternal(url).catch(() => {});
   });
-  win.webContents.on(
+  created.webContents.on("render-process-gone", (_event, details) => {
+    debugLog(`renderer: process gone (reason=${details.reason}, exitCode=${details.exitCode})`, new Error(details.reason));
+  });
+  created.webContents.on(
     "will-attach-webview",
-    (_e: unknown, p: Record<string, unknown>) => {
+    (_e, p) => {
       delete p.preload;
       p.nodeIntegration = false;
       p.contextIsolation = true;
@@ -160,16 +210,20 @@ async function create() {
   // isQuitting flag (before-quit fires before close events) or the tray
   // menu's Quit item. macOS keeps native behavior: the window closes and the
   // app stays in the dock.
-  win.on("close", (e: { preventDefault(): void }) => {
+  created.on("close", (e: { preventDefault(): void }) => {
     if (isQuitting || process.platform === "darwin") return;
     if (controller.settings.bundle().app.closeToTray === false) return;
     e.preventDefault();
-    win.hide();
+    created.hide();
     ensureTray();
   });
+  // Release the reference the moment the window is destroyed: every later
+  // broadcast and theme sync then no-ops instead of throwing into the agent
+  // event stream (macOS keeps the app alive after its last window closes).
+  created.on("closed", () => { if (win === created) win = undefined; });
   if (process.env.ELECTRON_RENDERER_URL)
-    await win.loadURL(process.env.ELECTRON_RENDERER_URL);
-  else await win.loadFile(join(dir, "../renderer/index.html"));
+    await created.loadURL(process.env.ELECTRON_RENDERER_URL);
+  else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
   bootstrapPixProfile(pixHome());
@@ -206,8 +260,96 @@ app.whenReady().then(async () => {
     async openExternal(url) {
       await openExternal(url);
     },
+    async openPath(path) {
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
+      // openPath resolves to the OS handler for the file type — associated
+      // app for files, Explorer/Finder for folders — and reports failures as
+      // a string rather than rejecting.
+      const failure = await shell.openPath(path);
+      if (failure) throw new Error(failure);
+    },
+    async openWith(path) {
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
+      if (process.platform === "win32") {
+        // OpenAs_RunDLL opens the system "Open with" dialog, which lists every
+        // application registered for this file type, offers browsing for one
+        // and can reset the default handler. Detached: the dialog outlives any
+        // single window and never blocks the app.
+        const rundll32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "rundll32.exe");
+        const child = spawn(rundll32, ["shell32.dll,OpenAs_RunDLL", path], { detached: true, stdio: "ignore" });
+        child.unref();
+        await new Promise<void>((done, fail) => {
+          child.once("error", fail);
+          child.once("spawn", () => done());
+        });
+        return;
+      }
+      if (process.platform !== "darwin")
+        throw new Error("The open-with chooser is only available on Windows and macOS");
+      // "choose application" opens the native, searchable application list;
+      // cancelling the dialog is a user no-op, not a failure.
+      const script = "set picked to choose application with prompt \"Open With\" as alias\nPOSIX path of picked";
+      await new Promise<void>((done, fail) => {
+        execFile("osascript", ["-e", script], (error, stdout) => {
+          if (!error) {
+            const appPath = String(stdout).trim();
+            if (appPath) spawn("open", ["-a", appPath, path], { detached: true, stdio: "ignore" }).unref();
+            done();
+          } else if (/User canceled/i.test(error.message)) done();
+          else fail(error);
+        });
+      });
+    },
+    async openWithApps(path) {
+      if (process.platform !== "linux") return [];
+      const mime = await new Promise<string | undefined>((done) => {
+        execFile("file", ["--brief", "--mime-type", path], (error, stdout) =>
+          done(error || !stdout ? undefined : stdout.trim()));
+      });
+      if (!mime) return [];
+      const apps = new Map<string, { id: string; name: string }>();
+      // User applications take precedence over system ones with the same id.
+      for (const dir of [join(homedir(), ".local/share/applications"), "/usr/share/applications"]) {
+        let names: string[];
+        try {
+          names = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const name of names) {
+          if (!name.endsWith(".desktop")) continue;
+          const id = name.slice(0, -".desktop".length);
+          if (apps.has(id)) continue;
+          let entry: string;
+          try {
+            entry = readFileSync(join(dir, name), "utf8");
+          } catch {
+            continue;
+          }
+          // Only keys of the [Desktop Entry] group count; later groups use
+          // their own headers.
+          const section = entry.slice(0, entry.indexOf("\n[", entry.indexOf("[") + 1) + 1 || undefined);
+          if (!/^Name\s*=.*$/m.test(section) || /^(NoDisplay|Hidden)\s*=\s*true\b/m.test(section)) continue;
+          const mimes = section.match(/^MimeType\s*=\s*(.+)$/m)?.[1]?.split(";") ?? [];
+          if (!mimes.includes(mime)) continue;
+          apps.set(id, { id, name: section.match(/^Name\s*=\s*(.+)$/m)![1]!.trim() });
+        }
+      }
+      return [...apps.values()].sort((a, b) => a.name.localeCompare(b.name));
+    },
+    async openWithApp(path, appId) {
+      if (process.platform !== "linux")
+        throw new Error("Choosing an application applies to Linux desktop entries");
+      if (!/^[\w.-]+$/.test(appId)) throw new Error("Invalid application id");
+      const child = spawn("gtk-launch", [appId, path], { detached: true, stdio: "ignore" });
+      child.unref();
+      await new Promise<void>((done, fail) => {
+        child.once("error", fail);
+        child.once("spawn", () => done());
+      });
+    },
     showItemInFolder(path) {
-      if (!existsSync(path)) throw new Error("Session file was not found or is inaccessible");
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
       shell.showItemInFolder(path);
     },
     quit() {
@@ -215,6 +357,13 @@ app.whenReady().then(async () => {
     },
   });
   controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
+  // Release awareness runs only in the desktop main process — a remote host
+  // serves sessions but must not announce desktop updates itself.
+  new UpdateChecker({
+    version: () => app.getVersion(),
+    skipped: () => controller.settings.bundle().app.updateSkippedVersion,
+    emit: (event) => controller.emit(event),
+  }).start();
   nativeTheme.on("updated", syncWindowTheme);
   // Preload needs the current preference before the first paint, including on reload.
   // This one synchronous handshake reads memory only; all persistence stays async over IPC.
@@ -247,6 +396,13 @@ app.whenReady().then(async () => {
     clipboard.writeText(text),
   );
   await create();
+  started = true;
+}).catch(e => {
+  // A half-built window would leave the user staring at a blank page, so a
+  // startup that never completed exits once the error box is dismissed. The
+  // finally keeps that promise even when the box itself cannot be shown.
+  try { reportFailure("startup", "index: startup", e); }
+  finally { if (!started) app.quit(); }
 });
 let sessionsClosed = false;
 let closingSessions = false;
@@ -256,7 +412,7 @@ app.on("before-quit", (event) => {
     event.preventDefault();
     if (!closingSessions) {
       closingSessions = true;
-      void controller.pi.close().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
+      void controller.closeAll().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
     }
     return;
   }
@@ -268,5 +424,5 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) void create();
+  if (BrowserWindow.getAllWindows().length === 0) void create().catch(e => reportFailure("window", "index: create from activate", e));
 });

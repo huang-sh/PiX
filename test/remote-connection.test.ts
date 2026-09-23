@@ -1,12 +1,15 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { WslHostClient } from "../src/main/wsl-host-client.js";
+import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
 import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
@@ -113,10 +116,11 @@ test("long-running prompts and shell commands are not cut off by the RPC timeout
   const { client, socket } = transport(t);
   const prompt = client.request("agent.control", { action: "prompt", text: "work" });
   const shell = client.request("shell.run", { command: "long job" });
+  const newSession = client.request("agent.control", { action: "newSession" });
   t.mock.timers.tick(300_000);
-  for (const id of ["1", "2"])
+  for (const id of ["1", "2", "3"])
     socket.emit("message", JSON.stringify({ type: "response", id, ok: true, result: "done" }));
-  assert.deepEqual(await Promise.all([prompt, shell]), ["done", "done"]);
+  assert.deepEqual(await Promise.all([prompt, shell, newSession]), ["done", "done", "done"]);
 });
 
 test("heartbeat detects a half-open connection and accepts healthy pong replies", async (t) => {
@@ -127,9 +131,104 @@ test("heartbeat detects a half-open connection and accepts healthy pong replies"
   socket.emit("pong");
   t.mock.timers.tick(15_000);
   assert.equal(client.connected, true);
+  // A single missed pong is tolerated: the host may block its event loop on
+  // synchronous session creation. Two consecutive misses mean the host is gone.
+  t.mock.timers.tick(15_000);
+  assert.equal(client.connected, true);
   t.mock.timers.tick(15_000);
   assert.equal(client.connected, false);
 });
+
+test("a host exit reports its recent stderr output", async (t) => {
+  const { client, child } = transport(t);
+  const failure = new Promise<Error>(resolve => client.onDisconnect(resolve));
+  child.stderr.write("Warning: noisy banner\n");
+  child.stderr.write("Error: session graph is corrupt\n");
+  child.emit("exit", 1);
+  assert.match((await failure).message, /Remote host exited with code 1:[\s\S]*session graph is corrupt/);
+});
+
+async function waitForLog(text: string) {
+  for (let i = 0; i < 400; i++) {
+    const content = existsSync(logFile()) ? readFileSync(logFile(), "utf8") : "";
+    if (content.includes(text)) return content;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail(`Missing log text: ${text}`);
+}
+
+test("socket-first disconnection logs late stderr at child close without notifying twice", async t => {
+  const { client, child, socket } = transport(t);
+  const failures: Error[] = [];
+  client.onDisconnect(error => failures.push(error));
+  const rejected = assert.rejects(client.request("session.list"), /Remote host disconnected/);
+  socket.terminate();
+  await rejected;
+  assert.equal(failures.length, 1, "requests and UI fail immediately, before child exit");
+  child.exitCode = 23;
+  child.emit("exit", 23);
+  await client.dispose(); // Failure cleanup must not mark this as a requested exit.
+  child.stderr.write("earlier output ".repeat(400));
+  child.stderr.write("\nlate stderr after exit: final diagnostic\n");
+  child.stderr.end();
+  child.emit("close", 23, null);
+  const log = await waitForLog("late stderr after exit: final diagnostic");
+  assert.match(log, /child closed\] requested=false code=23 signal=none/);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.message, "Remote host disconnected");
+});
+
+test("requested disposal is distinguished from failure and retains the final signal", async t => {
+  const { client, child } = transport(t);
+  const closing = client.dispose();
+  child.exitCode = 0;
+  child.emit("exit", null, "SIGTERM");
+  await closing;
+  child.emit("close", null, "SIGTERM");
+  await waitForLog("requested=true code=none signal=SIGTERM");
+});
+
+for (const failure of ["ENOENT", "EACCES", "ELOOP", "file"] as const) {
+  test(`host startup preserves ${failure} directory diagnostics`, { timeout: 20_000 }, async t => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-host-path-error-")));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const target = join(root, "project");
+    if (failure === "file") writeFileSync(target, "not a directory");
+    // Permission errors depend on the test account/OS, and Windows junctions
+    // cannot create a symlink loop. Inject only those fs failures in the child.
+    const preload = failure === "EACCES" || failure === "ELOOP" ? `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const original = fs.realpathSync;
+      fs.realpathSync = function(path, ...args) {
+        if (String(path) === ${JSON.stringify(target)}) {
+          throw Object.assign(new Error(${JSON.stringify(`${failure}: cannot resolve ${target}`)}), { code: ${JSON.stringify(failure)} });
+        }
+        return original.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+    ` : undefined;
+    const child = spawn(process.execPath, [
+      ...(preload ? ["--import", `data:text/javascript,${encodeURIComponent(preload)}`] : []),
+      fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+      "serve", "--cwd", target, "--exit-on-disconnect",
+    ], { env: { ...process.env, PIX_HOME: join(root, "home"),
+      PI_CODING_AGENT_DIR: join(root, "home", "agent") }, stdio: "pipe" });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+    let stderr = "";
+    let stdout = "";
+    child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(code, 1);
+    assert.match(stderr, failure === "file" ? /Project path is not a directory/ : new RegExp(failure));
+    assert.ok(stderr.replaceAll("\\", "/").includes(target.split(sep).join("/")), stderr);
+    assert.doesNotMatch(stdout, /PIX_AGENT_HOST_READY/);
+  });
+}
 
 test("startup accepts a handshake split across chunks and can be cancelled", async () => {
   const child = new FakeChild();
@@ -162,23 +261,23 @@ test("cancelling the WebSocket handshake closes the real socket promptly", async
 });
 
 function controllerFixture(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), "pix-remote-"));
+  // Canonical like the controller sees it: session.stop matches registry entries by the realpath the invoke boundary produces (macOS /var symlink).
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-remote-")));
   const controller = new MainController(root, {
     async pickProject() { return undefined; },
     async pickSession() { return undefined; },
     async confirm() { return true; },
-    async openExternal() {}, showItemInFolder() {}, quit() {},
+    async openExternal() {}, async openPath() {}, async openWith() {}, async openWithApps() { return []; }, async openWithApp() {}, showItemInFolder() {}, quit() {},
   });
-  controller.pi.control = async () => [];
+  controller.projectRuntime.control = async () => [];
   const project: ProjectInfo = { name: "old", path: "/old", remote: { kind: "ssh", host: "old" } };
   const old = candidate(controller);
   controller.project = project;
-  controller.wsl = old as any;
-  controller.wslSettings = controller.settings.bundle();
+  controller.installSlot(old as never, project, controller.settings.bundle());
   controller.settings.rememberProject(project, []);
   t.after(async () => {
     await controller.closeWsl();
-    controller.pi.dispose();
+    controller.projectRuntime.dispose();
     controller.shell.dispose();
     rmSync(root, { recursive: true, force: true });
   });
@@ -196,11 +295,179 @@ function candidate(controller: MainController) {
     },
     setModelBroker() {},
     onEvent(listener: (event: any) => void) { events.on("event", listener); return () => events.off("event", listener); },
+    emit(event: unknown) { events.emit("event", event); },
     onDisconnect(listener: (error: Error) => void) { events.on("disconnect", listener); return () => events.off("disconnect", listener); },
     async dispose() { this.disposed = true; this.connected = false; },
     disconnect() { this.connected = false; events.emit("disconnect", new Error("network lost")); },
   };
 }
+
+function remoteSnapshot(path = "/old/session.jsonl", running = false): SessionSnapshot {
+  return {
+    session: { id: path, path, cwd: "/old", created: "", modified: "", firstMessage: "remote", messageCount: 1 },
+    entries: [], projection: projectSession([], null), runtime: { available: true, isStreaming: false },
+    graph: { id: path, epoch: "e", revision: running ? 1 : 2,
+      runs: running ? [{ branchId: "branch", runId: "run", status: "running" }] : [] },
+  } as unknown as SessionSnapshot;
+}
+
+for (const order of [["A", "B"], ["B", "A"]]) {
+  test(`remote session selection follows click order when replies arrive ${order.join(" then ")}`, async t => {
+    const { controller, old } = controllerFixture(t);
+    const release = new Map<string, (value: SessionSnapshot) => void>();
+    old.request = (_route, input) => new Promise(resolve => release.set(input.path, resolve));
+    const a = controller.invoke("session.open", { path: "A" });
+    const b = controller.invoke("session.open", { path: "B" });
+    const pending = { A: a, B: b };
+    for (const path of order) {
+      release.get(path)!(remoteSnapshot(path));
+      await pending[path as keyof typeof pending];
+    }
+    assert.equal(controller.current?.session.path, "B");
+    old.emit({ type: "sessions", payload: { current: remoteSnapshot("A") } });
+    assert.equal(controller.current?.session.path, "B", "the old host selection cannot stream into B");
+    old.emit({ type: "sessions", payload: { current: remoteSnapshot("B") } });
+    assert.equal(controller.current?.session.path, "B");
+  });
+}
+
+test("a remote fork hands the view to the session the runtime moved to", async t => {
+  const { controller, old } = controllerFixture(t);
+  const before = remoteSnapshot("/old/session.jsonl");
+  old.request = async () => before;
+  await controller.invoke("session.open", { path: before.session.path });
+
+  const forked = remoteSnapshot("/old/fork.jsonl");
+  old.request = async () => forked;
+  await controller.invoke("agent.control", { action: "fork", entryId: "turn:1" });
+  assert.equal(controller.current?.session.path, "/old/fork.jsonl", "the fork moves the view");
+
+  old.emit({ type: "sessions", payload: { current: remoteSnapshot("/old/fork.jsonl", true) } });
+  assert.equal(controller.current?.graph?.runs.some(run => run.status === "running"), true,
+    "the forked session keeps streaming into the view");
+});
+
+test("a delayed pooled-project activation cannot replace a newer local selection", async t => {
+  const { controller, old } = controllerFixture(t);
+  let release!: (rows: unknown[]) => void;
+  old.request = route => route === "session.list"
+    ? new Promise(resolve => { release = resolve; }) : Promise.resolve(controller.settings.bundle());
+  const activating = controller.connectSsh("old", "/old");
+  const rejected = assert.rejects(activating, /selection changed/);
+  await new Promise(resolve => setImmediate(resolve));
+  controller.configure(controller.localProjectPath);
+  const local = remoteSnapshot("local"); controller.current = local;
+  release([]); await rejected;
+  assert.equal(controller.project?.remote, undefined);
+  assert.equal(controller.current, local);
+});
+
+test("remote completion and delayed replies keep their owner after switching local", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const running = remoteSnapshot(undefined, true), settled = remoteSnapshot();
+  old.request = async () => running;
+  await controller.invoke("session.open", { path: running.session.path });
+  let finish!: (value: SessionSnapshot) => void;
+  old.request = () => new Promise(resolve => { finish = resolve; });
+  const pending = controller.invoke("agent.control", { action: "prompt", text: "held" });
+  controller.configure(controller.localProjectPath);
+  const local = { ...remoteSnapshot("local.jsonl"), session: { ...settled.session, path: "local.jsonl" } };
+  controller.current = local;
+  controller.rememberSnapshot(controller.project, local);
+  const events: any[] = [];
+  controller.onEvent(event => events.push(event));
+  old.emit({ type: "sessions", payload: { current: settled } });
+  finish(settled);
+  await pending;
+  assert.equal(controller.current, local);
+  assert.ok(events.every(event => !event.payload.current), "background completion never drives the view");
+  const groups = controller.projectGroups();
+  assert.deepEqual(groups.find(group => group.id === projectId(controller.project!))?.sessions.map(row => row.path), ["local.jsonl"]);
+  assert.equal(groups.find(group => group.id === projectId(project))?.sessions[0]?.running, undefined);
+});
+
+test("remote list events update only their owning group and keep running flags across local switches", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const current = remoteSnapshot(undefined, true);
+  old.request = async () => current;
+  await controller.invoke("session.open", { path: current.session.path });
+  controller.configure(controller.localProjectPath);
+  const events: any[] = [];
+  controller.onEvent(event => events.push(event));
+  old.emit({ type: "sessions", payload: { projects: [
+    { id: "local:/unrelated", project: { name: "unrelated", path: "/unrelated" }, sessions: [remoteSnapshot("/unrelated/s.jsonl").session] },
+    { id: "local:/old", project: { name: "old", path: "/old" }, sessions: [{ ...current.session, running: true }] },
+  ] } });
+  assert.equal(controller.projectGroups().find(group => group.id === projectId(project))?.sessions[0]?.running, true);
+  assert.ok(events.at(-1).payload.projects.some((group: any) => group.id === projectId(project)));
+  assert.ok(events.at(-1).payload.projects.every((group: any) => group.id !== "local:/unrelated"));
+  old.emit({ type: "sessions", payload: { current: remoteSnapshot() } });
+  assert.equal(controller.projectGroups().find(group => group.id === projectId(project))?.sessions[0]?.running, undefined);
+});
+
+test("hosts with identical session paths cannot drive each other's view or stop requests", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const current = remoteSnapshot(undefined, true);
+  old.request = async () => current;
+  await controller.invoke("session.open", { path: current.session.path });
+  const otherProject: ProjectInfo = { ...project, remote: { kind: "ssh", host: "another" } };
+  const other = candidate(controller);
+  controller.installSlot(other as never, otherProject, controller.settings.bundle());
+  controller.settings.rememberProject(otherProject, [current.session]);
+  controller.current = current;
+  const seen: unknown[] = [];
+  controller.onEvent(event => { if (event.type === "agent" || (event.payload as any).current) seen.push(event); });
+  other.emit({ type: "sessions", payload: { current: remoteSnapshot() } });
+  other.emit({ type: "agent", payload: { type: "agent_start", graphId: current.graph!.id } });
+  assert.equal(controller.current, current);
+  assert.deepEqual(seen, []);
+  const calls: unknown[] = [];
+  old.request = async (route, input) => { calls.push(["old", route, input]); return []; };
+  other.request = async (route, input) => {
+    calls.push(["other", route, input]);
+    return route === "session.stop" ? { stopped: true } : [remoteSnapshot().session];
+  };
+  assert.deepEqual(await controller.invoke("session.stop", { path: current.session.path, projectId: projectId(otherProject) }), { stopped: true });
+  assert.deepEqual(calls[0], ["other", "session.stop", { path: current.session.path }]);
+  assert.ok(calls.every((call: any) => call[0] === "other"));
+  other.disconnect();
+  await assert.rejects(controller.invoke("session.stop", { path: current.session.path, projectId: projectId(otherProject) }), /not connected/i);
+});
+
+test("remote deletion refreshes the owner and clears the view only while that project is active", async t => {
+  const { controller, old } = controllerFixture(t);
+  const current = remoteSnapshot();
+  old.request = async () => current;
+  await controller.invoke("session.open", { path: current.session.path });
+  const events: any[] = [];
+  controller.onEvent(event => events.push(event));
+  old.emit({ type: "sessions", payload: { deletedPath: current.session.path, sessions: [] } });
+  assert.equal(controller.current, undefined);
+  assert.equal(events.at(-1).payload.deletedPath, current.session.path);
+  controller.configure(controller.localProjectPath);
+  controller.current = remoteSnapshot("local.jsonl");
+  events.length = 0;
+  old.emit({ type: "sessions", payload: { deletedPath: current.session.path, sessions: [] } });
+  assert.equal(controller.current.session.path, "local.jsonl");
+  assert.ok(events.every(event => !event.payload.deletedPath));
+});
+
+test("stopping a local background session bypasses the active remote host", async t => {
+  const { controller, old } = controllerFixture(t);
+  const localProject = { name: "local", path: controller.localProjectPath! };
+  const snapshot = remoteSnapshot(join(localProject.path, "local.jsonl"), true);
+  writeFileSync(snapshot.session.path, "");
+  const actions: unknown[] = [];
+  controller.createSessionRuntime = () => ({
+    async open() {}, snapshot: () => snapshot, state: () => ({}),
+    async control(input: unknown) { actions.push(input); }, async close() {},
+  }) as never;
+  await controller.registry.open(localProject, localProject.path, snapshot.session.path);
+  old.request = async () => assert.fail("local stop must not reach the remote host");
+  assert.deepEqual(await controller.invoke("session.stop", { path: snapshot.session.path, projectId: projectId(localProject) }), { stopped: true });
+  assert.deepEqual(actions, [{ action: "branchAbort", branchId: "branch", runId: "run" }]);
+  await controller.registry.disposeAll();
+});
 
 test("failed host connection and failed bootstrap both preserve the old workspace", async (t) => {
   const { controller, old, project } = controllerFixture(t);
@@ -233,15 +500,15 @@ test("directory browsing and cancellation use only the candidate, not the active
   assert.equal(controller.project, project);
 });
 
-test("a successful candidate is committed before closing the old host and reports later disconnection", async (t) => {
+test("a successful candidate is pooled instead of closing the old host and reports later disconnection", async (t) => {
   const { controller, old } = controllerFixture(t);
   const next = candidate(controller);
   t.mock.method(WslHostClient, "connectSsh", async () => next as any);
   await controller.connectSsh("new", "~", true);
-  const result = await controller.openRemoteProject("/new/sub");
+  const result = await controller.pool.openRemoteProject("/new/sub");
   assert.equal(result.project?.path, "/new/sub");
   assert.equal(controller.wsl, next);
-  assert.equal(old.disposed, true);
+  assert.equal(old.disposed, false, "switching remote projects keeps the previous host pooled");
   const events: any[] = [];
   controller.onEvent((event) => events.push(event));
   next.disconnect();
@@ -251,6 +518,185 @@ test("a successful candidate is committed before closing the old host and report
   const cached = await controller.invoke("app.bootstrap") as any;
   assert.equal(cached.project.path, "/new/sub");
   assert.equal(cached.projects.find((record: any) => record.id === id).connected, false);
+});
+
+test("reconnecting to a pooled project reuses its host instead of spawning a second one", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  const next = candidate(controller);
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+  assert.equal(controller.wsl, next);
+
+  const reused = await controller.connectSsh("old", "/old");
+
+  assert.equal(connectSsh.mock.callCount(), 1, "the pooled host is adopted, not reconnected");
+  assert.equal(controller.wsl, old);
+  assert.equal((reused as { project: ProjectInfo }).project.path, "/old");
+  assert.equal(next.disposed, false);
+});
+
+test("recycling keeps hosts with running work and disposes idle ones", async (t) => {  const previousIdle = process.env.PIX_REMOTE_IDLE_MS;
+  process.env.PIX_REMOTE_IDLE_MS = "1000";
+  t.after(() => {
+    if (previousIdle === undefined) delete process.env.PIX_REMOTE_IDLE_MS;
+    else process.env.PIX_REMOTE_IDLE_MS = previousIdle;
+  });
+  const { controller, old } = controllerFixture(t);
+  const busy = candidate(controller), spare = candidate(controller);
+  controller.installSlot(busy as never, { name: "busy", path: "/busy", remote: { kind: "ssh", host: "busy" } }, controller.settings.bundle());
+  controller.installSlot(spare as never, { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } }, controller.settings.bundle());
+  busy.request = async (route: string) => route === "session.list" ? [{ running: true } as never] : [];
+  const next = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+
+  await new Promise(resolve => setTimeout(resolve, 3500));
+
+  assert.equal(busy.disposed, false, "a host with running work is never recycled");
+  assert.equal(next.disposed, false, "the workspace in view is never recycled");
+  assert.equal(spare.disposed, true, "an idle host is recycled");
+  assert.equal(old.disposed, true, "an idle host beyond the pool cap is recycled");
+});
+
+test("quitting disposes every pooled host, running or not", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  const spare = candidate(controller);
+  controller.installSlot(spare as never, { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } }, controller.settings.bundle());
+  const next = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+
+  controller.dispose();
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  assert.equal(old.disposed, true, "a parked host is disposed on quit");
+  assert.equal(spare.disposed, true, "a pooled host is disposed on quit");
+  assert.equal(next.disposed, true, "the active host is disposed on quit");
+});
+
+test("forgetting a project disposes its pooled host and refuses while it runs", async (t) => {
+  const { controller } = controllerFixture(t);
+  const spare = candidate(controller);
+  const project: ProjectInfo = { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } };
+  controller.installSlot(spare as never, project, controller.settings.bundle());
+  controller.settings.rememberProject(project, []);
+  const running = async (route: string) => route === "session.list" ? [{ running: true } as never] : [];
+  const idle = async (route: string) => route === "session.list" ? [] : [];
+  spare.request = running;
+
+  await assert.rejects(controller.invoke("app.forgetProject", { id: projectId(project) }), /Stop the running sessions/);
+  assert.equal(spare.disposed, false, "a running host is not disposed by the refused removal");
+
+  spare.request = idle;
+  await controller.invoke("app.forgetProject", { id: projectId(project) });
+  assert.equal(spare.disposed, true, "the pooled host goes with the history entry");
+  assert.equal(controller.projectGroups().some(record => record.id === projectId(project)), false);
+});
+
+for (const kind of ["ssh", "wsl"] as const) {
+  test(`${kind} symlink connections and directory browsing reuse the same real host`, { timeout: 60_000 }, async t => {
+    const { controller } = controllerFixture(t);
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-host-alias-")));
+    const project = join(root, "project");
+    const alias = join(root, "alias");
+    const canonical = project.split(sep).join("/");
+    mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
+    symlinkSync(project, alias, process.platform === "win32" ? "junction" : "dir");
+    writeFileSync(join(project, ".pi", "sessions", "saved.jsonl"), JSON.stringify({
+      type: "session", version: 3, id: "saved", cwd: alias, timestamp: new Date().toISOString(),
+    }) + "\n");
+    const clients: WslHostClient[] = [];
+    t.after(async () => {
+      await controller.pool.closeAllRemote();
+      await Promise.all(clients.map(client => client.dispose()));
+      rmSync(root, { recursive: true, force: true });
+    });
+    // Exercise the real server and WebSocket handshake; replace only SSH/WSL
+    // process launching so the regression runs without a configured remote.
+    const connect = async (cwd: string) => {
+      const child = spawn(process.execPath, [
+        fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+        "serve", "--cwd", cwd, "--exit-on-disconnect",
+      ], { env: { ...process.env, PIX_HOME: join(root, "home"),
+        PI_CODING_AGENT_DIR: join(root, "home", "agent") }, stdio: "pipe" });
+      try {
+        const ready = await (WslHostClient as any).waitForReady(child, 15_000);
+        const { socket, hello } = await (WslHostClient as any).openSocket(ready, 15_000);
+        const client = Reflect.construct(WslHostClient, [child, socket, hello]) as WslHostClient;
+        clients.push(client);
+        return client;
+      } catch (error) {
+        child.kill();
+        throw error;
+      }
+    };
+    t.mock.method(WslHostClient, "connectSsh", (_host: string, cwd: string) => connect(cwd));
+    t.mock.method(WslHostClient, "installed", (options: { cwd: string }) => connect(options.cwd));
+    const open = (cwd: string, browse = false) => kind === "ssh"
+      ? controller.connectSsh("alias-test", cwd, browse)
+      : controller.connectWsl("alias-test", cwd, browse);
+
+    const first = await open(alias);
+    const original = controller.wsl!;
+    assert.equal(original.hello.cwd, canonical, "hello expands symlinks on the host");
+    assert.equal(original.hello.piVersion,
+      JSON.parse(readFileSync("server/package.json", "utf8")).dependencies["@earendil-works/pi-coding-agent"],
+      "hello reports the installed SDK version");
+    assert.equal(first.project.path, canonical);
+    assert.equal((await controller.invoke("session.list") as unknown[]).length, 1,
+      "sessions created through the alias remain visible");
+
+    await open(canonical);
+    assert.equal(clients.length, 1, "the real path matches the first slot before spawning");
+    await open(alias);
+    assert.equal(clients.length, 2);
+    assert.equal(clients[1]!.connected, false, "the redundant host is closed after hello");
+    assert.equal(controller.wsl, original);
+
+    await open(root, true);
+    await controller.invoke("remote.openProject", { path: alias });
+    assert.equal(clients[2]!.connected, false, "browsing to the alias also discards its temporary host");
+    assert.equal(controller.wsl, original);
+    assert.equal(original.connected, true, "the original host is never replaced");
+    assert.equal((await controller.invoke("session.list") as unknown[]).length, 1);
+  });
+}
+
+test("a differently spelled path reuses the pooled host after closing the redundant one", async (t) => {
+  const { controller } = controllerFixture(t);
+  const canonical: ProjectInfo = { name: "new", path: "/new", remote: { kind: "ssh", host: "new" } };
+  const pooledClient = candidate(controller);
+  controller.installSlot(pooledClient as never, canonical, controller.settings.bundle());
+  controller.settings.rememberProject(canonical, []);
+  const fresh = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+
+  const result = await controller.connectSsh("new", "/new/");
+
+  assert.equal(fresh.disposed, true, "the redundant connection is dropped after the canonical recheck");
+  assert.equal(controller.wsl, pooledClient, "the pooled host is adopted");
+  assert.equal((result as { project: ProjectInfo }).project.path, "/new");
+});
+
+test("reactivating a pooled workspace restores its remembered session", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  const snapshot = { session: { path: "/old/s.jsonl" }, entries: [], projection: { nodes: [] }, runtime: {},
+    graph: { id: "/old/s.jsonl", epoch: "e", revision: 1, runs: [] } };
+  old.request = async (route: string, input?: any) => {
+    if (route === "session.open" && input?.path === "/old/s.jsonl") return snapshot;
+    if (route === "session.list") return [];
+    return controller.settings.bundle();
+  };
+  await controller.invoke("session.open", { path: "/old/s.jsonl" });
+
+  const next = candidate(controller);
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("new", "/new");
+  const result = await controller.connectSsh("old", "/old");
+
+  assert.equal((result as { current?: typeof snapshot }).current?.session.path, "/old/s.jsonl",
+    "the session this workspace last showed comes back with it");
+  assert.equal(controller.current?.session.path, "/old/s.jsonl");
 });
 
 test("cancellation during installation reaches the worker and prevents a late connection from replacing the old host", async (t) => {
@@ -292,9 +738,9 @@ test("cancelling while the selected folder loads preserves the active workspace"
     }
     return request(route, input);
   };
-  const opening = assert.rejects(controller.openRemoteProject("/new/sub"), /cancelled/);
+  const opening = assert.rejects(controller.pool.openRemoteProject("/new/sub"), /cancelled/);
   await loading;
-  await controller.cancelRemote();
+  await controller.pool.cancelRemote();
   finish(controller.settings.bundle());
   await opening;
   assert.equal(controller.project, project);
@@ -309,4 +755,37 @@ test("a failed WSL preparation preserves the SSH workspace", async (t) => {
   assert.equal(controller.project, project);
   assert.equal(controller.wsl, old);
   assert.equal(old.disposed, false);
+});
+
+test("host list events still match the slot when paths differ by a trailing slash", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const row = remoteSnapshot("/old/s.jsonl").session;
+  old.request = async () => [row];
+  await controller.invoke("session.open", { path: row.path });
+  controller.configure(controller.localProjectPath);
+
+  old.emit({ type: "sessions", payload: { projects: [
+    { id: "local:/unrelated", project: { name: "unrelated", path: "/unrelated" }, sessions: [remoteSnapshot("/unrelated/s.jsonl").session] },
+    { id: "local:/old", project: { name: "old", path: "/old/" }, sessions: [{ ...row, running: true }] },
+  ] } });
+
+  const group = controller.projectGroups().find(record => record.id === projectId(project));
+  assert.equal(group?.sessions[0]?.running, true, "the slot's rows update despite the slash spelling");
+});
+
+test("bootstrapping a connected remote workspace restores its remembered session", async t => {
+  const { controller, old } = controllerFixture(t);
+  const snapshot = remoteSnapshot("/old/s.jsonl");
+  old.request = async (route: string, input?: any) => {
+    if (route === "session.open" && input?.path === "/old/s.jsonl") return snapshot;
+    if (route === "session.list") return [];
+    return controller.settings.bundle();
+  };
+  await controller.invoke("session.open", { path: "/old/s.jsonl" });
+
+  const bootstrapped = await controller.pool.wslBootstrap() as { current?: typeof snapshot };
+
+  assert.equal(bootstrapped.current?.session.path, "/old/s.jsonl",
+    "a window reload lands back on the session the workspace last showed");
+  assert.equal(controller.current?.session.path, "/old/s.jsonl");
 });

@@ -9,6 +9,7 @@ import {
   type NodeChange,
   type NodeMouseEvent,
   type VueFlowStore,
+  type ViewportTransform,
 } from "@vue-flow/core";
 import { MiniMap } from "@vue-flow/minimap";
 import GraphOverview from "./GraphOverview.vue";
@@ -48,6 +49,13 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
+// Sessions remember where they were left: manual card positions, measured card
+// sizes, and the pane viewport come back unchanged on return instead of
+// re-centering. Sizes matter because only visible cards ever measure — without
+// them the return would re-stack the lanes from the flat estimate pitch.
+const rememberedLayouts = new Map<string, Map<string, ManualPosition>>();
+const rememberedDimensions = new Map<string, Map<string, Dimensions>>();
+const rememberedViewports = new Map<string, ViewportTransform>();
 // Holding the branch modifier at any point of a drag carries the cards after it too.
 let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
@@ -64,10 +72,18 @@ const draftModel = ref<RuntimeModel | null>();
 const draftThinking = ref<string>();
 let activeSession: string | undefined;
 const readableZoom = 0.9;
+// Draft size before Vue Flow measures it, and the vertical slot the layout
+// reserves for it: a draft growing past the slot overlays the cards below
+// instead of shoving them around on every keystroke.
+const DRAFT_SIZE = { width: 440, height: 320 };
 const booted = ref(false);
 const deleteError = ref("");
 const searchOpen = ref(false);
 const searchQuery = ref("");
+// A plain click highlights a card without rebinding the chat panel — only a
+// double-click, a Ctrl gesture, or a submission moves panel content. The card
+// lives in the session store, so commands on "the selected node" follow it.
+watch(() => session.focusedNode, () => { session.highlightedNode = null; });
 const searchInput = ref<HTMLInputElement>();
 // -1 = no hit visited yet, so the first Enter lands on the first hit.
 const searchPosition = ref(-1);
@@ -157,8 +173,13 @@ function rebuild() {
     edges.value = [];
     return;
   }
+  if (session.highlightedNode && !value.nodes.some(node => node.id === session.highlightedNode)) session.highlightedNode = null;
+  let restoredLayout: Map<string, ManualPosition> | undefined;
+  let restoredSizes: Map<string, Dimensions> | undefined;
   if (activeSession !== sessionKey.value) {
     dragged.clear();
+    restoredLayout = rememberedLayouts.get(sessionKey.value);
+    restoredSizes = rememberedDimensions.get(sessionKey.value);
     branchOrder.clear();
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
@@ -189,8 +210,9 @@ function rebuild() {
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   // Settled positions use the same measured card sizes the pane renders, so
   // lanes track real heights instead of the fixed 280×146 estimate pitch.
-  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions.
-  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 280, height: 146 }]));
+  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions; a
+  // returning session starts from the sizes it left with.
+  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? restoredSizes?.get(n.id) ?? { width: 320, height: 146 }]));
   const calculated = layoutGraph(value, sizes, branchOrder);
   const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
@@ -205,6 +227,9 @@ function rebuild() {
     if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
   }
   autoPositions = positions;
+  // Returning to a session resumes the manual arrangement saved on leaving;
+  // only nodes still present here can carry their remembered slot.
+  if (restoredLayout) for (const [id, position] of restoredLayout) if (positions.has(id)) dragged.set(id, position);
   const placed = { nodes: value.nodes.map(node => ({ ...node, ...positions.get(node.id)!,
     ...dragged.get(node.id),
   })) };
@@ -235,9 +260,23 @@ function rebuild() {
       content: () => nodeContent(node.id),
       searchHit: searchHitIds.value.has(node.id),
       onCompose: direction => compose(node.id, direction),
+      onOpenPanel: session.current?.graph ? () => openChatColumn(node.id) : undefined,
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
         ? () => { void retryTurn(node.id); }
         : undefined,
+      onExportSession: session.current?.graph ? () => { void exportSession(node.id); } : undefined,
+      // The export target is the node the chat panel shows: that node becomes
+      // the new session's tip and everything after it stays in the original
+      // graph. The chat column follows focusedNode, while the projection's
+      // activeNodeId is only the main branch's cursor, so the viewed id stays a
+      // live getter: focus moves never rebuild the cards.
+      viewedNodeId: session.current?.graph
+        ? () => session.focusedNode && !session.focusedNode.startsWith("pending:")
+          ? session.focusedNode : session.current?.projection.activeNodeId ?? null
+        : undefined,
+      exportBlockedReason: node.running
+        ? "graph.blockedStreaming"
+        : !session.current?.runtime.available ? "graph.blockedReadonly" : undefined,
       onDelete: () => { void deleteNode(node.id); },
       deleteBlockedReason: session.deleteBlockedReason,
     }),
@@ -310,6 +349,7 @@ function rebuild() {
       onModel: (next: RuntimeModel) => {
         draftModel.value = next;
         if (next.reasoning === false) draftThinking.value = "off";
+        void session.setDefaultModel(next);
         rebuild();
       },
       onThinking: (level: string, explicit: boolean) => {
@@ -369,9 +409,9 @@ function rebuild() {
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : previous?.dimensions ?? { width: node.type === "draft" ? 360 : 280, height: node.type === "draft" ? 280 : 146 },
+        : previous?.dimensions ?? restoredSizes?.get(node.id) ?? (node.type === "draft" ? DRAFT_SIZE : { width: 320, height: 146 }),
       handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
-        source: [{ type: "source", nodeId: node.id, position: "right", x: 276, y: 69, width: 8, height: 8 }],
+        source: [{ type: "source", nodeId: node.id, position: "right", x: 316, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
       },
     });
@@ -394,7 +434,8 @@ function rebuild() {
 
 function layoutBranches(items: RenderNode[]) {
   // Runs on every rebuild and resize so settled lanes follow measured card
-  // heights; transients reserve vertical space but never widen columns.
+  // heights; transients reserve vertical space but never widen columns, and a
+  // draft's reservation is capped at its opening slot so growth only overlays.
   const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
@@ -404,7 +445,9 @@ function layoutBranches(items: RenderNode[]) {
   if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
   const pending = session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
-  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.type === "draft"
+    ? { width: node.dimensions!.width, height: DRAFT_SIZE.height }
+    : node.dimensions!])), order, transientNodeIds);
   // Cards that were not on screen yet may be moved out of a pinned card's way;
   // the ones the user can already see keep the position they have.
   const known = new Set(nodes.value.map(node => node.id));
@@ -449,6 +492,15 @@ async function deleteNode(id: string) {
     rebuild();
     await center(defaultFocusId());
   } catch (error) { deleteError.value = String(error); }
+}
+
+async function exportSession(id: string) {
+  try {
+    const result = await session.exportBranchSession(id);
+    if (result?.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 async function recoverDeletion() {
@@ -595,8 +647,8 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   const distant = Math.hypot(position.x * zoom + viewport.x - pane.width / 2,
     position.y * zoom + viewport.y - pane.height / 2) > Math.hypot(pane.width, pane.height) * 2;
   await flow.value.setCenter(
-    position.x + (size?.width || (id.startsWith("draft:") ? 360 : 280)) / 2,
-    position.y + (size?.height || (id.startsWith("draft:") ? 280 : 146)) / 2,
+    position.x + (size?.width || (id.startsWith("draft:") ? DRAFT_SIZE.width : 320)) / 2,
+    position.y + (size?.height || (id.startsWith("draft:") ? DRAFT_SIZE.height : 146)) / 2,
     // D3's zoom interpolation zooms far out between distant nodes, transiently
     // mounting thousands of cards. Jump directly across large branches.
     { zoom: ensureReadable ? Math.max(zoom, readableZoom) : zoom, duration: animate && !distant ? 280 : 0 },
@@ -604,6 +656,23 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   if (request !== centerRequest) return;
   if (id.startsWith("draft:"))
     document.querySelector<HTMLTextAreaElement>(".draft-node textarea")?.focus({ preventScroll: true });
+}
+
+// A session switch resumes that session's remembered viewport instead of
+// re-centering; sessions seen for the first time still focus their active node.
+async function restoreView() {
+  const saved = rememberedViewports.get(sessionKey.value);
+  if (!saved) {
+    void center(defaultFocusId(), true);
+    return;
+  }
+  // Cancel any in-flight centering so it cannot override the restore. A 1ms
+  // transition is visually instant, but it interrupts a running 280ms center
+  // animation (d3 same-name transitions), so the restore is the final word.
+  const request = ++centerRequest;
+  await nextTick();
+  if (request !== centerRequest || !flow.value) return;
+  await flow.value.setViewport(saved, { duration: 1 });
 }
 
 // The minimap colors nodes by the same running flag the pane cards use.
@@ -626,8 +695,7 @@ function navigateMinimap({ position }: { position: { x: number; y: number } }) {
   void flow.value.setCenter(position.x, position.y, { zoom: flow.value.getViewport().zoom });
 }
 
-function focusNodeVisible() {
-  const id = defaultFocusId();
+function focusNodeVisible(id = defaultFocusId()) {
   if (!id || !flow.value) return true;
   const node = flow.value.findNode(id);
   const cached = nodes.value.find(node => node.id === id);
@@ -680,7 +748,11 @@ async function ready(store: VueFlowStore) {
         new Promise<void>((resolve) => setTimeout(resolve, 2000)),
       ]);
     }
-    await center(defaultFocusId(), true, false);
+    // A remount (project switch) re-enters the remembered viewport instead of
+    // resetting to the active node; first views still center on it.
+    const remembered = rememberedViewports.get(sessionKey.value);
+    if (remembered) await store.setViewport(remembered);
+    else await center(defaultFocusId(), true, false);
   } finally {
     booted.value = true;
   }
@@ -688,6 +760,46 @@ async function ready(store: VueFlowStore) {
 
 function holdsBranchModifier(event: NodeMouseEvent) {
   return Boolean((event as { event?: { shiftKey?: boolean } }).event?.shiftKey);
+}
+
+// Ctrl/Cmd held through a double-click pins the node into a side column.
+function holdsPanelModifier(event: NodeMouseEvent) {
+  const raw = (event as { event?: { ctrlKey?: boolean; metaKey?: boolean } }).event;
+  return Boolean(raw?.ctrlKey || raw?.metaKey);
+}
+
+function openChatColumn(id: string) {
+  if (id.startsWith("draft:") || id.startsWith("pending:") || !session.current?.graph) return;
+  // One panel per branch: a column pinned to another node on the same
+  // root-to-node path shows a subset of this node's history, so retarget it
+  // instead of opening a redundant column beside it.
+  const parents = new Map(session.current.projection.nodes.map(node => [node.id, node.parentId ?? null]));
+  const onPath = (from: string, onto: string) => {
+    for (let cur: string | null = from; cur; cur = parents.get(cur) ?? null)
+      if (cur === onto) return true;
+    return false;
+  };
+  const clash = layout.chatColumns.find(pinned => pinned !== id && (onPath(id, pinned) || onPath(pinned, id)));
+  if (clash) {
+    layout.advanceChatColumn(clash, id);
+    void layout.setCollapsed("chat", false);
+  } else {
+    void layout.openChatColumn(id);
+  }
+}
+
+function nodeClicked(event: NodeMouseEvent) {
+  // Any single click, Ctrl held or not, only highlights — the Ctrl gesture
+  // for side columns lives on the double-click.
+  session.highlightedNode = event.node.id;
+  if (!focusNodeVisible(event.node.id)) void center(event.node.id, false, false);
+}
+
+// A plain double-click reveals the node in the primary chat panel; holding
+// Ctrl pins it into a side column instead.
+function nodeDoubleClicked(event: NodeMouseEvent) {
+  if (holdsPanelModifier(event)) openChatColumn(event.node.id);
+  else void select(event.node.id, true);
 }
 
 function startDrag(event: NodeMouseEvent) {
@@ -740,10 +852,23 @@ watch(
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
+    // Stash the outgoing session's arrangement and pane position before the
+    // rebuild resets per-session state. A teardown (no projection) clears the
+    // cards without adopting a new session, so the next fire must not overwrite
+    // the good snapshot with the torn-down state; rendered sessions always
+    // carry at least the draft card, so empty means torn down.
+    if (changedSession && activeSession !== undefined && nodes.value.length) {
+      const viewport = flow.value?.getViewport();
+      if (viewport) rememberedViewports.set(activeSession, viewport);
+      rememberedLayouts.set(activeSession, new Map(dragged));
+      rememberedDimensions.set(activeSession, new Map(nodes.value
+        .filter(node => node.dimensions?.width)
+        .map(node => [node.id, node.dimensions!])));
+    }
     const submittedNode = acceptSubmittedNode();
     rebuild();
     if (submittedNode) void center(submittedNode, true);
-    else if (changedSession) void center(defaultFocusId(), true);
+    else if (changedSession) void restoreView();
   },
   { immediate: true },
 );
@@ -780,8 +905,8 @@ watch(
       :only-render-visible-elements="true"
       :delete-key-code="null"
       @pane-ready="ready"
-      @node-click="({ node }: NodeMouseEvent) => select(node.id)"
-      @node-double-click="({ node }: NodeMouseEvent) => select(node.id, true)"
+      @node-click="nodeClicked"
+      @node-double-click="nodeDoubleClicked"
       @node-drag-start="startDrag"
       @node-drag="trackDragModifier"
       @node-drag-stop="rememberDrag"
@@ -789,7 +914,7 @@ watch(
     >
       <template #node-prompt="props">
         <!-- Selection is presentation state; changing it must not call Vue Flow's setNodes. -->
-        <PromptNode v-bind="props" :selected="session.focusedNode === props.id" />
+        <PromptNode v-bind="props" :selected="(session.highlightedNode || session.focusedNode) === props.id" />
       </template>
       <template #node-draft="props">
         <DraftNode v-bind="props" />

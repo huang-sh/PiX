@@ -21,8 +21,14 @@ export interface CustomModelInput {
 }
 export type BrokerModel = Pick<Model<Api>, "provider" | "id" | "name" | "api" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost">;
 
-export type PanelId = "navigator" | "chat" | "content";
-export type UtilityTab = "terminal" | "output" | "git" | "events";
+/** Panels whose collapse flag persists; the layout validation and the
+ *  PanelId union both derive from this list. */
+export const PANEL_IDS = ["navigator", "chat", "content"] as const;
+export type PanelId = (typeof PANEL_IDS)[number];
+/** Utility tabs that persist as layout.utility.activeTab; the layout
+ *  validation and the UtilityTab union both derive from this list. */
+export const UTILITY_TABS = ["terminal", "output", "git", "events"] as const;
+export type UtilityTab = (typeof UTILITY_TABS)[number];
 export interface ProjectInfo {
   name: string;
   path: string;
@@ -39,6 +45,8 @@ export interface ProjectHistory {
 }
 export interface ProjectGroup extends ProjectHistory {
   connected: boolean;
+  /** True when the user archived this project out of the navigator. */
+  archived?: boolean;
 }
 export function projectId(project: ProjectInfo) {
   const remote = project.remote;
@@ -59,7 +67,10 @@ export interface SessionSummary {
   modified: string;
   messageCount: number;
   firstMessage: string;
-  active?: boolean;
+  /** A run is in flight in this session's live runtime. */
+  running?: boolean;
+  pinned?: boolean;
+  archived?: boolean;
 }
 export interface RawSessionEntry {
   type: string;
@@ -69,6 +80,7 @@ export interface RawSessionEntry {
   [key: string]: unknown;
 }
 export const NODE_FOOTER_CUSTOM_TYPE = "pix.node-footer";
+export const GIT_BRANCH_CUSTOM_TYPE = "pix.git-branch";
 export interface ContextUsageSnapshot {
   tokens: number | null;
   contextWindow: number;
@@ -80,6 +92,8 @@ export interface NodeFooterState {
   thinkingLevel: string;
 }
 export interface GraphNode {
+  /** Git branch at turn start, recorded as the pix.git-branch entry the user message hangs off. */
+  gitBranch?: string;
   fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
@@ -115,6 +129,7 @@ export interface BranchMessage {
   toolInput?: string;
   isError?: boolean;
   errorMessage?: string;
+  contextStatus?: "excluded" | "modified";
 }
 export interface AgentActivityItem {
   id: string;
@@ -282,6 +297,8 @@ export interface PiSettings {
   sessionDir?: string;
   enabledModels?: string[];
   defaultTools?: string[];
+  /** The chosen output style; names a skill whose frontmatter opts in. */
+  outputStyle?: string;
   compaction?: {
     enabled?: boolean;
     reserveTokens?: number;
@@ -341,6 +358,10 @@ export interface AppSettings {
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /** Experimental features are opt-in, default off, and may change or disappear. */
+  experimentalHistory: boolean;
+  /** Latest release the user chose to stop being notified about. */
+  updateSkippedVersion?: string;
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -354,10 +375,11 @@ export interface LayoutState {
   branchOrders?: Record<string, Array<[string, number]>>;
   /** Keep the projects and sessions navigator open instead of auto-hiding it. */
   navigatorPinned?: boolean;
-  widths: { navigator: number; chat: number; content: number };
+  widths: { navigator: number; chat: number; content: number; settings: number };
+  /** The width chat pins widened the slot from/to, so a pinless boot restores it. */
+  chatPinWidth?: { from: number; to: number };
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;
-  composer: { open: boolean };
   utility: {
     open: boolean;
     collapsed: boolean;
@@ -378,6 +400,8 @@ export interface RuntimeSkill {
   source: string;
   scope: "user" | "project" | "temporary" | "builtin";
   disableModelInvocation: boolean;
+  /** True when the skill's frontmatter opts in as an output style. */
+  outputStyle: boolean;
   /** True when the file sits in a skills folder PiX may rewrite. */
   editable: boolean;
   /** Path of the bundled skill this one shadows by name, when it does. */
@@ -402,6 +426,7 @@ export interface RuntimeExtension {
 }
 export type AgentControl =
   | { action: "deleteNode"; nodeId: string; graphId: string }
+  | { action: "exportBranchSession"; nodeId: string; graphId: string }
   | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
   | { action: "branchAbort"; branchId: string; runId: string }
   | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[] }
@@ -481,8 +506,13 @@ export type DesktopRoute =
   | "app.bootstrap"
   | "app.pickProject"
   | "app.openProject"
+  | "app.revealLogs"
   | "app.forgetProject"
   | "app.openExternal"
+  | "app.openPath"
+  | "app.openWith"
+  | "app.openWithApps"
+  | "app.openWithApp"
   | "app.revealSession"
   | "app.quit"
   | "wsl.list"
@@ -498,9 +528,13 @@ export type DesktopRoute =
   | "session.list"
   | "session.snapshot"
   | "session.open"
+  | "session.stop"
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "library.pin"
+  | "library.archiveSession"
+  | "library.archiveProject"
   | "agent.control"
   | "workspace.tree"
   | "workspace.directories"
@@ -508,6 +542,8 @@ export type DesktopRoute =
   | "workspace.read"
   | "workspace.write"
   | "git.status"
+  | "git.branches"
+  | "git.switch"
   | "git.diff"
   | "changes.read"
   | "shell.run"
@@ -523,7 +559,7 @@ export type DesktopRoute =
   | "wiki.state"
   | "wiki.control";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "wiki";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available" | "wiki";
   payload: unknown;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";

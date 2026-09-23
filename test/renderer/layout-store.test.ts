@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toRaw } from "vue";
 import type { LayoutState, SettingsBundle } from "../../src/shared/types";
+import { desktop } from "../../src/renderer/api";
 import { NOTICE_AUTO_DISMISS_MS, useLayoutStore } from "../../src/renderer/stores/layout";
 
 const settings = {
@@ -28,6 +29,23 @@ const settings = {
 describe("layout store", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => vi.useRealTimers());
+
+  it("folds an app-settings write back so the form's full save keeps the key", async () => {
+    const layout = useLayoutStore();
+    layout.hydrate(settings);
+    vi.spyOn(desktop, "invoke").mockResolvedValue({
+      ...settings,
+      app: { ...settings.app, updateSkippedVersion: "9.9.9" },
+    });
+
+    await layout.updateAppSettings({ updateSkippedVersion: "9.9.9" });
+
+    expect(desktop.invoke).toHaveBeenCalledWith("settings.update", {
+      scope: "app",
+      patch: { updateSkippedVersion: "9.9.9" },
+    });
+    expect(layout.settings?.app.updateSkippedVersion).toBe("9.9.9");
+  });
 
   it("keeps graph outside the collapsible panel state", async () => {
     const layout = useLayoutStore();
@@ -90,21 +108,21 @@ describe("layout store", () => {
     expect(savedLayout.collapsed.content).toBe(false);
   });
 
-  it("keeps the chat composer collapsed by default and persists its toggle", async () => {
+  it("drops the legacy global composer flag from saved layouts", () => {
     const layout = useLayoutStore();
-    const savedLayout: LayoutState = {
+    const savedLayout = {
       widths: { navigator: 248, chat: 356, content: 620 },
       collapsed: { navigator: false, chat: false, content: false },
       minimap: false,
       utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
-    };
-    delete savedLayout.composer;
+      composer: { open: true },
+    } as LayoutState;
 
     layout.hydrate(settings, savedLayout);
-    expect(layout.layout.composer.open).toBe(false);
 
-    await layout.setComposerOpen(true);
-    expect(layout.layout.composer.open).toBe(true);
+    // Composer expansion is per-column ephemeral state; a saved flag must not
+    // survive hydration only to be written back forever.
+    expect(layout.layout).not.toHaveProperty("composer");
   });
 
   it("migrates inflated legacy side-panel widths once", () => {
@@ -117,7 +135,7 @@ describe("layout store", () => {
     } as LayoutState);
 
     expect(layout.layout.version).toBe(4);
-    expect(layout.layout.widths).toEqual({ navigator: 248, chat: 356, content: 320 });
+    expect(layout.layout.widths).toEqual({ navigator: 248, chat: 356, content: 320, settings: 260 });
     expect(layout.layout.collapsed.chat).toBe(true);
   });
 

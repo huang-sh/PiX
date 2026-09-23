@@ -1,8 +1,12 @@
 import {
+  closeSync,
   cpSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   readdirSync,
   renameSync,
@@ -11,6 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { debugLog } from "./debug-log.js";
 import {
   basename,
   dirname,
@@ -43,11 +48,12 @@ import { projectId } from "../shared/types.js";
 import { validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
+import { sessionModifiedAt } from "./graph-files.js";
 import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
-import { pixAgentDir, pixHome } from "./paths.js";
+import { canonicalPath, pixAgentDir, pixHome } from "./paths.js";
 import { piSettingsSdk } from "./pi-runtime.js";
-const readJson = <T extends Record<string, unknown>>(p: string): T => {
+export const readJson = <T extends Record<string, unknown>>(p: string): T => {
   try {
     const v = JSON.parse(readFileSync(p, "utf8"));
     return v && typeof v === "object" && !Array.isArray(v)
@@ -63,6 +69,12 @@ const merge = (
 ): Record<string, unknown> => {
   const out = { ...a };
   for (const [k, v] of Object.entries(b)) {
+    // null is the patch language's "remove this key": settings diffs must
+    // encode removals in a form JSON transports keep (see settingsDiff).
+    if (v === null) {
+      delete out[k];
+      continue;
+    }
     out[k] =
       v &&
       typeof v === "object" &&
@@ -75,7 +87,7 @@ const merge = (
   }
   return out;
 };
-const atomic = (p: string, v: unknown) => {
+export const atomic = (p: string, v: unknown) => {
   mkdirSync(dirname(p), { recursive: true });
   const t = `${p}.tmp`;
   writeFileSync(t, JSON.stringify(v, null, 2) + "\n");
@@ -84,10 +96,9 @@ const atomic = (p: string, v: unknown) => {
 export const DEFAULT_LAYOUT: LayoutState = {
   version: 4,
   navigatorPinned: false,
-  widths: { navigator: 248, chat: 356, content: 320 },
+  widths: { navigator: 248, chat: 356, content: 320, settings: 260 },
   collapsed: { navigator: false, chat: true, content: true },
   minimap: false,
-  composer: { open: false },
   utility: {
     open: false,
     collapsed: false,
@@ -116,7 +127,7 @@ function quarantineCorruptSettings(path: string) {
       path,
       `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "")}`,
     );
-  } catch {}
+  } catch (e) { debugLog("services: quarantine corrupt settings", e); }
 }
 /**
  * One-time bootstrap of a profile: park a corrupt GUI settings file, and on
@@ -165,6 +176,8 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
   out.theme = normalizeTheme(out.theme);
   if (typeof out.browserHome !== "string" || !out.browserHome) drop("browserHome");
   if (out.lastProject !== undefined && typeof out.lastProject !== "string") drop("lastProject");
+  if (out.updateSkippedVersion !== undefined && typeof out.updateSkippedVersion !== "string")
+    drop("updateSkippedVersion");
   for (const key of [
     "confirmDestructiveActions",
     "openLastSessionOnStartup",
@@ -172,6 +185,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "openLinksInApp",
     "closeToTray",
     "canvasDotGrid",
+    "experimentalHistory",
   ])
     expectBoolean(key);
   expectNumber("canvasDotGridSpacing", 8, 96);
@@ -232,6 +246,7 @@ export class SettingsService {
       canvasDotGrid: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
+      experimentalHistory: false,
     };
     // Normalize the raw file before the defaults merge, so a dropped key is
     // filled by its default instead of surfacing as undefined.
@@ -255,8 +270,8 @@ export class SettingsService {
       },
     };
   }
-  update(patch: Record<string, unknown>, replace = false) {
-    const next = replace ? { ...patch } : merge(readJson(this.appPath), patch);
+  update(patch: Record<string, unknown>) {
+    const next = merge(readJson(this.appPath), patch);
     if (Object.hasOwn(patch, "keyboardShortcuts")) {
       validateShortcutOverrides(patch.keyboardShortcuts);
       // This map is a complete set of overrides: merging would resurrect reset bindings.
@@ -279,7 +294,6 @@ export class SettingsService {
   async updatePi(
     scope: "global" | "project",
     patch: Record<string, unknown>,
-    replace = false,
   ) {
     if (scope === "project" && !this.project)
       throw new Error("Open a project first");
@@ -309,7 +323,7 @@ export class SettingsService {
           );
         }
       }
-      return JSON.stringify(replace ? { ...patch } : merge(base, patch), null, 2);
+      return JSON.stringify(merge(base, patch), null, 2);
     });
     return this.bundle();
   }
@@ -367,6 +381,25 @@ export class SettingsService {
     const recentProjects = this.projectHistory().filter((item) => item.id !== id);
     this.update({ recentProjects });
     return recentProjects;
+  }
+}
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+export const MAX_BINARY_PREVIEW_BYTES = 20 * 1024 * 1024;
+function readBounded(path: string, max: number): { bytes: Buffer; truncated: boolean } {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, max);
+    const bytes = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const read = readSync(fd, bytes, offset, length - offset, offset);
+      if (!read) break;
+      offset += read;
+    }
+    return { bytes, truncated: size > max };
+  } finally {
+    closeSync(fd);
   }
 }
 export class WorkspaceService {
@@ -433,31 +466,33 @@ export class WorkspaceService {
     const root = this.root;
     if (!root) throw new Error("Open a project first");
     const a = this.safe(p),
-      b = readFileSync(a),
       ext = extname(a).toLowerCase(),
-      mime: Record<string, string> = {
-        ".avif": "image/avif",
-        ".bmp": "image/bmp",
-        ".gif": "image/gif",
-        ".ico": "image/x-icon",
-        ".jpeg": "image/jpeg",
-        ".jpg": "image/jpeg",
-        ".png": "image/png",
-        ".svg": "image/svg+xml",
-        ".webp": "image/webp",
-      },
-      truncated = b.length > 2 * 1024 * 1024,
-      s = truncated ? b.subarray(0, 2 * 1024 * 1024) : b;
-    if (mime[ext])
+      binaries: Record<string, { mime: string; language: string }> = {
+        ".avif": { mime: "image/avif", language: "image" },
+        ".bmp": { mime: "image/bmp", language: "image" },
+        ".gif": { mime: "image/gif", language: "image" },
+        ".ico": { mime: "image/x-icon", language: "image" },
+        ".jpeg": { mime: "image/jpeg", language: "image" },
+        ".jpg": { mime: "image/jpeg", language: "image" },
+        ".pdf": { mime: "application/pdf", language: "pdf" },
+        ".png": { mime: "image/png", language: "image" },
+        ".svg": { mime: "image/svg+xml", language: "image" },
+        ".webp": { mime: "image/webp", language: "image" },
+      };
+    const binary = binaries[ext];
+    if (binary) {
+      const { bytes, truncated } = readBounded(a, MAX_BINARY_PREVIEW_BYTES);
       return {
         path: relative(root, a).split(sep).join("/"),
         name: basename(a),
         content: "",
-        dataUrl: `data:${mime[ext]};base64,${b.toString("base64")}`,
-        language: "image",
+        dataUrl: truncated ? undefined : `data:${binary.mime};base64,${bytes.toString("base64")}`,
+        language: binary.language,
         readonly: true,
-        truncated: false,
+        truncated,
       };
+    }
+    const { bytes: s, truncated } = readBounded(a, MAX_PREVIEW_BYTES);
     if (s.includes(0)) throw new Error("Binary file");
     const language: Record<string, string> = {
       ".ts": "typescript",
@@ -539,7 +574,7 @@ export class GitService {
     }));
     return {
       available: true,
-      branch: head.slice(3).split("...")[0]?.split(" [")[0] || "HEAD",
+      branch: head.slice(3).replace(/^(?:No commits yet on |Initial commit on )/, "").split("...")[0]?.split(" [")[0] || "HEAD",
       ahead: Number(head.match(/ahead (\d+)/)?.[1] ?? 0),
       behind: Number(head.match(/behind (\d+)/)?.[1] ?? 0),
       changes,
@@ -562,6 +597,27 @@ export class GitService {
       windowsHide: true,
     });
     return stdout || "No changes.";
+  }
+  async branches(): Promise<string[]> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const { stdout } = await git("git", ["-c", `safe.directory=${root}`, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"],
+      { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10000 });
+    return stdout.trim().split(/\r?\n/).filter(Boolean);
+  }
+  async switchBranch(branch: string): Promise<GitStatus> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const repository = new GitService(root);
+    // Accept exact local branch names, never revision expressions or Git options.
+    if (!(await repository.branches()).includes(branch)) throw new Error("Choose an existing local Git branch");
+    try {
+      await git("git", ["-c", `safe.directory=${root}`, "switch", "--no-guess", "--", branch],
+        { cwd: root, encoding: "utf8", windowsHide: true, timeout: 30000 });
+    } catch (error) {
+      throw new Error(String((error as { stderr?: string }).stderr || (error as Error).message).trim());
+    }
+    return repository.status();
   }
 }
 export class ShellService {
@@ -673,6 +729,24 @@ export class ShellService {
     this.running.clear();
   }
 }
+
+/** Validates a session path against one project's session directory and returns its realpath. */
+export function managedSessionFile(dir: string | null, p: string) {
+  if (!dir)
+    throw new Error("Open a project first");
+  const root = realpathSync(dir);
+  const target = realpathSync(resolve(p));
+  const path = relative(root, target);
+  if (
+    !path ||
+    isAbsolute(path) ||
+    path.startsWith(`..${sep}`) ||
+    dirname(path) !== "." ||
+    extname(path) !== ".jsonl"
+  )
+    throw new Error("Session path escapes the configured session directory");
+  return target;
+}
 export class SessionFiles {
   cwd: string | null;
   dir: string | null;
@@ -681,39 +755,27 @@ export class SessionFiles {
     this.dir = dir ? resolve(dir) : null;
     if (this.dir) mkdirSync(this.dir, { recursive: true });
   }
-  set(cwd: string | null, dir: string | null) {
-    this.cwd = cwd ? resolve(cwd) : null;
-    this.dir = dir ? resolve(dir) : null;
-    if (this.dir) mkdirSync(this.dir, { recursive: true });
-  }
   managed(p: string) {
-    if (!this.dir)
-      throw new Error("Open a project first");
-    const root = realpathSync(this.dir);
-    const target = realpathSync(resolve(p));
-    const path = relative(root, target);
-    if (
-      !path ||
-      isAbsolute(path) ||
-      path.startsWith(`..${sep}`) ||
-      dirname(path) !== "." ||
-      extname(path) !== ".jsonl"
-    )
-      throw new Error("Session path escapes the configured session directory");
-    return target;
+    return managedSessionFile(this.dir, p);
   }
   list(): SessionSummary[] {
     const dir = this.dir;
     if (!dir || !existsSync(dir)) return [];
-    return readdirSync(dir)
+    // Rows carry the canonical file so they match registry entries and history
+    // rows even when the project is reached through a junction. Rows all name
+    // plain files in this one directory, so canonicalizing the directory once
+    // spells every row without a realpath per file; reading through the
+    // canonical spelling also skips the junction on every stat and read.
+    const root = canonicalPath(dir);
+    return readdirSync(root)
       .filter((n) => n.endsWith(".jsonl"))
       .flatMap((n) => {
-        const p = join(dir, n);
+        const p = join(root, n);
         try {
           const s = statSync(p),
             x = parseSessionJsonl(readFileSync(p, "utf8"));
           return [
-            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
+            summarizeSession(p, x.header, x.entries, sessionModifiedAt(p, s.mtime.toISOString())),
           ];
         } catch {
           return [];
@@ -745,7 +807,10 @@ export class SessionFiles {
     return target;
   }
   rename(p: string, name: string) {
-    p = this.managed(p);
+    this.renameAt(this.managed(p), name);
+  }
+  /** Renames a session whose path was already validated against its owning directory. */
+  renameAt(p: string, name: string) {
     const raw = readFileSync(p, "utf8").trimEnd(),
       entries = parseSessionJsonl(raw).entries;
     writeFileSync(
@@ -763,14 +828,17 @@ export class SessionFiles {
     );
   }
   delete(p: string) {
-    const path = this.managed(p);
-    unlinkSync(path);
+    this.deleteAt(this.managed(p));
+  }
+  /** Deletes a session whose path was already validated against its owning directory. */
+  deleteAt(p: string) {
+    unlinkSync(p);
     // The sidecars keep file contents and branch records that nothing can reach
     // once the session file is gone, so they go with it. Cleanup stays
     // best-effort: a locked snapshot must not report a finished deletion as a
     // failure after the session file itself is already unlinked.
-    for (const dir of [fileChangeDir(path), graphDir(path)]) {
-      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    for (const dir of [fileChangeDir(p), graphDir(p)]) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch (e) { debugLog("services: sidecar cleanup", e); }
     }
   }
 }

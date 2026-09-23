@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   GitService,
+  MAX_BINARY_PREVIEW_BYTES,
   SessionFiles,
   SettingsService,
   ShellService,
@@ -57,6 +58,46 @@ test("workspace returns browser-safe image previews", () => {
     assert.equal(image.language, "image");
     assert.equal(image.readonly, true);
     assert.match(image.dataUrl ?? "", /^data:image\/png;base64,/);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace truncates text previews and only reads the preview window", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-preview-"));
+  try {
+    const path = join(temp, "large.log");
+    writeFileSync(path, "a".repeat(2 * 1024 * 1024 + 100));
+    const doc = new WorkspaceService(temp).read("large.log");
+    assert.equal(doc.truncated, true);
+    assert.equal(doc.readonly, true);
+    assert.equal(doc.content.length, 2 * 1024 * 1024);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace drops oversized image previews instead of encoding them", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-big-image-"));
+  try {
+    const path = join(temp, "big.png");
+    writeFileSync(path, Buffer.alloc(MAX_BINARY_PREVIEW_BYTES + 1, 0x42));
+    const doc = new WorkspaceService(temp).read("big.png");
+    assert.equal(doc.language, "image");
+    assert.equal(doc.truncated, true);
+    assert.equal(doc.dataUrl, undefined);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace returns pdf documents as base64 previews", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-pdf-"));
+  try {
+    const bytes = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
+    writeFileSync(join(temp, "paper.pdf"), bytes);
+    const doc = new WorkspaceService(temp).read("paper.pdf");
+    assert.equal(doc.language, "pdf");
+    assert.equal(doc.readonly, true);
+    assert.equal(doc.content, "");
+    assert.equal(doc.dataUrl, `data:application/pdf;base64,${bytes.toString("base64")}`);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -244,6 +285,10 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(persisted.closeToTray, undefined);
     assert.equal(persisted.canvasDotGridDotSize, undefined);
     assert.deepEqual(persisted.futureKey, { keep: true });
+
+    // Settings-form removals ride as null; the merge drops the key.
+    new SettingsService(temp).update({ futureKey: null });
+    assert.equal(JSON.parse(readFileSync(appPath, "utf8")).futureKey, undefined);
   } finally {
     if (previous === undefined) delete process.env.PIX_HOME;
     else process.env.PIX_HOME = previous;
@@ -265,9 +310,11 @@ test("pi settings writes go through the sdk: merge, replace, freeze, reset", asy
     assert.equal(bundle.piGlobal.defaultProvider, "openai");
     assert.equal(bundle.piGlobal.queueMode, "tree");
 
-    // Replace writes exactly the patch.
-    bundle = await settings.updatePi("global", { defaultProvider: "openai" }, true);
-    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { defaultProvider: "openai" });
+    // Removals ride as null, so the JSON hop to a remote host keeps them.
+    await settings.updatePi("global", JSON.parse(JSON.stringify({ queueMode: null })));
+    const cleared = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(Object.hasOwn(cleared, "queueMode"), false);
+    assert.equal(cleared.defaultProvider, "openai");
 
     // A corrupt file freezes saves instead of being silently overwritten.
     writeFileSync(file, "{broken");

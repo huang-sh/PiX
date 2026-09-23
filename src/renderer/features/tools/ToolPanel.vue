@@ -24,17 +24,20 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { desktop } from "../../api";
 import { useLayoutStore, type ContentTab } from "../../stores/layout";
 import { useWorkspaceStore, type WorkspaceTab } from "../../stores/workspace";
 import { useSessionStore } from "../../stores/session";
+import type { FileNode } from "../../../shared/types";
 import FileTree from "./FileTree.vue";
 import { filterFileTree } from "./file-tree";
 import TerminalView from "./TerminalView.vue";
 import FileDiff from "./FileDiff.vue";
+import PdfView from "./PdfView.vue";
+import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
@@ -43,17 +46,35 @@ const terminalConnected = computed(() => !workspace.project?.remote ||
   Boolean(session.projects.find((record) => record.id === session.activeProjectId)?.connected));
 const { t } = useI18n();
 
-// reka-ui 2.10.4 boots px-sized panels at their min size (initial layout runs
-// before the group is measured), which jammed the editor against its 100px
-// floor and left the file divider draggable one way only. Declare the panels
-// in percent instead; the content width is current at mount because the
-// workbench keeps widths.content updated on every drag.
-const contentEstimate = Math.max(1, layout.layout.widths.content);
-const pct = (px: number) => Math.min(95, Math.max(0, (px / contentEstimate) * 100));
+// Panels are declared in percent (reka-ui boots px-sized panels at their min
+// size before the group is measured), but the percent base must be the
+// group's live width: a boot-time snapshot diverges from the hydrated layout
+// and from later drags, which used to render the tree narrower than its
+// 180px floor. min/max props are reactive, so reka re-clamps as the base
+// moves; the store width only bridges the first frame before measuring.
+const fileGroupWidth = ref(0);
+let fileGroupObserver: ResizeObserver | undefined;
+const bindFileGroup = (instance: unknown) => {
+  const element = (instance as { $el?: unknown } | null)?.$el;
+  fileGroupObserver?.disconnect();
+  fileGroupObserver = undefined;
+  fileGroupWidth.value = 0;
+  if (!(element instanceof HTMLElement)) return;
+  fileGroupWidth.value = element.getBoundingClientRect().width;
+  if (typeof ResizeObserver === "undefined") return;
+  fileGroupObserver = new ResizeObserver(() => {
+    fileGroupWidth.value = element.getBoundingClientRect().width;
+  });
+  fileGroupObserver.observe(element);
+};
+onBeforeUnmount(() => fileGroupObserver?.disconnect());
+const pct = (px: number) => {
+  const base = fileGroupWidth.value || layout.layout.widths.content;
+  return Math.min(95, Math.max(0, (px / Math.max(1, base)) * 100));
+};
 const launchUrl = ref(workspace.browserUrl);
 const fileQuery = ref("");
 const fileTreeOpen = ref(true);
-const fileTreePanel = ref<{ collapse: () => void; expand: () => void }>();
 const lineNumbers = ref<HTMLElement>();
 const hasDesktop = Boolean(window.pix);
 const tools: { id: ContentTab; label: string; icon: unknown }[] = [
@@ -112,9 +133,79 @@ const gutter = computed(() => {
   const lines = activeFile.value?.document?.content.split("\n").length ?? 1;
   return Array.from({ length: lines }, (_, index) => index + 1).join("\n");
 });
+const isPdf = computed(() => activeFile.value?.document?.language === "pdf");
+const isMarkdown = computed(() => activeFile.value?.document?.language === "markdown");
+// Oversized binary documents arrive without a dataUrl; text previews keep
+// their (bounded) content and stay in the editor instead.
+const tooLarge = computed(() => {
+  const document = activeFile.value?.document;
+  return Boolean(document?.truncated && !document.dataUrl && !document.content);
+});
+const markdownEditing = ref(false);
+watch(() => activeFile.value?.id, () => {
+  markdownEditing.value = false;
+});
 
 async function openFile(path: string) {
   await workspace.openFile(path);
+}
+
+// Absolute tree paths keep the project root's separator style — drive-letter
+// and UNC roots use "\", POSIX (local or remote) roots use "/".
+function absoluteTreePath(node: FileNode): string {
+  const root = workspace.project?.path ?? "";
+  const separator = /^([a-zA-Z]:\\|\\\\)/.test(root) ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${separator}${node.path}`;
+}
+
+async function copyTreePath(node: FileNode) {
+  const value = absoluteTreePath(node);
+  try {
+    if (window.pix?.copy) await window.pix.copy(value);
+    else await navigator.clipboard.writeText(value);
+    layout.showNotice(t("common.copied"));
+  } catch {
+    layout.showNotice(t("common.copyFailed"), "error");
+  }
+}
+
+async function openTreePath(node: FileNode) {
+  try {
+    await desktop.invoke("app.openPath", { path: node.path });
+  } catch {
+    layout.showNotice(t("tools.openFailed"), "error");
+  }
+}
+
+async function openTreeWith(node: FileNode) {
+  try {
+    await desktop.invoke("app.openWith", { path: node.path });
+  } catch {
+    layout.showNotice(t("tools.openFailed"), "error");
+  }
+}
+
+// Linux renders registered .desktop applications as a submenu; the lists are
+// per row and loaded when its menu opens.
+const treeOpenWithApps = ref<Record<string, { id: string; name: string }[]>>({});
+const appsForTreeNode = (node: FileNode) => treeOpenWithApps.value[node.path] ?? [];
+
+async function treeMenuOpened(node: FileNode) {
+  if (!/^Linux/i.test(navigator.platform) || treeOpenWithApps.value[node.path]) return;
+  try {
+    treeOpenWithApps.value[node.path] =
+      await desktop.invoke<{ id: string; name: string }[]>("app.openWithApps", { path: node.path });
+  } catch {
+    treeOpenWithApps.value[node.path] = [];
+  }
+}
+
+async function openTreeWithApp(node: FileNode, appId: string) {
+  try {
+    await desktop.invoke("app.openWithApp", { path: node.path, appId });
+  } catch {
+    layout.showNotice(t("tools.openFailed"), "error");
+  }
 }
 
 function editorInput(event: Event) {
@@ -139,13 +230,6 @@ function closeFile(id: string) {
 
 function toggleFileTree() {
   fileTreeOpen.value = !fileTreeOpen.value;
-  // collapse()/expand() assert when the splitter group has not been measured
-  // yet (jsdom runs tests unmeasured); fileTreeOpen is the authoritative
-  // visibility state either way.
-  try {
-    if (fileTreeOpen.value) fileTreePanel.value?.expand();
-    else fileTreePanel.value?.collapse();
-  } catch {}
 }
 
 
@@ -298,10 +382,12 @@ async function save(tab: WorkspaceTab) {
     }}</pre>
 
     <template v-else-if="layout.contentSection === 'files'">
-      <!-- No auto-save-id: the tree is part of the tool's default
-           presentation and every open starts expanded at the default
-           width instead of a remembered collapsed/resize state. -->
+      <!-- No auto-save-id and no collapsible flag: the tree always opens at
+           the default width, and dragging its handle can only resize down to
+           min-size — hiding the tree is the toolbar button's job alone, so a
+           dragged handle can never collapse it into an unexpandable state. -->
       <SplitterGroup
+        :ref="bindFileGroup"
         id="pix-file-workspace"
         direction="horizontal"
         class="file-workspace"
@@ -331,6 +417,13 @@ async function save(tab: WorkspaceTab) {
                 <PanelRight :size="16" />
               </Button>
               <Button
+                v-if="isMarkdown && !activeFile?.document?.readonly"
+                size="sm"
+                :aria-pressed="markdownEditing"
+                data-action="toggle-markdown-edit"
+                @click="markdownEditing = !markdownEditing"
+              >{{ markdownEditing ? t("tools.preview") : t("tools.edit") }}</Button>
+              <Button
                 v-if="activeFile?.document && !activeFile.document.readonly"
                 size="sm"
                 @click="save(activeFile)"
@@ -344,8 +437,26 @@ async function save(tab: WorkspaceTab) {
             <span>{{ t("tools.selectFile") }}</span>
           </div>
 
+          <div v-else-if="tooLarge" class="file-empty" data-file-too-large>
+            <FileText :size="28" />
+            <strong>{{ t("tools.fileTooLarge") }}</strong>
+          </div>
+
+          <PdfView
+            v-else-if="isPdf"
+            class="full-tool"
+            :data-url="activeFile?.document?.dataUrl ?? ''"
+          />
+
           <div v-else-if="activeFile.document?.dataUrl" class="image-preview">
             <img :src="activeFile.document.dataUrl" :alt="activeFile.title" />
+          </div>
+
+          <div v-else-if="isMarkdown && !markdownEditing" class="file-markdown" data-markdown-preview>
+            <MarkdownRenderer
+              :content="activeFile.document?.content ?? ''"
+              :custom-id="activeFile.id"
+            />
           </div>
 
           <div v-else-if="activeFile.document" class="code-editor">
@@ -363,22 +474,20 @@ async function save(tab: WorkspaceTab) {
         </SplitterPanel>
 
         <SplitterResizeHandle
+          v-if="fileTreeOpen"
           class="resize-handle file-resize-handle"
-          :class="{ hidden: !fileTreeOpen }"
           :aria-label="t('tools.resizeTree')"
         />
 
         <SplitterPanel
+          v-if="fileTreeOpen"
           id="file-tree-panel"
-          ref="fileTreePanel"
           :order="2"
-          collapsible
-          :collapsed-size="0"
           :default-size="pct(200)"
           :min-size="pct(180)"
           :max-size="pct(800)"
         >
-          <aside v-if="fileTreeOpen" class="file-explorer">
+          <aside class="file-explorer">
             <div class="file-filter">
               <Search :size="14" />
               <input v-model="fileQuery" type="search" :placeholder="t('tools.filterFiles')" :aria-label="t('tools.filterFiles')" />
@@ -389,8 +498,15 @@ async function save(tab: WorkspaceTab) {
                 :nodes="filteredFiles"
                 :query="fileQuery"
                 :active-path="activeFile?.path"
+                :local="!workspace.project?.remote"
+                :open-with-apps="appsForTreeNode"
                 @open="openFile"
                 @expand="workspace.loadChildren"
+                @copy-path="copyTreePath"
+                @open-external="openTreePath"
+                @open-with="openTreeWith"
+                @open-with-app="openTreeWithApp"
+                @menu-open="treeMenuOpened"
               />
               <p v-if="fileQuery && !filteredFiles.length" class="empty-copy">{{ t("tools.noMatchingFiles") }}</p>
             </div>
@@ -448,9 +564,32 @@ async function save(tab: WorkspaceTab) {
           <template v-if="active.kind === 'file' && active.document">
             <div class="editor-header">
               <span>{{ active.path }}</span>
+              <Button
+                v-if="active.document.language === 'markdown' && !active.document.readonly"
+                size="sm"
+                :aria-pressed="markdownEditing"
+                @click="markdownEditing = !markdownEditing"
+              >{{ markdownEditing ? t("tools.preview") : t("tools.edit") }}</Button>
               <Button size="sm" @click="save(active)">{{ t("common.save") }}</Button>
             </div>
+            <div
+              v-if="active.document.truncated && !active.document.dataUrl && !active.document.content"
+              class="file-empty"
+              data-file-too-large
+            >
+              <FileText :size="28" />
+              <strong>{{ t("tools.fileTooLarge") }}</strong>
+            </div>
+            <PdfView
+              v-else-if="active.document.language === 'pdf'"
+              class="full-tool"
+              :data-url="active.document.dataUrl ?? ''"
+            />
+            <div v-else-if="active.document.language === 'markdown' && !markdownEditing" class="file-markdown" data-markdown-preview>
+              <MarkdownRenderer :content="active.document.content" :custom-id="active.id" />
+            </div>
             <textarea
+              v-else
               class="file-editor"
               :readonly="active.document.readonly"
               :value="active.document.content"

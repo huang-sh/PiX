@@ -18,6 +18,15 @@ async function openLink(url: string) {
     error.value = t("settings.about.openFailed");
   }
 }
+
+async function showLogs() {
+  error.value = "";
+  try {
+    await desktop.invoke("app.revealLogs");
+  } catch {
+    error.value = t("settings.about.logsFailed");
+  }
+}
 </script>
 
 <template>
@@ -32,6 +41,9 @@ async function openLink(url: string) {
       </Button>
       <Button variant="outline" data-about-source @click="openLink(repositoryUrl)">
         {{ t("settings.about.sourceFeedback") }}
+      </Button>
+      <Button variant="outline" data-about-logs @click="showLogs">
+        {{ t("settings.about.openLogs") }}
       </Button>
     </div>
     <p class="about-hint">{{ t("settings.about.updatesHint") }}</p>

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RemoteConnectStage } from "../shared/types.js";
+import { debugLog } from "./debug-log.js";
 import {
   PIX_HOST_VERSION,
   PIX_REMOTE_PROTOCOL,
@@ -51,7 +52,7 @@ export function parseSshHosts(config: string) {
       if (!host || /[*!?]/u.test(host)) continue;
       try {
         hosts.add(validateSshHost(host));
-      } catch {}
+      } catch (e) { debugLog(`ssh-host-installer: skipped invalid host ${host}`, e); }
     }
   }
   return [...hosts].sort((a, b) => a.localeCompare(b));

@@ -1,33 +1,25 @@
-import { dirname, basename, join, resolve } from "node:path";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, basename, join } from "node:path";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
+import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
+import { pixGitBranchExtension } from "./extensions/git-branch.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { appendOutputStyle, isOutputStyleFile, type OutputStyleSkill } from "./output-style.js";
 import { getSupportedThinkingLevels, type ModelsRefreshResult } from "@earendil-works/pi-ai";
 import {
   detectWindowsBash,
   memoizeOnce,
+  withDefaultPowershellTool,
   withDetectedBashShell,
 } from "./bash-resolution.js";
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
-import { applyBuiltinSkillOverrides, isBundledSkillPath, resolveBuiltinSkills, setBuiltinSkillManualOnly } from "./builtin-skills.js";
-import {
-  SKILL_BODY_MESSAGES,
-  SKILL_DESCRIPTION_MESSAGES,
-  SKILL_NAME_MESSAGES,
-  assertEditableSkillPath,
-  isEditableSkillPath,
-  isPathInside,
-  parseSkillDocument,
-  serializeSkillDocument,
-  skillRoots,
-} from "./skill-files.js";
-import { skillBodyError, skillDescriptionError, skillNameError, slugifySkillName } from "../shared/skills.js";
-import { pixAgentDir } from "./paths.js";
+import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skills.js";
+import { SkillControls } from "./skill-controls.js";
+import { canonicalPath, pixAgentDir } from "./paths.js";
 import { addCustomModel, getCustomModels } from "./custom-models.js";
+import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
 import type {
@@ -37,8 +29,6 @@ import type {
   RuntimeModel,
   RuntimeExtension,
   RuntimeProvider,
-  RuntimeSkill,
-  RuntimeSkillDocument,
   RuntimeState,
   SessionSnapshot,
   SessionSummary,
@@ -49,6 +39,30 @@ import { projectSession, summarizeSession } from "../shared/session.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+
+/** Control actions that need no open session; everything else is session-scoped. */
+export const MODEL_ACTIONS = [
+  "getModels",
+  "refreshModels",
+  "addCustomModel",
+  "updateCustomModel",
+  "getCustomModels",
+  "getProviders",
+  "getSkills",
+  "getSkill",
+  "createSkill",
+  "importSkill",
+  "updateSkill",
+  "deleteSkill",
+  "setSkillManualOnly",
+  "getExtensions",
+  "installExtension",
+  "removeExtension",
+  "loginApiKey",
+  "loginOAuth",
+  "logout",
+  "setBrokerProviders",
+] as const satisfies readonly AgentControl["action"][];
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -97,6 +111,15 @@ export class PiRuntime {
   private closeTask?: Promise<void>;
   private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
   eventScope?: { graphId: string; branchId: string; runId: string };
+  /** The settings page's skill management; every SDK touch stays behind live accessors. */
+  readonly skillControls = new SkillControls({
+    pi: () => this.pi(),
+    agentDir: () => this.agentDir(),
+    cwd: () => this.cwd,
+    session: () => this.runtime?.session,
+    modelServices: () => this.modelServices,
+    ensureModelServices: async () => { await this.modelRuntime(); },
+  });
   constructor(
     cwd: string | null,
     dir: string | null,
@@ -127,53 +150,6 @@ export class PiRuntime {
   agentDir() {
     return pixAgentDir();
   }
-  /** Skill roots PiX may create or rewrite for the active project. */
-  private async skillFileRoots() {
-    const pi = await this.pi();
-    return skillRoots(this.agentDir(), this.cwd ?? homedir(), pi.CONFIG_DIR_NAME, homedir());
-  }
-  /**
-   * Reloads discovery after a skill file changes so the settings list and the
-   * /skill:name commands (expanded against the live loader) agree with disk.
-   * The active session's system prompt is deliberately left alone: it is the
-   * prompt-cache prefix, and rebuilding it would reprocess the entire history.
-   * The <available_skills> advertisement only refreshes in a new or reloaded
-   * session, the same trade-off Pi's own CLI makes.
-   */
-  private async reloadSkills() {
-    const loader = this.runtime?.session?.resourceLoader;
-    if (loader) {
-      await loader.reload();
-      return;
-    }
-    await this.modelRuntime();
-    await this.modelServices?.resourceLoader?.reload();
-  }
-  private async skillTarget(path: string) {
-    const roots = await this.skillFileRoots();
-    return { roots, file: assertEditableSkillPath(path, roots.editable) };
-  }
-  private async skillRoot(scope: "user" | "project") {
-    if (scope === "project" && !this.cwd) throw new Error("Open a project first");
-    const { user, project } = await this.skillFileRoots();
-    return resolve(scope === "project" ? project : user);
-  }
-  /** Validates the editable fields shared by create, import, and update. */
-  private assertSkillFields(name: string, description: string, body: string) {
-    const nameError = skillNameError(name);
-    if (nameError) throw new Error(SKILL_NAME_MESSAGES[nameError]);
-    const descriptionError = skillDescriptionError(description);
-    if (descriptionError) throw new Error(SKILL_DESCRIPTION_MESSAGES[descriptionError]);
-    const bodyError = skillBodyError(body);
-    if (bodyError) throw new Error(SKILL_BODY_MESSAGES[bodyError]);
-  }
-  private skillFile(root: string, name: string) {
-    const slug = slugifySkillName(name);
-    const file = join(root, slug, "SKILL.md");
-    if (existsSync(file) || existsSync(join(root, `${slug}.md`)))
-      throw new Error(`A skill named "${name}" already exists`);
-    return file;
-  }
   async modelRuntime() {
     if (this.runtime?.session?.modelRuntime)
       return this.runtime.session.modelRuntime;
@@ -198,14 +174,49 @@ export class PiRuntime {
   }
 
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
+    await this.replaceBrokerCatalog(await this.modelRuntime(), new Set(providers), models);
+  }
+
+  /**
+   * Re-points this runtime at another runtime's broker catalog. Remote hosts
+   * hand every catalog change to the project runtime, while an open session
+   * holds its own copy — without this it would never see a newly added model.
+   */
+  async adoptBroker(source: PiRuntime) {
+    this.modelBroker = source.modelBroker;
+    const modelRuntime = this.runtime?.session?.modelRuntime;
+    if (!modelRuntime) {
+      this.brokerProviders = new Set(source.brokerProviders);
+      this.brokerModels = [...source.brokerModels];
+      return;
+    }
+    await this.replaceBrokerCatalog(modelRuntime, new Set(source.brokerProviders), [...source.brokerModels]);
+  }
+
+  /**
+   * Pulls a catalog or credential change another runtime already applied into
+   * this one. Every runtime's model catalog is its own in-memory copy, so an
+   * open session never sees a model added, updated, or logged in elsewhere
+   * until it re-reads it. A session running the updated model adopts the new
+   * definition; a streaming one keeps it for its current response only.
+   */
+  async adoptCatalog(input: AgentControl) {
     const modelRuntime = await this.modelRuntime();
-    const next = new Set(providers);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const s = this.runtime?.session;
+    if (input.action === "updateCustomModel" && s?.model && !s.isStreaming
+      && s.model.provider === input.provider && s.model.id === input.modelId)
+      await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
+  }
+
+  /** Switches one model runtime over to a catalog, dropping the providers that left it. */
+  private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
     for (const provider of this.brokerProviders)
-      if (!next.has(provider)) {
+      if (!providers.has(provider)) {
         await modelRuntime.removeRuntimeApiKey(provider);
         modelRuntime.unregisterProvider(provider);
       }
-    this.brokerProviders = next;
+    this.brokerProviders = providers;
     this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
@@ -235,11 +246,22 @@ export class PiRuntime {
     const agentDir = this.agentDir();
     // Pi's bash tool otherwise only finds Git Bash under Program Files or
     // directly on PATH; derive it from git.exe so custom install roots
-    // (e.g. D:\software\Git) get a POSIX shell without user setup.
-    const settingsManager = withDetectedBashShell(
-      pi.SettingsManager.create(cwd, agentDir),
-      detectBash(),
+    // (e.g. D:\software\Git) get a POSIX shell without user setup. The
+    // powershell tool joins the active default set the same way — PiX's own
+    // or a migrated pi CLI config — on Windows only; Pi resolves the
+    // executable itself when the tool runs.
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    const settingsManager = withDefaultPowershellTool(
+      withDetectedBashShell(
+        pi.SettingsManager.create(cwd, agentDir),
+        detectBash(),
+      ),
     );
+    // One loader pass resolves skills before the append-system prompt, so
+    // this holder already holds the opted-in list when the output style
+    // injection reads it. Fresh per services instance, so session and
+    // session-less services never share stale skills.
+    const outputStyleSkills: OutputStyleSkill[] = [];
     return {
       cwd,
       agentDir,
@@ -252,23 +274,35 @@ export class PiRuntime {
       resourceLoaderOptions: {
         extensionFactories: [
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
+          pixGitBranchExtension,
         ] as InlineExtension[],
         additionalExtensionPaths: resolveBuiltinPackages(
-          dirname(fileURLToPath(import.meta.url)),
+          moduleDir,
           settingsManager,
         ),
         // Built-in skills load as plain markdown via the same layout
         // resolution (extraResources skills/ beside the app or server);
         // pi ranks them below user skills, so same-named user copies win.
-        additionalSkillPaths: resolveBuiltinSkills(
-          dirname(fileURLToPath(import.meta.url)),
-        ),
+        additionalSkillPaths: resolveBuiltinSkills(moduleDir),
         // The manual-only overrides for those read-only files are applied
         // here. Re-read on every invocation: reload() and new loaders call
         // this closure again, so a toggled built-in takes effect without
         // recreating services.
-        skillsOverride: (base) =>
-          applyBuiltinSkillOverrides(dirname(fileURLToPath(import.meta.url)), base),
+        skillsOverride: (base) => {
+          const resolved = applyBuiltinSkillOverrides(moduleDir, base);
+          outputStyleSkills.length = 0;
+          outputStyleSkills.push(
+            ...resolved.skills.filter((skill) => isOutputStyleFile(String(skill.filePath))),
+          );
+          return resolved;
+        },
+        // The outputStyle setting names a skill; the name joins the
+        // append-system prompt sections after the user's own file, and the
+        // model resolves it against <available_skills>. Reload re-runs both
+        // closures, so a saved switch takes effect on the next reload like
+        // the other pi settings.
+        appendSystemPromptOverride: (base: string[]) =>
+          appendOutputStyle(base, outputStyleSkills, settingsManager),
       },
     };
   }
@@ -317,7 +351,7 @@ export class PiRuntime {
       // throw into that call stack, or the message would not be saved.
       try {
         forwarder.push({ ...(payload as object), ...this.eventScope });
-      } catch {}
+      } catch (e) { debugLog("pi-runtime: event push", e); }
     });
     this.unsubscribe = () => { unsubscribe(); forwarder.dispose(); };
   }
@@ -337,18 +371,34 @@ export class PiRuntime {
     this.bind();
   }
   async list(): Promise<SessionSummary[]> {
+    const { cwd, dir } = this;
     const pi = await this.pi(),
-      all = await pi.SessionManager.list(this.cwd, this.dir);
-    return all.map((s: any) => ({
-      id: s.id,
-      path: s.path,
-      name: s.name,
-      cwd: s.cwd || this.cwd,
-      created: new Date(s.created).toISOString(),
-      modified: new Date(s.modified).toISOString(),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage,
-    }));
+      all = await pi.SessionManager.list(cwd, dir);
+    // Registry entries key on the canonical file, so rows have to spell it the
+    // same way or a running marker would never match its own session. The
+    // listing comes from one directory of plain session files, so
+    // canonicalizing that directory once spells every row without a realpath
+    // per file.
+    const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
+    // The SDK lists sessions in creation order; the panel's contract is newest
+    // modification first, matching the SessionFiles fallback list(). Modified
+    // is the mtime side of the session tree (branch sidecars included), so a
+    // branch run floats its session here too.
+    return all
+      .map((s: any) => {
+        const path = root ? join(root, basename(String(s.path))) : String(s.path);
+        return {
+          id: s.id,
+          path,
+          name: s.name,
+          cwd: s.cwd || cwd,
+          created: new Date(s.created).toISOString(),
+          modified: sessionModifiedAt(path, new Date(s.modified).toISOString()),
+          messageCount: s.messageCount,
+          firstMessage: s.firstMessage,
+        };
+      })
+      .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
   }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
@@ -380,6 +430,19 @@ export class PiRuntime {
     }
     this.bind();
     return this.snapshot();
+  }
+  /**
+   * Creates an empty session file without holding any runtime on it, so the
+   * registry can hand the file to a runtime of its own choosing.
+   */
+  async createSessionFile(): Promise<string> {
+    const { cwd, dir } = this;
+    const pi = await this.pi();
+    const manager = pi.SessionManager.create(cwd, dir);
+    const path = manager.getSessionFile();
+    // Open an explicitly persisted header: SDK otherwise defers the first user input.
+    durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
+    return path;
   }
   state(): RuntimeState {
     const s = this.runtime?.session;
@@ -436,7 +499,12 @@ export class PiRuntime {
       this.projectionCache = { manager: m, count: entries.length, leaf, projection: projectSession(entries, leaf) };
     return {
       session: {
-        ...summarizeSession(s.sessionFile ?? "", m.getHeader?.() ?? null, entries, new Date().toISOString()),
+        ...summarizeSession(
+          s.sessionFile ?? "",
+          m.getHeader?.() ?? null,
+          entries,
+          sessionModifiedAt(s.sessionFile ?? "", String(entries.at(-1)?.timestamp ?? new Date().toISOString())),
+        ),
         id: s.sessionId,
         name: m.getSessionName?.(),
         cwd: m.getCwd(),
@@ -462,28 +530,7 @@ export class PiRuntime {
   }
   private async runControl(input: AgentControl): Promise<unknown> {
     const s = this.runtime?.session;
-    const modelAction = [
-      "getModels",
-      "refreshModels",
-      "addCustomModel",
-      "updateCustomModel",
-      "getCustomModels",
-      "getProviders",
-      "getSkills",
-      "getSkill",
-      "createSkill",
-      "importSkill",
-      "updateSkill",
-      "deleteSkill",
-      "setSkillManualOnly",
-      "getExtensions",
-      "installExtension",
-      "removeExtension",
-      "loginApiKey",
-      "loginOAuth",
-      "logout",
-      "setBrokerProviders",
-    ].includes(input.action);
+    const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
     if (!this.cwd && !modelAction)
       throw new Error("Open a project first");
     if (!s && input.action !== "newSession" && !modelAction)
@@ -583,14 +630,12 @@ export class PiRuntime {
         );
       }
       case "getCustomModels": {
-        const pi = await this.pi();
         return getCustomModels(join(this.agentDir(), "models.json"));
       }
       case "addCustomModel":
       case "updateCustomModel": {
         const update = input.action === "updateCustomModel";
         if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
-        const pi = await this.pi();
         const modelRuntime = await this.modelRuntime();
         if (!update && modelRuntime.getModel(input.provider, input.modelId))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
@@ -618,6 +663,8 @@ export class PiRuntime {
       case "setModel": {
         const m = s.modelRuntime.getModel(input.provider, input.modelId);
         if (!m) throw new Error("Model not found");
+        // A switch belongs to this session's transcript, like the TUI's /model;
+        // only an explicit "set as default" writes the profile defaults.
         await s.setModel(m, { persist: input.persist });
         break;
       }
@@ -692,164 +739,14 @@ export class PiRuntime {
             })),
         );
       }
-      case "getSkills": {
-        if (!s) await this.modelRuntime();
-        const loader = s?.resourceLoader ?? this.modelServices.resourceLoader;
-        if (input.reload) await loader.reload();
-        const { editable } = await this.skillFileRoots();
-        const moduleDir = dirname(fileURLToPath(import.meta.url));
-        const { skills: loaded, diagnostics } = loader.getSkills();
-        // A user copy hiding a bundled skill of the same name leaves the
-        // bundled row simply absent; badge the winner so the list explains
-        // itself. Pi reports these as collision diagnostics.
-        const shadowsBuiltin = new Map<string, string>();
-        for (const diagnostic of (diagnostics ?? []) as any[]) {
-          const collision = diagnostic?.collision;
-          if (collision?.resourceType !== "skill") continue;
-          const loser = String(collision.loserPath ?? "");
-          if (isBundledSkillPath(moduleDir, loser))
-            shadowsBuiltin.set(String(collision.winnerPath ?? ""), loser);
-        }
-        return loaded.map(
-          (skill: any): RuntimeSkill => ({
-            name: String(skill.name),
-            description: String(skill.description),
-            path: String(skill.filePath),
-            source: String(skill.sourceInfo?.source ?? "local"),
-            // Bundled skills carry no pi scope of their own; show them as a
-            // read-only category instead of a misleading "project" badge.
-            scope: isBundledSkillPath(moduleDir, String(skill.filePath))
-              ? "builtin"
-              : skill.sourceInfo?.scope ?? "project",
-            disableModelInvocation: Boolean(skill.disableModelInvocation),
-            editable: isEditableSkillPath(String(skill.filePath), editable),
-            ...(shadowsBuiltin.has(String(skill.filePath))
-              ? { shadowsBuiltin: shadowsBuiltin.get(String(skill.filePath)) }
-              : {}),
-          }),
-        );
-      }
-      case "getSkill": {
-        // Reading follows the loaded list: anything the settings page shows
-        // can be opened in the read-only viewer, packaged skills included.
-        // Writes (and paths the loader never listed) stay behind the
-        // editable-roots assertion in skillTarget. The listed entry also
-        // supplies the effective invocation flag, which for a bundled skill
-        // is the override table's value rather than the file's frontmatter.
-        if (!s) await this.modelRuntime();
-        const loader = s?.resourceLoader ?? this.modelServices.resourceLoader;
-        const requested = resolve(input.path);
-        const listed = loader
-          .getSkills()
-          .skills.find((skill: any) => resolve(String(skill.filePath)) === requested);
-        const file = listed || isBundledSkillPath(dirname(fileURLToPath(import.meta.url)), requested)
-          ? requested
-          : (await this.skillTarget(input.path)).file;
-        const document = parseSkillDocument(await readFile(file, "utf8"));
-        // A skill file may omit the frontmatter name. Pi then falls back to the
-        // containing folder for a SKILL.md, or to the file name for a root .md
-        // (case-insensitive, matching the editable-path check), so the editor
-        // starts from the same name the list shows.
-        const fallback = basename(file).toLowerCase() === "skill.md"
-          ? basename(dirname(file))
-          : basename(file).replace(/\.md$/i, "");
-        return {
-          path: file,
-          name: document.name || fallback,
-          description: document.description,
-          body: document.body,
-          // The loader's value is the effective one (post override table).
-          disableModelInvocation: listed
-            ? Boolean(listed.disableModelInvocation)
-            : document.disableModelInvocation,
-        } satisfies RuntimeSkillDocument;
-      }
-      case "createSkill": {
-        const root = await this.skillRoot(input.scope);
-        this.assertSkillFields(input.name, input.description, input.body);
-        const target = this.skillFile(root, input.name);
-        await mkdir(dirname(target), { recursive: true });
-        await writeFile(target, serializeSkillDocument({
-          name: input.name.trim(),
-          description: input.description.trim(),
-          body: input.body,
-          disableModelInvocation: input.disableModelInvocation,
-          extra: {},
-        }), "utf8");
-        await this.reloadSkills();
-        return { path: target };
-      }
-      case "importSkill": {
-        const root = await this.skillRoot(input.scope);
-        const document = parseSkillDocument(input.content);
-        // Pi tolerates a name that breaks the spec, but PiX only manages
-        // spec-valid skills, so an import normalizes whatever it finds into a
-        // slug instead of refusing a document Pi would happily load.
-        const name = slugifySkillName(document.name || input.name);
-        if (!name) throw new Error("Skill name must contain at least one letter or number");
-        this.assertSkillFields(name, document.description, document.body);
-        const target = this.skillFile(root, name);
-        await mkdir(dirname(target), { recursive: true });
-        // Rewriting through the parser normalizes the document so Pi is
-        // guaranteed to load it, while unmanaged frontmatter survives.
-        await writeFile(target, serializeSkillDocument({
-          ...document,
-          name,
-          description: document.description.trim(),
-        }), "utf8");
-        await this.reloadSkills();
-        return { path: target };
-      }
-      case "updateSkill": {
-        const { file } = await this.skillTarget(input.path);
-        this.assertSkillFields(input.name, input.description, input.body);
-        const existing = parseSkillDocument(await readFile(file, "utf8"));
-        await writeFile(file, serializeSkillDocument({
-          ...existing,
-          name: input.name.trim(),
-          description: input.description.trim(),
-          body: input.body,
-          disableModelInvocation: input.disableModelInvocation,
-        }), "utf8");
-        await this.reloadSkills();
-        return { path: file };
-      }
-      case "deleteSkill": {
-        const { roots, file } = await this.skillTarget(input.path);
-        const directory = dirname(file);
-        const ownsDirectory = basename(file).toLowerCase() === "skill.md" &&
-          roots.editable.some((root) => resolve(root) !== directory && isPathInside(root, directory));
-        if (ownsDirectory) await rm(directory, { recursive: true, force: true });
-        else await rm(file, { force: true });
-        await this.reloadSkills();
-        return { ok: true };
-      }
-      case "setSkillManualOnly": {
-        // A bundled skill's file is read-only (replaced on upgrade, possibly
-        // unwritable), so its manual-only preference goes to the override
-        // table that skillsOverride applies at load time. Only paths inside
-        // the bundled roots take this branch; everything else still has to
-        // be an editable skill file.
-        const moduleDir = dirname(fileURLToPath(import.meta.url));
-        const requested = resolve(input.path);
-        if (isBundledSkillPath(moduleDir, requested)) {
-          const document = parseSkillDocument(await readFile(requested, "utf8"));
-          const fallback = basename(requested).toLowerCase() === "skill.md"
-            ? basename(dirname(requested))
-            : basename(requested).replace(/\.md$/i, "");
-          setBuiltinSkillManualOnly(document.name || fallback, input.manualOnly);
-          await this.reloadSkills();
-          return { ok: true };
-        }
-        const { file } = await this.skillTarget(input.path);
-        const document = parseSkillDocument(await readFile(file, "utf8"));
-        await writeFile(file, serializeSkillDocument({
-          ...document,
-          disableModelInvocation: input.manualOnly,
-        }), "utf8");
-        await this.reloadSkills();
-        return { ok: true };
-      }
+      case "getSkills":
+      case "getSkill":
+      case "createSkill":
+      case "importSkill":
+      case "updateSkill":
+      case "deleteSkill":
+      case "setSkillManualOnly":
+        return this.skillControls.run(input);
       case "getExtensions": {
         if (!s) await this.modelRuntime();
         const loader = s?.resourceLoader ?? this.modelServices.resourceLoader;

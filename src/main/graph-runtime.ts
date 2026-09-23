@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
+import { sessionModifiedAt } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
-import { GraphFiles, durableWrite, encodeSession, type BranchRecord, type SessionData } from "./graph-files.js";
+import { GraphFiles, durableWrite, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { WikiGraphEvent } from "../shared/wiki.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, SessionSnapshot } from "../shared/types.js";
@@ -48,9 +50,19 @@ export class GraphRuntime extends PiRuntime {
     this.admission = result.catch(() => {});
     return result;
   }
+  /** True while a failed node deletion waits for a reopen or fresh session to recover. */
+  get recovering() {
+    return Boolean(this.deletionRecovery);
+  }
+  /** Cheap liveness probe for list decoration and guards; never bumps the snapshot revision. */
+  get busy() {
+    const state = this.state();
+    return Boolean(state.isStreaming || state.isCompacting || state.isRetrying || state.pendingMessageCount
+      || this.mainWork || [...this.workers.values()].some(worker => worker.work));
+  }
   private notify() {
     if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
-    try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch {}
+    try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch (e) { debugLog("graph-runtime: notify emit", e); }
   }
   private data(pi: PiRuntime): SessionData {
     const manager = pi.runtime.session.sessionManager;
@@ -102,23 +114,18 @@ export class GraphRuntime extends PiRuntime {
     return this.exclusive(async () => {
       await this.closeInternal();
       this.stopping = false;
-      const pi = await this.pi();
-      const manager = pi.SessionManager.create(this.cwd, this.dir);
-      const path = manager.getSessionFile();
-      // Open an explicitly persisted header: SDK otherwise defers the first user input.
-      durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
-      return this.openInternal(path);
+      return this.openInternal(await this.createSessionFile());
     });
   }
   private child(record: BranchRecord) {
     const child = new PiRuntime(this.cwd, this.dir, event => {
       if (this.stopping) return;
       const value = event as { type: string; payload: { type?: string } };
-      try { this.emit(event); } catch {}
+      try { this.emit(event); } catch (e) { debugLog("graph-runtime: worker event emit", e); }
       if (["message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
         const worker = this.workers.get(record.id);
         if (worker?.pi.runtime) {
-          try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch {}
+          try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch (e) { debugLog("graph-runtime: worker snapshot refresh", e); }
         }
       }
     }, this.openExternal);
@@ -131,8 +138,9 @@ export class GraphRuntime extends PiRuntime {
     return child;
   }
   private fileSnapshot(record: BranchRecord, data: SessionData): SessionSnapshot {
-    return { session: { id: String(data.header.id), path: this.graph!.path(record.id), cwd: String(data.header.cwd),
-      created: String(data.header.timestamp), modified: String(data.header.timestamp), messageCount: data.entries.length, firstMessage: record.request.text },
+    const path = this.graph!.path(record.id);
+    return { session: { id: String(data.header.id), path, cwd: String(data.header.cwd),
+      created: String(data.header.timestamp), modified: sessionModifiedAt(path, String(data.header.timestamp)), messageCount: data.entries.length, firstMessage: record.request.text },
       entries: data.entries, projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null),
       runtime: { ...super.state(), isStreaming: false, isCompacting: false, isRetrying: false } };
   }
@@ -202,6 +210,8 @@ export class GraphRuntime extends PiRuntime {
     if (input.action === "promptAt") return this.acceptAt(input);
     if (input.action === "exportJsonl" || input.action === "exportHtml")
       return this.exclusive(async () => ({ work: this.exportTree(input.action === "exportHtml" ? input : { action: "exportJsonl" }) })).then(({ work }) => work);
+    if (input.action === "exportBranchSession")
+      return this.exclusive(async () => ({ work: this.exportBranch(input) })).then(({ work }) => work);
     if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands"].includes(input.action))
       return super.control(input);
     // Prompt lifetime stays outside admission, so creating a sibling never waits for it.
@@ -402,7 +412,7 @@ export class GraphRuntime extends PiRuntime {
       void worker.work.catch(error => { this.storageError = String(error); this.notify(); });
       return this.snapshot();
     } catch (error) {
-      try { await child.close(); } catch {}
+      try { await child.close(); } catch (e) { debugLog("graph-runtime: worker close after start failure", e); }
       record.status = "interrupted"; record.error = String(error); graph.save(record);
       throw error;
     }
@@ -431,7 +441,7 @@ export class GraphRuntime extends PiRuntime {
         branchId: record.id, runId: record.runId, state: "settled" }) + "\n");
     } catch (error) {
       record.status = "interrupted"; record.error = String(error);
-      try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch {}
+      try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
     } finally {
       worker.work = undefined;
       graph.save(record);
@@ -439,28 +449,20 @@ export class GraphRuntime extends PiRuntime {
       this.notify();
     }
   }
-  private exportTree(input: Extract<AgentControl, { action: "exportHtml" }> | { action: "exportJsonl" }) {
-    const graph = this.graph;
-    if (!graph || !this.runtime) throw new Error("Open a session before exporting");
-    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
-      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
-    // Capture completed SDK entries in one synchronous turn. Streaming partial
-    // tokens are not session records yet. No runtime is closed or source rewritten.
-    const branches = [...graph.records.values()].map(record => {
+  // Capture completed SDK entries in one synchronous turn. Streaming partial
+  // tokens are not session records yet. No runtime is closed or source rewritten.
+  private exportSources() {
+    return [...this.graph!.records.values()].map(record => {
       const worker = this.workers.get(record.id);
       if (!worker?.snapshot) throw new Error(`Branch source unavailable: ${record.id}`);
       return { record, data: worker.pi.runtime ? this.data(worker.pi) : {
         header: record.header, entries: worker.snapshot.entries,
       } };
     });
-    const outputPath = input.action === "exportHtml" && input.outputPath
-      ? resolve(this.cwd ?? ".", input.outputPath) : join(this.cwd ?? resolve(graph.main, ".."), `pix-tree-${randomUUID()}.${input.action === "exportHtml" ? "html" : "jsonl"}`);
-    if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
+  }
+  private runExportWorker(workerData: Record<string, unknown>) {
     return new Promise<{ path: string }>((resolve, reject) => {
-      const worker = new ExportWorker(new URL("./graph-export-worker.js", import.meta.url), {
-        workerData: { main: graph.main, data: this.data(this), branches,
-          leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: input.action === "exportHtml" },
-      });
+      const worker = new ExportWorker(new URL("./graph-export-worker.js", import.meta.url), { workerData });
       let delivered = false;
       worker.once("message", message => {
         delivered = true;
@@ -469,6 +471,36 @@ export class GraphRuntime extends PiRuntime {
       worker.once("error", reject);
       worker.once("exit", code => { if (!delivered) reject(new Error(`Export worker exited (${code})`)); });
     });
+  }
+  private exportTree(input: Extract<AgentControl, { action: "exportHtml" }> | { action: "exportJsonl" }) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a session before exporting");
+    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
+      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
+    const branches = this.exportSources();
+    const outputPath = input.action === "exportHtml" && input.outputPath
+      ? resolve(this.cwd ?? ".", input.outputPath) : join(this.cwd ?? resolve(graph.main, ".."), `pix-tree-${randomUUID()}.${input.action === "exportHtml" ? "html" : "jsonl"}`);
+    if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
+    return this.runExportWorker({ main: graph.main, data: this.data(this), branches,
+      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: input.action === "exportHtml" });
+  }
+  /** Copy the root-to-node path into a new standalone session; the graph itself stays untouched. */
+  private exportBranch(input: Extract<AgentControl, { action: "exportBranchSession" }>) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a session before exporting");
+    if (input.graphId !== graph.main) throw new Error("Open the same graph before exporting");
+    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
+      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
+    const snapshot = this.snapshot();
+    const node = snapshot.projection.nodes.find(n => n.id === input.nodeId);
+    if (!node) throw new Error("Node no longer exists");
+    // The exported session ends at the selected node; anything after it stays
+    // behind in the original graph. A running turn has no complete records yet.
+    if (node.running) throw new Error("Wait for this turn to finish before exporting it");
+    const outputPath = join(this.dir ?? dirname(graph.main), `pix-branch-${randomUUID()}.jsonl`);
+    if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
+    return this.runExportWorker({ main: graph.main, data: this.data(this), branches: this.exportSources(),
+      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: false, targetLeafId: node.leafEntryId });
   }
   override close(): Promise<void> {
     this.stopping = true;
@@ -490,12 +522,9 @@ export class GraphRuntime extends PiRuntime {
     this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
   }
   override dispose() { void this.close().catch(() => {}); }
-  override setProject(cwd: string | null, dir: string | null) {
-    this.stopping = true;
-    void this.exclusive(async () => {
-      await this.closeInternal();
-      this.cwd = cwd; this.dir = dir; this.modelServices = undefined;
-      this.stopping = false;
-    }).catch(error => { this.storageError = String(error); });
+  override setProject(): never {
+    // Registry entries are never repointed: the base implementation only
+    // disposes, which would leak the graph ownership file a close releases.
+    throw new Error("A session runtime cannot switch projects; dispose its entry and open anew");
   }
 }

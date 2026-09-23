@@ -3,12 +3,18 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 // Missing optional dependencies must fail packaging, not the user's first search.
+function nativeFffNames(platform, arch) {
+  if (platform === "win32") return { fffBin: `win32-${arch}`, ffi: `win32-${arch}-msvc` };
+  if (platform === "linux") return { fffBin: `linux-${arch}-gnu`, ffi: `linux-${arch}-gnu` };
+  return { fffBin: `${platform}-${arch}`, ffi: `${platform}-${arch}` };
+}
+
 export function checkPackagedFff(resources, platform, arch) {
   const modules = join(resources, "pi-builtin", "node_modules");
-  const ffiTarget = `${platform}-${arch}${platform === "win32" ? "-msvc" : ""}`;
+  const { fffBin, ffi } = nativeFffNames(platform, arch);
   for (const name of [
     "@ff-labs/pi-fff", "@ff-labs/fff-node", "ffi-rs",
-    `@ff-labs/fff-bin-${platform}-${arch}`, `@yuuang/ffi-rs-${ffiTarget}`,
+    `@ff-labs/fff-bin-${fffBin}`, `@yuuang/ffi-rs-${ffi}`,
   ]) {
     try {
       const dir = join(modules, name);

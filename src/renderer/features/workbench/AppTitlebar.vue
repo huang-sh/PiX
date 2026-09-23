@@ -3,6 +3,7 @@ import { ChevronDown, Folder, MessageSquare, MonitorUp, PanelLeft, PanelRight, P
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
+import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { formatShortcut, shortcutBindings, type ShortcutId } from "../../../shared/shortcuts";
@@ -114,6 +115,7 @@ function disconnectRemote() {
 
     <div class="app-titlebar-side app-titlebar-right">
       <template v-if="layout.screen === 'workbench'">
+        <GitBranchPicker />
         <Button
           data-action="chat-panel"
           :class="!layout.layout.collapsed.chat ? 'active' : ''"

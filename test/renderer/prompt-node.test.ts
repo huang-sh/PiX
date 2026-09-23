@@ -29,6 +29,21 @@ function nodeData(overrides: Partial<PromptNodeData> = {}): PromptNodeData {
 }
 
 describe("PromptNode branch action", () => {
+  it("shows the recorded Git branch with its full name and hides missing history", async () => {
+    const data = nodeData();
+    const branch = "feature/Case-Sensitive-Long-Branch-Name";
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data: { ...data, node: { ...data.node, gitBranch: branch } } },
+      global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
+    });
+    expect(wrapper.get(".node-git-branch").text()).toBe(branch);
+    expect(wrapper.get(".node-git-branch").attributes("title")).toContain(branch);
+    expect(wrapper.get(".node-git-branch").attributes("aria-label")).toContain(branch);
+    await wrapper.setProps({ data: { ...data, node: { ...data.node } } });
+    expect(wrapper.find(".node-git-branch").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("explains and blocks branching while the runtime is busy", async () => {
     const onCompose = vi.fn();
     const data: PromptNodeData = {

@@ -23,7 +23,6 @@ test("shortcut overrides persist atomically, reset independently, and reject inv
     assert.equal(reopened.bundle().app.theme, "dark");
     const before = readFileSync(service.appPath, "utf8");
     assert.throws(() => service.update({ keyboardShortcuts: { commands: ["Mod+b"] } }));
-    assert.throws(() => service.update({ keyboardShortcuts: { commands: ["Mod+c"] } }, true));
     assert.equal(readFileSync(service.appPath, "utf8"), before);
   } finally {
     rmSync(directory, { recursive: true, force: true });

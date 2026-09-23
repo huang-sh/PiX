@@ -40,7 +40,7 @@ let localeSource;
 if (verifyHmr) {
   cpSync(join(root, "src"), join(testHome, "src"), { recursive: true });
   cpSync(join(root, "package.json"), join(testHome, "package.json"));
-  localeFile = join(testHome, "src/renderer/i18n.ts");
+  localeFile = join(testHome, "src/renderer/i18n/app.ts");
   localeSource = readFileSync(localeFile, "utf8");
   writeFileSync(localeFile, localeSource.replace(/^\s+(copyPath|copySessionId|revealSession):.*\r?\n/gm, ""));
   const { createServer } = await import("vite");
@@ -65,7 +65,7 @@ writeFileSync(
     openLastSessionOnStartup: true,
     layout: {
       version: 3,
-      widths: { navigator: 248, chat: 356, content: 320 },
+      widths: { navigator: 248, chat: 356, content: 600 },
       collapsed: { navigator: false, chat: false, content: true },
       minimap: false,
       utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
@@ -85,8 +85,12 @@ const xvfb =
   process.platform === "linux"
     ? String(spawnSync("which", ["xvfb-run"], { encoding: "utf8" }).stdout).trim()
     : "";
+// A stalled vite close leaves watchers and sockets holding the event loop
+// open on Linux; run the wrapper as its own group so teardown can reap the
+// whole tree, and exit explicitly once the script is done.
+const grouped = Boolean(xvfb);
 const child = xvfb
-  ? spawn(xvfb, ["-a", electron, ...args], { cwd: root, env: testEnv() })
+  ? spawn(xvfb, ["-a", electron, ...args], { cwd: root, env: testEnv(), detached: grouped })
   : spawn(electron, args, { cwd: root, env: testEnv(), windowsHide: true });
 
 let stderr = "";
@@ -191,6 +195,8 @@ function signalWslTestHost(pid, signal) {
   if (result.status !== 0) throw new Error(`WSL test signal failed (${result.status}): ${result.stderr}`);
 }
 try {
+  // Boot budgets are generous: on a cold machine the dev server has to transform
+  // the whole renderer graph before the shell appears.
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
     const targets = await response.json();
@@ -199,7 +205,7 @@ try {
     );
     if (!page) throw new Error("Electron page target missing");
     return page;
-  });
+  }, 90_000);
   cdp = new Cdp(target.webSocketDebuggerUrl);
   await cdp.open();
   await cdp.send("Runtime.enable");
@@ -209,7 +215,7 @@ try {
       "window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))",
     );
     if (!ready) throw new Error(`PiX renderer is not ready\n${stderr}`);
-  });
+  }, 90_000);
   await retry(async () => {
     const value = await cdp.evaluate(`({
       collapsed: window.__pixTest.state().layout.collapsed,
@@ -452,6 +458,14 @@ try {
     );
     console.log(JSON.stringify(remoteSshResult, null, 2));
   } else {
+  // A packaged Windows release once shipped a window that never showed: every
+  // boot assertion still passed because the renderer was alive. A hidden
+  // BrowserWindow reports document.visibilityState "hidden", so require the
+  // page to become visible — the renderer-observable form of "window shown".
+  await retry(async () => {
+    if ((await cdp.evaluate("document.visibilityState")) !== "visible")
+      throw new Error("Window did not become visible after boot");
+  });
   await cdp.evaluate(
     "Promise.all(['navigator','chat'].filter(panel => window.__pixTest.state().layout.collapsed[panel]).map(panel => window.__pixTest.toggle(panel))).then(() => window.__pixTest.state().layout.collapsed.content ? undefined : window.__pixTest.toggle('content'))",
   );
@@ -545,6 +559,44 @@ try {
         if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy full path")
           throw new Error("A second locale hot update did not reach the mounted menu");
       });
+      // Every domain file must reach the live dictionary through its own
+      // self-accept, so probe each one with a sentinel value.
+      for (const domain of ["app", "graph", "remote", "settings", "workbench", "history"]) {
+        const file = join(testHome, "src/renderer/i18n", `${domain}.ts`);
+        const source = readFileSync(file, "utf8");
+        const probe = source.match(/\r?\n  (\w+): \{\r?\n    (\w+): "(?:[^"\\]|\\.)*",/);
+        if (!probe) throw new Error(`No probe message found in ${domain}.ts`);
+        const [, group, key] = probe;
+        const sentinel = `hmr-probe-${domain}`;
+        writeFileSync(file, source.replace(probe[0], () => probe[0].replace(/"[^"]*",$/, `"${sentinel}",`)));
+        const path = [group, key].map((part) => `[${JSON.stringify(part)}]`).join("");
+        await retry(async () => {
+          const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+          if (value !== sentinel) throw new Error(`${domain}.ts hot update did not reach en.${group}.${key} (got ${JSON.stringify(value)})`);
+        });
+        // Re-executing the index re-seeds the registry: the domain that was just
+        // hot updated has to survive and the app has to keep rendering from the
+        // same plugin instance.
+        if (domain === "settings") {
+          const indexPath = join(testHome, "src/renderer/i18n/index.ts");
+          const indexSource = readFileSync(indexPath, "utf8");
+          writeFileSync(indexPath, `${indexSource}// hmr probe\n`);
+          await retry(async () => {
+            const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+            if (value !== sentinel) throw new Error("Re-executing the i18n index dropped a hot updated domain");
+          });
+          writeFileSync(indexPath, indexSource);
+          const appFile = join(testHome, "src/renderer/i18n/app.ts");
+          const appSource = readFileSync(appFile, "utf8");
+          writeFileSync(appFile, appSource.replace('copyPath: "Copy full path"', 'copyPath: "Copy path after index"'));
+          await retry(async () => {
+            if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy path after index")
+              throw new Error("A hot update after re-executing the i18n index did not reach the rendered menu");
+          });
+          writeFileSync(appFile, appSource);
+        }
+        writeFileSync(file, source);
+      }
     }
     await cdp.evaluate("document.querySelector('[data-action=session-rename]').click()");
     await retry(async () => {
@@ -599,6 +651,7 @@ try {
     await cdp.evaluate("document.querySelector('.prompt-node').click()");
     if (!(await cdp.evaluate("window.__pixTest.state().layout.collapsed.chat")))
       throw new Error("Single-clicking a graph node unexpectedly opened chat");
+    // A plain double-click reveals the node in the primary chat panel.
     await cdp.evaluate("document.querySelector('.prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
   } else
     await cdp.evaluate("document.querySelector('[data-action=chat-panel]').click()");
@@ -610,6 +663,105 @@ try {
     if (!value.expanded || !value.linkedContext)
       throw new Error(`Graph selection did not reveal matching chat context: ${JSON.stringify(value)}`);
   });
+  // Pinned chat columns: Ctrl+click pins a node beside the primary column, a
+  // node on an already-pinned branch retargets that column, and closing the
+  // last pin restores the layout.
+  if (sessionState.current) {
+    const nodeIds = await cdp.evaluate("window.__pixTest.state().current.projection.nodes.map(node => node.id)");
+    const domNodes = await cdp.evaluate("document.querySelectorAll('.prompt-node').length");
+    if (nodeIds.length >= 3 && domNodes >= 2) {
+      const focusBefore = await cdp.evaluate("window.__pixTest.state().focusedNode");
+      const firstTitle = await cdp.evaluate("document.querySelector('.prompt-node .turn-copy strong').textContent.trim()");
+      await cdp.evaluate("document.querySelector('.prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))");
+      await retry(async () => {
+        if ((await cdp.evaluate("document.querySelectorAll('.chat-columns .chat').length")) !== 2)
+          throw new Error("Ctrl+click did not pin a chat column beside the primary");
+      });
+      if ((await cdp.evaluate("window.__pixTest.state().focusedNode")) !== focusBefore)
+        throw new Error("Pinning a chat column moved the graph selection");
+      const pinnedHeader = await cdp.evaluate(
+        "document.querySelector('.chat-columns .chat:nth-child(2) .branch-title small').textContent.trim()",
+      );
+      if (pinnedHeader !== firstTitle)
+        throw new Error(`Pinned column shows the wrong node: ${pinnedHeader} !== ${firstTitle}`);
+      // The widened slot must drag smoothly: the splitter's own layout has to
+      // follow the store-driven width, or the first drag jumps back.
+      {
+        const storeWidth = await cdp.evaluate("__pixTest.state().layout.widths.chat");
+        await retry(async () => {
+          const width = await cdp.evaluate("Math.round(document.querySelector('#chat-panel').getBoundingClientRect().width)");
+          if (Math.abs(width - storeWidth) > 5)
+            throw new Error(`Pin width transition not settled: ${width} !== ${storeWidth}`);
+        });
+        const handlePoint = () => cdp.evaluate(`(() => {
+          const handle = [...document.querySelectorAll('.resize-handle')].find(h =>
+            !h.classList.contains('navigator-resize') && !h.classList.contains('hidden')
+            && h.nextElementSibling?.id === 'chat-panel');
+          const r = handle.getBoundingClientRect();
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        })()`);
+        const dragBy = async (dx) => {
+          const handle = await handlePoint(); // the handle itself moves with each drag
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...handle });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", ...handle });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", x: handle.x + dx, y: handle.y });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", x: handle.x + dx, y: handle.y });
+        };
+        await dragBy(-40);
+        await retry(async () => {
+          const width = await cdp.evaluate("Math.round(document.querySelector('#chat-panel').getBoundingClientRect().width)");
+          // The handle sits on the chat panel's left edge: dragging left widens it.
+          if (Math.abs(width - (storeWidth + 40)) > 30)
+            throw new Error(`Splitter jumped on the first drag after pinning: ${storeWidth} -> ${width}`);
+        });
+        await dragBy(40);
+        await retry(async () => {
+          const width = await cdp.evaluate("Math.round(document.querySelector('#chat-panel').getBoundingClientRect().width)");
+          if (Math.abs(width - storeWidth) > 30)
+            throw new Error(`Splitter did not drag back: ${width} !== ${storeWidth}`);
+        });
+      }
+      // Ctrl+clicking a node on the pinned column's branch retargets that
+      // column — one panel per branch. The fixture session is a tree, not a
+      // linear branch, so pick the pinned node's closest same-path rendered
+      // node with the same walk the workbench uses instead of trusting DOM
+      // order, where another branch's node may come last.
+      const pinnedId = await cdp.evaluate("window.__pixTest.state().chatColumns[0]");
+      const otherId = await cdp.evaluate(`(() => {
+        const nodes = window.__pixTest.state().current.projection.nodes;
+        const parents = new Map(nodes.map(node => [node.id, node.parentId]));
+        const onPath = (from, onto) => { for (let cur = from; cur; cur = parents.get(cur) ?? null) if (cur === onto) return true; return false; };
+        const rendered = [...document.querySelectorAll('.prompt-node')].map(node => node.closest('[data-id]')?.dataset.id);
+        return rendered.find(id => id && id !== ${JSON.stringify(pinnedId)}
+          && (onPath(id, ${JSON.stringify(pinnedId)}) || onPath(${JSON.stringify(pinnedId)}, id))) ?? null;
+      })()`);
+      if (!otherId) throw new Error("Fixture has no same-branch prompt node to retarget the pinned column with");
+      const otherTitle = await cdp.evaluate(`document.querySelector('[data-id="${otherId}"] .prompt-node .turn-copy strong').textContent.trim()`);
+      await cdp.evaluate(`document.querySelector('[data-id="${otherId}"] .prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))`);
+      await retry(async () => {
+        const value = await cdp.evaluate(`({
+          columns: window.__pixTest.state().chatColumns,
+          domColumns: document.querySelectorAll('.chat-columns .chat').length,
+          header: document.querySelector('.chat-columns .chat:nth-child(2) .branch-title small').textContent.trim(),
+        })`);
+        if (value.columns.length !== 1 || value.domColumns !== 2 || value.header !== otherTitle)
+          throw new Error(`Pinning a same-branch node did not retarget the column: ${JSON.stringify(value)}`);
+      });
+      await cdp.evaluate("[...document.querySelectorAll('[data-action=chat-column-close]')].forEach(button => button.click())");
+      await retry(async () => {
+        const value = await cdp.evaluate(`({
+          columns: window.__pixTest.state().chatColumns.length,
+          width: window.__pixTest.state().layout.widths.chat,
+          pin: window.__pixTest.state().layout.chatPinWidth ?? null,
+        })`);
+        // Closing the last pin restores the startup width (356 in the fixture)
+        // and forgets the memo, so a later boot cannot restore it again. The
+        // drags above may leave a pixel of rounding slack.
+        if (value.columns !== 0 || Math.abs(value.width - 356) > 2 || value.pin !== null)
+          throw new Error(`Pinned columns did not close and restore the chat width: ${JSON.stringify(value)}`);
+      });
+    }
+  }
   // Selection keeps the viewport still when the node is already visible. Center
   // explicitly before checking geometry; readable typography changes card height.
   if (sessionState.current)
@@ -730,7 +882,10 @@ try {
         readableAndCentered: (() => {
           const flow = document.querySelector('.session-flow').getBoundingClientRect();
           const draft = document.querySelector('.draft-node').getBoundingClientRect();
-          return draft.width >= 250 && draft.height <= 225 && Math.abs((draft.left + draft.width / 2) - (flow.left + flow.width / 2)) < 50;
+          // The auto-sizing draft opens within its reserved layout slot
+          // (GraphPanel's DRAFT_SIZE.height of 320), growing past it only
+          // as an overlay while typing.
+          return draft.width >= 250 && draft.height <= 320 && Math.abs((draft.left + draft.width / 2) - (flow.left + flow.width / 2)) < 50;
         })()
       })`);
       if (!value.draft || !value.settings || !value.connected || !value.parentStable || !value.focused || !value.fullyVisible || !value.readableAndCentered)
@@ -813,7 +968,7 @@ try {
   });
   await cdp.evaluate("document.querySelector('[data-file-path=\"README.md\"]')?.click()");
   await retry(async () => {
-    if (!(await cdp.evaluate("Boolean(document.querySelector('.code-editor')) && Boolean(document.querySelector('[data-file-tab=\"README.md\"]')) && document.querySelector('[data-file-path=\"README.md\"]')?.classList.contains('active')")))
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-markdown-preview]')) && Boolean(document.querySelector('[data-file-tab=\"README.md\"]')) && document.querySelector('[data-file-path=\"README.md\"]')?.classList.contains('active')")))
       throw new Error("File did not open in the workspace");
   });
   const fileMainWidth = await cdp.evaluate("document.querySelector('.file-main').getBoundingClientRect().width");
@@ -828,6 +983,24 @@ try {
     if (!(await cdp.evaluate("Boolean(document.querySelector('.file-explorer'))")))
       throw new Error("File tree did not reopen");
   });
+  // Right-clicking a tree row offers copy-path; the copy lands with a toast.
+  {
+    const row = await cdp.evaluate(`(() => {
+      const r = document.querySelector('[data-file-path="README.md"]').getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    })()`);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: row.x, y: row.y, button: "right", clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: row.x, y: row.y, button: "right", clickCount: 1 });
+    await retry(async () => {
+      if (!(await cdp.evaluate("Boolean(document.querySelector('[data-action=tree-copy-path]')) && Boolean(document.querySelector('[data-action=tree-open-with]'))")))
+        throw new Error("Tree context menu did not open");
+    });
+    await cdp.evaluate("document.querySelector('[data-action=tree-copy-path]').click()");
+    await retry(async () => {
+      if (!(await cdp.evaluate("document.querySelector('.toast')?.textContent?.includes('Copied')")))
+        throw new Error("Copy path did not confirm with a toast");
+    });
+  }
   if (allowEmpty) {
     await cdp.evaluate("document.querySelector('[data-directory-path=\"resources\"] > summary')?.click()");
     await retry(async () => {
@@ -841,6 +1014,60 @@ try {
     if (!(await cdp.evaluate("document.querySelector('.image-preview img')?.naturalWidth > 0")))
       throw new Error("Image preview did not render");
   });
+  const hasPdfStep = await cdp.evaluate("Boolean(document.querySelector('[data-file-path=\"sample.pdf\"]'))");
+  if (hasPdfStep) {
+    await cdp.evaluate("document.querySelector('[data-file-path=\"sample.pdf\"]')?.click()");
+    try {
+      await retry(async () => {
+        if (!(await cdp.evaluate(
+          "Boolean(document.querySelector('[data-pdf-view]')) && document.querySelectorAll('.pdf-pages canvas').length >= 1 && document.querySelector('.pdf-canvas-stack canvas')?.width > 0",
+        )))
+          throw new Error("PDF preview did not render");
+      }, 3000);
+    } catch {
+      // Builds without PDF support fall through; the drag probes still run.
+    }
+  }
+  // Dragging the tree handle past its minimum must clamp at min-size, never
+  // collapse the panel: with collapsible panels the drag collapsed the tree
+  // to 0 and could not drag it back out, and the show/hide button desynced.
+  {
+    const treeWidth = () => cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
+    const dragBy = async (dx) => {
+      const handle = await cdp.evaluate(`(() => {
+        const r = document.querySelector('.file-resize-handle').getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x, y: handle.y, button: "left", buttons: 0 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: handle.x, y: handle.y, button: "left", buttons: 1, clickCount: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x + dx, y: handle.y, buttons: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: handle.x + dx, y: handle.y, button: "left", buttons: 0, clickCount: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return treeWidth();
+    };
+    const start = await treeWidth();
+    const shrunk = Math.min(await dragBy(200), await dragBy(200));
+    if (shrunk < 170)
+      throw new Error(`Dragging the tree narrow collapsed it: ${start} → ${shrunk}`);
+    const grown = await dragBy(-150);
+    if (grown <= shrunk)
+      throw new Error(`Dragging the tree back did not grow it: ${shrunk} → ${grown}`);
+    await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if ((await treeWidth()) !== -1)
+      throw new Error("Tree toggle did not hide the explorer");
+    await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const reopened = await treeWidth();
+    if (reopened <= 0)
+      throw new Error("Tree toggle did not restore the explorer");
+  }
+  const pdfShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(
+    join(artifacts, "gui-pdf-preview.png"),
+    Buffer.from(pdfShot.data, "base64"),
+  );
+  await cdp.evaluate("document.querySelector('[data-file-tab=\"sample.pdf\"] .tool-tab-close')?.click()");
   await cdp.evaluate("document.querySelector('[data-file-tab=\"README.md\"] .tool-tab-close')?.click()");
   imagePreview = true;
   await cdp.evaluate("document.querySelector('[data-action=add-tool-tab]').click()");
@@ -1061,6 +1288,13 @@ try {
         throw new Error(`Missing ${category} setting: ${setting}`);
     });
   }
+  // The log folder action is asserted, never clicked: it would open the
+  // machine's file manager during the test run.
+  await cdp.evaluate("document.querySelector('[data-settings-category=about]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-about-logs]'))")))
+      throw new Error("Missing the About page log folder action");
+  });
   await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings-models.png"), Buffer.from(screenshot.data, "base64"));
@@ -1200,21 +1434,33 @@ try {
   console.log(JSON.stringify(result, null, 2));
   }
 } finally {
-  await devServer?.close();
+  // A stalled close (e.g. vite's ws shutdown with a live HMR client) once
+  // burned the job's whole timeout with the app still running: bound every
+  // teardown await and hard-kill the child when a graceful exit misses.
+  const bounded = (promise, ms) =>
+    Promise.race([promise ?? Promise.resolve(), new Promise((resolve) => setTimeout(resolve, ms))]);
+  await bounded(devServer?.close(), 2_000);
   if (wslStoppedPid) {
     try { signalWslTestHost(wslStoppedPid, "CONT"); } catch (error) { console.error(error); }
   }
-  await cdp?.close();
+  await bounded(cdp?.close(), 2_000);
   if (process.platform === "win32" && child.pid)
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore",
     });
-  else child.kill("SIGTERM");
-  if (child.exitCode === null)
+  else {
+    const signalTree = (signal) => {
+      if (!child.pid) return;
+      if (grouped) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    };
+    signalTree("SIGTERM");
     await Promise.race([
       new Promise((resolve) => child.once("close", resolve)),
       new Promise((resolve) => setTimeout(resolve, 1_000)),
     ]);
+    if (child.exitCode === null) signalTree("SIGKILL");
+  }
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.unref();
@@ -1234,3 +1480,5 @@ try {
       { stdio: "ignore", windowsHide: true },
     );
 }
+
+process.exit(0);

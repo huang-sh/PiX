@@ -1,4 +1,5 @@
 import { agentResultText } from "../shared/agent-stream.js";
+import { debugLog } from "./debug-log.js";
 
 // Dispatch every event on the next event-loop turn, outside SDK persistence.
 // Progress strings are immutable: capture them without cloning the growing body.
@@ -17,8 +18,8 @@ export function agentEventForwarder(emit: (event: unknown) => void) {
         }
         const captured = event.type === "message_update" || event.type === "tool_execution_update"
           ? copy : structuredClone(copy);
-        setImmediate(() => { if (!disposed) { try { emit(captured); } catch {} } });
-      } catch {}
+        setImmediate(() => { if (!disposed) { try { emit(captured); } catch (e) { debugLog("agent-event-forwarder: emit", e); } } });
+      } catch (e) { debugLog("agent-event-forwarder: sanitize", e); }
     },
     dispose() { disposed = true; },
   };

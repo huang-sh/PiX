@@ -8,6 +8,7 @@ import {
 } from "reka-ui";
 import { nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { i18n } from "./i18n";
 import { sessionEventDecoder } from "../shared/session-updates";
 import type {
   DesktopEvent,
@@ -34,6 +35,7 @@ import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
+import { handleHistoryKeys, history, historyEnabled, HistoryButton, HistoryPanel, togglePanel } from "./experimental/history";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
 
@@ -59,6 +61,12 @@ const wslBusy = ref(false);
 const wslError = ref("");
 const remoteStages = ref<RemoteConnectStage[]>([]);
 const remoteDisconnected = ref(false);
+const remoteDisconnectNotice = ref("");
+// The disconnect message can carry a host stack trace; only its first line fits a notice.
+function remoteLostText(message?: string) {
+  const detail = (message?.split("\n")[0] ?? "").slice(0, 160).trim();
+  return detail ? `${t("remote.connectionLost")} — ${detail}` : t("remote.connectionLost");
+}
 let remoteUiAttempt = 0;
 const wslDistributions = ref<WslDistribution[]>([]);
 const wslNamesLoading = ref(false);
@@ -78,6 +86,7 @@ const compactInstructions = ref("");
 const compactBusy = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
+const updateNotice = ref<{ version: string; url: string } | null>(null);
 
 // The custom titlebar needs platform knowledge only for the macOS traffic
 // lights (see .platform-darwin in app.css); the sandboxed renderer gets it
@@ -93,13 +102,15 @@ function applyLanguage(settings: SettingsBundle) {
 // Opening or switching a project never auto-opens a session — the user
 // lands in the project's empty state and picks or starts a session. The
 // only auto-open left is the opt-in "open last session on startup".
-async function hydrate(data: BootstrapData, openFirst = false) {
+async function hydrate(data: BootstrapData, openFirst = false, request = ++session.viewRequest) {
+  if (request !== session.viewRequest) return;
   workspace.hydrate(data.project, data.settings.app.browserHome);
   layout.hydrate(data.settings, data.layout);
   applyLanguage(data.settings);
-  session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current);
+  session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current, request);
   remoteDisconnected.value = Boolean(data.project?.remote &&
     !data.projects?.find((record) => record.id === session.activeProjectId)?.connected);
+  remoteDisconnectNotice.value = "";
   if (remoteDisconnected.value) {
     session.loading = false;
     return;
@@ -107,26 +118,32 @@ async function hydrate(data: BootstrapData, openFirst = false) {
   // Re-seed active streams after hydrate cleared local state, even if the model
   // is currently paused and will not send another token for a while.
   if (data.current) await desktop.invoke("session.snapshot");
+  if (request !== session.viewRequest) return;
   await workspace.load();
+  if (request !== session.viewRequest) return;
   if (openFirst && !session.current && session.sessions[0])
-    await session.open(session.sessions[0].path);
+    await session.open(session.sessions[0].path, request);
+  if (request !== session.viewRequest) return;
   await Promise.all([session.loadCommands(), session.loadModels().catch(() => {})]);
-  session.loading = false;
+  if (request === session.viewRequest) session.loading = false;
 }
 
 async function bootstrap() {
+  const request = ++session.viewRequest;
   try {
     const data = await desktop.invoke<BootstrapData>("app.bootstrap");
-    await hydrate(data, data.settings.app.openLastSessionOnStartup);
+    await hydrate(data, data.settings.app.openLastSessionOnStartup, request);
   } catch (error) {
+    if (request !== session.viewRequest) return;
     session.loading = false;
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
 }
 
 async function pickProject() {
+  const request = ++session.viewRequest;
   const data = await desktop.invoke<BootstrapData | null>("app.pickProject");
-  if (data) await hydrate(data);
+  if (data) await hydrate(data, false, request);
 }
 
 // wsl.exe can stall for its full timeout while the WSL service cold-starts,
@@ -180,6 +197,7 @@ function probeWslHomes() {
 }
 
 async function connectSsh(input: { host: string; cwd: string; browse?: boolean }) {
+  const request = ++session.viewRequest;
   const attempt = ++remoteUiAttempt;
   remoteStages.value = [];
   wslBusy.value = true;
@@ -189,7 +207,7 @@ async function connectSsh(input: { host: string; cwd: string; browse?: boolean }
     if (attempt !== remoteUiAttempt) return;
     if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
-      await hydrate(data as BootstrapData);
+      await hydrate(data as BootstrapData, false, request);
       remoteBrowseRoot.value = "";
       wslOpen.value = false;
       layout.showNotice(t("notice.connectedTo", { name: input.host }));
@@ -205,6 +223,7 @@ async function connectSsh(input: { host: string; cwd: string; browse?: boolean }
 }
 
 async function connectWsl(input: { distro: string; cwd: string; browse?: boolean }) {
+  const request = ++session.viewRequest;
   const attempt = ++remoteUiAttempt;
   remoteStages.value = [];
   wslBusy.value = true;
@@ -214,7 +233,7 @@ async function connectWsl(input: { distro: string; cwd: string; browse?: boolean
     if (attempt !== remoteUiAttempt) return;
     if (input.browse && data.project) await browseRemoteDirectory(data.project.path);
     else {
-      await hydrate(data as BootstrapData);
+      await hydrate(data as BootstrapData, false, request);
       remoteBrowseRoot.value = "";
       wslOpen.value = false;
       layout.showNotice(t("notice.connectedTo", { name: input.distro }));
@@ -247,14 +266,15 @@ async function browseRemoteDirectory(path: string) {
 }
 
 async function openRemoteDirectory(path: string) {
+  const request = ++session.viewRequest;
   const attempt = remoteUiAttempt;
   wslBusy.value = true;
   wslError.value = "";
   try {
     const data = await desktop.invoke<BootstrapData>("remote.openProject", { path });
-    // The backend may have committed just before Cancel was received. Always
-    // hydrate a successful commit so the visible workspace matches routing.
-    await hydrate(data);
+    // A cancelled dialog can still complete its commit, but a newer project
+    // selection must keep its view.
+    await hydrate(data, false, request);
     remoteBrowseRoot.value = "";
     remoteDirectories.value = [];
     wslOpen.value = false;
@@ -290,16 +310,19 @@ async function closeRemoteDialog() {
 }
 
 async function disconnectRemote() {
+  const request = ++session.viewRequest;
   try {
-    await hydrate(await desktop.invoke<BootstrapData>("remote.disconnect"));
+    await hydrate(await desktop.invoke<BootstrapData>("remote.disconnect"), false, request);
+    if (request !== session.viewRequest) return;
     layout.showNotice(t("notice.disconnectedRemote"));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
 }
 
-async function activateProject(record: ProjectGroup) {
-  if (record.id === session.activeProjectId && record.connected) return true;
+async function activateProject(record: ProjectGroup, request = ++session.viewRequest) {
+  if (request !== session.viewRequest) return false;
+  if (record.id === session.activeProjectId && record.connected && !session.loading) return true;
   session.loading = true;
   try {
     const remote = record.project.remote;
@@ -314,18 +337,19 @@ async function activateProject(record: ProjectGroup) {
             cwd: record.project.path,
           })
         : await desktop.invoke<BootstrapData>("app.openProject", { id: record.id });
-    await hydrate(data);
-    return true;
+    await hydrate(data, false, request);
+    return request === session.viewRequest;
   } catch (error) {
+    if (request !== session.viewRequest) return false;
     // A failed remote preparation leaves the old workspace and session intact.
     if (!record.project.remote) {
-      try { await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap")); }
+      try { await hydrate(await desktop.invoke<BootstrapData>("app.bootstrap"), false, request); }
       catch {}
     }
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     return false;
   } finally {
-    session.loading = false;
+    if (request === session.viewRequest) session.loading = false;
   }
 }
 
@@ -342,7 +366,8 @@ async function reconnectRemote() {
 }
 
 async function inProject(record: ProjectGroup, action: () => Promise<void>) {
-  if (!(await activateProject(record))) return;
+  const request = ++session.viewRequest;
+  if (!(await activateProject(record, request)) || request !== session.viewRequest) return;
   try {
     await action();
   } catch (error) {
@@ -385,7 +410,7 @@ async function submitDelete() {
 
 async function forgetProject(record: ProjectGroup) {
   try {
-    session.projects = await desktop.invoke<ProjectGroup[]>("app.forgetProject", { id: record.id });
+    await session.forgetProject(record.id);
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   }
@@ -454,7 +479,8 @@ function onEvent(wireEvent: DesktopEvent) {
       session.disconnected(payload.projectId);
       if (payload.projectId === session.activeProjectId) {
         remoteDisconnected.value = true;
-        layout.showNotice(t("remote.connectionLost"), "error");
+        remoteDisconnectNotice.value = remoteLostText(payload.message);
+        layout.showNotice(remoteDisconnectNotice.value, "error");
       }
     }
     return;
@@ -466,18 +492,42 @@ function onEvent(wireEvent: DesktopEvent) {
     const payload = event.payload as { level?: string; message?: string };
     if (payload.message) layout.showNotice(payload.message, payload.level);
   } else if (event.type === "sessions") {
-    const payload = event.payload as { current?: SessionSnapshot; deletedPath?: string; sessions?: SessionSummary[] };
+    const payload = event.payload as { current?: SessionSnapshot; deletedPath?: string; sessions?: SessionSummary[]; projects?: ProjectGroup[] };
     if (payload.deletedPath && payload.sessions)
       session.applyDeletion(payload.deletedPath, payload.sessions);
     else if (payload.current) session.applySnapshot(payload.current);
+    else if (payload.projects) session.applyProjects(payload.projects);
   } else if (event.type === "wiki") {
     session.applyWiki(event.payload as WikiStatus);
+  } else if (event.type === "update.available") {
+    updateNotice.value = event.payload as { version: string; url: string };
   }
+}
+
+async function skipUpdate() {
+  const version = updateNotice.value?.version;
+  updateNotice.value = null;
+  if (!version) return;
+  try {
+    await layout.updateAppSettings({ updateSkippedVersion: version });
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function openReleaseNotes() {
+  const url = updateNotice.value?.url;
+  if (!url) return;
+  void desktop.invoke("app.openExternal", { url }).catch(() => {});
 }
 
 function keydown(event: KeyboardEvent) {
   if (shortcutsBlocked(event)) return;
+  if (handleHistoryKeys(event)) return;
   const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
+  // A disabled experimental module's shortcut must fall through untouched, not
+  // be preventDefault-ed into silence.
+  if (action === "history" && !historyEnabled.value) return;
   if (action) {
     event.preventDefault();
     switch (action) {
@@ -486,6 +536,7 @@ function keydown(event: KeyboardEvent) {
       case "navigator": void layout.toggle("navigator"); break;
       case "tools": void layout.toggle("content"); break;
       case "settings": openSettings(); break;
+      case "history": togglePanel(); break;
     }
   } else if (event.key === "Escape" && layout.screen === "settings") closeSettings();
 }
@@ -507,12 +558,18 @@ onMounted(() => {
         layout: layout.layout,
         contentSection: layout.contentSection,
         contentTabs: layout.contentTabs,
+        chatColumns: layout.chatColumns,
         remoteBrowseRoot: remoteBrowseRoot.value,
       })),
       openSession: session.open,
       selectNode: session.selectNode,
+      openChatColumn: layout.openChatColumn,
+      closeChatColumn: layout.closeChatColumn,
       toggle: (panel: "navigator" | "chat" | "content") => layout.toggle(panel),
       settings: () => void (layout.screen = "settings"),
+      // The gui test asserts that a hot update of any i18n domain file reaches
+      // the dictionary the app is actually rendering from.
+      messages: (locale: "en" | "zh-CN") => JSON.parse(JSON.stringify(i18n.global.getLocaleMessage(locale))),
     },
   });
   void bootstrap();
@@ -554,8 +611,17 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <CommandPalette @run="runCommand" />
+  <div v-if="updateNotice" class="update-banner" role="status">
+    <span>{{ t("update.available", { version: updateNotice.version }) }}</span>
+    <Button data-action="update-release" variant="outline" @click="openReleaseNotes">
+      {{ t("update.viewRelease") }}
+    </Button>
+    <Button data-action="update-skip" variant="ghost" @click="skipUpdate">
+      {{ t("update.skip") }}
+    </Button>
+  </div>
   <div v-if="remoteDisconnected" class="remote-disconnected" role="alert">
-    <span>{{ t("remote.connectionLost") }}</span>
+    <span>{{ remoteDisconnectNotice || t("remote.connectionLost") }}</span>
     <Button data-action="remote-reconnect" variant="outline" :disabled="session.loading" @click="reconnectRemote">
       {{ session.loading ? t("remote.connecting") : t("remote.reconnect") }}
     </Button>
@@ -634,5 +700,10 @@ onBeforeUnmount(() => {
   >
     {{ layout.notice.message }} ×
   </button>
+  <div v-if="historyEnabled && history.toast" class="toast toast-history" role="status" aria-live="polite">
+    {{ history.toast }}
+  </div>
+  <HistoryPanel v-if="historyEnabled" />
+  <HistoryButton v-if="historyEnabled" />
   <div v-if="session.loading" class="loading-bar" />
 </template>

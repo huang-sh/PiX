@@ -99,7 +99,8 @@ export function sessionEventEncoder() {
     const payload = event.payload as SessionUpdate;
     const current = payload.current;
     const patch = current && previous && !payload.resync ? sessionPatch(previous, current) : undefined;
-    previous = current;
+    // List-only events keep the patch baseline for the session in view.
+    if (current) previous = current;
     return patch ? { ...event, payload: { patch } satisfies SessionUpdate } : event;
   };
 }
@@ -117,7 +118,11 @@ export function sessionEventDecoder(resync: () => Promise<unknown>) {
     if (event.type !== "sessions") return decodeAgent(event);
     decodeAgent(event);
     const payload = event.payload as SessionUpdate;
-    if (!payload.patch) { previous = payload.current; return event; }
+    if (!payload.patch) {
+      // List-only events keep the patch baseline for the session in view.
+      if (payload.current) previous = payload.current;
+      return event;
+    }
     const patch = payload.patch;
     if (previous?.graph?.id === patch.graph.id && previous.graph.epoch === patch.graph.epoch
       && previous.graph.revision >= patch.graph.revision) return undefined;

@@ -107,6 +107,40 @@ test("projects sibling branches without mixing chat", () => {
 });
 test("selects branch-specific raw anchor", () =>
   assert.equal(entryAnchorForNode(projectSession(e, "a3"), "turn:u1"), "s1"));
+
+test("context status follows the selected branch and latest edit while preserving original messages", () => {
+  const entries: RawSessionEntry[] = [...e,
+    { type: "context_edit", id: "omit", parentId: "a2", timestamp: "9", targetId: "u1", replacement: null },
+    { type: "context_edit", id: "edit", parentId: "omit", timestamp: "10", targetId: "a1", replacement: { content: "different model input" } },
+    { type: "context_edit", id: "tool", parentId: "edit", timestamp: "11", targetId: "r1", replacement: null },
+    { type: "context_edit", id: "restore", parentId: "tool", timestamp: "12", targetId: "u1", replacement: { content: "restored input" } },
+  ];
+  const window = createBranchMessageCache();
+  assert.deepEqual(window(entries, "tool", 2).messages.map(message => [message.entryId, message.contextStatus]),
+    [["u1", "excluded"], ["a1", "modified"], ["r1", "excluded"], ["u2", undefined], ["a2", undefined]]);
+  assert.equal(window(entries, "restore", 2).messages[0]?.contextStatus, "modified");
+  assert.equal(window(entries, "restore", 2).messages[0]?.text, "root");
+  assert.equal(window(entries, "tool", 2).messages.find(message => message.entryId === "a1")?.text, "answer");
+  assert.ok(window(entries, "tool", 1).messages.every(message => !message.contextStatus));
+  assert.ok(window(entries, "a3", 2).messages.every(message => !message.contextStatus), "sibling edits never leak");
+  assert.ok(projectSession(entries, "a2").messages.every(message => !message.contextStatus), "earlier leaves predate the edits");
+});
+
+test("context status accounts for compaction and preserves edits in retained history", () => {
+  const entries: RawSessionEntry[] = [...e,
+    { type: "context_edit", id: "edit", parentId: "a2", timestamp: "9", targetId: "a2", replacement: { content: "adjusted" } },
+    { type: "compaction", id: "compact", parentId: "edit", timestamp: "10", firstKeptEntryId: "u2", summary: "summary" },
+    { type: "compaction", id: "none", parentId: "compact", timestamp: "11", firstKeptEntryId: "none", summary: "summary only" },
+  ];
+  const window = createBranchMessageCache();
+  const full = window(entries, "compact", 2).messages;
+  assert.equal(full.find(message => message.entryId === "u1")?.contextStatus, "excluded");
+  assert.equal(full.find(message => message.entryId === "a2")?.contextStatus, "modified");
+  assert.equal(full.find(message => message.entryId === "u2")?.contextStatus, undefined);
+  assert.deepEqual(window(entries, "compact", 1).messages, full.filter(message => message.turnId === "turn:u2"));
+  assert.ok(window(entries, "none", 2).messages.filter(message => message.entryId !== "none")
+    .every(message => message.contextStatus === "excluded"));
+});
 test("projects failed assistant replies as error messages", () => {
   const failed: RawSessionEntry[] = [
     { type: "message", id: "u1", parentId: null, timestamp: "1", message: { role: "user", content: "hello" } },

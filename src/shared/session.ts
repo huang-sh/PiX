@@ -6,10 +6,19 @@ import type {
   RawSessionEntry,
   SessionProjection,
   SessionSummary,
+  SessionSnapshot,
 } from "./types.js";
-import { NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
+import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
+
+export function isSessionRunning(snapshot: SessionSnapshot): boolean {
+  const runtime = snapshot.runtime;
+  return runtime?.available !== false && Boolean(
+    snapshot.graph?.runs.some(run => run.status === "running")
+    || runtime?.isStreaming || runtime?.isCompacting || runtime?.isRetrying || runtime?.pendingMessageCount,
+  );
+}
 
 const entryIndexes = new WeakMap<RawSessionEntry[], Map<string, RawSessionEntry>>();
 export function sessionEntryIndex(entries: RawSessionEntry[]) {
@@ -195,6 +204,12 @@ export function projectSession(
         toolInputs.set(call.id, toolInput(call.arguments));
     }
   }
+  // The git-branch extension appends its record right before the user message
+  // lands, so the message's parent is that record: pair them by the link.
+  const gitBranches = new Map<string, string>();
+  for (const entry of entries)
+    if (entry.type === "custom" && entry.customType === GIT_BRANCH_CUSTOM_TYPE && typeof rec(entry.data)?.branch === "string")
+      gitBranches.set(entry.id, rec(entry.data)!.branch as string);
   const owners = new Map<string, string>();
   const ownedEntries = new Map<string, RawSessionEntry[]>();
   const contexts = new Map<string | null, { owner: string | null; depth: number; settings: SettingsState }>();
@@ -238,9 +253,11 @@ export function projectSession(
     const finalAssistantReply = owned
       .filter((x) => x.type === "message" && role(x) === "assistant")
       .at(-1);
+    const gitBranch = gitBranches.get(e.parentId ?? "");
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
+      ...(gitBranch ? { gitBranch } : {}),
       parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
       title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
       ...(images(e).length ? { imageCount: images(e).length } : {}),
@@ -322,6 +339,26 @@ export function projectSession(
         text: text(e),
         timestamp: e.timestamp,
       });
+  }
+  // Context edits are branch-local and last-write-wins. Compaction drops the
+  // older prefix (including its edits); paged history may start after that boundary.
+  // Badge-only divergences from the SDK projection, tracked in #22: an off-branch
+  // firstKeptEntryId (hand-edited files only — the SDK always picks it from the
+  // current path) clamps keptFrom to 0 instead of the SDK's summary-only reading,
+  // and an older compaction inside the newest retained range stays unbadged even
+  // though the SDK projects older compactions to no model messages.
+  const path = activeBranchEntryIds.map(id => byId.get(id)!);
+  const compaction = [...path].reverse().find(entry => entry.type === "compaction");
+  const keptFrom = compaction ? Math.max(0, activeBranchEntryIds.indexOf(String(compaction.firstKeptEntryId))) : 0;
+  const kept = new Set(activeBranchEntryIds.slice(keptFrom));
+  const edits = new Map<string, NonNullable<BranchMessage["contextStatus"]>>();
+  for (const entry of path.slice(keptFrom)) {
+    if (entry.type === "context_edit" && typeof entry.targetId === "string" && kept.has(entry.targetId))
+      edits.set(entry.targetId, entry.replacement === null ? "excluded" : "modified");
+  }
+  for (const message of messages) {
+    const status = kept.has(message.entryId) ? edits.get(message.entryId) : "excluded";
+    if (status) message.contextStatus = status;
   }
   return {
     nodes,

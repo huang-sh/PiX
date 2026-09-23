@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FileNode } from "../../src/shared/types";
 import ToolPanel from "../../src/renderer/features/tools/ToolPanel.vue";
+import FileTree from "../../src/renderer/features/tools/FileTree.vue";
 import { filterFileTree } from "../../src/renderer/features/tools/file-tree";
 import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
@@ -125,5 +126,115 @@ describe("file tree filtering", () => {
     resolve([{ name: "stale.ts", path: "stale.ts", kind: "file" }]);
     await pending;
     expect(workspace.files).toEqual([]);
+  });
+});
+
+describe("file tree context menu", () => {
+  const nodes: FileNode[] = [
+    {
+      name: "src",
+      path: "src",
+      kind: "directory",
+      children: [{ name: "app.ts", path: "src/app.ts", kind: "file" }],
+    },
+    { name: "README.md", path: "README.md", kind: "file" },
+  ];
+
+  const mountTree = (props: { local?: boolean }) =>
+    mount(FileTree, { props: { nodes, ...props }, global: { plugins: [i18n] } });
+
+  it("offers copy-path and open-external on file rows", async () => {
+    const wrapper = mountTree({});
+    await wrapper.get('[data-file-path="README.md"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('[data-action="tree-copy-path"]')).toHaveLength(1));
+    document.querySelector<HTMLElement>('[data-action="tree-copy-path"]')!.click();
+    await flushPromises();
+    expect(wrapper.emitted("copyPath")?.[0]?.[0]).toMatchObject({ path: "README.md" });
+
+    await wrapper.get('[data-file-path="README.md"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-action="tree-open-external"]')).toBeTruthy());
+    document.querySelector<HTMLElement>('[data-action="tree-open-external"]')!.click();
+    await flushPromises();
+    expect(wrapper.emitted("openExternal")?.[0]?.[0]).toMatchObject({ path: "README.md" });
+    wrapper.unmount();
+  });
+
+  it("opens only the nested row's menu, not the ancestor directory's", async () => {
+    const wrapper = mountTree({});
+    await wrapper.get('[data-file-path="src/app.ts"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('[data-action="tree-copy-path"]')).toHaveLength(1));
+    wrapper.unmount();
+  });
+
+  it("disables opening remote files with local applications", async () => {
+    const wrapper = mountTree({ local: false });
+    await wrapper.get('[data-file-path="README.md"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-action="tree-open-external"]')).toBeTruthy());
+    expect(document.querySelector('[data-action="tree-open-external"]')!.hasAttribute("data-disabled"))
+      .toBe(true);
+    wrapper.unmount();
+  });
+
+  it("emits openWith from the plain chooser entry on non-Linux platforms", async () => {
+    const wrapper = mountTree({});
+    await wrapper.get('[data-file-path="README.md"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-action="tree-open-with"]')).toBeTruthy());
+    expect(document.querySelector('[data-action="tree-open-with"]')!.getAttribute("aria-haspopup"))
+      .toBeNull();
+    document.querySelector<HTMLElement>('[data-action="tree-open-with"]')!.click();
+    await flushPromises();
+    expect(wrapper.emitted("openWith")?.[0]?.[0]).toMatchObject({ path: "README.md" });
+    wrapper.unmount();
+  });
+
+  it("lists registered applications in a submenu on Linux", async () => {
+    const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    const apps = [{ id: "code.desktop", name: "Visual Studio Code" }, { id: "writer.desktop", name: "LibreOffice Writer" }];
+    const wrapper = mount(FileTree, {
+      props: { nodes, local: true, openWithApps: () => apps },
+      global: { plugins: [i18n] },
+    });
+    await wrapper.get('[data-file-path="README.md"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() => {
+      expect(wrapper.emitted("menuOpen")?.at(-1)?.[0]).toMatchObject({ path: "README.md" });
+      expect(document.querySelector('[data-action="tree-open-with"]')).toBeTruthy();
+    });
+    // reka opens submenus 100ms after a mouse pointermove over the trigger.
+    const trigger = document.querySelector<HTMLElement>('[data-action="tree-open-with"]')!;
+    const move = new (window.PointerEvent ?? Event)("pointermove", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(move, "pointerType", { value: "mouse" });
+    trigger.dispatchEvent(move);
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-app="code.desktop"]')).toBeTruthy(), 1500);
+    expect(document.querySelector('[data-app="none"]')).toBeNull();
+    document.querySelector<HTMLElement>('[data-app="code.desktop"]')!.click();
+    await flushPromises();
+    expect(wrapper.emitted("openWithApp")).toEqual([[{ path: "README.md", name: "README.md", kind: "file" }, "code.desktop"]]);
+    platform.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("shows a placeholder when Linux registers no application for a type", async () => {
+    const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    const wrapper = mount(FileTree, {
+      props: { nodes, local: true, openWithApps: () => [] },
+      global: { plugins: [i18n] },
+    });
+    await wrapper.get('[data-file-path="README.md"]').trigger("contextmenu", { button: 2 });
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-action="tree-open-with"]')).toBeTruthy());
+    const trigger = document.querySelector<HTMLElement>('[data-action="tree-open-with"]')!;
+    const move = new (window.PointerEvent ?? Event)("pointermove", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(move, "pointerType", { value: "mouse" });
+    trigger.dispatchEvent(move);
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-app="none"]')).toBeTruthy(), 1500);
+    platform.mockRestore();
+    wrapper.unmount();
   });
 });
