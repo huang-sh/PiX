@@ -26,6 +26,12 @@ const denied: Platform = {
     return false;
   },
   async openExternal() {},
+  async openPath() {},
+  async openWith() {},
+  async openWithApps() { return []; },
+  async openWithApp() {},
+
+
   showItemInFolder() {},
   quit() {},
 };

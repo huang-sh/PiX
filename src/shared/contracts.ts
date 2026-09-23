@@ -157,6 +157,14 @@ export function validateRouteInput(
       return { path: str(v.path, "path") };
     case "app.openExternal":
       return { url: externalUrl(v.url) };
+    case "app.openPath":
+      return { path: str(v.path, "path") };
+    case "app.openWith":
+      return { path: str(v.path, "path") };
+    case "app.openWithApps":
+      return { path: str(v.path, "path") };
+    case "app.openWithApp":
+      return { path: str(v.path, "path"), appId: str(v.appId, "appId") };
     case "app.revealSession":
       return { id: str(v.id, "id"), path: str(v.path, "path") };
     case "app.openProject":

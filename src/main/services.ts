@@ -384,7 +384,7 @@ export class SettingsService {
   }
 }
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
-export const MAX_IMAGE_PREVIEW_BYTES = 20 * 1024 * 1024;
+export const MAX_BINARY_PREVIEW_BYTES = 20 * 1024 * 1024;
 function readBounded(path: string, max: number): { bytes: Buffer; truncated: boolean } {
   const fd = openSync(path, "r");
   try {
@@ -467,25 +467,27 @@ export class WorkspaceService {
     if (!root) throw new Error("Open a project first");
     const a = this.safe(p),
       ext = extname(a).toLowerCase(),
-      mime: Record<string, string> = {
-        ".avif": "image/avif",
-        ".bmp": "image/bmp",
-        ".gif": "image/gif",
-        ".ico": "image/x-icon",
-        ".jpeg": "image/jpeg",
-        ".jpg": "image/jpeg",
-        ".png": "image/png",
-        ".svg": "image/svg+xml",
-        ".webp": "image/webp",
+      binaries: Record<string, { mime: string; language: string }> = {
+        ".avif": { mime: "image/avif", language: "image" },
+        ".bmp": { mime: "image/bmp", language: "image" },
+        ".gif": { mime: "image/gif", language: "image" },
+        ".ico": { mime: "image/x-icon", language: "image" },
+        ".jpeg": { mime: "image/jpeg", language: "image" },
+        ".jpg": { mime: "image/jpeg", language: "image" },
+        ".pdf": { mime: "application/pdf", language: "pdf" },
+        ".png": { mime: "image/png", language: "image" },
+        ".svg": { mime: "image/svg+xml", language: "image" },
+        ".webp": { mime: "image/webp", language: "image" },
       };
-    if (mime[ext]) {
-      const { bytes, truncated } = readBounded(a, MAX_IMAGE_PREVIEW_BYTES);
+    const binary = binaries[ext];
+    if (binary) {
+      const { bytes, truncated } = readBounded(a, MAX_BINARY_PREVIEW_BYTES);
       return {
         path: relative(root, a).split(sep).join("/"),
         name: basename(a),
         content: "",
-        dataUrl: truncated ? undefined : `data:${mime[ext]};base64,${bytes.toString("base64")}`,
-        language: "image",
+        dataUrl: truncated ? undefined : `data:${binary.mime};base64,${bytes.toString("base64")}`,
+        language: binary.language,
         readonly: true,
         truncated,
       };

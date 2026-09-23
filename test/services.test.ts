@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   GitService,
-  MAX_IMAGE_PREVIEW_BYTES,
+  MAX_BINARY_PREVIEW_BYTES,
   SessionFiles,
   SettingsService,
   ShellService,
@@ -79,11 +79,25 @@ test("workspace drops oversized image previews instead of encoding them", () => 
   const temp = mkdtempSync(join(tmpdir(), "pix-big-image-"));
   try {
     const path = join(temp, "big.png");
-    writeFileSync(path, Buffer.alloc(MAX_IMAGE_PREVIEW_BYTES + 1, 0x42));
+    writeFileSync(path, Buffer.alloc(MAX_BINARY_PREVIEW_BYTES + 1, 0x42));
     const doc = new WorkspaceService(temp).read("big.png");
     assert.equal(doc.language, "image");
     assert.equal(doc.truncated, true);
     assert.equal(doc.dataUrl, undefined);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace returns pdf documents as base64 previews", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-pdf-"));
+  try {
+    const bytes = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
+    writeFileSync(join(temp, "paper.pdf"), bytes);
+    const doc = new WorkspaceService(temp).read("paper.pdf");
+    assert.equal(doc.language, "pdf");
+    assert.equal(doc.readonly, true);
+    assert.equal(doc.content, "");
+    assert.equal(doc.dataUrl, `data:application/pdf;base64,${bytes.toString("base64")}`);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

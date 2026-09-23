@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import NodeRenderer from "markstream-vue";
+import NodeRenderer, { enableKatex } from "markstream-vue";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { colorScheme } from "../theme";
 import { useI18n } from "vue-i18n";
 import { useLayoutStore } from "../stores/layout";
 import { useWorkspaceStore } from "../stores/workspace";
 import { readCodeTypography } from "../lib/typography";
+
+// Global switch for $...$/$$...$$ math nodes; katex itself is lazy-loaded on
+// first formula, so non-math content pays nothing.
+enableKatex();
 
 withDefaults(defineProps<{
   content: string;
