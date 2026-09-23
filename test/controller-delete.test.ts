@@ -23,6 +23,12 @@ for (const streaming of [false, true]) {
       pickSession: async () => undefined,
       confirm: async () => false,
       openExternal: async () => undefined,
+      openPath: async () => undefined,
+      openWith: async () => undefined,
+      openWithApps: async () => [],
+      openWithApp: async () => undefined,
+
+
       showItemInFolder() {},
       quit() {},
     });

@@ -267,7 +267,7 @@ function controllerFixture(t: TestContext) {
     async pickProject() { return undefined; },
     async pickSession() { return undefined; },
     async confirm() { return true; },
-    async openExternal() {}, showItemInFolder() {}, quit() {},
+    async openExternal() {}, async openPath() {}, async openWith() {}, async openWithApps() { return []; }, async openWithApp() {}, showItemInFolder() {}, quit() {},
   });
   controller.projectRuntime.control = async () => [];
   const project: ProjectInfo = { name: "old", path: "/old", remote: { kind: "ssh", host: "old" } };

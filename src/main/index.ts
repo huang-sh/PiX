@@ -11,7 +11,9 @@ import {
   Tray,
 } from "electron";
 import { dirname, join, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { MainController } from "./controller.js";
 import { debugLog, logFile } from "./debug-log.js";
@@ -257,6 +259,94 @@ app.whenReady().then(async () => {
     },
     async openExternal(url) {
       await openExternal(url);
+    },
+    async openPath(path) {
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
+      // openPath resolves to the OS handler for the file type — associated
+      // app for files, Explorer/Finder for folders — and reports failures as
+      // a string rather than rejecting.
+      const failure = await shell.openPath(path);
+      if (failure) throw new Error(failure);
+    },
+    async openWith(path) {
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
+      if (process.platform === "win32") {
+        // OpenAs_RunDLL opens the system "Open with" dialog, which lists every
+        // application registered for this file type, offers browsing for one
+        // and can reset the default handler. Detached: the dialog outlives any
+        // single window and never blocks the app.
+        const rundll32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "rundll32.exe");
+        const child = spawn(rundll32, ["shell32.dll,OpenAs_RunDLL", path], { detached: true, stdio: "ignore" });
+        child.unref();
+        await new Promise<void>((done, fail) => {
+          child.once("error", fail);
+          child.once("spawn", () => done());
+        });
+        return;
+      }
+      if (process.platform !== "darwin")
+        throw new Error("The open-with chooser is only available on Windows and macOS");
+      // "choose application" opens the native, searchable application list;
+      // cancelling the dialog is a user no-op, not a failure.
+      const script = "set picked to choose application with prompt \"Open With\" as alias\nPOSIX path of picked";
+      await new Promise<void>((done, fail) => {
+        execFile("osascript", ["-e", script], (error, stdout) => {
+          if (!error) {
+            const appPath = String(stdout).trim();
+            if (appPath) spawn("open", ["-a", appPath, path], { detached: true, stdio: "ignore" }).unref();
+            done();
+          } else if (/User canceled/i.test(error.message)) done();
+          else fail(error);
+        });
+      });
+    },
+    async openWithApps(path) {
+      if (process.platform !== "linux") return [];
+      const mime = await new Promise<string | undefined>((done) => {
+        execFile("file", ["--brief", "--mime-type", path], (error, stdout) =>
+          done(error || !stdout ? undefined : stdout.trim()));
+      });
+      if (!mime) return [];
+      const apps = new Map<string, { id: string; name: string }>();
+      // User applications take precedence over system ones with the same id.
+      for (const dir of [join(homedir(), ".local/share/applications"), "/usr/share/applications"]) {
+        let names: string[];
+        try {
+          names = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const name of names) {
+          if (!name.endsWith(".desktop")) continue;
+          const id = name.slice(0, -".desktop".length);
+          if (apps.has(id)) continue;
+          let entry: string;
+          try {
+            entry = readFileSync(join(dir, name), "utf8");
+          } catch {
+            continue;
+          }
+          // Only keys of the [Desktop Entry] group count; later groups use
+          // their own headers.
+          const section = entry.slice(0, entry.indexOf("\n[", entry.indexOf("[") + 1) + 1 || undefined);
+          if (!/^Name\s*=.*$/m.test(section) || /^(NoDisplay|Hidden)\s*=\s*true\b/m.test(section)) continue;
+          const mimes = section.match(/^MimeType\s*=\s*(.+)$/m)?.[1]?.split(";") ?? [];
+          if (!mimes.includes(mime)) continue;
+          apps.set(id, { id, name: section.match(/^Name\s*=\s*(.+)$/m)![1]!.trim() });
+        }
+      }
+      return [...apps.values()].sort((a, b) => a.name.localeCompare(b.name));
+    },
+    async openWithApp(path, appId) {
+      if (process.platform !== "linux")
+        throw new Error("Choosing an application applies to Linux desktop entries");
+      if (!/^[\w.-]+$/.test(appId)) throw new Error("Invalid application id");
+      const child = spawn("gtk-launch", [appId, path], { detached: true, stdio: "ignore" });
+      child.unref();
+      await new Promise<void>((done, fail) => {
+        child.once("error", fail);
+        child.once("spawn", () => done());
+      });
     },
     showItemInFolder(path) {
       if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
