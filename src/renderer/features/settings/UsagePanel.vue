@@ -226,7 +226,7 @@ watch([range, scope], load);
             :title="barTitle(day)"
           >
             <div class="usage-bar" :style="{ height: barHeight(day.cost) }"></div>
-            <small v-if="day === overview.days[0] || day === overview.days.at(-1)">{{ day.day.slice(5) }}</small>
+            <small>{{ Number(day.day.slice(8)) }}</small>
           </div>
         </div>
       </div>
@@ -375,10 +375,10 @@ watch([range, scope], load);
   background: var(--surface);
   overflow-x: auto;
 }
-.usage-bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; min-width: 0; }
+.usage-bar-col { flex: 1 0 22px; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; }
 .usage-bar { width: 100%; max-width: 26px; border-radius: 3px 3px 0 0; background: #40c463; }
 :global(:root[data-color-scheme="dark"]) .usage-bar { background: #26a641; }
-.usage-bar-col small { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.usage-bar-col small { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .usage-heat-cell.empty { border: 1px solid var(--border); }
 .usage-heat-cell[data-heat-level="1"] { background: #9be9a8; }
 .usage-heat-cell[data-heat-level="2"] { background: #40c463; }
