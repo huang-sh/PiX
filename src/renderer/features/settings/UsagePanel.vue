@@ -54,8 +54,6 @@ const fmtCost = (value: number) =>
   value > 0 ? `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}` : "$0";
 const fmtTokens = (value: number) =>
   new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
-const fmtDate = (iso: string) =>
-  iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
 const fmtMonth = new Intl.DateTimeFormat(undefined, { month: "short" }).format;
 // Tooltip of one heatmap day: tokens lead because the cell color tracks them.
 const dayTitle = (day: UsageDayRow) =>
@@ -174,10 +172,6 @@ watch([range, scope], load);
           <strong>{{ fmtCost(overview.today.cost) }}</strong>
         </div>
         <div class="usage-card">
-          <small>{{ t("settings.usage.sessions") }}</small>
-          <strong>{{ overview.sessionCount }}</strong>
-        </div>
-        <div class="usage-card">
           <small>{{ t("settings.usage.tokensIn") }}</small>
           <strong>{{ fmtTokens(overview.totals.input) }}</strong>
         </div>
@@ -291,41 +285,6 @@ watch([range, scope], load);
         </table>
       </div>
 
-      <div v-if="overview.sessions.length" class="usage-block">
-        <h3>{{ t("settings.usage.sessionsTitle") }}</h3>
-        <table class="usage-table">
-          <thead>
-            <tr>
-              <th>{{ t("settings.usage.colSession") }}</th>
-              <th>{{ t("settings.usage.colLastActive") }}</th>
-              <th>{{ t("settings.usage.colMessages") }}</th>
-              <th>{{ t("settings.usage.colTokensIn") }}</th>
-              <th>{{ t("settings.usage.colTokensOut") }}</th>
-              <th>{{ t("settings.usage.colCost") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in overview.sessions" :key="row.path">
-              <td class="usage-model" :title="row.path">
-                <em v-if="scope === 'all' && row.project" class="usage-project-tag">{{ row.project.name }}</em>
-                {{ row.name || row.firstMessage || row.id }}
-              </td>
-              <td>{{ fmtDate(row.modified) }}</td>
-              <td>{{ row.messageCount }}</td>
-              <td>{{ fmtTokens(row.usage.input) }}</td>
-              <td>{{ fmtTokens(row.usage.output) }}</td>
-              <td>
-                {{ fmtCost(row.usage.cost) }}<em
-                  v-if="row.estimatedCost > 0"
-                  class="usage-est-mark"
-                  :title="t('settings.usage.estimatedTip', { v: fmtCost(row.estimatedCost) })"
-                >≈</em>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
       <p class="usage-note">{{ t("settings.usage.costSourceNote") }}</p>
     </template>
   </section>
@@ -413,15 +372,6 @@ watch([range, scope], load);
   white-space: nowrap;
 }
 .usage-model { font-family: var(--font-mono, monospace); max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
-.usage-project-tag {
-  margin-right: 7px;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--muted);
-  font-size: 10px;
-  font-style: normal;
-}
 .usage-sub {
   margin-left: 7px;
   padding: 1px 7px;
