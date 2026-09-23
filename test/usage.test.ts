@@ -96,15 +96,15 @@ test("aggregation totals, buckets, and rows follow the range", () => {
   // Today keeps its own card even inside a wider range.
   assert.ok(near(week.today.cost, 0.15));
   assert.equal(week.today.input, 150);
-  // One bucket per local day across the range, gaps included.
-  assert.equal(week.days.length, 7);
+  // One bucket per local day, clamped to the first active day: the week's
+  // only activity is yesterday and today, so no leading padding renders.
+  assert.equal(week.days.length, 2);
   assert.deepEqual(
     week.days.map((d) => d.day),
-    [...Array(7)].map((_, i) => localDay(i - 6)),
+    [localDay(-1), localDay(0)],
   );
   assert.ok(near(week.days.at(-1)!.cost, 0.15));
   assert.ok(near(week.days.at(-2)!.cost, 0.2));
-  assert.equal(week.days.at(-3)!.cost, 0);
   // Models sort by cost; sessions without in-range usage drop out.
   assert.deepEqual(
     week.models.map((m) => m.model),

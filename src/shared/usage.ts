@@ -306,20 +306,19 @@ export function aggregateUsage(
     });
   }
 
-  // One bucket per local day from the range start to today, so gaps between
-  // activity still show as empty columns instead of collapsing the timeline.
-  // "all" clamps its start forward so the most recent days are the ones kept
-  // under the cap, and days advance through calendar arithmetic to stay on
-  // local midnight across DST transitions.
+  // One bucket per local day, never padding before the first day with
+  // activity: fixed windows clamp to the user's history the way "all" does,
+  // so a 30-day window over 20 days of sessions shows those 20 days. Gaps
+  // between active days still render, days advance through calendar
+  // arithmetic to stay on local midnight across DST transitions, and "all"
+  // keeps only the most recent days under the cap.
   const earliest =
     byDay.size ? midnight(new Date([...byDay.keys()].sort()[0]!)) : midnight(now);
-  const firstBucket =
-    startMs !== null
-      ? startMs
-      : Math.max(
-          earliest,
-          midnight(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (MAX_DAY_BUCKETS - 1))),
-        );
+  const firstBucket = Math.max(
+    startMs ?? Number.NEGATIVE_INFINITY,
+    earliest,
+    midnight(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (MAX_DAY_BUCKETS - 1))),
+  );
   const days: UsageDayRow[] = [];
   const cursor = new Date(firstBucket);
   while (midnight(cursor) <= midnight(now) && days.length < MAX_DAY_BUCKETS) {
