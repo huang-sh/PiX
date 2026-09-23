@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { DesktopEvent, PixieSettings, PromptImage, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 import { PIXIE_IDENTITY } from "../shared/pixie-prompt.js";
+import { debugLog } from "./debug-log.js";
 import { pixAgentDir } from "./paths.js";
 import { piPixieSystemPrompt } from "./pi-runtime.js";
 import { PixieRpc, type RpcLine } from "./pixie-rpc.js";
@@ -16,14 +17,20 @@ const cliSessionDir = (cwd: string) =>
 /**
  * The workspace was ~/.pix/agent/assistant before the rename; it and its
  * pre-RPC session dir move once so existing conversations follow along.
+ * Best-effort: a locked directory (an old instance still running, an AV
+ * scan) skips the move and retries on the next launch — nothing is lost.
  */
 function migrateLegacyWorkspace(): void {
   const legacy = join(pixAgentDir(), "assistant");
-  if (existsSync(legacy) && !existsSync(pixieWorkspace()))
-    renameSync(legacy, pixieWorkspace());
-  const legacySessions = cliSessionDir(legacy);
-  if (existsSync(legacySessions) && !existsSync(cliSessionDir(pixieWorkspace())))
-    renameSync(legacySessions, cliSessionDir(pixieWorkspace()));
+  try {
+    if (existsSync(legacy) && !existsSync(pixieWorkspace()))
+      renameSync(legacy, pixieWorkspace());
+    const legacySessions = cliSessionDir(legacy);
+    if (existsSync(legacySessions) && !existsSync(cliSessionDir(pixieWorkspace())))
+      renameSync(legacySessions, cliSessionDir(pixieWorkspace()));
+  } catch (error) {
+    debugLog("pixie: workspace migration", error);
+  }
 }
 
 /** Pixie's sessions can predate the RPC substrate, so both dirs are scanned. */
@@ -80,6 +87,9 @@ export class PixieRuntime {
     private readonly emit: (event: DesktopEvent) => void,
     private readonly settings: () => PixieSettings,
   ) {
+    // Before any clear-or-boot can touch the session dirs: clearing first
+    // and migrating afterwards would resurrect the wiped conversations.
+    migrateLegacyWorkspace();
     this.rpc.onEvent(event => this.onWireEvent(event));
     // A dead subprocess must fail the in-flight turn, not hang its waiters.
     this.rpc.onExit(error => {
@@ -167,7 +177,6 @@ export class PixieRuntime {
   }
 
   private async boot(): Promise<SessionSnapshot> {
-    migrateLegacyWorkspace();
     mkdirSync(join(pixieWorkspace(), "sessions"), { recursive: true });
     await this.startAgent();
     // A restored conversation keeps its own model; a fresh boot starts from
