@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "markstream-vue/index.css";
+@import "katex/dist/katex.min.css";
 
 :root {
   color-scheme: light;
