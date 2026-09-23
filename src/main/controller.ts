@@ -467,12 +467,24 @@ export class MainController {
         .filter((record) => !record.project.remote && record.project.path !== current?.path)
         .map((record) => record.project),
     ];
+    // Two history entries can resolve to one directory (case variants, or a
+    // shared custom sessionDir); scanning it twice would double every number.
+    // The project in view wins the attribution. Windows paths compare
+    // case-insensitively: realpath keeps the caller's spelling.
+    const seenDirs = new Set<string>();
+    const dirKey = (dir: string) =>
+      process.platform === "win32" ? canonicalPath(dir).toLowerCase() : canonicalPath(dir);
     return projects
       .map((project) => ({
         project: { id: projectId(project), name: project.name, path: project.path },
         dir: historySessionDir(project, bundle),
       }))
-      .filter((scan) => existsSync(scan.dir));
+      .filter((scan) => {
+        const key = dirKey(scan.dir);
+        if (seenDirs.has(key) || !existsSync(scan.dir)) return false;
+        seenDirs.add(key);
+        return true;
+      });
   }
   async sessions() {
     const files = this.files;

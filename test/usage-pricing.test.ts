@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parsePricingTable, resolvePricing } from "../src/main/usage-pricing.js";
+import { parsePricingTable, pricingResolver, resolvePricing } from "../src/main/usage-pricing.js";
 
 // A slice shaped like LiteLLM's model_prices_and_context_window.json.
 const table = parsePricingTable({
@@ -47,4 +47,19 @@ test("model resolution walks pair, bare id, and vendor suffix", () => {
   // Unknown models and the unattributed bucket resolve nothing.
   assert.equal(resolvePricing(table, "zai/glm-5.3"), undefined);
   assert.equal(resolvePricing(table, "Tools/summaries"), undefined);
+});
+
+test("the memoized resolver answers exactly like the direct lookup", () => {
+  const resolve = pricingResolver(table);
+  for (const model of [
+    "deepseek/deepseek-chat",
+    "pi/claude-sonnet-4.5",
+    "github-copilot/gpt-4o",
+    "zai/glm-5.3",
+    "Tools/summaries",
+  ]) {
+    assert.deepEqual(resolve(model), resolvePricing(table, model));
+    // Repeated lookups stay stable on the memoized path.
+    assert.deepEqual(resolve(model), resolvePricing(table, model));
+  }
 });

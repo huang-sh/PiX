@@ -47,7 +47,7 @@ import {
   type UsageRecord,
   type UsageSessionInput,
 } from "../shared/usage.js";
-import { loadPricingTable, resolvePricing } from "./usage-pricing.js";
+import { loadPricingTable, pricingResolver } from "./usage-pricing.js";
 import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
@@ -546,7 +546,7 @@ export class PiRuntime {
       }
     }
     const table = await pricing;
-    estimateUsageCosts(sessions, model => resolvePricing(table, model), new Set(unbilledProviders));
+    estimateUsageCosts(sessions, pricingResolver(table), new Set(unbilledProviders));
     return aggregateUsage(sessions, range);
   }
   async open(path: string) {

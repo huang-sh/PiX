@@ -158,7 +158,8 @@ export function estimateUsageCosts(
   const unbilledProviders = new Set([...unbilled].map(provider => provider.toLowerCase()));
   for (const session of sessions)
     for (const record of session.records) {
-      const provider = record.model.slice(0, record.model.indexOf("/"));
+      const slash = record.model.indexOf("/");
+      const provider = slash > 0 ? record.model.slice(0, slash) : "";
       if (provider && unbilledProviders.has(provider.toLowerCase())) {
         record.usage = { ...record.usage, cost: 0 };
         record.source = "unbilled";

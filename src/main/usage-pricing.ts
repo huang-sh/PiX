@@ -81,6 +81,19 @@ export function resolvePricing(
   return undefined;
 }
 
+/**
+ * Memoized per-model resolver: the suffix match walks the whole table, and
+ * every record of one model resolves the same way, so cost estimation pays
+ * one lookup per distinct model instead of one per record.
+ */
+export function pricingResolver(table: PricingTable) {
+  const memo = new Map<string, ModelPricing | undefined>();
+  return (model: string): ModelPricing | undefined => {
+    if (!memo.has(model)) memo.set(model, resolvePricing(table, model));
+    return memo.get(model);
+  };
+}
+
 interface PricingCache {
   fetchedAt: number;
   models: unknown;

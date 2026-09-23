@@ -21,7 +21,10 @@ const error = ref("");
 const unbilled = computed(
   () => new Set((layout.settings?.app.usage?.unbilledProviders ?? []).map(p => p.toLowerCase())),
 );
-const providerOf = (model: string) => model.slice(0, model.indexOf("/")) || model;
+const providerOf = (model: string) => {
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(0, slash) : model;
+};
 async function toggleBilling(provider: string) {
   if (!provider) return;
   const next = new Set(unbilled.value);
@@ -90,10 +93,10 @@ const heatWeeks = computed(() => {
 const maxDayTokens = computed(() =>
   Math.max(1, ...(overview.value?.days.map((day) => day.tokens) ?? [0])),
 );
-// Five steps against the busiest day; any usage reads as at least one step.
+// Five steps against the busiest day; days without usage stay hollow.
 const heatLevel = (day: UsageDayRow) =>
   day.tokens <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((4 * day.tokens) / maxDayTokens.value)));
-const HEAT_MIX = ["10%", "28%", "50%", "74%", "100%"];
+const HEAT_MIX = ["28%", "50%", "74%", "100%"];
 
 async function load() {
   loading.value = true;
@@ -203,8 +206,8 @@ watch([range, scope], load);
                 v-for="(day, slot) in column.cells"
                 :key="slot"
                 class="usage-heat-cell"
-                :class="{ empty: !day }"
-                :style="day ? { background: `color-mix(in srgb, var(--accent) ${HEAT_MIX[heatLevel(day)]}%, transparent)` } : undefined"
+                :class="{ empty: !day || heatLevel(day) === 0 }"
+                :style="day && heatLevel(day) > 0 ? { background: `color-mix(in srgb, var(--accent) ${HEAT_MIX[heatLevel(day) - 1]}%, transparent)` } : undefined"
                 :title="day ? dayTitle(day) : undefined"
               ></div>
             </div>

@@ -182,6 +182,16 @@ test("subscription-marked providers cost nothing, even when reported", () => {
   assert.equal(overview.totals.input, 180);
 });
 
+test("models without a provider prefix never match the unbilled marking", () => {
+  // A no-slash model used to lose its last character to slice(0, -1), which
+  // could collide with a same-named unbilled provider.
+  const bare = record(day(0), "summaries", { input: 10, cost: 0.1 });
+  const sessions = [session("bare", [bare], day(0))];
+  estimateUsageCosts(sessions, () => undefined, new Set(["summarie"]));
+  assert.equal(bare.source, "actual");
+  assert.ok(near(bare.usage.cost, 0.1));
+});
+
 test("usage.overview validates its range and scope", () => {
   assert.deepEqual(validateRouteInput("usage.overview", {}), { range: "30d", scope: "project" });
   assert.deepEqual(validateRouteInput("usage.overview", { range: "all", scope: "all" }), { range: "all", scope: "all" });
