@@ -121,11 +121,10 @@ export function piPixieSystemPrompt(cwd: string, identity: string): Promise<stri
       sessionManager: pi.SessionManager.inMemory(cwd, undefined, []),
     });
     try {
-      const prompt = String(session.agent.state.systemPrompt ?? "");
-      const markers = ["The following skills provide specialized instructions", "<available_skills>", "<project_context>"]
+      const prompt = session.systemPrompt;
+      const markers = ["The following skills provide specialized instructions", "<available_skills>", "<project_context>", "<cwd>"]
         .map(marker => prompt.indexOf(marker)).filter(at => at > 0);
-      let core = markers.length ? prompt.slice(0, Math.min(...markers)) : prompt;
-      core = core.replace(/\n+Current working directory: [^\n]*\n?$/, "").trimEnd();
+      const core = markers.length ? prompt.slice(0, Math.min(...markers)) : prompt;
       return core.startsWith(PI_OPENING)
         ? identity + core.slice(PI_OPENING.length)
         : `${core}\n\n${identity}`;
