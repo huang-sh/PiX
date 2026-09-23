@@ -34,8 +34,29 @@ export interface UsageRecord {
   /** "provider/modelId" attribution; summary/tool usage shares the SDK's "Tools/summaries" bucket. */
   model: string;
   usage: UsageAmount;
+  /** Session entry id; forks and exports copy entries into new files with the
+   *  id intact, so cross-file duplicates can be recognized and counted once. */
+  entryId?: string;
   /** Set by estimateUsageCosts; absent while records are still raw. */
   source?: CostSource;
+}
+
+/**
+ * Counts copied entries once. Forking, branch export, and session import all
+ * duplicate a session's root-to-leaf prefix into another file — same entry
+ * ids, same usage — and the earlier file in the scan (the original, since
+ * files sort by creation timestamp) keeps the attribution.
+ */
+export function dedupeUsageRecords(sessions: UsageSessionInput[]): void {
+  const seen = new Set<string>();
+  for (const session of sessions) {
+    if (!session.records.some((record) => record.entryId)) continue;
+    session.records = session.records.filter((record) => {
+      if (!record.entryId || seen.has(record.entryId)) return false;
+      seen.add(record.entryId);
+      return true;
+    });
+  }
 }
 
 /** The project a session's usage is attributed to in the all-projects scope. */

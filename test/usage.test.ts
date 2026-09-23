@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { validateRouteInput } from "../src/shared/contracts.js";
 import {
   aggregateUsage,
+  dedupeUsageRecords,
   estimateUsageCosts,
   usageAmount,
   usageStart,
@@ -14,9 +15,11 @@ const record = (
   timestamp: string,
   model: string,
   usage: Partial<UsageRecord["usage"]> = {},
+  entryId?: string,
 ): UsageRecord => ({
   timestamp,
   model,
+  ...(entryId ? { entryId } : {}),
   usage: usageAmount({
     input: usage.input ?? 0,
     output: usage.output ?? 0,
@@ -190,6 +193,32 @@ test("models without a provider prefix never match the unbilled marking", () => 
   estimateUsageCosts(sessions, () => undefined, new Set(["summarie"]));
   assert.equal(bare.source, "actual");
   assert.ok(near(bare.usage.cost, 0.1));
+});
+
+test("fork-copied prefixes count once across session files", () => {
+  const shared = [
+    record(day(-2), "zai/glm-5.3", { input: 10, cost: 0.1 }, "e1"),
+    record(day(-2), "zai/glm-5.3", { input: 20, cost: 0.2 }, "e2"),
+  ];
+  const original = session("orig", shared, day(-2));
+  // The fork copies the shared prefix (same entry ids) and adds one new reply.
+  const forked = session(
+    "fork",
+    [...shared, record(day(-1), "zai/glm-5.3", { input: 5, cost: 0.05 }, "e3")],
+    day(-1),
+  );
+  dedupeUsageRecords([original, forked]);
+  assert.equal(original.records.length, 2);
+  assert.deepEqual(
+    forked.records.map((r) => r.entryId),
+    ["e3"],
+  );
+  const overview = aggregateUsage([original, forked], "all", now);
+  assert.ok(near(overview.totals.cost, 0.35));
+  // Records without ids (legacy cache entries) are never dropped.
+  const legacy = session("legacy", [record(day(0), "zai/x", { input: 1, cost: 0.01 })], day(0));
+  dedupeUsageRecords([legacy]);
+  assert.equal(legacy.records.length, 1);
 });
 
 test("usage.overview validates its range and scope", () => {

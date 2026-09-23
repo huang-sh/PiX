@@ -15,7 +15,7 @@ import type { UsageSessionInput, UsageProjectRef } from "../shared/usage.js";
  */
 const CACHE_PATH = join(pixHome(), ".pix", "usage-scan-cache.json");
 /** Bump when record extraction changes shape, so stale entries are dropped. */
-const SCAN_CACHE_VERSION = 1;
+const SCAN_CACHE_VERSION = 2;
 /** Cached sessions beyond this drop the longest-inserted entries first. */
 const SCAN_CACHE_MAX = 2000;
 /** Flushes wait out bursts of scan writes before hitting the disk. */

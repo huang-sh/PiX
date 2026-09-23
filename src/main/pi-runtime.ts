@@ -39,6 +39,7 @@ import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 import {
   aggregateUsage,
+  dedupeUsageRecords,
   estimateUsageCosts,
   usageAmount,
   type UsageOverview,
@@ -140,6 +141,7 @@ function usageRecordsOf(entries: any[]): UsageRecord[] {
       timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
       model,
       usage: usageAmount(usage),
+      ...(typeof entry.id === "string" ? { entryId: entry.id } : {}),
     });
   }
   return records;
@@ -546,6 +548,9 @@ export class PiRuntime {
       }
     }
     const table = await pricing;
+    // Forks, branch exports, and imports copy entries between files with ids
+    // intact; the copies would bill twice without this pass.
+    dedupeUsageRecords(sessions);
     estimateUsageCosts(sessions, pricingResolver(table), new Set(unbilledProviders));
     return aggregateUsage(sessions, range);
   }
