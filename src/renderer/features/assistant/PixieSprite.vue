@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ContextMenuContent, ContextMenuItem, ContextMenuPortal, ContextMenuRoot, ContextMenuTrigger } from "reka-ui";
 import { EyeOff, MessageSquare, MessageSquarePlus, Settings } from "@lucide/vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useAssistantStore } from "../../stores/assistant";
 import { useLayoutStore } from "../../stores/layout";
@@ -54,20 +54,41 @@ function noteActivity() {
 }
 
 // --- Dragging and activation -------------------------------------------------
-// The graph controls own the bottom-right corner: the measured icon row is
-// 88px wide at right 8 and 28px tall at bottom 33. Any position — dropped,
-// restored, or after a window resize — that would sit on those three icons
-// is lifted to just above them. The search box extends further left but is
-// transient; only the icons are protected.
+// The sprite roams the whole window; the one place it may not sit is on the
+// graph controls — the icon row at the graph panel's bottom-right corner,
+// which itself moves whenever the surrounding panels open, close, or resize.
+// A ResizeObserver feeds that corner's box so dropped, restored, and pinned
+// positions alike are kept clear of it. The measured icon row is 88px wide at
+// right 8 and 28px tall at bottom 33. The search box extends further left but
+// is transient; only the icons are protected.
 const CONTROLS_ZONE_RIGHT = 100, CONTROLS_ZONE_BOTTOM = 64;
+const graphRect = shallowRef<DOMRect>();
+let graphObserver: ResizeObserver | undefined;
+function trackGraph() {
+  const element = document.getElementById("graph-panel");
+  if (!element || graphObserver) return;
+  const read = () => {
+    const box = element.getBoundingClientRect();
+    // A detached workbench (the settings screen) reports a zero box; the last
+    // real box keeps the sprite put until the workbench returns.
+    if (box.width > 0) graphRect.value = box;
+  };
+  graphObserver = new ResizeObserver(read);
+  graphObserver.observe(element);
+  read();
+}
 function clamp(left: number, top: number) {
   const next = {
     left: Math.min(window.innerWidth - SIZE - 8, Math.max(8, left)),
     top: Math.min(window.innerHeight - SIZE - 8, Math.max(44, top)),
   };
-  if (next.left + SIZE > window.innerWidth - CONTROLS_ZONE_RIGHT &&
-      next.top + SIZE > window.innerHeight - CONTROLS_ZONE_BOTTOM)
-    next.top = window.innerHeight - CONTROLS_ZONE_BOTTOM - SIZE;
+  // Lift only on a real overlap with the controls box — a sprite parked on a
+  // panel to the right of the graph must not be dragged up for nothing.
+  const r = graphRect.value;
+  if (r && next.left < r.right &&
+      next.left + SIZE > r.right - CONTROLS_ZONE_RIGHT &&
+      next.top + SIZE > r.bottom - CONTROLS_ZONE_BOTTOM)
+    next.top = r.bottom - CONTROLS_ZONE_BOTTOM - SIZE;
   return next;
 }
 function startDrag(event: PointerEvent) {
@@ -121,9 +142,15 @@ function hideSprite() {
   layout.updateAppSettings({ pixie: { sprite: false } }).catch(error =>
     layout.showNotice(error instanceof Error ? error.message : String(error), "error"));
 }
-function constrainOnResize() {
+// Panels can move the controls box under a pinned sprite; it must lift clear.
+function reClamp() {
   if (position.value) position.value = clamp(position.value.left, position.value.top);
 }
+watch(graphRect, reClamp);
+// Re-enabling the sprite happens on the settings screen, where the workbench
+// (and #graph-panel) is detached — re-attempt once it returns. Attached
+// observers survive detach, so later calls are no-ops.
+watch([enabled, () => layout.screen], ([on]) => { if (on) trackGraph(); }, { immediate: true, flush: "post" });
 // The saved position arrives when bootstrapping hydrates the layout state
 // (setup runs earlier); it clamps into the current window in case it shrank,
 // and loses to any position pinned locally since.
@@ -142,7 +169,6 @@ onMounted(() => {
   document.addEventListener("pointermove", dragMove);
   document.addEventListener("pointerup", endDrag);
   document.addEventListener("pointercancel", endDrag);
-  window.addEventListener("resize", constrainOnResize);
   reducedMotion.addEventListener("change", onReducedMotionChange);
   sleepCheck = window.setInterval(() => {
     if (!sleeping.value && Date.now() - lastActivity >= SLEEP_AFTER_MS) sleeping.value = true;
@@ -162,7 +188,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("pointermove", dragMove);
   document.removeEventListener("pointerup", endDrag);
   document.removeEventListener("pointercancel", endDrag);
-  window.removeEventListener("resize", constrainOnResize);
+  graphObserver?.disconnect();
   reducedMotion.removeEventListener("change", onReducedMotionChange);
 });
 
@@ -238,7 +264,9 @@ watch(() => assistant.visible, visible => {
   user-select: none;
   touch-action: none;
 }
-.pixie-sprite[style*="left:"] { right: auto; }
+/* A pinned top with the parked-corner bottom still set would stretch the
+   fixed box between the two (height: auto) instead of sizing to the sprite. */
+.pixie-sprite[style*="left:"] { right: auto; bottom: auto; }
 .pixie-sprite:active { cursor: grabbing; }
 .pixie-sprite:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 12px; }
 .pixie-sprite img { display: block; width: 96px; height: 96px; pointer-events: none; }
