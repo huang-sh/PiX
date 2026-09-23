@@ -188,6 +188,26 @@ function sessionUsage(
   };
 }
 
+/** Safety valve for pathological trees; real projects stay far below this. */
+const MAX_SESSION_FILES_PER_DIR = 5000;
+
+/** Every .jsonl under a session directory, top level first, sidecars after. */
+function sessionFilesUnder(root: string): string[] {
+  const files: string[] = [];
+  const queue: string[] = [root];
+  while (queue.length && files.length < MAX_SESSION_FILES_PER_DIR) {
+    const dir = queue.shift()!;
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      try {
+        if (statSync(path).isDirectory()) queue.push(path);
+        else if (name.endsWith(".jsonl")) files.push(path);
+      } catch { /* vanished between listing and stat */ }
+    }
+  }
+  return files;
+}
+
 /**
  * One session file's parsed usage, served from the persistent scan cache
  * (mtime + size validation, clones on every hand-out) and reduced through the
@@ -541,9 +561,12 @@ export class PiRuntime {
     for (const target of targets) {
       const root = canonicalPath(target.dir);
       if (!existsSync(root)) continue;
-      for (const name of readdirSync(root).filter((n) => n.endsWith(".jsonl"))) {
+      // The graph model gives every branch and worker its own session file
+      // under .pix-graph/.pix-tree sidecar directories, so the scan walks the
+      // whole tree — copied prefixes are deduped by entry id afterwards.
+      for (const path of sessionFilesUnder(root)) {
         try {
-          sessions.push(cachedSessionUsage(pi, join(root, name), target.dir, cwd, target.project));
+          sessions.push(cachedSessionUsage(pi, path, target.dir, cwd, target.project));
         } catch (e) { debugLog("pi-runtime: usage scan", e); }
       }
     }

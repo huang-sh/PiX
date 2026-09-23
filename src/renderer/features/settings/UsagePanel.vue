@@ -94,9 +94,11 @@ const maxDayTokens = computed(() =>
   Math.max(1, ...(overview.value?.days.map((day) => day.tokens) ?? [0])),
 );
 // Five steps against the busiest day; days without usage stay hollow.
+// Levels style through data attributes: plain accent background plus opacity
+// steps, which cannot fail to resolve the way a color-mix of a runtime-set
+// custom property can.
 const heatLevel = (day: UsageDayRow) =>
   day.tokens <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((4 * day.tokens) / maxDayTokens.value)));
-const HEAT_MIX = ["28%", "50%", "74%", "100%"];
 
 async function load() {
   loading.value = true;
@@ -207,7 +209,7 @@ watch([range, scope], load);
                 :key="slot"
                 class="usage-heat-cell"
                 :class="{ empty: !day || heatLevel(day) === 0 }"
-                :style="day && heatLevel(day) > 0 ? { background: `color-mix(in srgb, var(--accent) ${HEAT_MIX[heatLevel(day) - 1]}%, transparent)` } : undefined"
+                :data-heat-level="day ? heatLevel(day) : undefined"
                 :title="day ? dayTitle(day) : undefined"
               ></div>
             </div>
@@ -382,8 +384,12 @@ watch([range, scope], load);
 }
 .usage-heat-grid { display: flex; gap: 2px; }
 .usage-heat-week { display: grid; grid-template-rows: repeat(7, 13px); gap: 2px; }
-.usage-heat-cell { width: 13px; height: 13px; border-radius: 3px; }
+.usage-heat-cell { width: 13px; height: 13px; border-radius: 3px; background: var(--accent); }
 .usage-heat-cell.empty { border: 1px solid var(--border); background: transparent; }
+.usage-heat-cell[data-heat-level="1"] { opacity: 0.35; }
+.usage-heat-cell[data-heat-level="2"] { opacity: 0.55; }
+.usage-heat-cell[data-heat-level="3"] { opacity: 0.78; }
+.usage-heat-cell[data-heat-level="4"] { opacity: 1; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .usage-table th {
   position: sticky;
