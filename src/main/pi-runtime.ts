@@ -48,6 +48,7 @@ import {
   type UsageSessionInput,
 } from "../shared/usage.js";
 import { loadPricingTable, resolvePricing } from "./usage-pricing.js";
+import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
@@ -186,25 +187,10 @@ function sessionUsage(
 }
 
 /**
- * Parsed session usage keyed by canonical file path, invalidated by mtime and
- * size so repeated panel opens skip re-parsing unchanged files. Estimation
- * mutates records in place, so hits (and the first read) hand out clones and
- * the cache only ever holds untouched originals.
+ * One session file's parsed usage, served from the persistent scan cache
+ * (mtime + size validation, clones on every hand-out) and reduced through the
+ * SDK on a miss.
  */
-const usageSessionCache = new Map<
-  string,
-  { mtimeMs: number; size: number; session: UsageSessionInput }
->();
-const USAGE_SESSION_CACHE_MAX = 400;
-
-const cloneUsageSession = (session: UsageSessionInput): UsageSessionInput => ({
-  ...session,
-  records: session.records.map((record) => ({
-    ...record,
-    usage: { ...record.usage },
-  })),
-});
-
 function cachedSessionUsage(
   pi: any,
   path: string,
@@ -213,26 +199,14 @@ function cachedSessionUsage(
   project: UsageProjectRef | undefined,
 ): UsageSessionInput {
   const stat = statSync(path);
-  const cached = usageSessionCache.get(path);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
-    return cloneUsageSession(cached.session);
-  const session = sessionUsage(
-    pi.SessionManager.open(path, dir, cwd),
+  const cached = usageScanCache.get(path, stat, project);
+  if (cached) return cached;
+  usageScanCache.set(
     path,
-    stat.mtime.toISOString(),
-    project,
+    stat,
+    sessionUsage(pi.SessionManager.open(path, dir, cwd), path, stat.mtime.toISOString(), project),
   );
-  usageSessionCache.set(path, {
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
-    session,
-  });
-  // Map order is insertion order: drop the longest-unused entries first.
-  for (const key of usageSessionCache.keys()) {
-    if (usageSessionCache.size <= USAGE_SESSION_CACHE_MAX) break;
-    usageSessionCache.delete(key);
-  }
-  return cloneUsageSession(session);
+  return usageScanCache.get(path, stat, project)!;
 }
 
 export class PiRuntime {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { debugLog } from "./debug-log.js";
 import { pixHome } from "./paths.js";
@@ -101,13 +101,22 @@ const readCache = (path: string): PricingCache | undefined => {
 };
 
 /**
- * Fresh table from disk cache, refetching when stale. Any failure keeps the
- * panel working: a stale cache is better than none, and none at all just
- * leaves unreported costs at zero instead of blocking the route.
+ * Fresh table from the in-memory cache, then the disk cache, refetching only
+ * when both are stale. Any failure keeps the panel working: a stale cache is
+ * better than none, and none at all just leaves unreported costs at zero
+ * instead of blocking the route.
  */
 export async function loadPricingTable(): Promise<PricingTable> {
   if (tableCache && Date.now() - tableCache.at < PRICING_TTL_MS) return tableCache.table;
   loading ??= (async () => {
+    const stale = readCache(PRICING_CACHE_PATH);
+    if (stale && Date.now() - stale.fetchedAt < PRICING_TTL_MS) {
+      const table = parsePricingTable(stale.models);
+      if (table.size) {
+        tableCache = { table, at: stale.fetchedAt };
+        return table;
+      }
+    }
     let table: PricingTable | undefined;
     try {
       const response = await fetch(PRICING_URL, {
@@ -128,7 +137,6 @@ export async function loadPricingTable(): Promise<PricingTable> {
     } catch (e) {
       debugLog("usage pricing: fetch", e);
     }
-    const stale = existsSync(PRICING_CACHE_PATH) ? readCache(PRICING_CACHE_PATH) : undefined;
     if (table === undefined || table.size === 0) {
       table = stale ? parsePricingTable(stale.models) : new Map();
     }
