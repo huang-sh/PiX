@@ -18,6 +18,7 @@ import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js"
 import { canonicalPath } from "./paths.js";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { ProgressLedger } from "./progress-ledger.js";
@@ -617,6 +618,7 @@ export class MainController {
         "session.import",
         "session.rename",
         "session.delete",
+        "usage.overview",
         "workspace.tree",
         "workspace.read",
         "workspace.write",
@@ -797,6 +799,8 @@ export class MainController {
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
       }
+      case "usage.overview":
+        return this.projectRuntime.usageOverview(v.range as UsageRange);
       case "library.pin":
       case "library.archiveSession":
       case "library.archiveProject": {

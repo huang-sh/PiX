@@ -1,3 +1,4 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { debugLog } from "./debug-log.js";
@@ -36,6 +37,16 @@ import type {
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
+import {
+  aggregateUsage,
+  estimateUsageCosts,
+  usageAmount,
+  type UsageOverview,
+  type UsageRange,
+  type UsageRecord,
+  type UsageSessionInput,
+} from "../shared/usage.js";
+import { loadPricingTable, resolvePricing } from "./usage-pricing.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
@@ -92,6 +103,79 @@ export interface PiSettingsSdk {
 export async function piSettingsSdk(): Promise<PiSettingsSdk> {
   const moduleUrl = new URL("./core/settings-manager.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
   return import(moduleUrl.href);
+}
+
+/** Usage that no single model reply owns (summaries, tool-side billing). */
+const UNATTRIBUTED_USAGE_MODEL = "Tools/summaries";
+
+/**
+ * One billed event per assistant reply, auxiliary usage entry, and summary
+ * generation, attributing each the way the SDK's own accounting does
+ * (getUsageCostBreakdown): replies to their reporting model, everything else
+ * into the shared tools bucket.
+ */
+function usageRecordsOf(entries: any[]): UsageRecord[] {
+  const records: UsageRecord[] = [];
+  for (const entry of entries) {
+    let model: string | undefined;
+    let usage: any;
+    if (entry.type === "message" && entry.message?.role === "assistant") {
+      const message = entry.message;
+      model = `${message.provider}/${message.responseModel ?? message.model}`;
+      usage = message.usage;
+    } else if (entry.type === "usage") {
+      model = `${entry.provider}/${entry.model}`;
+      usage = entry.usage;
+    } else if (entry.type === "branch_summary" || entry.type === "compaction") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      usage = entry.usage;
+    } else if (entry.type === "message" && entry.message?.role === "toolResult") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      usage = entry.message.usage;
+    }
+    if (!model || !usage) continue;
+    records.push({
+      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
+      model,
+      usage: usageAmount(usage),
+    });
+  }
+  return records;
+}
+
+const usageMessageText = (message: any): string => {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  return Array.isArray(content)
+    ? content
+        .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+        .map((part: any) => part.text)
+        .join(" ")
+    : "";
+};
+
+/** Reduces one open session manager to the identity + billed events aggregateUsage takes. */
+function sessionUsage(manager: any, path: string, modified: string): UsageSessionInput {
+  const header = manager.getHeader(),
+    entries = manager.getEntries();
+  const firstUser = usageMessageText(
+    entries.find((e: any) => e.type === "message" && e.message?.role === "user")?.message,
+  );
+  const name = manager.getSessionName();
+  const clip = (s: string, n: number) => {
+    const c = s.replace(/\s+/g, " ").trim();
+    return c.length > n ? `${c.slice(0, n - 1)}…` : c;
+  };
+  return {
+    id: String(header?.id ?? basename(path)),
+    path,
+    ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
+    created: String(header?.timestamp ?? entries[0]?.timestamp ?? modified),
+    modified,
+    messageCount: entries.filter((e: any) => e.type === "message").length,
+    firstMessage: clip(firstUser, 120),
+    records: usageRecordsOf(entries),
+  };
 }
 
 export class PiRuntime {
@@ -399,6 +483,39 @@ export class PiRuntime {
         };
       })
       .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
+  }
+  /**
+   * Aggregated usage across the project's session files, for the settings
+   * page's usage panel. Read-only: each file is opened through the SDK's
+   * SessionManager and reduced in place; an unreadable file is skipped like
+   * the session list skips it. Costs the provider did not report are
+   * estimated from the cached public price table while the scan runs.
+   */
+  async usageOverview(range: UsageRange): Promise<UsageOverview> {
+    const { cwd, dir } = this;
+    if (!cwd || !dir) throw new Error("Open a project first");
+    const pi = await this.pi();
+    const pricing = loadPricingTable();
+    const root = canonicalPath(dir);
+    const names = existsSync(root)
+      ? readdirSync(root).filter((n) => n.endsWith(".jsonl"))
+      : [];
+    const sessions: UsageSessionInput[] = [];
+    for (const name of names) {
+      const path = join(root, name);
+      try {
+        sessions.push(
+          sessionUsage(
+            pi.SessionManager.open(path, dir, cwd),
+            path,
+            statSync(path).mtime.toISOString(),
+          ),
+        );
+      } catch (e) { debugLog("pi-runtime: usage scan", e); }
+    }
+    const table = await pricing;
+    estimateUsageCosts(sessions, model => resolvePricing(table, model));
+    return aggregateUsage(sessions, range);
   }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");

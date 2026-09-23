@@ -192,6 +192,13 @@ export function validateRouteInput(
         // grew message entries behind the journal's back.
         ...(v.pristineOnly === true ? { pristineOnly: true } : {}),
       };
+    case "usage.overview":
+      return {
+        range:
+          v.range === "today" || v.range === "7d" || v.range === "30d" || v.range === "all"
+            ? v.range
+            : "30d",
+      };
     case "library.pin":
       return { path: str(v.path, "path"), pinned: v.pinned === true };
     case "library.archiveSession":

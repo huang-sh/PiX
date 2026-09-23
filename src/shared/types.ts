@@ -530,6 +530,7 @@ export type DesktopRoute =
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "usage.overview"
   | "library.pin"
   | "library.archiveSession"
   | "library.archiveProject"
