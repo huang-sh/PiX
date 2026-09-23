@@ -14,7 +14,7 @@ test("Pi SDK is isolated to the main runtime adapter and its internal extensions
   );
   assert.deepEqual(
     hits.map((p) => p.replace(root, "").replaceAll("\\", "/")),
-    ["/main/extensions/file-changes.ts", "/main/pi-runtime.ts"],
+    ["/main/extensions/file-changes.ts", "/main/extensions/git-branch.ts", "/main/pi-runtime.ts"],
   );
 });
 test("renderer has no Node, Electron, or Pi authority", () => {

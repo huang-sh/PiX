@@ -7,6 +7,7 @@ import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "..
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import BranchHistory, { type HistoryTurn as Turn } from "./BranchHistory.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
@@ -186,9 +187,11 @@ const visibleTurns = computed<Turn[]>(() =>
     // message the projection reads for node.hasError. An empty final reply is a
     // failure, never the earlier text that happened to precede it.
     const terminal = [...body].reverse().find((message) => message.role === "assistant");
+    const node = session.nodeFor(id);
     return {
       id,
-      fileChanges: session.current?.projection.nodes.find(node => node.id === id)?.fileChanges,
+      gitBranch: node?.gitBranch,
+      fileChanges: node?.fileChanges,
       user,
       terminal,
       running: selectedRun.value?.status === "running" && id === selectedRun.value.nodeId,
@@ -357,6 +360,7 @@ onBeforeUnmount(() => {
         <MessageSquare :size="17" />
         <small>{{ panelNode?.title ?? t("branch.noNodeSelected") }}</small>
       </span>
+      <GitBranchPicker />
       <button
         type="button"
         class="branch-close"

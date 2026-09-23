@@ -1,12 +1,15 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { WslHostClient } from "../src/main/wsl-host-client.js";
+import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
 import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
@@ -113,10 +116,11 @@ test("long-running prompts and shell commands are not cut off by the RPC timeout
   const { client, socket } = transport(t);
   const prompt = client.request("agent.control", { action: "prompt", text: "work" });
   const shell = client.request("shell.run", { command: "long job" });
+  const newSession = client.request("agent.control", { action: "newSession" });
   t.mock.timers.tick(300_000);
-  for (const id of ["1", "2"])
+  for (const id of ["1", "2", "3"])
     socket.emit("message", JSON.stringify({ type: "response", id, ok: true, result: "done" }));
-  assert.deepEqual(await Promise.all([prompt, shell]), ["done", "done"]);
+  assert.deepEqual(await Promise.all([prompt, shell, newSession]), ["done", "done", "done"]);
 });
 
 test("heartbeat detects a half-open connection and accepts healthy pong replies", async (t) => {
@@ -127,9 +131,104 @@ test("heartbeat detects a half-open connection and accepts healthy pong replies"
   socket.emit("pong");
   t.mock.timers.tick(15_000);
   assert.equal(client.connected, true);
+  // A single missed pong is tolerated: the host may block its event loop on
+  // synchronous session creation. Two consecutive misses mean the host is gone.
+  t.mock.timers.tick(15_000);
+  assert.equal(client.connected, true);
   t.mock.timers.tick(15_000);
   assert.equal(client.connected, false);
 });
+
+test("a host exit reports its recent stderr output", async (t) => {
+  const { client, child } = transport(t);
+  const failure = new Promise<Error>(resolve => client.onDisconnect(resolve));
+  child.stderr.write("Warning: noisy banner\n");
+  child.stderr.write("Error: session graph is corrupt\n");
+  child.emit("exit", 1);
+  assert.match((await failure).message, /Remote host exited with code 1:[\s\S]*session graph is corrupt/);
+});
+
+async function waitForLog(text: string) {
+  for (let i = 0; i < 400; i++) {
+    const content = existsSync(logFile()) ? readFileSync(logFile(), "utf8") : "";
+    if (content.includes(text)) return content;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail(`Missing log text: ${text}`);
+}
+
+test("socket-first disconnection logs late stderr at child close without notifying twice", async t => {
+  const { client, child, socket } = transport(t);
+  const failures: Error[] = [];
+  client.onDisconnect(error => failures.push(error));
+  const rejected = assert.rejects(client.request("session.list"), /Remote host disconnected/);
+  socket.terminate();
+  await rejected;
+  assert.equal(failures.length, 1, "requests and UI fail immediately, before child exit");
+  child.exitCode = 23;
+  child.emit("exit", 23);
+  await client.dispose(); // Failure cleanup must not mark this as a requested exit.
+  child.stderr.write("earlier output ".repeat(400));
+  child.stderr.write("\nlate stderr after exit: final diagnostic\n");
+  child.stderr.end();
+  child.emit("close", 23, null);
+  const log = await waitForLog("late stderr after exit: final diagnostic");
+  assert.match(log, /child closed\] requested=false code=23 signal=none/);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.message, "Remote host disconnected");
+});
+
+test("requested disposal is distinguished from failure and retains the final signal", async t => {
+  const { client, child } = transport(t);
+  const closing = client.dispose();
+  child.exitCode = 0;
+  child.emit("exit", null, "SIGTERM");
+  await closing;
+  child.emit("close", null, "SIGTERM");
+  await waitForLog("requested=true code=none signal=SIGTERM");
+});
+
+for (const failure of ["ENOENT", "EACCES", "ELOOP", "file"] as const) {
+  test(`host startup preserves ${failure} directory diagnostics`, { timeout: 20_000 }, async t => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-host-path-error-")));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const target = join(root, "project");
+    if (failure === "file") writeFileSync(target, "not a directory");
+    // Permission errors depend on the test account/OS, and Windows junctions
+    // cannot create a symlink loop. Inject only those fs failures in the child.
+    const preload = failure === "EACCES" || failure === "ELOOP" ? `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const original = fs.realpathSync;
+      fs.realpathSync = function(path, ...args) {
+        if (String(path) === ${JSON.stringify(target)}) {
+          throw Object.assign(new Error(${JSON.stringify(`${failure}: cannot resolve ${target}`)}), { code: ${JSON.stringify(failure)} });
+        }
+        return original.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+    ` : undefined;
+    const child = spawn(process.execPath, [
+      ...(preload ? ["--import", `data:text/javascript,${encodeURIComponent(preload)}`] : []),
+      fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+      "serve", "--cwd", target, "--exit-on-disconnect",
+    ], { env: { ...process.env, PIX_HOME: join(root, "home"),
+      PI_CODING_AGENT_DIR: join(root, "home", "agent") }, stdio: "pipe" });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+    let stderr = "";
+    let stdout = "";
+    child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+    child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(code, 1);
+    assert.match(stderr, failure === "file" ? /Project path is not a directory/ : new RegExp(failure));
+    assert.ok(stderr.replaceAll("\\", "/").includes(target.split(sep).join("/")), stderr);
+    assert.doesNotMatch(stdout, /PIX_AGENT_HOST_READY/);
+  });
+}
 
 test("startup accepts a handshake split across chunks and can be cancelled", async () => {
   const child = new FakeChild();
@@ -406,7 +505,7 @@ test("a successful candidate is pooled instead of closing the old host and repor
   const next = candidate(controller);
   t.mock.method(WslHostClient, "connectSsh", async () => next as any);
   await controller.connectSsh("new", "~", true);
-  const result = await controller.openRemoteProject("/new/sub");
+  const result = await controller.pool.openRemoteProject("/new/sub");
   assert.equal(result.project?.path, "/new/sub");
   assert.equal(controller.wsl, next);
   assert.equal(old.disposed, false, "switching remote projects keeps the previous host pooled");
@@ -494,7 +593,76 @@ test("forgetting a project disposes its pooled host and refuses while it runs", 
   assert.equal(controller.projectGroups().some(record => record.id === projectId(project)), false);
 });
 
-test("a differently spelled path still adopts the pooled host instead of spawning a second one", async (t) => {
+for (const kind of ["ssh", "wsl"] as const) {
+  test(`${kind} symlink connections and directory browsing reuse the same real host`, { timeout: 60_000 }, async t => {
+    const { controller } = controllerFixture(t);
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-host-alias-")));
+    const project = join(root, "project");
+    const alias = join(root, "alias");
+    const canonical = project.split(sep).join("/");
+    mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
+    symlinkSync(project, alias, process.platform === "win32" ? "junction" : "dir");
+    writeFileSync(join(project, ".pi", "sessions", "saved.jsonl"), JSON.stringify({
+      type: "session", version: 3, id: "saved", cwd: alias, timestamp: new Date().toISOString(),
+    }) + "\n");
+    const clients: WslHostClient[] = [];
+    t.after(async () => {
+      await controller.pool.closeAllRemote();
+      await Promise.all(clients.map(client => client.dispose()));
+      rmSync(root, { recursive: true, force: true });
+    });
+    // Exercise the real server and WebSocket handshake; replace only SSH/WSL
+    // process launching so the regression runs without a configured remote.
+    const connect = async (cwd: string) => {
+      const child = spawn(process.execPath, [
+        fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+        "serve", "--cwd", cwd, "--exit-on-disconnect",
+      ], { env: { ...process.env, PIX_HOME: join(root, "home"),
+        PI_CODING_AGENT_DIR: join(root, "home", "agent") }, stdio: "pipe" });
+      try {
+        const ready = await (WslHostClient as any).waitForReady(child, 15_000);
+        const { socket, hello } = await (WslHostClient as any).openSocket(ready, 15_000);
+        const client = Reflect.construct(WslHostClient, [child, socket, hello]) as WslHostClient;
+        clients.push(client);
+        return client;
+      } catch (error) {
+        child.kill();
+        throw error;
+      }
+    };
+    t.mock.method(WslHostClient, "connectSsh", (_host: string, cwd: string) => connect(cwd));
+    t.mock.method(WslHostClient, "installed", (options: { cwd: string }) => connect(options.cwd));
+    const open = (cwd: string, browse = false) => kind === "ssh"
+      ? controller.connectSsh("alias-test", cwd, browse)
+      : controller.connectWsl("alias-test", cwd, browse);
+
+    const first = await open(alias);
+    const original = controller.wsl!;
+    assert.equal(original.hello.cwd, canonical, "hello expands symlinks on the host");
+    assert.equal(original.hello.piVersion,
+      JSON.parse(readFileSync("server/package.json", "utf8")).dependencies["@earendil-works/pi-coding-agent"],
+      "hello reports the installed SDK version");
+    assert.equal(first.project.path, canonical);
+    assert.equal((await controller.invoke("session.list") as unknown[]).length, 1,
+      "sessions created through the alias remain visible");
+
+    await open(canonical);
+    assert.equal(clients.length, 1, "the real path matches the first slot before spawning");
+    await open(alias);
+    assert.equal(clients.length, 2);
+    assert.equal(clients[1]!.connected, false, "the redundant host is closed after hello");
+    assert.equal(controller.wsl, original);
+
+    await open(root, true);
+    await controller.invoke("remote.openProject", { path: alias });
+    assert.equal(clients[2]!.connected, false, "browsing to the alias also discards its temporary host");
+    assert.equal(controller.wsl, original);
+    assert.equal(original.connected, true, "the original host is never replaced");
+    assert.equal((await controller.invoke("session.list") as unknown[]).length, 1);
+  });
+}
+
+test("a differently spelled path reuses the pooled host after closing the redundant one", async (t) => {
   const { controller } = controllerFixture(t);
   const canonical: ProjectInfo = { name: "new", path: "/new", remote: { kind: "ssh", host: "new" } };
   const pooledClient = candidate(controller);
@@ -570,9 +738,9 @@ test("cancelling while the selected folder loads preserves the active workspace"
     }
     return request(route, input);
   };
-  const opening = assert.rejects(controller.openRemoteProject("/new/sub"), /cancelled/);
+  const opening = assert.rejects(controller.pool.openRemoteProject("/new/sub"), /cancelled/);
   await loading;
-  await controller.cancelRemote();
+  await controller.pool.cancelRemote();
   finish(controller.settings.bundle());
   await opening;
   assert.equal(controller.project, project);
@@ -615,7 +783,7 @@ test("bootstrapping a connected remote workspace restores its remembered session
   };
   await controller.invoke("session.open", { path: "/old/s.jsonl" });
 
-  const bootstrapped = await controller.wslBootstrap() as { current?: typeof snapshot };
+  const bootstrapped = await controller.pool.wslBootstrap() as { current?: typeof snapshot };
 
   assert.equal(bootstrapped.current?.session.path, "/old/s.jsonl",
     "a window reload lands back on the session the workspace last showed");

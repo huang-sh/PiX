@@ -1,7 +1,56 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateRouteInput } from "../src/shared/contracts.js";
+import { customModelInput, validateRouteInput } from "../src/shared/contracts.js";
 
+test("layout save validates the persisted workbench shape", () => {
+  const layout = {
+    version: 1,
+    navigatorPinned: true,
+    branchOrders: { "D:\\p\\s.jsonl": [["turn:a", 2], ["turn:b", 1]] },
+    chatPinWidth: { from: 400, to: 640 },
+    widths: { navigator: 240, chat: 480, content: 800.5, settings: 360 },
+    collapsed: { navigator: false, chat: false, content: true },
+    minimap: true,
+    utility: { open: true, collapsed: false, height: 220, activeTab: "terminal" },
+  };
+  assert.deepEqual(validateRouteInput("layout.save", { layout }), { layout });
+  assert.throws(() =>
+    validateRouteInput("layout.save", { layout: { ...layout, minimap: "yes" } }),
+    /minimap/);
+  assert.throws(() =>
+    validateRouteInput("layout.save", {
+      layout: { ...layout, widths: { ...layout.widths, chat: Number.NaN } },
+    }),
+    /widths\.chat/);
+  assert.throws(() =>
+    validateRouteInput("layout.save", {
+      layout: { ...layout, utility: { ...layout.utility, activeTab: "nope" } },
+    }),
+    /activeTab/);
+  assert.throws(() =>
+    validateRouteInput("layout.save", {
+      layout: { ...layout, branchOrders: { "D:\\p\\s.jsonl": [["turn:a"]] } },
+    }),
+    /branchOrders/);
+  assert.throws(() => validateRouteInput("layout.save", { layout: {} }), /widths/);
+});
+test("custom model input is validated standalone for models.json writes", () => {
+  const input = {
+    provider: "openrouter",
+    modelId: "gpt-x",
+    name: " GPT X ",
+    baseUrl: "https://api.example.com/v1",
+    api: "openai-completions",
+    contextWindow: 200000,
+    maxTokens: 8192,
+    reasoning: true,
+    imageInput: false,
+  };
+  assert.deepEqual(customModelInput(input), { ...input, name: "GPT X", apiKey: undefined });
+  assert.throws(() => customModelInput({ ...input, api: "carrier-pigeon" }), /API/);
+  assert.throws(() => customModelInput({ ...input, provider: "../evil" }), /provider/i);
+  assert.throws(() => customModelInput({ ...input, baseUrl: "ftp://x" }), /HTTP/);
+});
 test("node deletion preserves its target across IPC and rejects missing identifiers", () => {
   const input = { action: "deleteNode", nodeId: "turn:b", graphId: "D:\\project\\session.jsonl" };
   assert.deepEqual(validateRouteInput("agent.control", input), input);

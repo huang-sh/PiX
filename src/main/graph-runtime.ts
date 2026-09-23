@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
+import { sessionModifiedAt } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
@@ -57,7 +59,7 @@ export class GraphRuntime extends PiRuntime {
   }
   private notify() {
     if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
-    try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch {}
+    try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch (e) { debugLog("graph-runtime: notify emit", e); }
   }
   private data(pi: PiRuntime): SessionData {
     const manager = pi.runtime.session.sessionManager;
@@ -115,11 +117,11 @@ export class GraphRuntime extends PiRuntime {
     const child = new PiRuntime(this.cwd, this.dir, event => {
       if (this.stopping) return;
       const value = event as { type: string; payload: { type?: string } };
-      try { this.emit(event); } catch {}
+      try { this.emit(event); } catch (e) { debugLog("graph-runtime: worker event emit", e); }
       if (["message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
         const worker = this.workers.get(record.id);
         if (worker?.pi.runtime) {
-          try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch {}
+          try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch (e) { debugLog("graph-runtime: worker snapshot refresh", e); }
         }
       }
     }, this.openExternal);
@@ -132,8 +134,9 @@ export class GraphRuntime extends PiRuntime {
     return child;
   }
   private fileSnapshot(record: BranchRecord, data: SessionData): SessionSnapshot {
-    return { session: { id: String(data.header.id), path: this.graph!.path(record.id), cwd: String(data.header.cwd),
-      created: String(data.header.timestamp), modified: String(data.header.timestamp), messageCount: data.entries.length, firstMessage: record.request.text },
+    const path = this.graph!.path(record.id);
+    return { session: { id: String(data.header.id), path, cwd: String(data.header.cwd),
+      created: String(data.header.timestamp), modified: sessionModifiedAt(path, String(data.header.timestamp)), messageCount: data.entries.length, firstMessage: record.request.text },
       entries: data.entries, projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null),
       runtime: { ...super.state(), isStreaming: false, isCompacting: false, isRetrying: false } };
   }
@@ -399,7 +402,7 @@ export class GraphRuntime extends PiRuntime {
       void worker.work.catch(error => { this.storageError = String(error); this.notify(); });
       return this.snapshot();
     } catch (error) {
-      try { await child.close(); } catch {}
+      try { await child.close(); } catch (e) { debugLog("graph-runtime: worker close after start failure", e); }
       record.status = "interrupted"; record.error = String(error); graph.save(record);
       throw error;
     }
@@ -428,7 +431,7 @@ export class GraphRuntime extends PiRuntime {
         branchId: record.id, runId: record.runId, state: "settled" }) + "\n");
     } catch (error) {
       record.status = "interrupted"; record.error = String(error);
-      try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch {}
+      try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
     } finally {
       worker.work = undefined;
       graph.save(record);

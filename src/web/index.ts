@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
 import { MainController } from "../main/controller.js";
+import { debugLog } from "../main/debug-log.js";
 import { pixHome } from "../main/paths.js";
 import { bootstrapPixProfile } from "../main/services.js";
 import { UpdateChecker } from "../main/update-check.js";
@@ -226,6 +227,7 @@ async function main() {
 }
 
 void main().catch((error) => {
+  debugLog("web: startup", error);
   process.stderr.write(
     `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
   );

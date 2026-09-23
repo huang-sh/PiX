@@ -40,7 +40,7 @@ let localeSource;
 if (verifyHmr) {
   cpSync(join(root, "src"), join(testHome, "src"), { recursive: true });
   cpSync(join(root, "package.json"), join(testHome, "package.json"));
-  localeFile = join(testHome, "src/renderer/i18n.ts");
+  localeFile = join(testHome, "src/renderer/i18n/app.ts");
   localeSource = readFileSync(localeFile, "utf8");
   writeFileSync(localeFile, localeSource.replace(/^\s+(copyPath|copySessionId|revealSession):.*\r?\n/gm, ""));
   const { createServer } = await import("vite");
@@ -85,8 +85,12 @@ const xvfb =
   process.platform === "linux"
     ? String(spawnSync("which", ["xvfb-run"], { encoding: "utf8" }).stdout).trim()
     : "";
+// A stalled vite close leaves watchers and sockets holding the event loop
+// open on Linux; run the wrapper as its own group so teardown can reap the
+// whole tree, and exit explicitly once the script is done.
+const grouped = Boolean(xvfb);
 const child = xvfb
-  ? spawn(xvfb, ["-a", electron, ...args], { cwd: root, env: testEnv() })
+  ? spawn(xvfb, ["-a", electron, ...args], { cwd: root, env: testEnv(), detached: grouped })
   : spawn(electron, args, { cwd: root, env: testEnv(), windowsHide: true });
 
 let stderr = "";
@@ -191,6 +195,8 @@ function signalWslTestHost(pid, signal) {
   if (result.status !== 0) throw new Error(`WSL test signal failed (${result.status}): ${result.stderr}`);
 }
 try {
+  // Boot budgets are generous: on a cold machine the dev server has to transform
+  // the whole renderer graph before the shell appears.
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
     const targets = await response.json();
@@ -199,7 +205,7 @@ try {
     );
     if (!page) throw new Error("Electron page target missing");
     return page;
-  });
+  }, 90_000);
   cdp = new Cdp(target.webSocketDebuggerUrl);
   await cdp.open();
   await cdp.send("Runtime.enable");
@@ -209,7 +215,7 @@ try {
       "window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))",
     );
     if (!ready) throw new Error(`PiX renderer is not ready\n${stderr}`);
-  });
+  }, 90_000);
   await retry(async () => {
     const value = await cdp.evaluate(`({
       collapsed: window.__pixTest.state().layout.collapsed,
@@ -452,6 +458,14 @@ try {
     );
     console.log(JSON.stringify(remoteSshResult, null, 2));
   } else {
+  // A packaged Windows release once shipped a window that never showed: every
+  // boot assertion still passed because the renderer was alive. A hidden
+  // BrowserWindow reports document.visibilityState "hidden", so require the
+  // page to become visible — the renderer-observable form of "window shown".
+  await retry(async () => {
+    if ((await cdp.evaluate("document.visibilityState")) !== "visible")
+      throw new Error("Window did not become visible after boot");
+  });
   await cdp.evaluate(
     "Promise.all(['navigator','chat'].filter(panel => window.__pixTest.state().layout.collapsed[panel]).map(panel => window.__pixTest.toggle(panel))).then(() => window.__pixTest.state().layout.collapsed.content ? undefined : window.__pixTest.toggle('content'))",
   );
@@ -545,6 +559,44 @@ try {
         if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy full path")
           throw new Error("A second locale hot update did not reach the mounted menu");
       });
+      // Every domain file must reach the live dictionary through its own
+      // self-accept, so probe each one with a sentinel value.
+      for (const domain of ["app", "graph", "remote", "settings", "workbench", "history"]) {
+        const file = join(testHome, "src/renderer/i18n", `${domain}.ts`);
+        const source = readFileSync(file, "utf8");
+        const probe = source.match(/\r?\n  (\w+): \{\r?\n    (\w+): "(?:[^"\\]|\\.)*",/);
+        if (!probe) throw new Error(`No probe message found in ${domain}.ts`);
+        const [, group, key] = probe;
+        const sentinel = `hmr-probe-${domain}`;
+        writeFileSync(file, source.replace(probe[0], () => probe[0].replace(/"[^"]*",$/, `"${sentinel}",`)));
+        const path = [group, key].map((part) => `[${JSON.stringify(part)}]`).join("");
+        await retry(async () => {
+          const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+          if (value !== sentinel) throw new Error(`${domain}.ts hot update did not reach en.${group}.${key} (got ${JSON.stringify(value)})`);
+        });
+        // Re-executing the index re-seeds the registry: the domain that was just
+        // hot updated has to survive and the app has to keep rendering from the
+        // same plugin instance.
+        if (domain === "settings") {
+          const indexPath = join(testHome, "src/renderer/i18n/index.ts");
+          const indexSource = readFileSync(indexPath, "utf8");
+          writeFileSync(indexPath, `${indexSource}// hmr probe\n`);
+          await retry(async () => {
+            const value = await cdp.evaluate(`window.__pixTest.messages('en')${path}`);
+            if (value !== sentinel) throw new Error("Re-executing the i18n index dropped a hot updated domain");
+          });
+          writeFileSync(indexPath, indexSource);
+          const appFile = join(testHome, "src/renderer/i18n/app.ts");
+          const appSource = readFileSync(appFile, "utf8");
+          writeFileSync(appFile, appSource.replace('copyPath: "Copy full path"', 'copyPath: "Copy path after index"'));
+          await retry(async () => {
+            if (await cdp.evaluate(`document.querySelector('[data-action="session-copy-path"]')?.textContent.trim()`) !== "Copy path after index")
+              throw new Error("A hot update after re-executing the i18n index did not reach the rendered menu");
+          });
+          writeFileSync(appFile, appSource);
+        }
+        writeFileSync(file, source);
+      }
     }
     await cdp.evaluate("document.querySelector('[data-action=session-rename]').click()");
     await retry(async () => {
@@ -669,10 +721,23 @@ try {
             throw new Error(`Splitter did not drag back: ${width} !== ${storeWidth}`);
         });
       }
-      // The fixture session is one linear branch, so Ctrl+clicking another
-      // node must retarget the same column — one panel per branch.
-      const otherTitle = await cdp.evaluate("[...document.querySelectorAll('.prompt-node')].at(-1).querySelector('.turn-copy strong').textContent.trim()");
-      await cdp.evaluate("[...document.querySelectorAll('.prompt-node')].at(-1).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))");
+      // Ctrl+clicking a node on the pinned column's branch retargets that
+      // column — one panel per branch. The fixture session is a tree, not a
+      // linear branch, so pick the pinned node's closest same-path rendered
+      // node with the same walk the workbench uses instead of trusting DOM
+      // order, where another branch's node may come last.
+      const pinnedId = await cdp.evaluate("window.__pixTest.state().chatColumns[0]");
+      const otherId = await cdp.evaluate(`(() => {
+        const nodes = window.__pixTest.state().current.projection.nodes;
+        const parents = new Map(nodes.map(node => [node.id, node.parentId]));
+        const onPath = (from, onto) => { for (let cur = from; cur; cur = parents.get(cur) ?? null) if (cur === onto) return true; return false; };
+        const rendered = [...document.querySelectorAll('.prompt-node')].map(node => node.closest('[data-id]')?.dataset.id);
+        return rendered.find(id => id && id !== ${JSON.stringify(pinnedId)}
+          && (onPath(id, ${JSON.stringify(pinnedId)}) || onPath(${JSON.stringify(pinnedId)}, id))) ?? null;
+      })()`);
+      if (!otherId) throw new Error("Fixture has no same-branch prompt node to retarget the pinned column with");
+      const otherTitle = await cdp.evaluate(`document.querySelector('[data-id="${otherId}"] .prompt-node .turn-copy strong').textContent.trim()`);
+      await cdp.evaluate(`document.querySelector('[data-id="${otherId}"] .prompt-node').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, ctrlKey: true }))`);
       await retry(async () => {
         const value = await cdp.evaluate(`({
           columns: window.__pixTest.state().chatColumns,
@@ -817,7 +882,10 @@ try {
         readableAndCentered: (() => {
           const flow = document.querySelector('.session-flow').getBoundingClientRect();
           const draft = document.querySelector('.draft-node').getBoundingClientRect();
-          return draft.width >= 250 && draft.height <= 225 && Math.abs((draft.left + draft.width / 2) - (flow.left + flow.width / 2)) < 50;
+          // The auto-sizing draft opens within its reserved layout slot
+          // (GraphPanel's DRAFT_SIZE.height of 320), growing past it only
+          // as an overlay while typing.
+          return draft.width >= 250 && draft.height <= 320 && Math.abs((draft.left + draft.width / 2) - (flow.left + flow.width / 2)) < 50;
         })()
       })`);
       if (!value.draft || !value.settings || !value.connected || !value.parentStable || !value.focused || !value.fullyVisible || !value.readableAndCentered)
@@ -1148,6 +1216,13 @@ try {
         throw new Error(`Missing ${category} setting: ${setting}`);
     });
   }
+  // The log folder action is asserted, never clicked: it would open the
+  // machine's file manager during the test run.
+  await cdp.evaluate("document.querySelector('[data-settings-category=about]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-about-logs]'))")))
+      throw new Error("Missing the About page log folder action");
+  });
   await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings-models.png"), Buffer.from(screenshot.data, "base64"));
@@ -1287,21 +1362,33 @@ try {
   console.log(JSON.stringify(result, null, 2));
   }
 } finally {
-  await devServer?.close();
+  // A stalled close (e.g. vite's ws shutdown with a live HMR client) once
+  // burned the job's whole timeout with the app still running: bound every
+  // teardown await and hard-kill the child when a graceful exit misses.
+  const bounded = (promise, ms) =>
+    Promise.race([promise ?? Promise.resolve(), new Promise((resolve) => setTimeout(resolve, ms))]);
+  await bounded(devServer?.close(), 2_000);
   if (wslStoppedPid) {
     try { signalWslTestHost(wslStoppedPid, "CONT"); } catch (error) { console.error(error); }
   }
-  await cdp?.close();
+  await bounded(cdp?.close(), 2_000);
   if (process.platform === "win32" && child.pid)
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore",
     });
-  else child.kill("SIGTERM");
-  if (child.exitCode === null)
+  else {
+    const signalTree = (signal) => {
+      if (!child.pid) return;
+      if (grouped) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    };
+    signalTree("SIGTERM");
     await Promise.race([
       new Promise((resolve) => child.once("close", resolve)),
       new Promise((resolve) => setTimeout(resolve, 1_000)),
     ]);
+    if (child.exitCode === null) signalTree("SIGKILL");
+  }
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.unref();
@@ -1321,3 +1408,5 @@ try {
       { stdio: "ignore", windowsHide: true },
     );
 }
+
+process.exit(0);

@@ -1,7 +1,8 @@
 {
   "name": "pix",
-  "version": "0.0.19",
+  "version": "0.0.22",
   "private": true,
+  "license": "MPL-2.0",
   "type": "module",
   "description": "Graph-first web workbench for Pi Agent",
   "main": "out/web/index.js",
@@ -26,14 +27,14 @@
     "start": "node out/web/index.js"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.85.0",
-    "@earendil-works/pi-coding-agent": "0.85.0",
-    "@earendil-works/pi-server": "0.85.0",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-server": "0.87.0",
     "@lucide/vue": "^1.39.0",
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",
     "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.1.0-beta.302",
+    "@xterm/xterm": "^6.1.0-beta.304",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "diff": "8.0.4",

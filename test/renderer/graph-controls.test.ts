@@ -107,7 +107,7 @@ describe("graph viewport controls", () => {
     viewport.x = -4000; viewport.y = 2000;
     setCenter.mockClear();
     await wrapper.find('.graph-controls button:last-child').trigger("click"); await flushPromises();
-    expect(setCenter).toHaveBeenCalledExactlyOnceWith(188, 121, { zoom: 0.9, duration: 0 });
+    expect(setCenter).toHaveBeenCalledExactlyOnceWith(208, 121, { zoom: 0.9, duration: 0 });
   });
 
   it("discards delayed centering after a newer selection and leaves visible cards in place", async () => {

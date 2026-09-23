@@ -49,9 +49,12 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
-// Sessions remember where they were left: manual card positions and the pane
-// viewport come back unchanged on return instead of re-centering.
+// Sessions remember where they were left: manual card positions, measured card
+// sizes, and the pane viewport come back unchanged on return instead of
+// re-centering. Sizes matter because only visible cards ever measure — without
+// them the return would re-stack the lanes from the flat estimate pitch.
 const rememberedLayouts = new Map<string, Map<string, ManualPosition>>();
+const rememberedDimensions = new Map<string, Map<string, Dimensions>>();
 const rememberedViewports = new Map<string, ViewportTransform>();
 // Holding the branch modifier at any point of a drag carries the cards after it too.
 let dragFollowsBranch = false;
@@ -69,6 +72,10 @@ const draftModel = ref<RuntimeModel | null>();
 const draftThinking = ref<string>();
 let activeSession: string | undefined;
 const readableZoom = 0.9;
+// Draft size before Vue Flow measures it, and the vertical slot the layout
+// reserves for it: a draft growing past the slot overlays the cards below
+// instead of shoving them around on every keystroke.
+const DRAFT_SIZE = { width: 440, height: 320 };
 const booted = ref(false);
 const deleteError = ref("");
 const searchOpen = ref(false);
@@ -168,9 +175,11 @@ function rebuild() {
   }
   if (session.highlightedNode && !value.nodes.some(node => node.id === session.highlightedNode)) session.highlightedNode = null;
   let restoredLayout: Map<string, ManualPosition> | undefined;
+  let restoredSizes: Map<string, Dimensions> | undefined;
   if (activeSession !== sessionKey.value) {
     dragged.clear();
     restoredLayout = rememberedLayouts.get(sessionKey.value);
+    restoredSizes = rememberedDimensions.get(sessionKey.value);
     branchOrder.clear();
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
@@ -201,8 +210,9 @@ function rebuild() {
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   // Settled positions use the same measured card sizes the pane renders, so
   // lanes track real heights instead of the fixed 280×146 estimate pitch.
-  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions.
-  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 280, height: 146 }]));
+  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions; a
+  // returning session starts from the sizes it left with.
+  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? restoredSizes?.get(n.id) ?? { width: 320, height: 146 }]));
   const calculated = layoutGraph(value, sizes, branchOrder);
   const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
@@ -399,9 +409,9 @@ function rebuild() {
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : previous?.dimensions ?? { width: node.type === "draft" ? 360 : 280, height: node.type === "draft" ? 280 : 146 },
+        : previous?.dimensions ?? restoredSizes?.get(node.id) ?? (node.type === "draft" ? DRAFT_SIZE : { width: 320, height: 146 }),
       handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
-        source: [{ type: "source", nodeId: node.id, position: "right", x: 276, y: 69, width: 8, height: 8 }],
+        source: [{ type: "source", nodeId: node.id, position: "right", x: 316, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
       },
     });
@@ -424,7 +434,8 @@ function rebuild() {
 
 function layoutBranches(items: RenderNode[]) {
   // Runs on every rebuild and resize so settled lanes follow measured card
-  // heights; transients reserve vertical space but never widen columns.
+  // heights; transients reserve vertical space but never widen columns, and a
+  // draft's reservation is capped at its opening slot so growth only overlays.
   const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
@@ -434,7 +445,9 @@ function layoutBranches(items: RenderNode[]) {
   if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
   const pending = session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
-  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.type === "draft"
+    ? { width: node.dimensions!.width, height: DRAFT_SIZE.height }
+    : node.dimensions!])), order, transientNodeIds);
   // Cards that were not on screen yet may be moved out of a pinned card's way;
   // the ones the user can already see keep the position they have.
   const known = new Set(nodes.value.map(node => node.id));
@@ -634,8 +647,8 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   const distant = Math.hypot(position.x * zoom + viewport.x - pane.width / 2,
     position.y * zoom + viewport.y - pane.height / 2) > Math.hypot(pane.width, pane.height) * 2;
   await flow.value.setCenter(
-    position.x + (size?.width || (id.startsWith("draft:") ? 360 : 280)) / 2,
-    position.y + (size?.height || (id.startsWith("draft:") ? 280 : 146)) / 2,
+    position.x + (size?.width || (id.startsWith("draft:") ? DRAFT_SIZE.width : 320)) / 2,
+    position.y + (size?.height || (id.startsWith("draft:") ? DRAFT_SIZE.height : 146)) / 2,
     // D3's zoom interpolation zooms far out between distant nodes, transiently
     // mounting thousands of cards. Jump directly across large branches.
     { zoom: ensureReadable ? Math.max(zoom, readableZoom) : zoom, duration: animate && !distant ? 280 : 0 },
@@ -840,11 +853,17 @@ watch(
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
     // Stash the outgoing session's arrangement and pane position before the
-    // rebuild resets per-session state.
-    if (changedSession && activeSession !== undefined) {
+    // rebuild resets per-session state. A teardown (no projection) clears the
+    // cards without adopting a new session, so the next fire must not overwrite
+    // the good snapshot with the torn-down state; rendered sessions always
+    // carry at least the draft card, so empty means torn down.
+    if (changedSession && activeSession !== undefined && nodes.value.length) {
       const viewport = flow.value?.getViewport();
       if (viewport) rememberedViewports.set(activeSession, viewport);
       rememberedLayouts.set(activeSession, new Map(dragged));
+      rememberedDimensions.set(activeSession, new Map(nodes.value
+        .filter(node => node.dimensions?.width)
+        .map(node => [node.id, node.dimensions!])));
     }
     const submittedNode = acceptSubmittedNode();
     rebuild();
