@@ -367,6 +367,9 @@ export class RemoteWorkspacePool {
       }
     }
     this.rememberPushed(id, []);
+    // Open sessions still treat these providers as local; re-push so they
+    // hand them back to the desktop broker.
+    await this.syncModelBroker(slot.client).catch(() => {});
     return { revoked: pushed };
   }
   /** Deployment state for the remote settings page, one row per remembered host. */

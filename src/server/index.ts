@@ -105,6 +105,10 @@ async function serve() {
   // Refreshed by connections and running work; a lingering host exits once
   // this stops advancing for the whole linger window.
   let lastLive = Date.now();
+  // The connection whose broker the runtime currently uses. A dead socket's
+  // close event can land after a replacement connected; only the owner's
+  // close may clear the broker.
+  let brokerOwner: WebSocket | undefined;
   const stopEvents = controller.onEvent((event: DesktopEvent) => {
     const message: HostMessage = { type: "event", sequence: ++sequence, event };
     for (const client of wss.clients) send(client, message);
@@ -136,6 +140,7 @@ async function serve() {
     socket.on("error", () => {});
     lastLive = Date.now();
     const modelStreams = new Map<string, BrokerModelStream>();
+    brokerOwner = socket;
     controller.projectRuntime.setModelBroker((model, context, options) => {
       const id = randomBytes(16).toString("hex");
       const stream = new BrokerModelStream(model);
@@ -232,7 +237,11 @@ async function serve() {
       }
     });
     socket.on("close", () => {
-      controller.projectRuntime.setModelBroker(undefined);
+      // A superseded connection must not clear its replacement's broker.
+      if (brokerOwner === socket) {
+        brokerOwner = undefined;
+        controller.projectRuntime.setModelBroker(undefined);
+      }
       for (const stream of modelStreams.values())
         stream.fail("Desktop model broker disconnected");
       modelStreams.clear();

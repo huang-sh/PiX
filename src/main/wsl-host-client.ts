@@ -355,10 +355,17 @@ export class WslHostClient {
       );
       return new WslHostClient(child, socket, hello, handle, true, true);
     } catch (error) {
-      child.kill();
       // The tunnel dying means the server is unreachable: the host there may
-      // still be running work, so callers must not treat it as stale.
-      if ((child.exitCode != null || child.signalCode != null) && !options.signal?.aborted)
+      // still be running work, so callers must not treat it as stale. ssh's
+      // own ConnectTimeout can expire just after ours, so give it a moment
+      // to report the exit itself — and our kill below must not count.
+      let dead = child.exitCode != null || child.signalCode != null;
+      if (!dead && !options.signal?.aborted) {
+        await delay(1_500, undefined, { signal: options.signal }).catch(() => {});
+        dead = child.exitCode != null || child.signalCode != null;
+      }
+      child.kill();
+      if (dead && !options.signal?.aborted)
         throw new RemoteHostUnreachable(
           error instanceof Error ? error.message : String(error),
         );
