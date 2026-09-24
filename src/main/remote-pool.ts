@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { debugLog } from "./debug-log.js";
 import type {
   AgentControl,
@@ -98,6 +99,8 @@ export class RemoteWorkspacePool {
   private remoteRecycleTimer?: NodeJS.Timeout;
   private remoteAttempt?: AbortController;
   private pendingRemote?: PendingRemote;
+  /** Project ids with an automatic reconnect loop in flight. */
+  private readonly reconnecting = new Set<string>();
   private readonly brokerModels = new WeakMap<WslHostClient, Set<string>>();
   constructor(private readonly host: RemotePoolHost) {}
 
@@ -169,6 +172,9 @@ export class RemoteWorkspacePool {
       const project = this.host.view.project();
       const record = this.host.projectGroups().find((record) => record.id === projectId(project!));
       const viewed = this.host.view.current();
+      // A reload landing on a dead host recovers on its own like a live
+      // disconnect would, instead of waiting for a manual reconnect.
+      this.scheduleReconnect(slot);
       return {
         project,
         sessions: record?.sessions ?? [],
@@ -245,14 +251,16 @@ export class RemoteWorkspacePool {
     slot.stopDisconnect = client.onDisconnect(error => {
       if (this.remotePool.get(id) !== slot) return;
       // The slot stays until replaced or recycled so a degraded bootstrap can
-      // still present the project's remembered rows and a reconnect banner.
+      // still present the project's remembered rows while recovery runs.
       const project = this.host.view.project();
       const current = this.host.view.current();
-      if (project && projectId(project) === id && current)
+      const viewed = project != null && projectId(project) === id;
+      if (viewed && current)
         this.host.view.setCurrent({ ...current, runtime: unavailable() });
       this.host.emit({ type: "remote.connection", payload: {
-        projectId: id, connected: false, message: error.message,
+        projectId: id, connected: false, reconnecting: viewed, message: error.message,
       } });
+      if (viewed) this.scheduleReconnect(slot);
     });
     this.remotePool.set(id, slot);
     this.scheduleRemoteRecycle();
@@ -263,6 +271,59 @@ export class RemoteWorkspacePool {
     slot.stopDisconnect();
     for (const [id, pooled] of this.remotePool) if (pooled === slot) this.remotePool.delete(id);
     if (dispose) await slot.client.dispose().catch(() => {});
+  }
+  /** Automatic reconnect backoff: 1s doubling, capped by PIX_REMOTE_RECONNECT_MAX_MS. */
+  private reconnectDelayMs(step: number): number {
+    const max = Math.max(1, Number.parseInt(process.env.PIX_REMOTE_RECONNECT_MAX_MS ?? "30000", 10) || 30_000);
+    return Math.min(max, 1_000 * 2 ** (step - 1));
+  }
+  /**
+   * Recovery for an unplanned disconnect of the workspace in view: the
+   * connection is retried automatically (VS Code-style) until it comes back,
+   * the user switches or closes the workspace, or the app quits. Background
+   * hosts are not reconnected; the idle recycler reaps them as before.
+   */
+  private scheduleReconnect(slot: RemoteSlot) {
+    const id = projectId(slot.project);
+    if (this.reconnecting.has(id)) return;
+    this.reconnecting.add(id);
+    void this.reconnectLoop(id).catch(e => debugLog("remote-pool: reconnect", e))
+      .finally(() => this.reconnecting.delete(id));
+  }
+  private async reconnectLoop(id: string): Promise<void> {
+    let step = 0;
+    for (;;) {
+      if (step) await delay(this.reconnectDelayMs(step));
+      // Re-resolve after every sleep: the wait may outlive the slot (closed,
+      // recycled, replaced) or the view (user switched projects). Re-checking
+      // before each attempt keeps a retry from stealing the view back.
+      const slot = this.remotePool.get(id);
+      if (!slot) return;
+      if (slot.client.connected) {
+        this.host.emit({ type: "remote.connection", payload: { projectId: id, connected: true } });
+        return;
+      }
+      const viewed = this.host.view.project();
+      if (!viewed || projectId(viewed) !== id) return;
+      if (this.pendingRemote) {
+        // A user-driven connect flow owns the pipe; retrying now would cancel
+        // their browse mid-flight.
+        step = 1;
+        continue;
+      }
+      const remote = slot.project.remote;
+      if (!remote) return;
+      step++;
+      try {
+        await (remote.kind === "ssh"
+          ? this.connectSsh(remote.host, slot.project.path)
+          : this.connectWsl(remote.distro, slot.project.path));
+        this.host.emit({ type: "remote.connection", payload: { projectId: id, connected: true } });
+        return;
+      } catch (error) {
+        debugLog(`remote-pool: reconnect attempt ${step}`, error);
+      }
+    }
   }
   /** Detaches the active remote workspace; pooled hosts of other projects keep serving them. */
   async closeWsl() {

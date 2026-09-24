@@ -40,6 +40,7 @@ export const en = {
     securityLocal: "Model authentication remains local.",
     preparing: "Preparing the remote workspace…",
     connectionLost: "Remote connection lost. Reconnect to continue; running work may have stopped.",
+    reconnecting: "Remote connection lost. Reconnecting automatically…",
     reconnect: "Reconnect",
     stages: {
       checking: "Checking connection and host version",
@@ -104,6 +105,7 @@ export const zhCN: typeof en = {
     securityLocal: "模型认证始终保留在本地。",
     preparing: "正在准备远程工作区…",
     connectionLost: "远程连接已断开，请重新连接；运行中的任务可能已停止。",
+    reconnecting: "远程连接已断开，正在自动重连…",
     reconnect: "重新连接",
     stages: {
       checking: "检查连接和服务端版本",

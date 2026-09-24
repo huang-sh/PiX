@@ -100,7 +100,13 @@ host whose `session.list` still reports running work, bounded by
 5 min). Recycling a host also closes its remote terminals and shell runs —
 `slotBusy` only weighs session runs, so a shell-only workspace recycles when
 its idle window passes. Disconnects keep the slot until replaced so the
-degraded bootstrap can present remembered rows and a reconnect banner.
+degraded bootstrap can present remembered rows. An unplanned disconnect of
+the workspace in view recovers on its own: the connection is retried with
+exponential backoff (capped by `PIX_REMOTE_RECONNECT_MAX_MS`, default 30 s)
+until it returns, the user switches or closes the workspace, or the app
+quits; a restored transport is announced as `remote.connection
+{connected:true}` so the view rehydrates without a manual click. Background
+hosts are not reconnected — the idle recycler reaps them as before.
 
 **Shutdown.** Quitting flushes pending background history writes, aborts
 every local run (settling as `interrupted` with recovered inputs — this is

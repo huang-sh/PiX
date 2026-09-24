@@ -509,6 +509,8 @@ test("a successful candidate is pooled instead of closing the old host and repor
   assert.equal(result.project?.path, "/new/sub");
   assert.equal(controller.wsl, next);
   assert.equal(old.disposed, false, "switching remote projects keeps the previous host pooled");
+  fastReconnect(t);
+  t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("network down"); });
   const events: any[] = [];
   controller.onEvent((event) => events.push(event));
   next.disconnect();
@@ -518,6 +520,94 @@ test("a successful candidate is pooled instead of closing the old host and repor
   const cached = await controller.invoke("app.bootstrap") as any;
   assert.equal(cached.project.path, "/new/sub");
   assert.equal(cached.projects.find((record: any) => record.id === id).connected, false);
+});
+
+// The reconnect loop waits between attempts; tests cap the wait so loops settle fast.
+function fastReconnect(t: TestContext) {
+  const previous = process.env.PIX_REMOTE_RECONNECT_MAX_MS;
+  process.env.PIX_REMOTE_RECONNECT_MAX_MS = "20";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PIX_REMOTE_RECONNECT_MAX_MS;
+    else process.env.PIX_REMOTE_RECONNECT_MAX_MS = previous;
+  });
+}
+
+test("an unplanned disconnect of the viewed workspace reconnects automatically", async (t) => {
+  fastReconnect(t);
+  const { controller, old, project } = controllerFixture(t);
+  const events: any[] = [];
+  controller.onEvent((event) => events.push(event));
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: project.path };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  old.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const dropped = events.find((event) => event.type === "remote.connection" && event.payload.connected === false);
+  assert.equal(dropped.payload.reconnecting, true);
+  assert.ok(events.some((event) => event.type === "remote.connection" &&
+    event.payload.connected === true && event.payload.projectId === projectId(project)),
+    "a restored transport is announced so the view can rehydrate");
+  assert.equal(controller.wsl, fresh);
+  assert.equal(old.disposed, true);
+  assert.equal(controller.projectGroups().find((record) => record.id === projectId(project))?.connected, true);
+});
+
+test("failed reconnect attempts back off and stop once another project is viewed", async (t) => {
+  fastReconnect(t);
+  const { controller, old } = controllerFixture(t);
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("network down"); });
+  old.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const attempts = connectSsh.mock.callCount();
+  assert.ok(attempts >= 2, "the connection is retried");
+  controller.configure(controller.localProjectPath);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(connectSsh.mock.callCount(), attempts, "retries stop once the workspace leaves the view");
+});
+
+test("closing the remote workspace stops the automatic reconnect", async (t) => {
+  fastReconnect(t);
+  const { controller, old } = controllerFixture(t);
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("network down"); });
+  old.disconnect();
+  await controller.closeWsl();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const attempts = connectSsh.mock.callCount();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(connectSsh.mock.callCount(), attempts, "an explicit disconnect is not second-guessed");
+});
+
+test("a background host disconnect is reported without automatic reconnect", async (t) => {
+  fastReconnect(t);
+  const { controller, old, project } = controllerFixture(t);
+  const background: ProjectInfo = { name: "bg", path: "/bg", remote: { kind: "ssh", host: "bg" } };
+  const spare = candidate(controller);
+  controller.installSlot(spare as never, background, controller.settings.bundle());
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not reconnect"); });
+  const events: any[] = [];
+  controller.onEvent((event) => events.push(event));
+  spare.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const dropped = events.find((event) => event.type === "remote.connection" && event.payload.connected === false);
+  assert.equal(dropped.payload.reconnecting, false);
+  assert.equal(connectSsh.mock.callCount(), 0);
+  assert.equal(controller.wsl, old, "the viewed workspace is untouched");
+  assert.equal(controller.projectGroups().find((record) => record.id === projectId(project))?.connected, true);
+});
+
+test("bootstrapping a dead viewed workspace restarts recovery", async (t) => {
+  fastReconnect(t);
+  const { controller, project } = controllerFixture(t);
+  const dead = candidate(controller);
+  dead.connected = false;
+  controller.installSlot(dead as never, project, controller.settings.bundle());
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: project.path };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  const cached = await controller.invoke("app.bootstrap") as any;
+  assert.equal(cached.project.path, project.path, "a dead host serves its remembered rows while recovering");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(controller.wsl, fresh);
 });
 
 test("reconnecting to a pooled project reuses its host instead of spawning a second one", async (t) => {
