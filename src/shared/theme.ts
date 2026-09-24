@@ -1,15 +1,26 @@
 // Shared by the renderer, terminal and Electron window chrome.
-export type ThemeId = "light" | "dark" | "teal" | "peach";
+export type ThemeId = "light" | "dark" | "teal" | "peach" | "paper" | "graphite";
 export type ThemePreference = ThemeId | "system";
 export type ColorScheme = "light" | "dark";
 
 export function normalizeTheme(value: unknown): ThemePreference {
-  return value === "dark" || value === "system" || value === "teal" || value === "peach" ? value : "light";
+  return value === "dark" || value === "system" || value === "teal" || value === "peach" || value === "paper" || value === "graphite" ? value : "light";
 }
 
 export function resolveTheme(preference: ThemePreference, systemDark: boolean): ThemeId {
   return preference === "system" ? systemDark ? "dark" : "light" : preference;
 }
+
+// Which color scheme each theme renders as. Drives the root `color-scheme`
+// (native widgets, KaTeX, light-dark()) and the terminal ANSI palettes.
+export const themeSchemes = {
+  "light": "light",
+  "paper": "light",
+  "teal": "light",
+  "peach": "light",
+  "dark": "dark",
+  "graphite": "dark"
+} as const satisfies Record<ThemeId, ColorScheme>;
 
 export const themeColors = {
   "light": {
@@ -36,6 +47,36 @@ export const themeColors = {
     "running": "#d97706",
     "warn": "#d97706",
     "shadow": "0 12px 36px rgba(28, 36, 48, 0.10), 0 2px 6px rgba(28, 36, 48, 0.04)",
+    "accent-foreground": "#ffffff",
+    "danger-foreground": "#ffffff"
+  },
+  // deepseek-harness design language: pure-white canvas, near-black ink text,
+  // blue kept for links, focus and selection rather than filled controls.
+  "paper": {
+    "background": "#f9fafb",
+    "surface": "#ffffff",
+    "surface-subtle": "#f5f6f7",
+    "navigator": "#f9fafb",
+    "context": "#ffffff",
+    "tool-surface": "#ffffff",
+    "muted-surface": "#f1f3f5",
+    "border": "#e6e6e6",
+    "border-strong": "#d4d4d4",
+    "text": "#0f1115",
+    "muted": "#61666b",
+    "faint": "#81858c",
+    // The harness blue (#4176e6) and red are darkened one step so they clear
+    // the 4.5:1 floor in both the text and the filled-control role.
+    "accent": "#3568da",
+    "accent-strong": "#2f4c8f",
+    "accent-soft": "#edf3fe",
+    "ring": "rgba(65, 118, 230, 0.14)",
+    "danger": "#d52121",
+    "success": "#15803d",
+    "running": "#d97706",
+    "warn": "#d97706",
+    // The hairline-stroke-plus-glow elevation from the same design language.
+    "shadow": "0 0 1px rgba(15, 17, 21, 0.20), 0 12px 32px rgba(15, 17, 21, 0.08)",
     "accent-foreground": "#ffffff",
     "danger-foreground": "#ffffff"
   },
@@ -121,5 +162,33 @@ export const themeColors = {
     "shadow": "0 18px 58px rgba(0,0,0,.34)",
     "accent-foreground": "#172238",
     "danger-foreground": "#172238"
+  },
+  // deepseek-harness dark mode: layered charcoal with white-alpha hairline
+  // borders; the accent flips to the light end of the brand ramp, so filled
+  // controls take the dark-ink foreground like the "dark" theme above.
+  "graphite": {
+    "background": "#151517",
+    "surface": "#232324",
+    "surface-subtle": "#2c2c2e",
+    "navigator": "#1b1b1c",
+    "context": "#232324",
+    "tool-surface": "#1b1b1c",
+    "muted-surface": "#353638",
+    "border": "rgba(255, 255, 255, 0.10)",
+    "border-strong": "rgba(255, 255, 255, 0.16)",
+    "text": "#f9fafb",
+    "muted": "#cfd3d6",
+    "faint": "#adb2b8",
+    "accent": "#7aaaff",
+    "accent-strong": "#b7c8fe",
+    "accent-soft": "#34415b",
+    "ring": "rgba(122, 170, 255, 0.24)",
+    "danger": "#f86666",
+    "success": "#4ed17e",
+    "running": "#f59e0b",
+    "warn": "#f59e0b",
+    "shadow": "0 0 1px rgba(0, 0, 0, 0.60), 0 16px 40px rgba(0, 0, 0, 0.50)",
+    "accent-foreground": "#0f1115",
+    "danger-foreground": "#0f1115"
   }
 } as const;
