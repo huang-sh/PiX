@@ -78,11 +78,13 @@ export function launcherScript(v: {
   return [
     `B=${v.base}; F=$B/host-${v.port}.ready; L=$B/host-${v.port}.log`,
     `C="${v.exe} serve ${flags}"`,
+    // Newlines, not semicolons: a ";" right after the backgrounding "&" is a
+    // POSIX shell syntax error, and dash enforces it.
     "(command -v setsid >/dev/null 2>&1 && setsid $C || nohup $C) </dev/null >>$L 2>&1 &",
     "i=0; while [ ! -s \"$F\" ] && [ \"$i\" -lt 140 ]; do sleep 0.2; i=$((i+1)); done",
     "if [ ! -s \"$F\" ]; then echo pix-agent-host failed to start; tail -n 5 \"$L\" 2>/dev/null; fi",
     "cat \"$F\" 2>/dev/null; rm -f \"$F\"",
-  ].join("; ");
+  ].join("\n");
 }
 
 export class WslHostClient {

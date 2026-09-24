@@ -657,6 +657,7 @@ test("the launcher script detaches the host and reports readiness via a file", (
   assert.match(script, /cat "\$F"/, "readiness reaches the desktop through the wrapper's stdout");
   assert.match(script, /tail -n 5 "\$L"/, "startup failures surface their log tail");
   assert.ok(!script.includes("'"), "the ssh transport wraps the script in single quotes");
+  assert.ok(!/[&]\s*;/.test(script), "a ';' after the background '&' is a POSIX sh syntax error");
   const deployed = launcherScript({
     exe: "$HOME/.pix/server/current/bin/pix-agent-host",
     cwd: "/p",
