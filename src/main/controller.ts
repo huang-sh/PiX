@@ -587,6 +587,8 @@ export class MainController {
       // Pooled hosts and live entries would write the forgotten project back
       // into the history through their events; they go with the entry.
       if (slot) await this.pool.dropSlot(slot, true);
+      // Removing the project also gives up on any lingering host it left.
+      this.pool.forgetHost(id);
       await this.registry.disposeProject(id);
       this.settings.forgetProject(id);
       return this.projectGroups();

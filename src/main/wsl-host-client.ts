@@ -601,6 +601,13 @@ export class WslHostClient {
     const child = this.child;
     this.stopping = new Promise<void>((accept) => {
       if (!child || child.exitCode != null || child.signalCode != null) { accept(); return; }
+      // Intentional teardown drops the local child at once: the host is
+      // detached, and an ssh -N tunnel would never exit on its own.
+      if (this.intentionalDisconnect) {
+        if (!child.killed) child.kill();
+        accept();
+        return;
+      }
       const finish = () => { clearTimeout(timer); child.off("exit", finish); accept(); };
       const timer = setTimeout(() => {
         if (!child.killed) child.kill();
@@ -657,8 +664,11 @@ export class WslHostClient {
     // Cleanup after a failure must not relabel that failure as a requested exit.
     if (!this.disconnectError) this.intentionalDisconnect = true;
     if (!this.disconnectError && this.socket.readyState === WebSocket.OPEN) {
-      try { this.socket.send(JSON.stringify({ type: "shutdown" })); }
-      catch { /* the close below still ends the link */ }
+      // Wait for the frame to leave before the close below can end the link.
+      await new Promise<void>((resolve) => {
+        try { this.socket.send(JSON.stringify({ type: "shutdown" }), () => resolve()); }
+        catch { resolve(); }
+      });
     }
     this.disconnected(new Error("Remote host client disposed"));
     await this.stopping;

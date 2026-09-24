@@ -328,6 +328,10 @@ export class RemoteWorkspacePool {
       }
     }
     this.rememberPushed(id, pushed);
+    // The catalog push that ran before these keys landed left every session
+    // routing through the broker; re-push so they re-evaluate and go direct.
+    await this.syncModelBroker(client).catch(error =>
+      debugLog("remote-pool: re-sync after deploy", error));
   }
   /** Forwards a desktop logout only for providers this desktop deployed. */
   private async forwardLogout(client: WslHostClient, id: string, provider: string): Promise<void> {
@@ -337,6 +341,8 @@ export class RemoteWorkspacePool {
     try {
       await client.request("agent.control", { action: "logout", provider });
       this.rememberPushed(id, pushed.filter((known) => known !== provider));
+      // Open sessions must hand the provider back to the desktop broker.
+      await this.syncModelBroker(client).catch(() => {});
     } catch (error) {
       debugLog(`remote-pool: forward logout for ${provider}`, error);
     }
@@ -416,10 +422,18 @@ export class RemoteWorkspacePool {
       .map(([id]) => id);
     for (const id of ids) this.remotePool.delete(id);
     if (dispose) {
+      // A shutdown order only goes out over a live link. Dropping a
+      // disconnected slot leaves a lingering host running work; its handle
+      // must survive so the next session reattaches instead of tripping its
+      // graph lock with a second host.
+      const ordered = slot.client.connected;
       await slot.client.dispose().catch(() => {});
-      // An intentional shutdown ends the host; its handle is useless now.
-      if (!keepHandle) for (const id of ids) this.forgetHandle(id);
+      if (!keepHandle && ordered) for (const id of ids) this.forgetHandle(id);
     }
+  }
+  /** Drops a remembered host handle (a project removed from the list). */
+  forgetHost(id: string) {
+    this.forgetHandle(id);
   }
   /** Automatic reconnect backoff: 1s doubling, capped by PIX_REMOTE_RECONNECT_MAX_MS. */
   private reconnectDelayMs(step: number): number {

@@ -1137,6 +1137,12 @@ test("a host with local credentials serves those providers directly", async () =
   assert.deepEqual(modelRuntime.registered, ["openai"]);
   assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
   assert.equal(brokered, 2);
+
+  // A lingering host without its desktop fails clearly, not with a DNS error.
+  runtime.modelBroker = undefined;
+  assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native",
+    "local credentials keep working with no desktop attached");
+  assert.throws(() => modelRuntime.stream({ provider: "openai" }, {}, {}), /reconnect it to use this model/);
 });
 
 test("connecting deploys credentials to an authorized host when enabled", async (t) => {
@@ -1163,6 +1169,10 @@ test("connecting deploys credentials to an authorized host when enabled", async 
     "custom model definitions ride along");
   const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
   assert.deepEqual(stored[projectId(project)].pushedProviders.sort(), ["anthropic", "mycustom"]);
+  const firstLogin = fresh.calls.findIndex(([route, input]: any[]) => route === "agent.control" && input.action === "loginApiKey");
+  assert.ok(fresh.calls.slice(firstLogin + 1).some(([route, input]: any[]) =>
+    route === "agent.control" && input.action === "setBrokerProviders"),
+    "the catalog re-pushes after the keys land so open sessions go direct");
 });
 
 test("deployment stays off without the setting or the host's authorization", async (t) => {
@@ -1227,4 +1237,24 @@ test("revoking removes deployed credentials from a connected host", async (t) =>
   assert.deepEqual(logouts.map(([, input]: any[]) => input.provider).sort(), ["anthropic", "mycustom"]);
   const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
   assert.deepEqual(stored[projectId(project)].pushedProviders, []);
+});
+
+test("dropping a disconnected slot keeps its lingering host's handle", async (t) => {
+  const bgProject: ProjectInfo = { name: "bg", path: "/bg", remote: { kind: "ssh", host: "bg" } };
+  const bgId = projectId(bgProject);
+  const { controller } = controllerFixture(t, home => {
+    mkdirSync(join(home, ".pix"), { recursive: true });
+    writeFileSync(join(home, ".pix", "remote-hosts.json"), JSON.stringify({
+      [bgId]: { kind: "ssh", target: "bg", port: 41001, token: "tok", pid: 4343, path: "/bg" },
+    }));
+  });
+  const spare = candidate(controller);
+  controller.installSlot(spare as never, bgProject, controller.settings.bundle());
+  spare.disconnect();   // unplanned: its host lingers with running work
+  await controller.pool.dropSlot(controller.pool.slot(bgId)!, true);
+  let stored = readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8");
+  assert.match(stored, /"pid":4343/, "the handle survives so the next session reattaches");
+  controller.pool.forgetHost(bgId);
+  stored = readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8");
+  assert.ok(!stored.includes("4343"), "removing the project gives up on its host");
 });

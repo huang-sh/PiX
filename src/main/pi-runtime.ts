@@ -300,9 +300,16 @@ export class PiRuntime {
     context: any,
     options: any,
   ) {
-    if (!this.modelBroker || this.localCredentialProviders.has(String(model.provider)))
+    const provider = String(model.provider);
+    if (this.localCredentialProviders.has(provider))
       return native.stream(model, context, options);
-    return this.modelBroker(model, context, options);
+    if (this.modelBroker)
+      return this.modelBroker(model, context, options);
+    if (this.brokerProviders.has(provider))
+      // A lingering host without its desktop: the fake registration's URL
+      // would only produce a confusing DNS failure. Say what is missing.
+      throw new Error(`${provider} is served by the PiX desktop; reconnect it to use this model`);
+    return native.stream(model, context, options);
   }
   /** Re-evaluates which brokered providers this machine serves by itself. */
   async refreshBrokerAuth() {
