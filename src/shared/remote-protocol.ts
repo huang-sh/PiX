@@ -1,8 +1,8 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// Git branch listing and switching require an updated remote host.
-// Installers compare both protocol and product version.
-export const PIX_REMOTE_PROTOCOL = 14;
+// Lingering hosts, reattachment, and credential deployment require an
+// updated remote host. Installers compare both protocol and product version.
+export const PIX_REMOTE_PROTOCOL = 15;
 export const PIX_HOST_VERSION = "0.0.23";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
@@ -101,6 +101,22 @@ export interface HostModelCancel {
   id: string;
 }
 
+/** Tells a lingering host the desktop is done with it; it shuts down now. */
+export interface ClientShutdown {
+  type: "shutdown";
+}
+
+/** Identifies a lingering host across desktop sessions, for reattachment. */
+export interface HostHandle {
+  kind: "ssh" | "wsl";
+  /** SSH host alias or WSL distribution naming the machine. */
+  target: string;
+  /** Loopback port and auth token of the running host, plus its pid. */
+  port: number;
+  token: string;
+  pid: number;
+}
+
 export type HostMessage =
   | HostHello
   | HostResponse
@@ -110,4 +126,5 @@ export type HostMessage =
 export type ClientMessage =
   | HostRequest
   | ClientModelEvent
-  | ClientModelFailure;
+  | ClientModelFailure
+  | ClientShutdown;

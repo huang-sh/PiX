@@ -7,6 +7,7 @@ import { debugLog } from "./debug-log.js";
 import {
   PIX_REMOTE_PROTOCOL,
   MAX_REMOTE_PAYLOAD,
+  type HostHandle,
   type HostHello,
   type HostMessage,
   type HostModelRequest,
@@ -43,6 +44,46 @@ type ModelBroker = (
 ) => Promise<AsyncIterable<unknown>> | AsyncIterable<unknown>;
 
 const READY_MARKER = "PIX_AGENT_HOST_READY ";
+/** The ssh transport options shared by spawn and reattach connections. */
+const SSH_TRANSPORT_OPTIONS = [
+  "-o",
+  "BatchMode=yes",
+  "-o",
+  "ConnectTimeout=15",
+  "-o",
+  "ServerAliveInterval=15",
+  "-o",
+  "ServerAliveCountMax=2",
+  "-o",
+  "ExitOnForwardFailure=yes",
+] as const;
+
+/** Reattachment failed because the server itself cannot be reached; a lingering host there must be left alone. */
+export class RemoteHostUnreachable extends Error {}
+
+/**
+ * The launcher script that starts a host as a detached process and reports
+ * readiness on stdout: the host survives the ssh/wsl session that launched
+ * it, so unplanned disconnects leave its running work alive.
+ */
+export function launcherScript(v: {
+  exe: string;
+  cwd: string;
+  port: number;
+  base: string;
+  deployCredentials?: boolean;
+}) {
+  const flags = `--cwd ${v.cwd} --port ${v.port} --ready-file "$F"` +
+    (v.deployCredentials ? " --allow-credential-deploy" : "");
+  return [
+    `B=${v.base}; F=$B/host-${v.port}.ready; L=$B/host-${v.port}.log`,
+    `C="${v.exe} serve ${flags}"`,
+    "(command -v setsid >/dev/null 2>&1 && setsid $C || nohup $C) </dev/null >>$L 2>&1 &",
+    "i=0; while [ ! -s \"$F\" ] && [ \"$i\" -lt 140 ]; do sleep 0.2; i=$((i+1)); done",
+    "if [ ! -s \"$F\" ]; then echo pix-agent-host failed to start; tail -n 5 \"$L\" 2>/dev/null; fi",
+    "cat \"$F\" 2>/dev/null; rm -f \"$F\"",
+  ].join("; ");
+}
 
 export class WslHostClient {
   private nextId = 0;
@@ -62,31 +103,39 @@ export class WslHostClient {
   private readonly heartbeat: ReturnType<typeof setInterval>;
 
   private constructor(
-    readonly child: ChildProcessWithoutNullStreams,
+    readonly child: ChildProcessWithoutNullStreams | undefined,
     readonly socket: WebSocket,
     readonly hello: HostHello,
+    readonly handle: HostHandle,
+    /** A reattach's `ssh -N` carries the tunnel: its exit ends the link. */
+    private readonly childIsTransport = false,
+    /** True when this client attached to a host an earlier link started. */
+    readonly reattached = false,
   ) {
     socket.on("message", (data) => this.receive(data.toString()));
     socket.on("close", () => this.disconnected(new Error("Remote host disconnected")));
     socket.on("error", (error) => this.disconnected(error));
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-4_096);
-    });
-    child.on("exit", (code) =>
-      this.disconnected(new Error(
-        `Remote host exited with code ${code ?? "unknown"}${this.stderrTail ? `: ${this.stderrTail.trim()}` : ""}`,
-      )),
-    );
-    child.on("error", (error) => this.disconnected(error));
-    // Disconnect immediately, but wait for stdio to drain before recording
-    // diagnostics. Socket close can arrive before child exit.
-    child.once("close", (code, signal) => {
-      debugLog("wsl-host-client: child closed", `requested=${this.intentionalDisconnect} code=${code ?? "none"} signal=${signal ?? "none"}`);
-      // Keep the END of stderr within debugLog's per-entry detail budget.
-      if (this.stderrTail.trim())
-        debugLog("wsl-host-client: stderr tail", this.stderrTail.trim().slice(-1_024));
-    });
+    if (child) {
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        this.stderrTail = (this.stderrTail + chunk).slice(-4_096);
+      });
+      if (childIsTransport) {
+        child.on("exit", (code) =>
+          this.disconnected(new Error(`SSH transport exited with code ${code ?? "unknown"}`)),
+        );
+      } else {
+        // The launcher wrapper exits once the detached host is running; its
+        // death says nothing about the host. The socket and heartbeat own
+        // liveness from here on.
+        child.once("close", (code, signal) => {
+          debugLog("wsl-host-client: launcher closed", `requested=${this.intentionalDisconnect} code=${code ?? "none"} signal=${signal ?? "none"}`);
+          if (this.stderrTail.trim())
+            debugLog("wsl-host-client: stderr tail", this.stderrTail.trim().slice(-1_024));
+        });
+      }
+      child.on("error", (error) => this.disconnected(error));
+    }
     // Two missed pongs (~30s) match the SSH tunnel's ServerAliveCountMax=2:
     // the host legitimately blocks its event loop on synchronous session
     // creation (fsync), which is not a dead transport.
@@ -177,24 +226,31 @@ export class WslHostClient {
   static async connect(options: WslHostOptions) {
     options.signal?.throwIfAborted();
     options.onProgress?.("starting");
-    const args = [
-      ...(options.distro ? ["-d", options.distro] : []),
-      "--exec",
-      options.executable,
-      "serve",
-      "--cwd",
-      options.cwd,
-      "--exit-on-disconnect",
-    ];
-    const child = spawn("wsl.exe", args, { windowsHide: true });
+    const distro = options.distro ?? "";
+    const base = options.executable.replace(/\/server\/current\/bin\/pix-agent-host$/u, "");
+    const port = randomInt(30_000, 60_000);
+    const script = launcherScript({
+      exe: options.executable,
+      cwd: options.cwd,
+      port,
+      base,
+      deployCredentials: options.deployCredentials,
+    });
+    const child = spawn("wsl.exe",
+      [...(options.distro ? ["-d", options.distro] : []), "--exec", "sh", "-c", script],
+      { windowsHide: true },
+    );
     const timeout = options.connectTimeoutMs ?? 30_000;
     try {
       const ready = await this.waitForReady(child, timeout, options.signal);
       if (ready.protocol !== PIX_REMOTE_PROTOCOL)
         throw new Error(`Unsupported WSL host protocol ${ready.protocol}`);
+      if (ready.port !== port)
+        throw new Error("WSL host listened on an unexpected port");
       options.onProgress?.("handshake");
       const { socket, hello } = await this.openSocket(ready, timeout, options.signal);
-      return new WslHostClient(child, socket, hello);
+      const handle: HostHandle = { kind: "wsl", target: distro, port: ready.port, token: ready.token, pid: ready.pid };
+      return new WslHostClient(child, socket, hello, handle);
     } catch (error) {
       child.kill();
       throw error;
@@ -211,27 +267,23 @@ export class WslHostClient {
       options.signal?.throwIfAborted();
       options.onProgress?.("starting");
       const remotePort = randomInt(30_000, 60_000);
-      const command =
-        `"$HOME/.pix/server/current/bin/pix-agent-host" serve --cwd ${remoteCwd}` +
-        ` --port ${remotePort} --exit-on-disconnect`;
+      // Single-quoted so the remote login shell hands the script to sh -c verbatim.
+      const script = launcherScript({
+        exe: "$HOME/.pix/server/current/bin/pix-agent-host",
+        cwd: remoteCwd,
+        port: remotePort,
+        base: "$HOME/.pix",
+        deployCredentials: options.deployCredentials,
+      });
       const child = spawn(
         "ssh",
         [
           "-T",
-          "-o",
-          "BatchMode=yes",
-          "-o",
-          "ConnectTimeout=15",
-          "-o",
-          "ServerAliveInterval=15",
-          "-o",
-          "ServerAliveCountMax=2",
-          "-o",
-          "ExitOnForwardFailure=yes",
+          ...SSH_TRANSPORT_OPTIONS,
           "-L",
           `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`,
           host,
-          command,
+          `sh -c '${script}'`,
         ],
         { windowsHide: true },
       );
@@ -273,11 +325,67 @@ export class WslHostClient {
         timeout,
         options.signal,
       );
-      return new WslHostClient(child, socket, hello);
+      const handle: HostHandle = { kind: "ssh", target: host, port: ready.port, token: ready.token, pid: ready.pid };
+      return new WslHostClient(child, socket, hello, handle);
     } catch (error) {
       child.kill();
       throw error;
     }
+  }
+
+  /** Attaches to a lingering host from an earlier session; its work survives. */
+  static async reattach(handle: HostHandle, options: RemoteConnectOptions & { connectTimeoutMs?: number } = {}) {
+    options.onProgress?.("handshake");
+    const timeout = options.connectTimeoutMs ?? 15_000;
+    if (handle.kind === "wsl") {
+      const { socket, hello } = await this.openSocket(handle, timeout, options.signal);
+      return new WslHostClient(undefined, socket, hello, handle, false, true);
+    }
+    const localPort = await this.availableLocalPort();
+    const child = spawn(
+      "ssh",
+      ["-N", "-T", ...SSH_TRANSPORT_OPTIONS, "-L", `127.0.0.1:${localPort}:127.0.0.1:${handle.port}`, handle.target],
+      { windowsHide: true },
+    );
+    try {
+      const { socket, hello } = await this.openSocket(
+        { ...handle, port: localPort },
+        timeout,
+        options.signal,
+      );
+      return new WslHostClient(child, socket, hello, handle, true, true);
+    } catch (error) {
+      child.kill();
+      // The tunnel dying means the server is unreachable: the host there may
+      // still be running work, so callers must not treat it as stale.
+      if ((child.exitCode != null || child.signalCode != null) && !options.signal?.aborted)
+        throw new RemoteHostUnreachable(
+          error instanceof Error ? error.message : String(error),
+        );
+      throw error;
+    }
+  }
+
+  /** Stops a lingering host by pid, verifying the process is really ours. */
+  static async killHost(handle: HostHandle): Promise<void> {
+    const script =
+      `p=$(ps -p ${handle.pid} -o args= 2>/dev/null); ` +
+      `case "$p" in *pix-agent-host*) kill ${handle.pid};; esac`;
+    if (handle.kind === "wsl") {
+      await this.runWsl(["-d", handle.target, "--exec", "sh", "-c", script], 15_000).catch(() => {});
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const child = spawn(
+        "ssh",
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", handle.target, script],
+        { windowsHide: true },
+      );
+      const timer = setTimeout(() => { child.kill(); resolve(); }, 20_000);
+      timer.unref();
+      child.once("error", () => { clearTimeout(timer); resolve(); });
+      child.once("exit", () => { clearTimeout(timer); resolve(); });
+    });
   }
 
   private static availableLocalPort() {
@@ -346,7 +454,7 @@ export class WslHostClient {
     });
   }
 
-  private static async openSocket(ready: HostReady, timeoutMs: number, signal?: AbortSignal) {
+  private static async openSocket(ready: Pick<HostReady, "port" | "token">, timeoutMs: number, signal?: AbortSignal) {
     const url = `ws://127.0.0.1:${ready.port}/?token=${encodeURIComponent(ready.token)}`;
     const deadline = Date.now() + timeoutMs;
     let lastError: unknown;
@@ -482,12 +590,17 @@ export class WslHostClient {
     this.failPending(error);
     for (const request of this.modelRequests.values()) request.abort();
     this.modelRequests.clear();
-    this.socket.terminate();
-    // Closing the socket lets the host persist its aborted turn. Killing
-    // wsl.exe immediately can kill Linux before that flush has happened.
+    // An intentional close lets a queued shutdown message flush before the
+    // close frame; anything else tears the transport down right away.
+    if (this.intentionalDisconnect && this.socket.readyState === WebSocket.OPEN)
+      this.socket.close();
+    else
+      this.socket.terminate();
+    // The host runs detached from its launcher; only a transport child (a
+    // reattach tunnel) still needs teardown here.
+    const child = this.child;
     this.stopping = new Promise<void>((accept) => {
-      const child = this.child;
-      if (child.exitCode != null || child.signalCode != null) { accept(); return; }
+      if (!child || child.exitCode != null || child.signalCode != null) { accept(); return; }
       const finish = () => { clearTimeout(timer); child.off("exit", finish); accept(); };
       const timer = setTimeout(() => {
         if (!child.killed) child.kill();
@@ -539,10 +652,23 @@ export class WslHostClient {
     this.pending.clear();
   }
 
+  /** Intentional teardown: tells a lingering host to shut down now. */
   async dispose() {
     // Cleanup after a failure must not relabel that failure as a requested exit.
     if (!this.disconnectError) this.intentionalDisconnect = true;
+    if (!this.disconnectError && this.socket.readyState === WebSocket.OPEN) {
+      try { this.socket.send(JSON.stringify({ type: "shutdown" })); }
+      catch { /* the close below still ends the link */ }
+    }
     this.disconnected(new Error("Remote host client disposed"));
+    await this.stopping;
+    this.listeners.clear();
+    this.disconnectListeners.clear();
+  }
+
+  /** Ends the link but leaves a lingering host running for a later reattach. */
+  async abandon() {
+    this.disconnected(new Error("Remote connection abandoned"));
     await this.stopping;
     this.listeners.clear();
     this.disconnectListeners.clear();
