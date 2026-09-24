@@ -539,6 +539,8 @@ export class MainController {
     if (route === "ssh.list") return listSshHosts();
     if (route === "remote.cancel") return this.pool.cancelRemote();
     if (route === "remote.directories") return this.pool.browseDirectories(v);
+    if (route === "remote.deployed") return this.pool.deployedWorkspaces();
+    if (route === "remote.revoke") return this.pool.revokeDeployedCredentials(String(v.id));
     if (route === "wsl.connect")
       return this.pool.connectWsl(String(v.distro), String(v.cwd), Boolean(v.browse));
     if (route === "ssh.connect")

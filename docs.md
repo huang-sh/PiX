@@ -108,6 +108,29 @@ quits; a restored transport is announced as `remote.connection
 {connected:true}` so the view rehydrates without a manual click. Background
 hosts are not reconnected — the idle recycler reaps them as before.
 
+**Lingering hosts and model autonomy.** Hosts start detached from their
+ssh/wsl launcher and outlive the connection: an unplanned disconnect leaves
+their running work alive, and the host exits on its own after
+`PIX_HOST_LINGER_MS` (default 10 min) with no client and no running
+sessions — or immediately on the desktop's `shutdown` message. Each host's
+port, token and pid are remembered in `~/.pix/remote-hosts.json`, so any
+later connect (manual, automatic retry, or a fresh desktop session)
+reattaches to the lingering host instead of tripping its graph lock with a
+second one; an unreachable server keeps its handle, a reachable but dead
+host is stopped by its verified pid first. Quitting parks hosts that are
+mid-run for the next session to reattach to. Model calls prefer the host's
+own credentials (its pi CLI login, environment, or deployed keys) and call
+providers directly; the desktop brokers only providers the host cannot
+authenticate itself. The Remote settings page holds the opt-in
+`deployModelCredentialsToRemote`: when on, connecting pushes this
+desktop's model API keys and custom model definitions to the host (which
+accepts them only when started with `--allow-credential-deploy`), and the
+page lists deployed hosts with a per-host revoke. OAuth logins never
+leave the desktop, logins the server already had are never removed, and a
+desktop logout only revokes providers this desktop deployed. The model
+picker still lists the desktop's configured models; server-only providers
+are not surfaced.
+
 **Shutdown.** Quitting flushes pending background history writes, aborts
 every local run (settling as `interrupted` with recovered inputs — this is
 in-process continuation, not persisted resumption), releases the graph

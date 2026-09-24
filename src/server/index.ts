@@ -54,6 +54,9 @@ async function serve() {
   if (!statSync(cwd).isDirectory())
     throw new Error(`Project path is not a directory: ${cwd}`);
   const readyFile = option("--ready-file");
+  // Credential deployment is a desktop decision: the host accepts
+  // loginApiKey/logout only when the desktop started it with this flag.
+  const allowCredentialDeploy = process.argv.includes("--allow-credential-deploy");
   const port = Number(option("--port") ?? 0);
   if (!Number.isInteger(port) || port < 0 || port > 65_535)
     throw new Error("--port must be an integer between 0 and 65535");
@@ -167,6 +170,7 @@ async function serve() {
       platform: process.platform,
       arch: process.arch,
       cwd,
+      allowCredentialDeploy,
     });
     socket.on("message", async (data) => {
       let request: HostRequest | undefined;
@@ -204,7 +208,8 @@ async function serve() {
           request.route === "agent.control" &&
           ["loginApiKey", "logout"].includes(
             String((request.input as { action?: unknown } | undefined)?.action),
-          )
+          ) &&
+          !allowCredentialDeploy
         )
           throw new Error("Model credentials are desktop-only");
         const result = await controller.invoke(request.route, request.input);

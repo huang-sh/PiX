@@ -11,6 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { WslHostClient, RemoteHostUnreachable, launcherScript } from "../src/main/wsl-host-client.js";
 import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
+import { PiRuntime } from "../src/main/pi-runtime.js";
 import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
@@ -307,9 +308,11 @@ function controllerFixture(t: TestContext, seed?: (home: string) => void) {
 function candidate(controller: MainController) {
   const events = new EventEmitter();
   return {
-    hello: { cwd: "/new" }, connected: true, disposed: false, abandoned: false, reattached: false,
+    hello: { cwd: "/new" } as { cwd: string } & Record<string, unknown>, connected: true, disposed: false, abandoned: false, reattached: false,
     handle: undefined as any,
+    calls: [] as any[],
     async request(route: string, input?: any): Promise<any> {
+      this.calls.push([route, input]);
       if (route === "settings.get") return controller.settings.bundle();
       if (route === "workspace.open") return { path: input.path };
       if (route === "workspace.directories") return { path: input.path, entries: [] };
@@ -1086,4 +1089,142 @@ test("bootstrapping a connected remote workspace restores its remembered session
   assert.equal(bootstrapped.current?.session.path, "/old/s.jsonl",
     "a window reload lands back on the session the workspace last showed");
   assert.equal(controller.current?.session.path, "/old/s.jsonl");
+});
+
+// --- Model autonomy: local credentials win over the desktop broker. ---
+
+function fakeModelRuntime(local: string[]) {
+  const runtime: any = {
+    registered: [] as string[],
+    keys: new Set<string>(),
+    checkAuth: async (provider: string) => (local.includes(provider) ? { type: "api_key" } : null),
+    registerProvider: (id: string) => runtime.registered.push(id),
+    unregisterProvider: (id: string) => { runtime.registered = runtime.registered.filter((p: string) => p !== id); },
+    setRuntimeApiKey: async (id: string) => { runtime.keys.add(id); },
+    removeRuntimeApiKey: async (id: string) => { runtime.keys.delete(id); },
+    stream: () => "native",
+    streamSimple: () => "native",
+  };
+  return runtime;
+}
+
+test("a host with local credentials serves those providers directly", async () => {
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  const local = ["anthropic"];
+  const modelRuntime = fakeModelRuntime(local);
+  runtime.modelRuntime = async () => modelRuntime;
+  let brokered = 0;
+  runtime.modelBroker = () => { brokered++; return "brokered"; };
+  const models = [
+    { provider: "anthropic", id: "claude", name: "Claude" },
+    { provider: "openai", id: "gpt", name: "GPT" },
+  ] as never[];
+  await runtime.configureBrokerProviders(["anthropic", "openai"], models);
+  assert.deepEqual(modelRuntime.registered, ["openai"], "locally-authenticated providers keep their native catalog");
+  assert.deepEqual([...modelRuntime.keys], ["openai"], "no fake runtime key shadows a local credential");
+  assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native");
+  assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
+
+  // A deployed credential moves its provider to direct calls...
+  local.push("openai");
+  await runtime.refreshBrokerAuth();
+  assert.deepEqual(modelRuntime.registered, [], "the overlay is stripped once credentials exist");
+  assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "native");
+
+  // ...and revoking it hands the provider back to the desktop.
+  local.splice(local.indexOf("openai"), 1);
+  await runtime.refreshBrokerAuth();
+  assert.deepEqual(modelRuntime.registered, ["openai"]);
+  assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
+  assert.equal(brokered, 2);
+});
+
+test("connecting deploys credentials to an authorized host when enabled", async (t) => {
+  const { controller, old, project } = controllerFixture(t);
+  old.connected = false;
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: true } });
+  controller.projectRuntime.listApiKeys = () => ({ anthropic: "sk-local", mycustom: "sk-2" });
+  controller.projectRuntime.control = async (input: any) =>
+    input.action === "getModels" ? [] : input.action === "getCustomModels"
+      ? [{ provider: "mycustom", modelId: "m1", name: "M1", baseUrl: "https://x", api: "openai-completions",
+          contextWindow: 128000, maxTokens: 16384, reasoning: false, imageInput: false }]
+      : [];
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: "/old", allowCredentialDeploy: true };
+  fresh.handle = { kind: "ssh", target: "old", port: 1, token: "t", pid: 1 };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  await controller.connectSsh("old", "/old");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const logins = fresh.calls.filter(([route, input]: any[]) => route === "agent.control" && input.action === "loginApiKey");
+  assert.deepEqual(logins.map(([, input]: any[]) => input.provider).sort(), ["anthropic", "mycustom"],
+    "every stored API key reaches the host");
+  assert.deepEqual(logins.map(([, input]: any[]) => input.apiKey), ["sk-local", "sk-2"]);
+  assert.equal(fresh.calls.some(([route, input]: any[]) => route === "agent.control" && String(input?.action).includes("CustomModel")), true,
+    "custom model definitions ride along");
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.deepEqual(stored[projectId(project)].pushedProviders.sort(), ["anthropic", "mycustom"]);
+});
+
+test("deployment stays off without the setting or the host's authorization", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  controller.projectRuntime.listApiKeys = () => ({ anthropic: "sk-local" });
+  const unauthorized = candidate(controller);
+  unauthorized.hello = { cwd: "/old" };
+  t.mock.method(WslHostClient, "connectSsh", async () => unauthorized as any);
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: true } });
+  await controller.connectSsh("old", "/old");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(unauthorized.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "loginApiKey"), false,
+    "a host started without the authorization receives nothing");
+
+  const previous = candidate(controller);
+  previous.hello = { cwd: "/old", allowCredentialDeploy: true };
+  const seeded: typeof previous = previous;
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: false } });
+  const active = controller.pool.active();
+  assert.ok(active);
+  active!.client = seeded as never;
+  await controller.invoke("agent.control", { action: "loginApiKey", provider: "anthropic", apiKey: "sk" });
+  assert.equal(seeded.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "loginApiKey" && input?.provider === "anthropic" && input?.apiKey === "sk"), false,
+    "with the setting off, credentials never leave the desktop");
+});
+
+test("a desktop logout removes only credentials this desktop deployed", async (t) => {
+  const { controller, old, project } = controllerFixture(t, home => {
+    seedLingeringHost(home);
+    const file = join(home, ".pix", "remote-hosts.json");
+    const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    stored[key].pushedProviders = ["anthropic"];
+    writeFileSync(file, JSON.stringify(stored));
+  });
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: true } });
+  old.hello = { cwd: "/old", allowCredentialDeploy: true } as any;
+  controller.projectRuntime.control = async () => [];
+  await controller.invoke("agent.control", { action: "logout", provider: "serverlocal" });
+  assert.ok(!old.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "logout"),
+    "a login the server already had is never removed");
+  await controller.invoke("agent.control", { action: "logout", provider: "anthropic" });
+  assert.ok(old.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "logout" && input?.provider === "anthropic"),
+    "a deployed provider is cleaned up");
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.deepEqual(stored[projectId(project)].pushedProviders, []);
+});
+
+test("revoking removes deployed credentials from a connected host", async (t) => {
+  const { controller, old, project } = controllerFixture(t, home => {
+    seedLingeringHost(home);
+    const file = join(home, ".pix", "remote-hosts.json");
+    const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    stored[key].pushedProviders = ["anthropic", "mycustom"];
+    writeFileSync(file, JSON.stringify(stored));
+  });
+  const result = await controller.invoke("remote.revoke", { id: projectId(project) }) as { revoked: string[] };
+  assert.deepEqual([...result.revoked].sort(), ["anthropic", "mycustom"]);
+  const logouts = old.calls.filter(([route, input]: any[]) => route === "agent.control" && input?.action === "logout");
+  assert.deepEqual(logouts.map(([, input]: any[]) => input.provider).sort(), ["anthropic", "mycustom"]);
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.deepEqual(stored[projectId(project)].pushedProviders, []);
 });

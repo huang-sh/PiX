@@ -287,6 +287,93 @@ export class RemoteWorkspacePool {
     });
     await this.syncModelBroker(client);
   }
+  /** Whether the user opted in and this host was started to accept credentials. */
+  private mayDeployCredentials(client: WslHostClient): boolean {
+    return this.host.settings.bundle().app.deployModelCredentialsToRemote
+      && client.hello.allowCredentialDeploy === true;
+  }
+  /**
+   * Pushes this desktop's model API keys and custom model definitions to a
+   * connected host so its work keeps running between desktop connections
+   * (VS Code-style autonomy). OAuth credentials stay on this desktop, and
+   * logins the host already had on its own are never overwritten away —
+   * re-pushing a provider the desktop also uses is the user's opt-in.
+   */
+  private async deployCredentials(client: WslHostClient, id: string): Promise<void> {
+    if (!this.mayDeployCredentials(client)) return;
+    const keys = this.host.projectRuntime.listApiKeys();
+    const pushed: string[] = [];
+    for (const [provider, apiKey] of Object.entries(keys)) {
+      try {
+        await client.request("agent.control", { action: "loginApiKey", provider, apiKey });
+        pushed.push(provider);
+      } catch (error) {
+        debugLog(`remote-pool: deploy credentials for ${provider}`, error);
+      }
+    }
+    let customs: Record<string, unknown>[] = [];
+    try {
+      customs = await this.host.projectRuntime.control({ action: "getCustomModels" }) as Record<string, unknown>[];
+    } catch (error) {
+      debugLog("remote-pool: deploy custom models", error);
+    }
+    for (const model of customs) {
+      for (const action of ["addCustomModel", "updateCustomModel"]) {
+        try {
+          await client.request("agent.control", { action, ...model });
+          break;
+        } catch (error) {
+          debugLog(`remote-pool: deploy custom model ${String(model.provider)}/${String(model.modelId)}`, error);
+        }
+      }
+    }
+    this.rememberPushed(id, pushed);
+  }
+  /** Forwards a desktop logout only for providers this desktop deployed. */
+  private async forwardLogout(client: WslHostClient, id: string, provider: string): Promise<void> {
+    if (!this.mayDeployCredentials(client)) return;
+    const pushed = this.hostHandles.get(id)?.pushedProviders ?? [];
+    if (!pushed.includes(provider)) return;
+    try {
+      await client.request("agent.control", { action: "logout", provider });
+      this.rememberPushed(id, pushed.filter((known) => known !== provider));
+    } catch (error) {
+      debugLog(`remote-pool: forward logout for ${provider}`, error);
+    }
+  }
+  private rememberPushed(id: string, providers: string[]) {
+    const handle = this.hostHandles.get(id);
+    if (!handle) return;
+    handle.pushedProviders = providers;
+    this.storeHandles();
+  }
+  /** Removes the credentials this desktop deployed to a connected host. */
+  async revokeDeployedCredentials(id: string): Promise<{ revoked: string[] }> {
+    const slot = this.slot(id);
+    if (!slot?.client.connected)
+      throw new Error("Connect that workspace before revoking its deployed credentials");
+    const pushed = this.hostHandles.get(id)?.pushedProviders ?? [];
+    for (const provider of pushed) {
+      try {
+        await slot.client.request("agent.control", { action: "logout", provider });
+      } catch (error) {
+        debugLog(`remote-pool: revoke ${provider}`, error);
+      }
+    }
+    this.rememberPushed(id, []);
+    return { revoked: pushed };
+  }
+  /** Deployment state for the remote settings page, one row per remembered host. */
+  deployedWorkspaces(): { id: string; kind: "ssh" | "wsl"; target: string; path: string; connected: boolean; pushedProviders: string[] }[] {
+    return [...this.hostHandles.entries()].map(([id, handle]) => ({
+      id,
+      kind: handle.kind,
+      target: handle.target,
+      path: handle.path,
+      connected: Boolean(this.slot(id)?.client.connected),
+      pushedProviders: handle.pushedProviders ?? [],
+    }));
+  }
   /**
    * Subscribes a connected client as a pooled workspace. Switching projects
    * never disposes a slot; only explicit disconnect, recycling, or quitting
@@ -506,6 +593,8 @@ export class RemoteWorkspacePool {
       abort.signal.throwIfAborted();
       const options = {
         signal: abort.signal,
+        // The setting gates both the spawn-time authorization and the push.
+        deployCredentials: this.host.settings.bundle().app.deployModelCredentialsToRemote,
         onProgress: (stage: RemoteConnectStage) => {
           if (!abort.signal.aborted) this.host.emit({ type: "remote.progress", payload: { stage } });
         },
@@ -624,6 +713,10 @@ export class RemoteWorkspacePool {
     this.installSlot(client, project, settings);
     // The committed host is the one to reattach to after any later drop.
     this.rememberHandle(projectId(project), client.handle, project.path);
+    // Credential deployment follows the commit: a failed push must never
+    // fail the connection itself.
+    void this.deployCredentials(client, projectId(project))
+      .catch(error => debugLog("remote-pool: deploy credentials", error));
     this.host.view.enter(project);
     return {
       project, sessions, projects: this.host.projectGroups(),
@@ -664,11 +757,15 @@ export class RemoteWorkspacePool {
       if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels" || action === "addCustomModel" || action === "updateCustomModel") {
         const result = await this.host.projectRuntime.control(v as unknown as AgentControl);
         await this.syncModelBroker(client);
+        // Credential and definition changes re-deploy so the host stays autonomous.
+        if (action !== "loginOAuth" && action !== "refreshModels")
+          await this.deployCredentials(client, projectId(project)).catch(() => {});
         return result;
       }
       if (action === "logout") {
         const result = await this.host.projectRuntime.control(v as unknown as AgentControl);
         await this.syncModelBroker(client);
+        await this.forwardLogout(client, projectId(project), String(v.provider));
         return result;
       }
     }

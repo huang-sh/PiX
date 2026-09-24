@@ -67,6 +67,8 @@ export interface HostHello {
   arch: string;
   /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
+  /** Whether the desktop may deploy its model credentials to this host. */
+  allowCredentialDeploy?: boolean;
 }
 
 export interface HostEvent {
