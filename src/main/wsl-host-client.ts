@@ -98,7 +98,10 @@ export function launcherScript(v: {
     "(command -v setsid >/dev/null 2>&1 && setsid $C || nohup $C) </dev/null >>$L 2>&1 &",
     "i=0; while [ ! -s \"$F\" ] && [ \"$i\" -lt 140 ]; do sleep 0.2; i=$((i+1)); done",
     "if [ ! -s \"$F\" ]; then echo pix-agent-host failed to start; tail -n 5 \"$L\" 2>/dev/null; fi",
-    "cat \"$F\" 2>/dev/null; rm -f \"$F\"",
+    // The host removes its own ready file shortly after; the wrapper must
+    // not (a blocking rm on a network filesystem pins this shell, and a
+    // backgrounded one dies with the session that spawned it).
+    "cat \"$F\" 2>/dev/null",
   ].join("\n");
 }
 
@@ -493,6 +496,7 @@ export class WslHostClient {
     const url = `ws://127.0.0.1:${ready.port}/?token=${encodeURIComponent(ready.token)}`;
     const deadline = Date.now() + timeoutMs;
     let lastError: unknown;
+    let refusedSince: number | undefined;
     while (Date.now() < deadline) {
       signal?.throwIfAborted();
       try {
@@ -538,6 +542,15 @@ export class WslHostClient {
       } catch (error) {
         signal?.throwIfAborted();
         lastError = error;
+        if (/ECONNREFUSED/u.test(String(error))) {
+          // The SSH forward binds before READY, and the WSL relay appears
+          // within moments: sustained instant refusals mean the tunnel is
+          // gone, and the caller can redial far sooner than the full timeout.
+          refusedSince ??= Date.now();
+          if (Date.now() - refusedSince > 3_000) throw error;
+        } else {
+          refusedSince = undefined;
+        }
         await delay(200, undefined, { signal });
       }
     }

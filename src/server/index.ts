@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { realpathSync, statSync, writeFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { MainController, type Platform } from "../main/controller.js";
@@ -290,9 +290,37 @@ async function serve() {
       pid: process.pid,
     })}\n`;
   process.stdout.write(readyLine);
-  if (readyFile) writeFileSync(readyFile, readyLine, { mode: 0o600 });
+  if (readyFile) {
+    writeFileSync(readyFile, readyLine, { mode: 0o600 });
+    // The launcher only reads this file; removing it here keeps the host in
+    // charge of its own artifact even when the launching session dies first.
+    const cleanup = setTimeout(() => {
+      try { unlinkSync(readyFile); } catch { /* already gone */ }
+    }, 10_000);
+    cleanup.unref();
+    sweepStaleReadyFiles(readyFile);
+  }
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+/**
+ * A host that died before its own cleanup timer leaves its ready file behind
+ * (its launcher is gone too). Each start sweeps the leftovers: a file older
+ * than two minutes has no reader left under any timeline.
+ */
+function sweepStaleReadyFiles(current: string) {
+  try {
+    const dir = dirname(current);
+    const cutoff = Date.now() - 120_000;
+    for (const name of readdirSync(dir)) {
+      if (!/^host-\d+\.ready$/u.test(name)) continue;
+      const file = join(dir, name);
+      try {
+        if (file !== current && statSync(file).mtimeMs < cutoff) unlinkSync(file);
+      } catch { /* raced with another sweep */ }
+    }
+  } catch { /* best-effort housekeeping */ }
 }
 
 const command = process.argv[2];
