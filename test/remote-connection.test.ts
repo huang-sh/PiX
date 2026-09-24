@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
-import { WslHostClient, RemoteHostUnreachable, launcherScript } from "../src/main/wsl-host-client.js";
+import { WslHostClient, RemoteHostUnreachable, HostStarted, launcherScript } from "../src/main/wsl-host-client.js";
 import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
 import { PiRuntime } from "../src/main/pi-runtime.js";
@@ -1258,4 +1258,36 @@ test("dropping a disconnected slot keeps its lingering host's handle", async (t)
   controller.pool.forgetHost(bgId);
   stored = readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8");
   assert.ok(!stored.includes("4343"), "removing the project gives up on its host");
+});
+
+test("a link death after READY redials the surviving host instead of wasting it", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  // READY arrived, then the tunnel died before the WebSocket handshake —
+  // exactly the pattern of an SSH reset mid-connect.
+  const startedHandle = { kind: "ssh", target: "old", port: 41515, token: "survivor", pid: 6262 } as const;
+  t.mock.method(WslHostClient, "connectSsh", async () => {
+    throw new HostStarted("connect ECONNREFUSED 127.0.0.1:54114", startedHandle as never);
+  });
+  const reattached = candidate(controller);
+  reattached.hello = { cwd: "/old" };
+  reattached.reattached = true;
+  reattached.handle = { kind: "ssh", target: "old", port: 41515, token: "survivor", pid: 6262 };
+  const reattach = t.mock.method(WslHostClient, "reattach", async () => reattached as any);
+  const result = await controller.connectSsh("old", "/old");
+  assert.equal(reattach.mock.callCount(), 1, "the connect redials the surviving host");
+  assert.equal(controller.wsl, reattached);
+  assert.equal((result as { project: ProjectInfo }).project.path, "/old");
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+  assert.equal(stored[key]?.pid, 6262, "the handle is kept even before the workspace commits");
+});
+
+test("a host that never started is not redialed", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("ssh: connect refused"); });
+  const reattach = t.mock.method(WslHostClient, "reattach", async () => { throw new Error("must not reattach"); });
+  await assert.rejects(controller.connectSsh("old", "/old"), /connect refused/);
+  assert.equal(reattach.mock.callCount(), 0);
 });

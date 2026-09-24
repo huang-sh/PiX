@@ -18,7 +18,7 @@ import type {
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
 import type { HostHandle, ProjectRoute } from "../shared/remote-protocol.js";
-import { WslHostClient, RemoteHostUnreachable } from "./wsl-host-client.js";
+import { WslHostClient, RemoteHostUnreachable, HostStarted } from "./wsl-host-client.js";
 import { brokerOptions } from "./model-broker.js";
 import type { PiRuntime } from "./pi-runtime.js";
 import type { SettingsService } from "./services.js";
@@ -635,10 +635,20 @@ export class RemoteWorkspacePool {
           await WslHostClient.killHost(remembered.handle).catch(() => {});
         }
       }
-      if (!client)
-        client = remote.kind === "ssh"
-          ? await WslHostClient.connectSsh(remote.host, cwd, options)
-          : await WslHostClient.installed({ distro: remote.distro, cwd, ...options });
+      if (!client) {
+        try {
+          client = remote.kind === "ssh"
+            ? await WslHostClient.connectSsh(remote.host, cwd, options)
+            : await WslHostClient.installed({ distro: remote.distro, cwd, ...options });
+        } catch (error) {
+          if (!(error instanceof HostStarted)) throw error;
+          // The host is up; only the link died (a reset between READY and the
+          // handshake). Remember it, then give a fresh tunnel one chance so a
+          // flaky network cannot waste a working host.
+          this.rememberHandle(projectId({ name: "", path: cwd, remote }), error.hostHandle, cwd);
+          client = await WslHostClient.reattach(error.hostHandle, options);
+        }
+      }
       abort.signal.throwIfAborted();
       const connectedClient = client;
       // Aborting mid-attempt must not shut down a lingering host the

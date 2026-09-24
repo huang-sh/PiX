@@ -62,6 +62,21 @@ const SSH_TRANSPORT_OPTIONS = [
 export class RemoteHostUnreachable extends Error {}
 
 /**
+ * The host started and reported READY, but the link to it died before the
+ * WebSocket handshake (e.g. an SSH reset between the two). The host is
+ * alive and listening; carrying its handle lets the caller redial instead
+ * of wasting it.
+ */
+export class HostStarted extends Error {
+  constructor(
+    message: string,
+    readonly hostHandle: HostHandle,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * The launcher script that starts a host as a detached process and reports
  * readiness on stdout: the host survives the ssh/wsl session that launched
  * it, so unplanned disconnects leave its running work alive.
@@ -243,16 +258,22 @@ export class WslHostClient {
       { windowsHide: true },
     );
     const timeout = options.connectTimeoutMs ?? 30_000;
+    let handle: HostHandle | undefined;
     try {
       const ready = await this.waitForReady(child, timeout, options.signal);
       if (ready.protocol !== PIX_REMOTE_PROTOCOL)
         throw new Error(`Unsupported WSL host protocol ${ready.protocol}`);
       if (ready.port !== port)
         throw new Error("WSL host listened on an unexpected port");
+      handle = { kind: "wsl", target: distro, port: ready.port, token: ready.token, pid: ready.pid };
       options.onProgress?.("handshake");
-      const { socket, hello } = await this.openSocket(ready, timeout, options.signal);
-      const handle: HostHandle = { kind: "wsl", target: distro, port: ready.port, token: ready.token, pid: ready.pid };
-      return new WslHostClient(child, socket, hello, handle);
+      try {
+        const { socket, hello } = await this.openSocket(ready, timeout, options.signal);
+        return new WslHostClient(child, socket, hello, handle);
+      } catch (error) {
+        // The host is up and listening; only the link to it died.
+        throw new HostStarted(error instanceof Error ? error.message : String(error), handle);
+      }
     } catch (error) {
       child.kill();
       throw error;
@@ -316,19 +337,24 @@ export class WslHostClient {
       started = await start();
     }
     const { child, ready } = started;
+    const handle: HostHandle = { kind: "ssh", target: host, port: ready.port, token: ready.token, pid: ready.pid };
     try {
       if (ready.protocol !== PIX_REMOTE_PROTOCOL)
         throw new Error(`Unsupported SSH host protocol ${ready.protocol}`);
       if (ready.port !== started.remotePort)
         throw new Error("SSH host listened on an unexpected port");
       options.onProgress?.("handshake");
-      const { socket, hello } = await this.openSocket(
-        { ...ready, port: localPort },
-        timeout,
-        options.signal,
-      );
-      const handle: HostHandle = { kind: "ssh", target: host, port: ready.port, token: ready.token, pid: ready.pid };
-      return new WslHostClient(child, socket, hello, handle);
+      try {
+        const { socket, hello } = await this.openSocket(
+          { ...ready, port: localPort },
+          timeout,
+          options.signal,
+        );
+        return new WslHostClient(child, socket, hello, handle);
+      } catch (error) {
+        // The host is up and listening; only the tunnel to it died.
+        throw new HostStarted(error instanceof Error ? error.message : String(error), handle);
+      }
     } catch (error) {
       child.kill();
       throw error;
