@@ -572,3 +572,36 @@ test("plain sessions without .pix-tree compile without fake graph storage", () =
   assert.ok(existsSync(join(f.wiki, "sessions", "session-c", "tree.md")));
   assert.ok(!existsSync(`${plain}.pix-tree`));
 });
+
+test("a fork continuing a turn mid-flight anchors the parent's range locally", () => {
+  const f = fixture(test);
+  // The child forks after a2 and continues turn:u2 with one more entry and no
+  // new user message, so the turn's canonical leaf lives in the child storage.
+  const C = "22222222-2222-4222-8222-222222222222";
+  const childMsg = (id: string, parentId: string, role: string, text: string) =>
+    ({ type: "message", id, parentId, timestamp: "2026-09-01T10:00:00.000Z",
+      message: { role, content: [{ type: "text", text }], ...(role === "assistant" ? { stopReason: "stop" } : {}) } }) as unknown as RawSessionEntry;
+  const continuation = childMsg("t1", "a2", "assistant", "child continuation");
+  const ownTurn = [childMsg("u3", "t1", "user", "child question"), childMsg("a3", "u3", "assistant", "child answer")];
+  const childFile = join(`${f.main}.pix-tree`, `${C}.jsonl`);
+  writeFileSync(childFile, encode(SID_A, [...BASE, ...MAIN_TURN_2, continuation, ...ownTurn]));
+  writeFileSync(`${childFile}.origin.json`, JSON.stringify({
+    id: C, parentId: "main", forkEntryId: "a2", baseline: [...BASE, ...MAIN_TURN_2],
+    inherited: { u1: "u1", a1: "a1", u2: "u2", a2: "a2" },
+    status: "idle", header: { type: "session", version: 3, id: SID_A, timestamp: "2026-09-01T10:00:00.000Z" },
+    request: { text: "continue" }, requestId: "r2", runId: "run2",
+  }) + "\n");
+  refreshSessionWiki(f.wiki, f.main);
+  const plan = prepareCompile(f.wiki, f.main, "main")!;
+  // The revision anchor must be the turn's last MAIN-local entry, not the
+  // child's canonical leaf — otherwise publication fails with "read range".
+  assert.equal(plan.lastIncludedEntryId, "a2");
+  assert.equal(plan.includedTurns.at(-1), "turn:u2");
+  publishSummary(f.wiki, plan, parseModelSummary(summaryJson(["turn:u1", "turn:u2"])), { inputTokens: 1, outputTokens: 1, cost: null });
+  refreshSessionWiki(f.wiki, f.main);
+  assert.equal(readManifest(f.wiki)!.pageStatus[A_MAIN], "fresh");
+  // The child compiles its own turn against its storage without touching main's range.
+  const child = prepareCompile(f.wiki, f.main, C)!;
+  assert.deepEqual(child.includedTurns, [`turn:${C}:u3`]);
+  assert.equal(child.lastIncludedEntryId, `${C}:a3`);
+});

@@ -86,6 +86,9 @@ export interface WikiSnapshot {
   selfReadCalls: Map<string, boolean>;
   localEntryIds: Map<string, Map<string, string>>;
   branchOf: (node: GraphNode) => string;
+  /** Last entry of a turn that lives in this branch's own storage; a fork
+   *  continuing a turn mid-flight leaves the canonical leaf in the child. */
+  localLeafOf: (branchId: string, turn: string) => string | null;
   leaves: GraphNode[];
   lanePath: (leaf: GraphNode) => GraphNode[];
   evidenceState: (node: GraphNode) => string;
@@ -174,6 +177,14 @@ export function loadWikiSnapshot(mainPath: string): WikiSnapshot {
     for (let e = byId.get(start); e; e = e.parentId ? byId.get(e.parentId) : undefined) result.push(e);
     return result.reverse();
   };
+  // Anchors for revision ranges must be local to the branch being compiled:
+  // when a fork continues a turn mid-flight, that turn's canonical leaf entry
+  // lives in the child branch's storage and cannot anchor the parent's range.
+  const localIdsByBranch = new Map([...locals].map(([id, entries]) => [id, new Set(entries.map(e => e.id))]));
+  const localLeafOf = (branchId: string, turn: string) => {
+    const ids = localIdsByBranch.get(branchId);
+    return ids ? (messages.get(turn) ?? []).filter(e => ids.has(e.id)).at(-1)?.id ?? null : null;
+  };
   const sources: Record<string, WikiSourceInfo> = {}, scopes = new Map<string, Set<string>>(), contexts = new Map<string, RawSessionEntry[]>(), localEntryIds = new Map<string, Map<string, string>>();
   for (const id of ["main", ...ids]) {
     const source = data.get(id)!, local = locals.get(id)!;
@@ -204,7 +215,7 @@ export function loadWikiSnapshot(mainPath: string): WikiSnapshot {
   const session = { id: String(data.get("main")!.header.id), path: mainPath, name: String([...locals.get("main")!].reverse().find(e => e.type === "session_info")?.name ?? basename(mainPath)) };
   return {
     dir, mainPath, sessionKey: session.id, ids: ["main", ...ids], nodes, nodeById, byId, sources, scopes, locals, contexts, records, messages, selfReadCalls, localEntryIds,
-    branchOf, leaves, lanePath, evidenceState,
+    branchOf, localLeafOf, leaves, lanePath, evidenceState,
     revisionThrough(branchId, canonicalEntryId) {
       const local = locals.get(branchId);
       if (!local) return null;
@@ -540,7 +551,7 @@ function isIncrementalReceipt(
 ): boolean {
   if (receipt.policyRevision !== policy || receipt.semanticRevision !== page.semanticRevision) return false;
   if (!Array.isArray(receipt.coveredTurns) || !receipt.coveredTurns.length) return false;
-  const leafOf = (turn: string) => snap.nodeById.get(turn)?.leafEntryId ?? null;
+  const leafOf = (turn: string) => snap.localLeafOf(branchId, turn);
   if (!receipt.coveredTurns.every(t => turns.includes(t) && localOrder.has(leafOf(t) ?? ""))) return false;
   let last = receipt.coveredTurns[0]!;
   for (const turn of receipt.coveredTurns)
@@ -566,7 +577,7 @@ export function prepareCompile(wikiRoot: string, mainPath: string, branchId: str
   if (page && manifest && pageState(page, manifest.pages[pageRel], snap, policy) === "fresh") return null;
   const receipt = manifest?.pages[pageRel];
   const localOrder = new Map(snap.locals.get(branchId)!.map((e, i) => [e.id, i]));
-  const leafOf = (turn: string) => snap.nodeById.get(turn)?.leafEntryId ?? null;
+  const leafOf = (turn: string) => snap.localLeafOf(branchId, turn);
   let mode: "incremental" | "reset" = "reset", covered: string[] = [], oldSummary = "";
   if (page && receipt && isIncrementalReceipt(receipt, page, policy, info.turns, localOrder, branchId, snap)) {
     mode = "incremental";
@@ -706,8 +717,10 @@ export function publishSummary(
   const coveredTotal = new Set<string>(plan.mode === "incremental" ? [...(manifest.pages[plan.pageRel]?.coveredTurns ?? []), ...plan.includedTurns] : plan.includedTurns);
   receipt.coveredTurns = info.turns.filter(t => coveredTotal.has(t));
   // Anchor the read range at the NEWEST covered entry, not just this batch:
-  // a backfill batch ends earlier than the coverage it completes.
-  const newestLeaf = snap.nodeById.get(receipt.coveredTurns.at(-1) ?? "")?.leafEntryId ?? null;
+  // a backfill batch ends earlier than the coverage it completes. The anchor
+  // is branch-local — a fork continuing a turn leaves the canonical leaf in
+  // the child branch, where this branch's range cannot reach.
+  const newestLeaf = snap.localLeafOf(plan.branchId, receipt.coveredTurns.at(-1) ?? "") ?? plan.lastIncludedEntryId;
   const rangeRevision = newestLeaf ? snap.revisionThrough(plan.branchId, newestLeaf) : null;
   if (rangeRevision) receipt.compiledRevision = rangeRevision;
   const usage0 = manifest.usage ?? { input: 0, output: 0, calls: 0, cost: null };
