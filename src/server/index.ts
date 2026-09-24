@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { MainController, type Platform } from "../main/controller.js";
@@ -53,7 +53,10 @@ async function serve() {
   const cwd = realpathSync(resolve(requestedCwd)).split(sep).join("/");
   if (!statSync(cwd).isDirectory())
     throw new Error(`Project path is not a directory: ${cwd}`);
-  const exitOnDisconnect = process.argv.includes("--exit-on-disconnect");
+  const readyFile = option("--ready-file");
+  // Credential deployment is a desktop decision: the host accepts
+  // loginApiKey/logout only when the desktop started it with this flag.
+  const allowCredentialDeploy = process.argv.includes("--allow-credential-deploy");
   const port = Number(option("--port") ?? 0);
   if (!Number.isInteger(port) || port < 0 || port > 65_535)
     throw new Error("--port must be an integer between 0 and 65535");
@@ -99,7 +102,13 @@ async function serve() {
     verifyClient: ({ req }, done) => done(authorized(req.url, token), 401),
   });
   let sequence = 0;
-  let hadClient = false;
+  // Refreshed by connections and running work; a lingering host exits once
+  // this stops advancing for the whole linger window.
+  let lastLive = Date.now();
+  // The connection whose broker the runtime currently uses. A dead socket's
+  // close event can land after a replacement connected; only the owner's
+  // close may clear the broker.
+  let brokerOwner: WebSocket | undefined;
   const stopEvents = controller.onEvent((event: DesktopEvent) => {
     const message: HostMessage = { type: "event", sequence: ++sequence, event };
     for (const client of wss.clients) send(client, message);
@@ -129,11 +138,18 @@ async function serve() {
     // ws emits 'error' right before 'close'; without a listener the event
     // throws and kills the host. The 'close' handler below does the cleanup.
     socket.on("error", () => {});
-    hadClient = true;
+    lastLive = Date.now();
     const modelStreams = new Map<string, BrokerModelStream>();
+    brokerOwner = socket;
     controller.projectRuntime.setModelBroker((model, context, options) => {
       const id = randomBytes(16).toString("hex");
       const stream = new BrokerModelStream(model);
+      // A lingering host serves sessions between desktop connections; a
+      // brokered call with no live socket must fail fast instead of hanging.
+      if (socket.readyState !== WebSocket.OPEN) {
+        stream.fail("Desktop model broker is not connected");
+        return stream;
+      }
       const abort = () => send(socket, { type: "model.cancel", id });
       modelStreams.set(id, stream);
       options?.signal?.addEventListener("abort", abort, { once: true });
@@ -159,6 +175,7 @@ async function serve() {
       platform: process.platform,
       arch: process.arch,
       cwd,
+      allowCredentialDeploy,
     });
     socket.on("message", async (data) => {
       let request: HostRequest | undefined;
@@ -170,6 +187,13 @@ async function serve() {
         }
         if (message.type === "model.failure") {
           modelStreams.get(message.id)?.fail(message.error);
+          return;
+        }
+        if (message.type === "shutdown") {
+          // The desktop's intentional teardown: drain and exit now instead of
+          // waiting out the linger window.
+          socket.close();
+          setImmediate(shutdown);
           return;
         }
         request = message;
@@ -189,7 +213,8 @@ async function serve() {
           request.route === "agent.control" &&
           ["loginApiKey", "logout"].includes(
             String((request.input as { action?: unknown } | undefined)?.action),
-          )
+          ) &&
+          !allowCredentialDeploy
         )
           throw new Error("Model credentials are desktop-only");
         const result = await controller.invoke(request.route, request.input);
@@ -212,11 +237,17 @@ async function serve() {
       }
     });
     socket.on("close", () => {
-      controller.projectRuntime.setModelBroker(undefined);
+      // A superseded connection must not clear its replacement's broker.
+      if (brokerOwner === socket) {
+        brokerOwner = undefined;
+        controller.projectRuntime.setModelBroker(undefined);
+      }
       for (const stream of modelStreams.values())
         stream.fail("Desktop model broker disconnected");
       modelStreams.clear();
-      if (exitOnDisconnect && hadClient) setImmediate(shutdown);
+      // The host lingers on: unplanned disconnects leave running work alive,
+      // and the idle check below reaps it once nothing runs and nobody
+      // reconnects within the linger window.
     });
   });
   wss.on("error", (error) => {
@@ -224,26 +255,72 @@ async function serve() {
   });
   await new Promise<void>((accept) => wss.once("listening", accept));
   const address = wss.address() as AddressInfo;
-  process.stdout.write(
+  // A lingering host outlives its desktop connection: an unplanned disconnect
+  // leaves running work alive. It exits once nobody is connected and nothing
+  // has run for the whole linger window.
+  const lingerMs = Math.max(
+    30_000,
+    Number.parseInt(process.env.PIX_HOST_LINGER_MS ?? "600000", 10) || 600_000,
+  );
+  const idleCheck = setInterval(() => {
+    if (wss.clients.size > 0) {
+      lastLive = Date.now();
+      return;
+    }
+    void (async () => {
+      try {
+        const sessions = await controller.invoke("session.list") as { running?: boolean }[];
+        if (sessions.some((session) => session.running)) lastLive = Date.now();
+        else if (Date.now() - lastLive >= lingerMs) {
+          clearInterval(idleCheck);
+          await shutdown();
+        }
+      } catch {
+        // A busy check that cannot run must not become a shutdown reason.
+        lastLive = Date.now();
+      }
+    })();
+  }, 30_000);
+  idleCheck.unref();
+  const readyLine =
     `${READY_MARKER}${JSON.stringify({
       protocol: PIX_REMOTE_PROTOCOL,
       port: address.port,
       token,
       pid: process.pid,
-    })}\n`,
-  );
+    })}\n`;
+  process.stdout.write(readyLine);
+  if (readyFile) {
+    writeFileSync(readyFile, readyLine, { mode: 0o600 });
+    // The launcher only reads this file; removing it here keeps the host in
+    // charge of its own artifact even when the launching session dies first.
+    const cleanup = setTimeout(() => {
+      try { unlinkSync(readyFile); } catch { /* already gone */ }
+    }, 10_000);
+    cleanup.unref();
+    sweepStaleReadyFiles(readyFile);
+  }
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  if (exitOnDisconnect) {
-    // --exit-on-disconnect arms only after a first client: a desktop that died
-    // between spawn and handshake would otherwise leave this host idling
-    // forever on its owner's machine.
-    const orphan = setTimeout(
-      () => { if (!hadClient) shutdown(); },
-      Number(process.env.PIX_HOST_ORPHAN_TIMEOUT_MS) || 600_000,
-    );
-    orphan.unref();
-  }
+}
+
+/**
+ * A host that died before its own cleanup timer leaves its ready file behind
+ * (its launcher is gone too). Each start sweeps the leftovers: a file older
+ * than two minutes has no reader left under any timeline.
+ */
+function sweepStaleReadyFiles(current: string) {
+  try {
+    const dir = dirname(current);
+    const cutoff = Date.now() - 120_000;
+    for (const name of readdirSync(dir)) {
+      if (!/^host-\d+\.ready$/u.test(name)) continue;
+      const file = join(dir, name);
+      try {
+        if (file !== current && statSync(file).mtimeMs < cutoff) unlinkSync(file);
+      } catch { /* raced with another sweep */ }
+    }
+  } catch { /* best-effort housekeeping */ }
 }
 
 const command = process.argv[2];

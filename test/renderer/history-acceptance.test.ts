@@ -1,8 +1,8 @@
-// End-to-end acceptance coverage for the operation history feature, at the
-// store level with mocked IPC (scenarios 1-3, 5) and via the mounted panel
-// (scenario 4). Shortcut keys themselves belong to a parallel PR; the rapid
-// ⌘Z behaviour these tests cover is the undoSteps/redoSteps concurrency that
-// shortcuts delegate to.
+// End-to-end acceptance coverage for the operation history feature: lock
+// sealing, rapid ⌘Z concurrency (the undoSteps/redoSteps serialisation that
+// shortcuts delegate to), and the mounted panel's click-to-jump wiring.
+// Journal recording and the management-op round-trips themselves are covered
+// by history-actions.test.ts.
 
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,55 +65,6 @@ async function flush() {
 }
 
 describe("management ops round-trip E2E", () => {
-  it("pin: undo flips the flag without a new entry, redo re-pins", async () => {
-    const { history, store } = await boot();
-    store.sessions = [summary("s.jsonl", "My Sesh")];
-    lib.mockResolvedValue({ projects: [] });
-
-    await store.pin("s.jsonl", true);
-    expect(history.history.cursor).toBe(1);
-
-    const undone = await history.undoSteps(1);
-    expect(undone).toBe(true);
-    expect(lib).toHaveBeenLastCalledWith("library.pin", { path: "s.jsonl", pinned: false });
-    expect(history.history.entries).toHaveLength(1); // no new journal entry
-    expect(history.history.cursor).toBe(0);
-
-    await history.redoSteps(1);
-    expect(lib).toHaveBeenLastCalledWith("library.pin", { path: "s.jsonl", pinned: true });
-    expect(history.history.cursor).toBe(1);
-  });
-
-  it("archiveSession: undo restores the archived flag, redo re-archives", async () => {
-    const { history, store } = await boot();
-    store.sessions = [summary("s1", "My Sesh")];
-    lib.mockResolvedValue({ projects: [] });
-
-    await store.archiveSession("s1", true);
-    expect(history.history.entries[0]?.kind).toBe("archiveSession");
-
-    await history.undoSteps(1);
-    expect(lib).toHaveBeenLastCalledWith("library.archiveSession", { path: "s1", archived: false });
-
-    await history.redoSteps(1);
-    expect(lib).toHaveBeenLastCalledWith("library.archiveSession", { path: "s1", archived: true });
-  });
-
-  it("rename: undo restores the previous name via session.rename IPC", async () => {
-    const { history, store } = await boot();
-    store.sessions = [summary("s1", "Old Name")];
-    lib.mockResolvedValue({ sessions: [summary("s1", "New Name")] });
-
-    await store.rename("s1", "New Name");
-    expect(history.history.entries[0]?.label).toContain("Old Name");
-
-    await history.undoSteps(1);
-    expect(lib).toHaveBeenLastCalledWith("session.rename", { path: "s1", name: "Old Name" });
-
-    await history.redoSteps(1);
-    expect(lib).toHaveBeenLastCalledWith("session.rename", { path: "s1", name: "New Name" });
-  });
-
   it("archiveProject: undo flips the archiveProject flag back, redo re-archives", async () => {
     const { history, store } = await boot();
     store.projects = [{ id: "p1", project: { name: "Proj", path: "D:/P" }, sessions: [] }];
@@ -140,26 +91,6 @@ describe("lock sealing after irreversible ops", () => {
     await store.pin("s1", true);
     store.current = snapshot("s1");
   }
-
-  it("undo of a pinned step stops at a sendPrompt lock", async () => {
-    const { history, store } = await boot();
-    await seedPinAndCurrent(store, lib);
-    expect(history.history.cursor).toBe(1);
-
-    lib.mockResolvedValue({});
-    await store.prompt("hi");
-    expect(history.history.entries).toHaveLength(2);
-    expect(history.history.entries[1]?.undoable).toBe(false);
-
-    lib.mockClear();
-    const ret = await history.undoSteps(1);
-    expect(ret).toBe(false);
-    expect(lib).not.toHaveBeenCalledWith("library.pin", { path: "s1", pinned: false });
-    expect(history.history.cursor).toBe(2); // the lock seals the pin underneath
-    expect(history.history.toast).toBe(i18n.global.t("history.locked", {
-      label: i18n.global.t("history.sendPrompt", { text: "hi" }),
-    }));
-  });
 
   it("undo of a pinned step stops at an abort lock", async () => {
     const { history, store } = await boot();

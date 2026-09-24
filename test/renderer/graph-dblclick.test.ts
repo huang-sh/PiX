@@ -71,30 +71,12 @@ function snapshot(): SessionSnapshot {
   };
 }
 
-describe("GraphPanel node double-click opens the chat panel", () => {
+// Plain node double-click (reveal the primary chat panel) is covered in
+// chat-columns.test.ts; this file keeps the footer-strip variant, whose
+// hit target differs from the node body's.
+describe("GraphPanel footer-strip double-click opens the chat panel", () => {
   beforeAll(() => {
     globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
-  });
-
-  it("expands chat when a prompt node is double-clicked", async () => {
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const session = useSessionStore();
-    session.current = snapshot();
-    const layout = useLayoutStore();
-    layout.layout.collapsed.chat = true;
-
-    const wrapper = mount(GraphPanel, { global: { plugins: [pinia, i18n] } });
-    await flushPromises();
-
-    const node = wrapper.find(".vue-flow__node");
-    expect(node.exists()).toBe(true);
-    expect(layout.layout.collapsed.chat).toBe(true);
-
-    await node.trigger("dblclick");
-    await flushPromises();
-
-    expect(layout.layout.collapsed.chat).toBe(false);
   });
 
   it("expands chat when the node footer strip is double-clicked", async () => {

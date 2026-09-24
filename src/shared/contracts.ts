@@ -155,6 +155,10 @@ export function validateRouteInput(
     case "workspace.directories":
     case "workspace.open":
       return { path: str(v.path, "path") };
+    case "remote.deployed":
+      return {};
+    case "remote.revoke":
+      return { id: str(v.id, "id") };
     case "app.openExternal":
       return { url: externalUrl(v.url) };
     case "app.openPath":
@@ -191,6 +195,14 @@ export function validateRouteInput(
         // Set by undo of "create session": refuse to unlink a file that
         // grew message entries behind the journal's back.
         ...(v.pristineOnly === true ? { pristineOnly: true } : {}),
+      };
+    case "usage.overview":
+      return {
+        range:
+          v.range === "today" || v.range === "7d" || v.range === "30d" || v.range === "all"
+            ? v.range
+            : "30d",
+        scope: v.scope === "all" ? "all" : "project",
       };
     case "library.pin":
       return { path: str(v.path, "path"), pinned: v.pinned === true };
@@ -238,8 +250,8 @@ export function validateRouteInput(
     case "settings.update": {
       const patch = obj(v.patch);
       if (v.scope !== "project" && v.scope !== "global" && Object.hasOwn(patch, "theme") &&
-          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach")
-        throw new Error("theme must be light, dark, teal, peach or system");
+          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach" && patch.theme !== "paper" && patch.theme !== "graphite")
+        throw new Error("theme must be light, dark, teal, peach, paper, graphite or system");
       return {
         scope:
           v.scope === "project"

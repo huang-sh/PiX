@@ -1,16 +1,16 @@
 import { computed, readonly, ref } from "vue";
-import { normalizeTheme, resolveTheme, themeColors, type ColorScheme, type ThemeId, type ThemePreference } from "../shared/theme";
+import { normalizeTheme, resolveTheme, themeColors, themeSchemes, type ColorScheme, type ThemeId, type ThemePreference } from "../shared/theme";
 
 const resolved = ref<ThemeId>("light");
 export const activeTheme = readonly(resolved);
-export const colorScheme = computed<ColorScheme>(() => resolved.value === "dark" ? "dark" : "light");
+export const colorScheme = computed<ColorScheme>(() => themeSchemes[resolved.value]);
 let preference: ThemePreference = "light";
 let systemTheme: MediaQueryList | undefined;
 
 export function applyTheme(value: ThemePreference) {
   preference = normalizeTheme(value);
   const theme = resolveTheme(preference, systemTheme?.matches ?? false);
-  const scheme = theme === "dark" ? "dark" : "light";
+  const scheme = themeSchemes[theme];
   const root = document.documentElement;
   root.dataset.theme = preference;
   root.dataset.colorScheme = scheme;

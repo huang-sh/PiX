@@ -8,9 +8,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
-import { WslHostClient } from "../src/main/wsl-host-client.js";
+import { WslHostClient, RemoteHostUnreachable, HostStarted, launcherScript } from "../src/main/wsl-host-client.js";
 import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
+import { PiRuntime } from "../src/main/pi-runtime.js";
 import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
@@ -44,6 +45,7 @@ class FakeSocket extends EventEmitter {
     this.pings++;
     callback();
   }
+  close() { this.readyState = WebSocket.CLOSING; }
   terminate() { this.readyState = WebSocket.CLOSED; this.emit("close"); }
 }
 function transport(t: TestContext) {
@@ -139,13 +141,23 @@ test("heartbeat detects a half-open connection and accepts healthy pong replies"
   assert.equal(client.connected, false);
 });
 
-test("a host exit reports its recent stderr output", async (t) => {
-  const { client, child } = transport(t);
-  const failure = new Promise<Error>(resolve => client.onDisconnect(resolve));
-  child.stderr.write("Warning: noisy banner\n");
-  child.stderr.write("Error: session graph is corrupt\n");
-  child.emit("exit", 1);
-  assert.match((await failure).message, /Remote host exited with code 1:[\s\S]*session graph is corrupt/);
+test("a launcher exit does not end the link, but a reattach transport exit does", async (t) => {
+  // The launcher wrapper is expected to exit once the detached host runs;
+  // only a transport child (a reattach's ssh -N tunnel) carries the link.
+  const launcher = transport(t);
+  launcher.child.emit("exit", 0);
+  assert.equal(launcher.client.connected, true, "the detached host outlives its launcher");
+  const child = new FakeChild();
+  const socket = new FakeSocket();
+  const transportClient = Reflect.construct(WslHostClient, [
+    child, socket, { cwd: "/project" },
+    { kind: "ssh", target: "h", port: 1, token: "t", pid: 1 }, true, true,
+  ]) as WslHostClient;
+  t.after(async () => { child.exitCode = 0; child.emit("exit", 0); await transportClient.dispose(); });
+  const failure = new Promise<Error>(resolve => transportClient.onDisconnect(resolve));
+  child.stderr.write("ssh: connect to host h port 22: Connection reset\n");
+  child.emit("exit", 255);
+  assert.match((await failure).message, /SSH transport exited with code 255/);
 });
 
 async function waitForLog(text: string) {
@@ -173,7 +185,7 @@ test("socket-first disconnection logs late stderr at child close without notifyi
   child.stderr.end();
   child.emit("close", 23, null);
   const log = await waitForLog("late stderr after exit: final diagnostic");
-  assert.match(log, /child closed\] requested=false code=23 signal=none/);
+  assert.match(log, /launcher closed\] requested=false code=23 signal=none/);
   assert.equal(failures.length, 1);
   assert.equal(failures[0]!.message, "Remote host disconnected");
 });
@@ -260,7 +272,17 @@ test("cancelling the WebSocket handshake closes the real socket promptly", async
   await closed;
 });
 
-function controllerFixture(t: TestContext) {
+function controllerFixture(t: TestContext, seed?: (home: string) => void) {
+  // A fresh profile per test: persisted reattach handles and remembered
+  // projects must not leak between tests.
+  const home = mkdtempSync(join(tmpdir(), "pix-remote-home-"));
+  const previousHome = process.env.PIX_HOME;
+  process.env.PIX_HOME = home;
+  seed?.(home);
+  t.after(() => {
+    process.env.PIX_HOME = previousHome ?? settingsHome;
+    rmSync(home, { recursive: true, force: true });
+  });
   // Canonical like the controller sees it: session.stop matches registry entries by the realpath the invoke boundary produces (macOS /var symlink).
   const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-remote-")));
   const controller = new MainController(root, {
@@ -286,8 +308,11 @@ function controllerFixture(t: TestContext) {
 function candidate(controller: MainController) {
   const events = new EventEmitter();
   return {
-    hello: { cwd: "/new" }, connected: true, disposed: false,
+    hello: { cwd: "/new" } as { cwd: string } & Record<string, unknown>, connected: true, disposed: false, abandoned: false, reattached: false,
+    handle: undefined as any,
+    calls: [] as any[],
     async request(route: string, input?: any): Promise<any> {
+      this.calls.push([route, input]);
       if (route === "settings.get") return controller.settings.bundle();
       if (route === "workspace.open") return { path: input.path };
       if (route === "workspace.directories") return { path: input.path, entries: [] };
@@ -298,6 +323,7 @@ function candidate(controller: MainController) {
     emit(event: unknown) { events.emit("event", event); },
     onDisconnect(listener: (error: Error) => void) { events.on("disconnect", listener); return () => events.off("disconnect", listener); },
     async dispose() { this.disposed = true; this.connected = false; },
+    async abandon() { this.abandoned = true; this.connected = false; },
     disconnect() { this.connected = false; events.emit("disconnect", new Error("network lost")); },
   };
 }
@@ -509,6 +535,8 @@ test("a successful candidate is pooled instead of closing the old host and repor
   assert.equal(result.project?.path, "/new/sub");
   assert.equal(controller.wsl, next);
   assert.equal(old.disposed, false, "switching remote projects keeps the previous host pooled");
+  fastReconnect(t);
+  t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("network down"); });
   const events: any[] = [];
   controller.onEvent((event) => events.push(event));
   next.disconnect();
@@ -518,6 +546,280 @@ test("a successful candidate is pooled instead of closing the old host and repor
   const cached = await controller.invoke("app.bootstrap") as any;
   assert.equal(cached.project.path, "/new/sub");
   assert.equal(cached.projects.find((record: any) => record.id === id).connected, false);
+});
+
+// The reconnect loop waits between attempts; tests cap the wait so loops settle fast.
+function fastReconnect(t: TestContext) {
+  const previous = process.env.PIX_REMOTE_RECONNECT_MAX_MS;
+  process.env.PIX_REMOTE_RECONNECT_MAX_MS = "20";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PIX_REMOTE_RECONNECT_MAX_MS;
+    else process.env.PIX_REMOTE_RECONNECT_MAX_MS = previous;
+  });
+}
+
+test("an unplanned disconnect of the viewed workspace reconnects automatically", async (t) => {
+  fastReconnect(t);
+  const { controller, old, project } = controllerFixture(t);
+  const events: any[] = [];
+  controller.onEvent((event) => events.push(event));
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: project.path };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  old.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const dropped = events.find((event) => event.type === "remote.connection" && event.payload.connected === false);
+  assert.equal(dropped.payload.reconnecting, true);
+  assert.ok(events.some((event) => event.type === "remote.connection" &&
+    event.payload.connected === true && event.payload.projectId === projectId(project)),
+    "a restored transport is announced so the view can rehydrate");
+  assert.equal(controller.wsl, fresh);
+  assert.equal(old.disposed, true);
+  assert.equal(controller.projectGroups().find((record) => record.id === projectId(project))?.connected, true);
+});
+
+test("failed reconnect attempts back off and stop once another project is viewed", async (t) => {
+  fastReconnect(t);
+  const { controller, old } = controllerFixture(t);
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("network down"); });
+  old.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const attempts = connectSsh.mock.callCount();
+  assert.ok(attempts >= 2, "the connection is retried");
+  controller.configure(controller.localProjectPath);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(connectSsh.mock.callCount(), attempts, "retries stop once the workspace leaves the view");
+});
+
+test("closing the remote workspace stops the automatic reconnect", async (t) => {
+  fastReconnect(t);
+  const { controller, old } = controllerFixture(t);
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("network down"); });
+  old.disconnect();
+  await controller.closeWsl();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const attempts = connectSsh.mock.callCount();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(connectSsh.mock.callCount(), attempts, "an explicit disconnect is not second-guessed");
+});
+
+test("a background host disconnect is reported without automatic reconnect", async (t) => {
+  fastReconnect(t);
+  const { controller, old, project } = controllerFixture(t);
+  const background: ProjectInfo = { name: "bg", path: "/bg", remote: { kind: "ssh", host: "bg" } };
+  const spare = candidate(controller);
+  controller.installSlot(spare as never, background, controller.settings.bundle());
+  const connectSsh = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not reconnect"); });
+  const events: any[] = [];
+  controller.onEvent((event) => events.push(event));
+  spare.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const dropped = events.find((event) => event.type === "remote.connection" && event.payload.connected === false);
+  assert.equal(dropped.payload.reconnecting, false);
+  assert.equal(connectSsh.mock.callCount(), 0);
+  assert.equal(controller.wsl, old, "the viewed workspace is untouched");
+  assert.equal(controller.projectGroups().find((record) => record.id === projectId(project))?.connected, true);
+});
+
+test("bootstrapping a dead viewed workspace restarts recovery", async (t) => {
+  fastReconnect(t);
+  const { controller, project } = controllerFixture(t);
+  const dead = candidate(controller);
+  dead.connected = false;
+  controller.installSlot(dead as never, project, controller.settings.bundle());
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: project.path };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  const cached = await controller.invoke("app.bootstrap") as any;
+  assert.equal(cached.project.path, project.path, "a dead host serves its remembered rows while recovering");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(controller.wsl, fresh);
+});
+
+// A lingering host is remembered so a later session reattaches to it.
+const seededHandle = { kind: "ssh", target: "old", port: 41000, token: "secret", pid: 4242, path: "/old" } as const;
+function seedLingeringHost(home: string) {
+  mkdirSync(join(home, ".pix"), { recursive: true });
+  const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+  writeFileSync(join(home, ".pix", "remote-hosts.json"), JSON.stringify({ [key]: seededHandle }));
+}
+
+test("the launcher script detaches the host and reports readiness via a file", () => {
+  const script = launcherScript({
+    exe: "/home/u/.pix/server/current/bin/pix-agent-host",
+    cwd: "/proj",
+    port: 41234,
+    base: "/home/u/.pix",
+  });
+  assert.match(script, /--cwd \/proj --port 41234 --ready-file "\$F"/);
+  assert.match(script, /setsid \$C \|\| nohup \$C/, "the host detaches from the launching session");
+  assert.match(script, /<\/dev\/null >>\$L 2>&1 &/, "stdio is redirected so the wrapper can exit");
+  assert.match(script, /cat "\$F"/, "readiness reaches the desktop through the wrapper's stdout");
+  assert.match(script, /tail -n 5 "\$L"/, "startup failures surface their log tail");
+  assert.ok(!script.includes("'"), "the ssh transport wraps the script in single quotes");
+  assert.ok(!/[&]\s*;/.test(script), "a ';' after the background '&' is a POSIX sh syntax error");
+  const deployed = launcherScript({
+    exe: "$HOME/.pix/server/current/bin/pix-agent-host",
+    cwd: "/p",
+    port: 1,
+    base: "$HOME/.pix",
+    deployCredentials: true,
+  });
+  assert.match(deployed, /--allow-credential-deploy/);
+});
+
+test("dispose orders a lingering host to shut down; abandon leaves it running", async (t) => {
+  const disposed = transport(t);
+  disposed.child.exitCode = 0;
+  await disposed.client.dispose();
+  assert.equal(disposed.socket.sent.filter((message: any) => message.type === "shutdown").length, 1,
+    "an intentional teardown tells the host to exit now");
+  const child = new FakeChild();
+  const socket = new FakeSocket();
+  const client = Reflect.construct(WslHostClient, [child, socket, { cwd: "/p" },
+    { kind: "ssh", target: "h", port: 1, token: "t", pid: 1 }, true, true]) as WslHostClient;
+  t.after(async () => { child.exitCode = 0; child.emit("exit", 0); await client.dispose(); });
+  child.exitCode = 0;
+  await client.abandon();
+  assert.equal(socket.sent.filter((message: any) => message.type === "shutdown").length, 0,
+    "an abandoned link leaves the lingering host alone");
+});
+
+test("reattach speaks the token handshake against a lingering host", async (t) => {
+  const server = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    verifyClient: ({ req }, done) =>
+      done(new URL(req.url ?? "/", "ws://127.0.0.1").searchParams.get("token") === "secret", 401),
+  });
+  server.on("connection", socket => socket.send(JSON.stringify({
+    type: "hello", protocol: PIX_REMOTE_PROTOCOL, hostVersion: "test", piVersion: "test",
+    platform: "linux", arch: "x64", cwd: "/project",
+  })));
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(() => new Promise<void>(resolve => {
+    for (const socket of server.clients) socket.terminate();
+    server.close(() => resolve());
+  }));
+  const port = (server.address() as { port: number }).port;
+  const client = await WslHostClient.reattach(
+    { kind: "wsl", target: "Ubuntu", port, token: "secret", pid: 1 },
+    { connectTimeoutMs: 2_000 },
+  );
+  assert.equal(client.reattached, true);
+  assert.equal(client.hello.cwd, "/project");
+  await client.abandon();
+  await assert.rejects(
+    WslHostClient.reattach({ kind: "wsl", target: "Ubuntu", port, token: "wrong", pid: 1 }, { connectTimeoutMs: 500 }),
+    /connect|handshake|401|Unable/i,
+    "a wrong token cannot attach",
+  );
+});
+
+test("a remembered lingering host is reattached instead of spawned", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: "/old" };
+  fresh.reattached = true;
+  fresh.handle = seededHandle;
+  old.connected = false;  // drop the pooled fast path so the reattach path runs
+  const reattach = t.mock.method(WslHostClient, "reattach", async () => fresh as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not spawn"); });
+  const result = await controller.connectSsh("old", "/old");
+  assert.equal(reattach.mock.callCount(), 1);
+  assert.equal(spawn.mock.callCount(), 0, "attaching beats spawning a second host");
+  assert.equal(controller.wsl, fresh);
+  assert.equal((result as { project: ProjectInfo }).project.path, "/old");
+});
+
+test("an unreachable server keeps the lingering host's handle", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;  // drop the pooled fast path so the reattach path runs
+  t.mock.method(WslHostClient, "reattach", async () => { throw new RemoteHostUnreachable("ssh: connect refused"); });
+  const kill = t.mock.method(WslHostClient, "killHost", async () => {});
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("server down"); });
+  await assert.rejects(controller.connectSsh("old", "/old"), /refused/);
+  assert.equal(kill.mock.callCount(), 0, "an unreachable server must not condemn its hosts");
+  assert.equal(spawn.mock.callCount(), 0, "spawning cannot succeed either; the next retry reattaches");
+  const stored = readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8");
+  assert.match(stored, /"pid":4242/, "the handle stays for the next attempt");
+});
+
+test("a stale remembered host is stopped and replaced by a fresh spawn", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;  // drop the pooled fast path so the reattach path runs
+  t.mock.method(WslHostClient, "reattach", async () => { throw new Error("handshake failed"); });
+  const kill = t.mock.method(WslHostClient, "killHost", async () => {});
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: "/old" };
+  fresh.handle = { kind: "ssh", target: "old", port: 42000, token: "next", pid: 5252 };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  await controller.connectSsh("old", "/old");
+  assert.equal(kill.mock.callCount(), 1, "the wedged host is stopped by its verified pid");
+  assert.equal(controller.wsl, fresh);
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+  assert.equal(stored[key].pid, 5252, "the stored handle follows the fresh host");
+});
+
+test("a cancelled attempt abandons a reattached host instead of stopping it", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  const pending = candidate(controller);
+  pending.hello = { cwd: "/old" };
+  pending.reattached = true;
+  old.connected = false;  // drop the pooled fast path so the reattach path runs
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => (release = resolve));
+  pending.request = (route: string) =>
+    route === "session.list" ? gate.then(() => []) : Promise.resolve(controller.settings.bundle());
+  t.mock.method(WslHostClient, "reattach", async () => pending as any);
+  const first = controller.connectSsh("old", "/old");
+  await new Promise(resolve => setImmediate(resolve));
+  const next = candidate(controller);
+  next.hello = { cwd: "/other" };
+  t.mock.method(WslHostClient, "connectSsh", async () => next as any);
+  await controller.connectSsh("other", "/other");
+  release();
+  await assert.rejects(first, /cancelled/i);
+  assert.equal(pending.abandoned, true, "the lingering host keeps running");
+  assert.equal(pending.disposed, false, "no shutdown was ordered");
+});
+
+test("automatic recovery reattaches to the lingering host", async (t) => {
+  fastReconnect(t);
+  const { controller, old, project } = controllerFixture(t, seedLingeringHost);
+  old.handle = seededHandle as any;
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: "/old" };
+  fresh.reattached = true;
+  fresh.handle = seededHandle;
+  t.mock.method(WslHostClient, "reattach", async () => fresh as any);
+  const events: any[] = [];
+  controller.onEvent(event => events.push(event));
+  old.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(events.some((event) => event.type === "remote.connection" &&
+    event.payload.connected === true && event.payload.projectId === projectId(project)),
+    "the reconnect loop reattached to the same host");
+  assert.equal(controller.wsl, fresh);
+});
+
+test("quitting stops idle hosts but parks hosts mid-run for a reattach", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;  // drop the pooled fast path so a fresh host commits
+  const busy = candidate(controller);
+  busy.hello = { cwd: "/old" };
+  busy.handle = { kind: "ssh", target: "old", port: 41000, token: "secret", pid: 4242 };
+  busy.request = async (route: string) =>
+    route === "session.list" ? [{ running: true } as never] : [];
+  t.mock.method(WslHostClient, "connectSsh", async () => busy as any);
+  await controller.connectSsh("old", "/old");
+  const stored = join(process.env.PIX_HOME!, ".pix", "remote-hosts.json");
+  assert.ok(existsSync(stored), "the committed host is remembered");
+  await controller.pool.closeAllRemote();
+  assert.equal(busy.abandoned, true, "a host mid-run is parked, not stopped");
+  assert.equal(busy.disposed, false);
+  assert.ok(existsSync(stored), "its handle stays for the next session's reattach");
 });
 
 test("reconnecting to a pooled project reuses its host instead of spawning a second one", async (t) => {
@@ -788,4 +1090,222 @@ test("bootstrapping a connected remote workspace restores its remembered session
   assert.equal(bootstrapped.current?.session.path, "/old/s.jsonl",
     "a window reload lands back on the session the workspace last showed");
   assert.equal(controller.current?.session.path, "/old/s.jsonl");
+});
+
+// --- Model autonomy: local credentials win over the desktop broker. ---
+
+function fakeModelRuntime(local: string[]) {
+  const runtime: any = {
+    registered: [] as string[],
+    keys: new Set<string>(),
+    getModel: (provider: string, id: string) => ({ provider, id, baseUrl: "https://real.example" }),
+    checkAuth: async (provider: string) => (local.includes(provider) ? { type: "api_key" } : null),
+    registerProvider: (id: string) => runtime.registered.push(id),
+    unregisterProvider: (id: string) => { runtime.registered = runtime.registered.filter((p: string) => p !== id); },
+    setRuntimeApiKey: async (id: string) => { runtime.keys.add(id); },
+    removeRuntimeApiKey: async (id: string) => { runtime.keys.delete(id); },
+    stream: () => "native",
+    streamSimple: () => "native",
+  };
+  return runtime;
+}
+
+test("a host with local credentials serves those providers directly", async () => {
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  const local = ["anthropic"];
+  const modelRuntime = fakeModelRuntime(local);
+  runtime.modelRuntime = async () => modelRuntime;
+  let brokered = 0;
+  runtime.modelBroker = () => { brokered++; return "brokered"; };
+  const models = [
+    { provider: "anthropic", id: "claude", name: "Claude" },
+    { provider: "openai", id: "gpt", name: "GPT" },
+  ] as never[];
+  await runtime.configureBrokerProviders(["anthropic", "openai"], models);
+  assert.deepEqual(modelRuntime.registered, ["openai"], "locally-authenticated providers keep their native catalog");
+  assert.deepEqual([...modelRuntime.keys], ["openai"], "no fake runtime key shadows a local credential");
+  assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native");
+  assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
+  // setModel's preflight must see brokered providers as configured.
+  assert.deepEqual(await modelRuntime.checkAuth("openai"), { type: "api_key", source: "pix-desktop-broker" });
+  assert.deepEqual(await modelRuntime.checkAuth("anthropic"), { type: "api_key" });
+  assert.equal(await modelRuntime.checkAuth("unknown"), null);
+
+  // A session holding an overlay-resolved model re-resolves when its
+  // provider gains local credentials; the placeholder URL must not leak
+  // into a direct call.
+  let reResolved: any = undefined;
+  runtime.runtime = { session: {
+    model: { provider: "openai", id: "gpt", baseUrl: "http://pix-desktop-broker.invalid" },
+    isStreaming: false,
+    setModel: async (model: any) => { reResolved = model; },
+  } };
+
+  // A deployed credential moves its provider to direct calls...
+  local.push("openai");
+  await runtime.refreshBrokerAuth();
+  assert.equal(reResolved?.baseUrl, "https://real.example", "the stale overlay model is re-resolved");
+  assert.deepEqual(modelRuntime.registered, [], "the overlay is stripped once credentials exist");
+  assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "native");
+
+  // ...and revoking it hands the provider back to the desktop.
+  local.splice(local.indexOf("openai"), 1);
+  await runtime.refreshBrokerAuth();
+  assert.deepEqual(modelRuntime.registered, ["openai"]);
+  assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
+  assert.equal(brokered, 2);
+
+  // A lingering host without its desktop fails clearly, not with a DNS error.
+  runtime.modelBroker = undefined;
+  assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native",
+    "local credentials keep working with no desktop attached");
+  assert.throws(() => modelRuntime.stream({ provider: "openai" }, {}, {}), /reconnect it to use this model/);
+  assert.equal(await modelRuntime.checkAuth("openai"), null,
+    "with no desktop attached, a brokered provider honestly reports unconfigured");
+});
+
+test("connecting deploys credentials to an authorized host when enabled", async (t) => {
+  const { controller, old, project } = controllerFixture(t);
+  old.connected = false;
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: true } });
+  controller.projectRuntime.listApiKeys = () => ({ anthropic: "sk-local", mycustom: "sk-2" });
+  controller.projectRuntime.control = async (input: any) =>
+    input.action === "getModels" ? [] : input.action === "getCustomModels"
+      ? [{ provider: "mycustom", modelId: "m1", name: "M1", baseUrl: "https://x", api: "openai-completions",
+          contextWindow: 128000, maxTokens: 16384, reasoning: false, imageInput: false }]
+      : [];
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: "/old", allowCredentialDeploy: true };
+  fresh.handle = { kind: "ssh", target: "old", port: 1, token: "t", pid: 1 };
+  t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  await controller.connectSsh("old", "/old");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const logins = fresh.calls.filter(([route, input]: any[]) => route === "agent.control" && input.action === "loginApiKey");
+  assert.deepEqual(logins.map(([, input]: any[]) => input.provider).sort(), ["anthropic", "mycustom"],
+    "every stored API key reaches the host");
+  assert.deepEqual(logins.map(([, input]: any[]) => input.apiKey), ["sk-local", "sk-2"]);
+  assert.equal(fresh.calls.some(([route, input]: any[]) => route === "agent.control" && String(input?.action).includes("CustomModel")), true,
+    "custom model definitions ride along");
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.deepEqual(stored[projectId(project)].pushedProviders.sort(), ["anthropic", "mycustom"]);
+  const firstLogin = fresh.calls.findIndex(([route, input]: any[]) => route === "agent.control" && input.action === "loginApiKey");
+  assert.ok(fresh.calls.slice(firstLogin + 1).some(([route, input]: any[]) =>
+    route === "agent.control" && input.action === "setBrokerProviders"),
+    "the catalog re-pushes after the keys land so open sessions go direct");
+});
+
+test("deployment stays off without the setting or the host's authorization", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  controller.projectRuntime.listApiKeys = () => ({ anthropic: "sk-local" });
+  const unauthorized = candidate(controller);
+  unauthorized.hello = { cwd: "/old" };
+  t.mock.method(WslHostClient, "connectSsh", async () => unauthorized as any);
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: true } });
+  await controller.connectSsh("old", "/old");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(unauthorized.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "loginApiKey"), false,
+    "a host started without the authorization receives nothing");
+
+  const previous = candidate(controller);
+  previous.hello = { cwd: "/old", allowCredentialDeploy: true };
+  const seeded: typeof previous = previous;
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: false } });
+  const active = controller.pool.active();
+  assert.ok(active);
+  active!.client = seeded as never;
+  await controller.invoke("agent.control", { action: "loginApiKey", provider: "anthropic", apiKey: "sk" });
+  assert.equal(seeded.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "loginApiKey" && input?.provider === "anthropic" && input?.apiKey === "sk"), false,
+    "with the setting off, credentials never leave the desktop");
+});
+
+test("a desktop logout removes only credentials this desktop deployed", async (t) => {
+  const { controller, old, project } = controllerFixture(t, home => {
+    seedLingeringHost(home);
+    const file = join(home, ".pix", "remote-hosts.json");
+    const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    stored[key].pushedProviders = ["anthropic"];
+    writeFileSync(file, JSON.stringify(stored));
+  });
+  await controller.invoke("settings.update", { scope: "app", patch: { deployModelCredentialsToRemote: true } });
+  old.hello = { cwd: "/old", allowCredentialDeploy: true } as any;
+  controller.projectRuntime.control = async () => [];
+  await controller.invoke("agent.control", { action: "logout", provider: "serverlocal" });
+  assert.ok(!old.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "logout"),
+    "a login the server already had is never removed");
+  await controller.invoke("agent.control", { action: "logout", provider: "anthropic" });
+  assert.ok(old.calls.some(([route, input]: any[]) => route === "agent.control" && input?.action === "logout" && input?.provider === "anthropic"),
+    "a deployed provider is cleaned up");
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.deepEqual(stored[projectId(project)].pushedProviders, []);
+});
+
+test("revoking removes deployed credentials from a connected host", async (t) => {
+  const { controller, old, project } = controllerFixture(t, home => {
+    seedLingeringHost(home);
+    const file = join(home, ".pix", "remote-hosts.json");
+    const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    stored[key].pushedProviders = ["anthropic", "mycustom"];
+    writeFileSync(file, JSON.stringify(stored));
+  });
+  const result = await controller.invoke("remote.revoke", { id: projectId(project) }) as { revoked: string[] };
+  assert.deepEqual([...result.revoked].sort(), ["anthropic", "mycustom"]);
+  const logouts = old.calls.filter(([route, input]: any[]) => route === "agent.control" && input?.action === "logout");
+  assert.deepEqual(logouts.map(([, input]: any[]) => input.provider).sort(), ["anthropic", "mycustom"]);
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.deepEqual(stored[projectId(project)].pushedProviders, []);
+});
+
+test("dropping a disconnected slot keeps its lingering host's handle", async (t) => {
+  const bgProject: ProjectInfo = { name: "bg", path: "/bg", remote: { kind: "ssh", host: "bg" } };
+  const bgId = projectId(bgProject);
+  const { controller } = controllerFixture(t, home => {
+    mkdirSync(join(home, ".pix"), { recursive: true });
+    writeFileSync(join(home, ".pix", "remote-hosts.json"), JSON.stringify({
+      [bgId]: { kind: "ssh", target: "bg", port: 41001, token: "tok", pid: 4343, path: "/bg" },
+    }));
+  });
+  const spare = candidate(controller);
+  controller.installSlot(spare as never, bgProject, controller.settings.bundle());
+  spare.disconnect();   // unplanned: its host lingers with running work
+  await controller.pool.dropSlot(controller.pool.slot(bgId)!, true);
+  let stored = readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8");
+  assert.match(stored, /"pid":4343/, "the handle survives so the next session reattaches");
+  controller.pool.forgetHost(bgId);
+  stored = readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8");
+  assert.ok(!stored.includes("4343"), "removing the project gives up on its host");
+});
+
+test("a link death after READY redials the surviving host instead of wasting it", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  // READY arrived, then the tunnel died before the WebSocket handshake —
+  // exactly the pattern of an SSH reset mid-connect.
+  const startedHandle = { kind: "ssh", target: "old", port: 41515, token: "survivor", pid: 6262 } as const;
+  t.mock.method(WslHostClient, "connectSsh", async () => {
+    throw new HostStarted("connect ECONNREFUSED 127.0.0.1:54114", startedHandle as never);
+  });
+  const reattached = candidate(controller);
+  reattached.hello = { cwd: "/old" };
+  reattached.reattached = true;
+  reattached.handle = { kind: "ssh", target: "old", port: 41515, token: "survivor", pid: 6262 };
+  const reattach = t.mock.method(WslHostClient, "reattach", async () => reattached as any);
+  const result = await controller.connectSsh("old", "/old");
+  assert.equal(reattach.mock.callCount(), 1, "the connect redials the surviving host");
+  assert.equal(controller.wsl, reattached);
+  assert.equal((result as { project: ProjectInfo }).project.path, "/old");
+  const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
+  assert.equal(stored[key]?.pid, 6262, "the handle is kept even before the workspace commits");
+});
+
+test("a host that never started is not redialed", async (t) => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("ssh: connect refused"); });
+  const reattach = t.mock.method(WslHostClient, "reattach", async () => { throw new Error("must not reattach"); });
+  await assert.rejects(controller.connectSsh("old", "/old"), /connect refused/);
+  assert.equal(reattach.mock.callCount(), 0);
 });

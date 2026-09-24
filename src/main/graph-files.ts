@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
@@ -115,6 +116,27 @@ function inheritsConsistently(record: BranchRecord) {
   return true;
 }
 
+/**
+ * Windows recycles pids aggressively: a lock outlives its force-killed owner
+ * as soon as an unrelated process reuses the number, and the plain signal
+ * probe then reports the holder alive forever. Before honoring a live
+ * holder, also require its process image to look like Pi (packaged PiX, dev
+ * electron, or the node-based remote host server).
+ */
+function holderLooksLikePi(pid: number): boolean {
+  let probe: ReturnType<typeof spawnSync>;
+  try {
+    probe =
+      process.platform === "win32"
+        ? spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true })
+        : spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+  } catch {
+    return true;
+  }
+  if (probe.error) return true;
+  return probe.status === 0 && /pix|electron|node/i.test(String(probe.stdout ?? ""));
+}
+
 export class GraphFiles {
   readonly dir: string;
   readonly records = new Map<string, BranchRecord>();
@@ -156,12 +178,21 @@ export class GraphFiles {
     mkdirSync(this.dir, { recursive: true });
     const file = join(this.dir, "owner.json");
     if (existsSync(file)) {
-      const owner = JSON.parse(readFileSync(file, "utf8"));
-      if (owner.host !== hostname()) throw new Error("Session graph is owned by another host");
-      let alive = true;
-      try { process.kill(owner.pid, 0); } catch (e) { alive = (e as NodeJS.ErrnoException).code !== "ESRCH"; }
-      if (alive) throw new Error("Session graph is already open in another PiX process");
-      rmSync(file);
+      // A corrupt or shapeless lock guards nothing: replace it.
+      let owner: { pid?: unknown; host?: unknown } | undefined;
+      try { owner = JSON.parse(readFileSync(file, "utf8")); } catch { owner = undefined; }
+      if (!owner || typeof owner.pid !== "number" || !Number.isInteger(owner.pid)) {
+        rmSync(file, { force: true });
+      } else if (owner.host !== hostname()) {
+        throw new Error("Session graph is owned by another host");
+      } else {
+        let alive = true;
+        try { process.kill(owner.pid, 0); } catch (e) { alive = (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+        if (alive && holderLooksLikePi(owner.pid))
+          throw new Error("Session graph is already open in another PiX process");
+        if (alive) debugLog("graph lock: holder pid no longer a Pi process; taking over", { pid: owner.pid });
+        rmSync(file, { force: true });
+      }
     }
     const fd = openSync(file, "wx");
     try { writeFileSync(fd, JSON.stringify({ pid: process.pid, host: hostname() })); fsyncSync(fd); }

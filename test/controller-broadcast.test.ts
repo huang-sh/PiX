@@ -120,7 +120,10 @@ test("switching sessions keeps the other session's live progress for its return"
   } finally { controller.dispose(); }
 });
 
-test("epoch records are pruned to the live set", async () => {
+// The pruning rules themselves (mid-stream/viewed retention, inert records)
+// are covered unit-level in progress-ledger.test.ts; this wiring check only
+// verifies the controller feeds the ledger the live set from both paths.
+test("epoch records follow the registry's live set", async () => {
   const controller = new MainController(root, platform);
   const snapshotOf = (path: string): SessionSnapshot => ({
     session: { path }, entries: [], projection: projectSession([], null), runtime: {} as never,
@@ -130,28 +133,12 @@ test("epoch records are pruned to the live set", async () => {
     ({ open: async () => {}, snapshot: () => snapshotOf(entry.path), state: () => ({}), close: async () => {} }) as never;
   const epochs = () => controller.progress.epochs;
   const note = (path: string) => controller.emit({ type: "sessions", payload: { current: snapshotOf(path) } });
-  const stream = (graphId: string) => ({ type: "agent", payload: {
-    type: "message_update", graphId, message: { role: "assistant", content: [{ type: "text", text: "streaming" }] },
-  } } as never);
   try {
     await controller.registry.open(controller.project!, null, "a.jsonl");
     await controller.registry.open(controller.project!, null, "b.jsonl");
     note("a.jsonl");
     note("b.jsonl");
-    assert.deepEqual([...epochs().keys()].sort(), ["a.jsonl", "b.jsonl"], "live entries keep their records");
-
-    // A viewed session without a live entry (a remote host's, say) keeps its
-    // record, and its stream keeps it across the view switch until it settles.
-    controller.current = snapshotOf("r.jsonl");
-    note("r.jsonl");
-    controller.emit(stream("r.jsonl"));
-    controller.current = snapshotOf("b.jsonl");
-    note("b.jsonl");
-    assert.ok(epochs().has("r.jsonl"), "a mid-stream session keeps its record without a live entry");
-    controller.emit({ type: "agent", payload: { type: "message_end", graphId: "r.jsonl",
-      message: { role: "assistant", content: [{ type: "text", text: "done" }] } } } as never);
-    note("b.jsonl");
-    assert.ok(!epochs().has("r.jsonl"), "the record dies with its last baseline");
+    assert.deepEqual([...epochs().keys()].sort(), ["a.jsonl", "b.jsonl"], "sessions events reach the ledger");
 
     await controller.registry.dispose("a.jsonl");
     note("b.jsonl");
