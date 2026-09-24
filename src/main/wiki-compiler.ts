@@ -266,12 +266,15 @@ export function lintPage(rel: string, page: WikiPage, snap: WikiSnapshot) {
 function pageState(page: WikiPage, receipt: WikiReceipt | undefined, snap: WikiSnapshot, policy: string): WikiPageState {
   if (lintPage(sessionPageRel(page.sessionId, page.branchId!), page, snap).length) return "invalid";
   if (!receipt || receipt.policyRevision !== policy || receipt.semanticRevision !== page.semanticRevision) return "dirty";
-  if (receipt.compiledRevision !== snap.sources[page.branchId!]?.sourceRevision) return "dirty";
-  // The compiled revision proves the sources did not change, not that every
-  // turn was summarized: a size-capped batch can stop mid-branch, so fresh
-  // additionally requires complete coverage.
+  // Fresh requires complete coverage AND a receipt pinning the range through
+  // the newest covered turn's local leaf. Trailing non-message entries carry
+  // no turn evidence and must not keep a fully covered page dirty forever;
+  // a late message joining the last turn moves the leaf and does.
   const turns = snap.sources[page.branchId!]?.turns ?? [];
-  return turns.length === receipt.coveredTurns.length ? "fresh" : "dirty";
+  if (turns.length !== receipt.coveredTurns.length) return "dirty";
+  const anchor = snap.localLeafOf(page.branchId!, turns.at(-1) ?? "");
+  const range = anchor ? snap.revisionThrough(page.branchId!, anchor) : null;
+  return receipt.compiledRevision === range ? "fresh" : "dirty";
 }
 
 function renderMessageEntry(e: RawSessionEntry, snap: WikiSnapshot, id: string): string {

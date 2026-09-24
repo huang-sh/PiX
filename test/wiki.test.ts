@@ -605,3 +605,22 @@ test("a fork continuing a turn mid-flight anchors the parent's range locally", (
   assert.deepEqual(child.includedTurns, [`turn:${C}:u3`]);
   assert.equal(child.lastIncludedEntryId, `${C}:a3`);
 });
+
+test("trailing non-message entries do not keep a fully covered page dirty", () => {
+  const f = fixture(test);
+  refreshSessionWiki(f.wiki, f.main);
+  const plan = prepareCompile(f.wiki, f.main, "main")!;
+  publishSummary(f.wiki, plan, parseModelSummary(summaryJson(["turn:u1", "turn:u2"])), { inputTokens: 1, outputTokens: 1, cost: null });
+  refreshSessionWiki(f.wiki, f.main);
+  assert.equal(readManifest(f.wiki)!.pageStatus[A_MAIN], "fresh");
+  // Bookkeeping appended after the last message carries no turn evidence.
+  f.appendMain({ type: "custom", id: "x1", parentId: "a2", timestamp: "2026-09-01T10:00:00.000Z", payload: {} } as unknown as RawSessionEntry);
+  refreshSessionWiki(f.wiki, f.main);
+  assert.equal(readManifest(f.wiki)!.pageStatus[A_MAIN], "fresh");
+  assert.equal(prepareCompile(f.wiki, f.main, "main"), null);
+  // A late message joining the last covered turn moves the local leaf: dirty again.
+  f.appendMain(msg("a4", "a2", "assistant", "late continuation"));
+  refreshSessionWiki(f.wiki, f.main);
+  assert.equal(readManifest(f.wiki)!.pageStatus[A_MAIN], "dirty");
+  assert.ok(prepareCompile(f.wiki, f.main, "main"));
+});
