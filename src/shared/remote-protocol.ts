@@ -1,8 +1,9 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// Git branch listing and switching require an updated remote host.
+// usage.overview is a new project route: a host from before it rejects the
+// request as invalid, so the protocol moves to force reinstalling such hosts.
 // Installers compare both protocol and product version.
-export const PIX_REMOTE_PROTOCOL = 14;
+export const PIX_REMOTE_PROTOCOL = 15;
 export const PIX_HOST_VERSION = "0.0.23";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
@@ -14,6 +15,7 @@ export const PROJECT_ROUTES = [
   "session.stop",
   "session.rename",
   "session.delete",
+  "usage.overview",
   "agent.control",
   "workspace.tree",
   "workspace.directories",

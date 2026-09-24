@@ -18,6 +18,7 @@ import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js"
 import { canonicalPath } from "./paths.js";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { ProgressLedger } from "./progress-ledger.js";
@@ -31,6 +32,7 @@ import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
   GitService,
+  historySessionDir,
   managedSessionFile,
   SessionFiles,
   SettingsService,
@@ -451,6 +453,39 @@ export class MainController {
       ...old.filter((session) => session.path !== snapshot.session.path),
     ]);
   }
+  /**
+   * Session directories behind the usage panel's all-projects scope: every
+   * local project in the history, the project in view first. Remote projects
+   * stay on their hosts, which answer the same route with their own scans.
+   */
+  private usageScans(bundle: SettingsBundle): Array<{ project: { id: string; name: string; path: string }; dir: string }> {
+    const current = this.project && !this.project.remote ? this.project : null;
+    const projects = [
+      ...(current ? [current] : []),
+      ...this.settings
+        .projectHistory()
+        .filter((record) => !record.project.remote && record.project.path !== current?.path)
+        .map((record) => record.project),
+    ];
+    // Two history entries can resolve to one directory (case variants, or a
+    // shared custom sessionDir); scanning it twice would double every number.
+    // The project in view wins the attribution. Windows paths compare
+    // case-insensitively: realpath keeps the caller's spelling.
+    const seenDirs = new Set<string>();
+    const dirKey = (dir: string) =>
+      process.platform === "win32" ? canonicalPath(dir).toLowerCase() : canonicalPath(dir);
+    return projects
+      .map((project) => ({
+        project: { id: projectId(project), name: project.name, path: project.path },
+        dir: historySessionDir(project, bundle),
+      }))
+      .filter((scan) => {
+        const key = dirKey(scan.dir);
+        if (seenDirs.has(key) || !existsSync(scan.dir)) return false;
+        seenDirs.add(key);
+        return true;
+      });
+  }
   async sessions() {
     const files = this.files;
     const running = this.registry.runningPaths();
@@ -617,6 +652,7 @@ export class MainController {
         "session.import",
         "session.rename",
         "session.delete",
+        "usage.overview",
         "workspace.tree",
         "workspace.read",
         "workspace.write",
@@ -796,6 +832,27 @@ export class MainController {
         this.rememberProject(sessions);
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
+      }
+      case "usage.overview": {
+        const bundle = this.settings.bundle();
+        const scans =
+          v.scope === "all"
+            ? this.usageScans(bundle)
+            : this.project && !this.project.remote && this.files.dir
+              ? [{
+                  project: {
+                    id: projectId(this.project),
+                    name: this.project.name,
+                    path: this.project.path,
+                  },
+                  dir: this.files.dir,
+                }]
+              : undefined;
+        return this.projectRuntime.usageOverview(
+          v.range as UsageRange,
+          bundle.app.usage?.unbilledProviders ?? [],
+          scans,
+        );
       }
       case "library.pin":
       case "library.archiveSession":

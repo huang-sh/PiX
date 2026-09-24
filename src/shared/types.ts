@@ -360,6 +360,9 @@ export interface AppSettings {
   experimentalHistory: boolean;
   /** Latest release the user chose to stop being notified about. */
   updateSkippedVersion?: string;
+  /** Usage panel preferences: providers on flat subscription plans (coding
+   *  plans) whose per-token costs should not count as billed. */
+  usage?: { unbilledProviders?: string[] };
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -530,6 +533,7 @@ export type DesktopRoute =
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "usage.overview"
   | "library.pin"
   | "library.archiveSession"
   | "library.archiveProject"

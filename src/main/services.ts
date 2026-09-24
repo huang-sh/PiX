@@ -195,6 +195,18 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
   } catch {
     drop("keyboardShortcuts");
   }
+  if (out.usage !== undefined) {
+    const providers = (out.usage as { unbilledProviders?: unknown }).unbilledProviders;
+    const unbilled = [
+      ...new Set(
+        (Array.isArray(providers) ? providers : []).filter(
+          (p): p is string => typeof p === "string" && /^[^/\s]+$/u.test(p),
+        ),
+      ),
+    ];
+    if (unbilled.length) out.usage = { unbilledProviders: unbilled };
+    else drop("usage");
+  }
   return out;
 }
 
@@ -850,4 +862,18 @@ export function configuredSessionDir(
   if (typeof v === "string" && v.trim())
     return isAbsolute(v) ? resolve(v) : resolve(project, v);
   return join(project, ".pi", "sessions");
+}
+/**
+ * A historical project's session directory for the usage panel's
+ * all-projects scope: only sessionDir differs from the bundle in effect,
+ * and the project's own settings file wins over the global default.
+ */
+export function historySessionDir(project: ProjectInfo, bundle: SettingsBundle) {
+  const own = readJson<PiSettings>(join(project.path, ".pi", "settings.json")).sessionDir;
+  const effective =
+    typeof own === "string" && own.trim() ? own : bundle.piGlobal.sessionDir;
+  return configuredSessionDir(project.path, {
+    ...bundle,
+    effective: { ...bundle.effective, sessionDir: effective },
+  });
 }

@@ -1,3 +1,4 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { debugLog } from "./debug-log.js";
@@ -36,6 +37,19 @@ import type {
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
+import {
+  aggregateUsage,
+  dedupeUsageRecords,
+  estimateUsageCosts,
+  usageAmount,
+  type UsageOverview,
+  type UsageProjectRef,
+  type UsageRange,
+  type UsageRecord,
+  type UsageSessionInput,
+} from "../shared/usage.js";
+import { loadPricingTable, pricingResolver } from "./usage-pricing.js";
+import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
@@ -92,6 +106,133 @@ export interface PiSettingsSdk {
 export async function piSettingsSdk(): Promise<PiSettingsSdk> {
   const moduleUrl = new URL("./core/settings-manager.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
   return import(moduleUrl.href);
+}
+
+/** Usage that no single model reply owns (summaries, tool-side billing). */
+const UNATTRIBUTED_USAGE_MODEL = "Tools/summaries";
+
+/**
+ * One billed event per assistant reply, auxiliary usage entry, and summary
+ * generation, attributing each the way the SDK's own accounting does
+ * (getUsageCostBreakdown): replies to their reporting model, everything else
+ * into the shared tools bucket.
+ */
+function usageRecordsOf(entries: any[]): UsageRecord[] {
+  const records: UsageRecord[] = [];
+  for (const entry of entries) {
+    let model: string | undefined;
+    let usage: any;
+    if (entry.type === "message" && entry.message?.role === "assistant") {
+      const message = entry.message;
+      model = `${message.provider}/${message.responseModel ?? message.model}`;
+      usage = message.usage;
+    } else if (entry.type === "usage") {
+      model = `${entry.provider}/${entry.model}`;
+      usage = entry.usage;
+    } else if (entry.type === "branch_summary" || entry.type === "compaction") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      usage = entry.usage;
+    } else if (entry.type === "message" && entry.message?.role === "toolResult") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      usage = entry.message.usage;
+    }
+    if (!model || !usage) continue;
+    records.push({
+      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
+      model,
+      usage: usageAmount(usage),
+      ...(typeof entry.id === "string" ? { entryId: entry.id } : {}),
+    });
+  }
+  return records;
+}
+
+const usageMessageText = (message: any): string => {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  return Array.isArray(content)
+    ? content
+        .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+        .map((part: any) => part.text)
+        .join(" ")
+    : "";
+};
+
+/** Reduces one open session manager to the identity + billed events aggregateUsage takes. */
+function sessionUsage(
+  manager: any,
+  path: string,
+  modified: string,
+  project?: UsageProjectRef,
+): UsageSessionInput {
+  const header = manager.getHeader(),
+    entries = manager.getEntries();
+  const firstUser = usageMessageText(
+    entries.find((e: any) => e.type === "message" && e.message?.role === "user")?.message,
+  );
+  const name = manager.getSessionName();
+  const clip = (s: string, n: number) => {
+    const c = s.replace(/\s+/g, " ").trim();
+    return c.length > n ? `${c.slice(0, n - 1)}…` : c;
+  };
+  return {
+    id: String(header?.id ?? basename(path)),
+    path,
+    ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
+    created: String(header?.timestamp ?? entries[0]?.timestamp ?? modified),
+    modified,
+    messageCount: entries.filter((e: any) => e.type === "message").length,
+    firstMessage: clip(firstUser, 120),
+    records: usageRecordsOf(entries),
+    ...(project ? { project } : {}),
+  };
+}
+
+/** Safety valve for pathological trees; real projects stay far below this. */
+const MAX_SESSION_FILES_PER_DIR = 5000;
+
+/** Every .jsonl under a session directory, top level first, sidecars after.
+ *  .pix-tree holds the graph model's worker/branch sessions; .pix-graph is
+ *  its orphaned predecessor (a "<session>.jsonl.pix-graph" sibling) and stays
+ *  out of the accounting. */
+function sessionFilesUnder(root: string): string[] {
+  const files: string[] = [];
+  const queue: string[] = [root];
+  while (queue.length && files.length < MAX_SESSION_FILES_PER_DIR) {
+    const dir = queue.shift()!;
+    for (const name of readdirSync(dir).sort()) {
+      if (name.endsWith(".pix-graph")) continue;
+      const path = join(dir, name);
+      try {
+        if (statSync(path).isDirectory()) queue.push(path);
+        else if (name.endsWith(".jsonl")) files.push(path);
+      } catch { /* vanished between listing and stat */ }
+    }
+  }
+  return files;
+}
+
+/**
+ * One session file's parsed usage, served from the persistent scan cache
+ * (mtime + size validation, clones on every hand-out) and reduced through the
+ * SDK on a miss.
+ */
+function cachedSessionUsage(
+  pi: any,
+  path: string,
+  dir: string,
+  cwd: string,
+  project: UsageProjectRef | undefined,
+): UsageSessionInput {
+  const stat = statSync(path);
+  const cached = usageScanCache.get(path, stat, project);
+  if (cached) return cached;
+  usageScanCache.set(
+    path,
+    stat,
+    sessionUsage(pi.SessionManager.open(path, dir, cwd), path, stat.mtime.toISOString(), project),
+  );
+  return usageScanCache.get(path, stat, project)!;
 }
 
 export class PiRuntime {
@@ -399,6 +540,46 @@ export class PiRuntime {
         };
       })
       .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
+  }
+  /**
+   * Aggregated usage across session files, for the settings page's usage
+   * panel. Read-only: each file is opened through the SDK's SessionManager
+   * (cached by mtime) and reduced in place; an unreadable file is skipped
+   * like the session list skips it. Costs the provider did not report are
+   * estimated from the cached public price table while the scan runs;
+   * subscription-billed providers the user marked cost nothing. Scans default
+   * to this runtime's project; the controller passes one entry per local
+   * project for the all-projects scope.
+   */
+  async usageOverview(
+    range: UsageRange,
+    unbilledProviders: readonly string[] = [],
+    scans?: Array<{ project?: UsageProjectRef; dir: string }>,
+  ): Promise<UsageOverview> {
+    const { cwd, dir } = this;
+    if (!cwd || !dir) throw new Error("Open a project first");
+    const pi = await this.pi();
+    const pricing = loadPricingTable();
+    const targets = scans?.length ? scans : [{ dir }];
+    const sessions: UsageSessionInput[] = [];
+    for (const target of targets) {
+      const root = canonicalPath(target.dir);
+      if (!existsSync(root)) continue;
+      // The graph model gives every branch and worker its own session file
+      // under .pix-graph/.pix-tree sidecar directories, so the scan walks the
+      // whole tree — copied prefixes are deduped by entry id afterwards.
+      for (const path of sessionFilesUnder(root)) {
+        try {
+          sessions.push(cachedSessionUsage(pi, path, target.dir, cwd, target.project));
+        } catch (e) { debugLog("pi-runtime: usage scan", e); }
+      }
+    }
+    const table = await pricing;
+    // Forks, branch exports, and imports copy entries between files with ids
+    // intact; the copies would bill twice without this pass.
+    dedupeUsageRecords(sessions);
+    estimateUsageCosts(sessions, pricingResolver(table), new Set(unbilledProviders));
+    return aggregateUsage(sessions, range);
   }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
