@@ -1125,6 +1125,10 @@ test("a host with local credentials serves those providers directly", async () =
   assert.deepEqual([...modelRuntime.keys], ["openai"], "no fake runtime key shadows a local credential");
   assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native");
   assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
+  // setModel's preflight must see brokered providers as configured.
+  assert.deepEqual(await modelRuntime.checkAuth("openai"), { type: "api_key", source: "pix-desktop-broker" });
+  assert.deepEqual(await modelRuntime.checkAuth("anthropic"), { type: "api_key" });
+  assert.equal(await modelRuntime.checkAuth("unknown"), null);
 
   // A deployed credential moves its provider to direct calls...
   local.push("openai");
@@ -1144,6 +1148,8 @@ test("a host with local credentials serves those providers directly", async () =
   assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native",
     "local credentials keep working with no desktop attached");
   assert.throws(() => modelRuntime.stream({ provider: "openai" }, {}, {}), /reconnect it to use this model/);
+  assert.equal(await modelRuntime.checkAuth("openai"), null,
+    "with no desktop attached, a brokered provider honestly reports unconfigured");
 });
 
 test("connecting deploys credentials to an authorized host when enabled", async (t) => {

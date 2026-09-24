@@ -108,8 +108,12 @@ export class PiRuntime {
   modelBroker?: (model: any, context: any, options: any) => any;
   /** Brokered providers this machine serves with its own credentials. */
   private localCredentialProviders = new Set<string>();
-  /** Original stream methods per model runtime, saved before brokering. */
-  private readonly nativeStreams = new WeakMap<object, { stream: (model: any, context: any, options: any) => any; streamSimple: (model: any, context: any, options: any) => any }>();
+  /** Original model-runtime methods per runtime, saved before brokering. */
+  private readonly nativeStreams = new WeakMap<object, {
+    stream: (model: any, context: any, options: any) => any;
+    streamSimple: (model: any, context: any, options: any) => any;
+    checkAuth: (provider: string) => Promise<any>;
+  }>();
   /** Model runtimes currently overlaid with the fake broker registration. */
   private readonly brokerOverlays = new WeakMap<object, Set<string>>();
   openExternal: (url: string) => Promise<void>;
@@ -287,12 +291,24 @@ export class PiRuntime {
       this.nativeStreams.set(modelRuntime, {
         stream: modelRuntime.stream.bind(modelRuntime),
         streamSimple: modelRuntime.streamSimple.bind(modelRuntime),
+        checkAuth: modelRuntime.checkAuth.bind(modelRuntime),
       });
     const native = this.nativeStreams.get(modelRuntime)!;
     modelRuntime.stream = (model: any, context: any, options: any) =>
       this.routeModelStream(native, model, context, options);
     modelRuntime.streamSimple = (model: any, context: any, options: any) =>
       this.routeModelStream(native, model, context, options);
+    // setModel's preflight and provider status reads ignore the runtime-key
+    // override, so a brokered provider would look unconfigured. Surface a
+    // synthetic credential for exactly those.
+    modelRuntime.checkAuth = async (provider: string) => {
+      const status = await native.checkAuth(provider);
+      if (status) return status;
+      if (this.modelBroker && this.brokerProviders.has(provider)
+        && !this.localCredentialProviders.has(provider))
+        return { type: "api_key", source: "pix-desktop-broker" };
+      return status;
+    };
   }
   private routeModelStream(
     native: { stream: (model: any, context: any, options: any) => any; streamSimple: (model: any, context: any, options: any) => any },

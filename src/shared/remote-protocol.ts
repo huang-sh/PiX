@@ -3,7 +3,7 @@ import type { DesktopEvent, DesktopRoute } from "./types.js";
 // Lingering hosts, reattachment, and credential deployment require an
 // updated remote host. Installers compare both protocol and product version.
 export const PIX_REMOTE_PROTOCOL = 15;
-export const PIX_HOST_VERSION = "0.0.23";
+export const PIX_HOST_VERSION = "0.0.24";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
