@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, provide, ref, watch } from "vue";
-import { ArrowLeft, Bot, Box, ChartColumn, FlaskConical, History, Info, Keyboard, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, ChartColumn, FlaskConical, History, Info, Keyboard, MonitorUp, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import AboutPage from "./AboutPage.vue";
@@ -9,6 +9,7 @@ import ExtensionsPanel from "./ExtensionsPanel.vue";
 import ExtensionInspector from "./ExtensionInspector.vue";
 import ModelInspector from "./ModelInspector.vue";
 import ModelsPanel from "./ModelsPanel.vue";
+import RemotePanel from "./RemotePanel.vue";
 import SettingsRowsPanel from "./SettingsRowsPanel.vue";
 import SkillsPanel from "./SkillsPanel.vue";
 import UsagePanel from "./UsagePanel.vue";
@@ -102,6 +103,7 @@ const categories = computed(() => [
   ["skills", t("settings.categories.skills"), Sparkles],
   ["extensions", t("settings.categories.extensions"), Puzzle],
   ["shell", t("settings.categories.shell"), Terminal],
+  ["remote", t("settings.categories.remote"), MonitorUp],
   ["experimental", t("settings.categories.experimental"), FlaskConical],
   ["about", t("settings.categories.about"), Info],
 ] as const);
@@ -176,6 +178,7 @@ watch(
       <ModelsPanel v-if="layout.settingsCategory === 'models'" />
       <SkillsPanel v-else-if="layout.settingsCategory === 'skills'" />
       <UsagePanel v-else-if="layout.settingsCategory === 'usage'" />
+      <RemotePanel v-else-if="layout.settingsCategory === 'remote'" />
       <ExtensionsPanel v-else-if="layout.settingsCategory === 'extensions'" />
       <AboutPage v-else-if="layout.settingsCategory === 'about'" />
       <SettingsRowsPanel v-else-if="layout.settingsCategory !== 'shortcuts'" />

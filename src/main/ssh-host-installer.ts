@@ -13,6 +13,8 @@ import {
 export interface RemoteConnectOptions {
   signal?: AbortSignal;
   onProgress?: (stage: RemoteConnectStage) => void;
+  /** Starts the host so it accepts desktop credential deployment. */
+  deployCredentials?: boolean;
 }
 
 export function validateSshHost(host: string) {

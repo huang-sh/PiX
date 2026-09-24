@@ -60,6 +60,7 @@ const wslBusy = ref(false);
 const wslError = ref("");
 const remoteStages = ref<RemoteConnectStage[]>([]);
 const remoteDisconnected = ref(false);
+const remoteReconnecting = ref(false);
 const remoteDisconnectNotice = ref("");
 // The disconnect message can carry a host stack trace; only its first line fits a notice.
 function remoteLostText(message?: string) {
@@ -109,6 +110,9 @@ async function hydrate(data: BootstrapData, openFirst = false, request = ++sessi
   session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current, request);
   remoteDisconnected.value = Boolean(data.project?.remote &&
     !data.projects?.find((record) => record.id === session.activeProjectId)?.connected);
+  // A degraded remote bootstrap means the main process is already retrying the
+  // connection; the banner reflects that instead of asking for a manual click.
+  remoteReconnecting.value = remoteDisconnected.value;
   remoteDisconnectNotice.value = "";
   if (remoteDisconnected.value) {
     session.loading = false;
@@ -473,14 +477,23 @@ function onEvent(wireEvent: DesktopEvent) {
     return;
   }
   if (event.type === "remote.connection") {
-    const payload = event.payload as { projectId: string; connected: boolean; message?: string };
+    const payload = event.payload as { projectId: string; connected: boolean; reconnecting?: boolean; message?: string };
     if (!payload.connected) {
       session.disconnected(payload.projectId);
       if (payload.projectId === session.activeProjectId) {
         remoteDisconnected.value = true;
-        remoteDisconnectNotice.value = remoteLostText(payload.message);
-        layout.showNotice(remoteDisconnectNotice.value, "error");
+        remoteReconnecting.value = Boolean(payload.reconnecting);
+        if (payload.reconnecting) {
+          remoteDisconnectNotice.value = "";
+        } else {
+          remoteDisconnectNotice.value = remoteLostText(payload.message);
+          layout.showNotice(remoteDisconnectNotice.value, "error");
+        }
       }
+    } else if (payload.projectId === session.activeProjectId && remoteDisconnected.value) {
+      // The main process restored the transport; rehydrate through the pooled
+      // host and reopen the session the workspace was showing.
+      void reconnectRemote();
     }
     return;
   }
@@ -617,7 +630,8 @@ onBeforeUnmount(() => {
     </Button>
   </div>
   <div v-if="remoteDisconnected" class="remote-disconnected" role="alert">
-    <span>{{ remoteDisconnectNotice || t("remote.connectionLost") }}</span>
+    <span v-if="remoteReconnecting">{{ t("remote.reconnecting") }}</span>
+    <span v-else>{{ remoteDisconnectNotice || t("remote.connectionLost") }}</span>
     <Button data-action="remote-reconnect" variant="outline" :disabled="session.loading" @click="reconnectRemote">
       {{ session.loading ? t("remote.connecting") : t("remote.reconnect") }}
     </Button>

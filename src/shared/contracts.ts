@@ -155,6 +155,10 @@ export function validateRouteInput(
     case "workspace.directories":
     case "workspace.open":
       return { path: str(v.path, "path") };
+    case "remote.deployed":
+      return {};
+    case "remote.revoke":
+      return { id: str(v.id, "id") };
     case "app.openExternal":
       return { url: externalUrl(v.url) };
     case "app.openPath":

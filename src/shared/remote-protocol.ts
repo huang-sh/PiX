@@ -1,10 +1,12 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// usage.overview is a new project route: a host from before it rejects the
-// request as invalid, so the protocol moves to force reinstalling such hosts.
-// Installers compare both protocol and product version.
-export const PIX_REMOTE_PROTOCOL = 15;
-export const PIX_HOST_VERSION = "0.0.23";
+// Both sides of this merge moved the wire on their own: usage.overview is a
+// new project route, and lingering hosts, reattachment, and credential
+// deployment added shutdown messages and the hello authorization flag. Each
+// change alone claimed 15, so the merged protocol is 16 to force hosts from
+// either lineage to reinstall. Installers compare both protocol and version.
+export const PIX_REMOTE_PROTOCOL = 16;
+export const PIX_HOST_VERSION = "0.0.24";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
@@ -69,6 +71,8 @@ export interface HostHello {
   arch: string;
   /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
+  /** Whether the desktop may deploy its model credentials to this host. */
+  allowCredentialDeploy?: boolean;
 }
 
 export interface HostEvent {
@@ -103,6 +107,22 @@ export interface HostModelCancel {
   id: string;
 }
 
+/** Tells a lingering host the desktop is done with it; it shuts down now. */
+export interface ClientShutdown {
+  type: "shutdown";
+}
+
+/** Identifies a lingering host across desktop sessions, for reattachment. */
+export interface HostHandle {
+  kind: "ssh" | "wsl";
+  /** SSH host alias or WSL distribution naming the machine. */
+  target: string;
+  /** Loopback port and auth token of the running host, plus its pid. */
+  port: number;
+  token: string;
+  pid: number;
+}
+
 export type HostMessage =
   | HostHello
   | HostResponse
@@ -112,4 +132,5 @@ export type HostMessage =
 export type ClientMessage =
   | HostRequest
   | ClientModelEvent
-  | ClientModelFailure;
+  | ClientModelFailure
+  | ClientShutdown;

@@ -185,6 +185,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "openLinksInApp",
     "closeToTray",
     "canvasDotGrid",
+    "deployModelCredentialsToRemote",
     "experimentalHistory",
   ])
     expectBoolean(key);
@@ -258,6 +259,7 @@ export class SettingsService {
       canvasDotGrid: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
+      deployModelCredentialsToRemote: false,
       experimentalHistory: false,
     };
     // Normalize the raw file before the defaults merge, so a dropped key is

@@ -356,6 +356,12 @@ export interface AppSettings {
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /**
+   * Deploys this desktop's model API keys and custom models to remote hosts,
+   * so remote work runs without the desktop. Off by default; the host only
+   * accepts them when started with this authorization.
+   */
+  deployModelCredentialsToRemote: boolean;
   /** Experimental features are opt-in, default off, and may change or disappear. */
   experimentalHistory: boolean;
   /** Latest release the user chose to stop being notified about. */
@@ -526,6 +532,8 @@ export type DesktopRoute =
   | "remote.cancel"
   | "remote.directories"
   | "remote.openProject"
+  | "remote.deployed"
+  | "remote.revoke"
   | "session.list"
   | "session.snapshot"
   | "session.open"

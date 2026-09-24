@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
@@ -246,6 +247,16 @@ export class PiRuntime {
   brokerProviders = new Set<string>();
   brokerModels: BrokerModel[] = [];
   modelBroker?: (model: any, context: any, options: any) => any;
+  /** Brokered providers this machine serves with its own credentials. */
+  private localCredentialProviders = new Set<string>();
+  /** Original model-runtime methods per runtime, saved before brokering. */
+  private readonly nativeStreams = new WeakMap<object, {
+    stream: (model: any, context: any, options: any) => any;
+    streamSimple: (model: any, context: any, options: any) => any;
+    checkAuth: (provider: string) => Promise<any>;
+  }>();
+  /** Model runtimes currently overlaid with the fake broker registration. */
+  private readonly brokerOverlays = new WeakMap<object, Set<string>>();
   openExternal: (url: string) => Promise<void>;
   private closing = false;
   private pendingControls = new Set<Promise<unknown>>();
@@ -290,6 +301,24 @@ export class PiRuntime {
   }
   agentDir() {
     return pixAgentDir();
+  }
+  /**
+   * This machine's stored API keys, for deployment to a remote host the user
+   * opted in. OAuth credentials stay put: they are bound to this desktop.
+   */
+  listApiKeys(): Record<string, string> {
+    try {
+      const stored = JSON.parse(readFileSync(join(this.agentDir(), "auth.json"), "utf8")) as Record<string, unknown>;
+      const keys: Record<string, string> = {};
+      for (const [provider, credential] of Object.entries(stored)) {
+        const key = (credential as { type?: string; key?: unknown } | null);
+        if (key?.type === "api_key" && typeof key.key === "string" && key.key)
+          keys[provider] = key.key;
+      }
+      return keys;
+    } catch {
+      return {};
+    }
   }
   async modelRuntime() {
     if (this.runtime?.session?.modelRuntime)
@@ -352,32 +381,114 @@ export class PiRuntime {
 
   /** Switches one model runtime over to a catalog, dropping the providers that left it. */
   private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
-    for (const provider of this.brokerProviders)
-      if (!providers.has(provider)) {
-        await modelRuntime.removeRuntimeApiKey(provider);
-        modelRuntime.unregisterProvider(provider);
-      }
+    const overlays = this.brokerOverlays.get(modelRuntime);
+    if (overlays)
+      for (const provider of [...overlays])
+        if (!providers.has(provider)) await this.stripBrokerOverlay(modelRuntime, provider);
     this.brokerProviders = providers;
     this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
 
+  /** Removes one provider's fake registration and runtime key, restoring its native form. */
+  private async stripBrokerOverlay(modelRuntime: any, provider: string) {
+    const overlays = this.brokerOverlays.get(modelRuntime);
+    if (!overlays?.has(provider)) return;
+    overlays.delete(provider);
+    // Best-effort: a provider the SDK cannot fully restore still reaches the
+    // broker on the next catalog sync.
+    await modelRuntime.removeRuntimeApiKey(provider).catch(() => {});
+    try { modelRuntime.unregisterProvider(provider); } catch { /* see above */ }
+  }
+
   async applyModelBroker(modelRuntime: any) {
+    if (!modelRuntime) return;
+    const overlays = this.brokerOverlays.get(modelRuntime) ?? new Set<string>();
+    this.brokerOverlays.set(modelRuntime, overlays);
+    // Strip every overlay before evaluating credentials: the fake runtime
+    // key would shadow this machine's real ones in checkAuth.
+    for (const provider of [...overlays]) await this.stripBrokerOverlay(modelRuntime, provider);
+    const local = new Set<string>();
     for (const provider of this.brokerProviders) {
+      try {
+        // A host with its own login (pi CLI, env, or deployed credentials)
+        // serves that provider directly; the desktop brokers only the rest.
+        if (await modelRuntime.checkAuth(provider)) local.add(provider);
+      } catch { /* unreachable credentials fall back to the broker */ }
+    }
+    this.localCredentialProviders = local;
+    for (const provider of this.brokerProviders) {
+      if (local.has(provider)) continue;
       const models = this.brokerModels.filter((model) => model.provider === provider);
       if (models.length) modelRuntime.registerProvider(provider, {
         baseUrl: "http://pix-desktop-broker.invalid",
         models,
       });
-    }
-    for (const provider of this.brokerProviders)
       await modelRuntime.setRuntimeApiKey(provider, "pix-desktop-broker");
+      overlays.add(provider);
+    }
     if (!this.modelBroker) return;
-    const broker = this.modelBroker;
+    if (!this.nativeStreams.has(modelRuntime))
+      this.nativeStreams.set(modelRuntime, {
+        stream: modelRuntime.stream.bind(modelRuntime),
+        streamSimple: modelRuntime.streamSimple.bind(modelRuntime),
+        checkAuth: modelRuntime.checkAuth.bind(modelRuntime),
+      });
+    const native = this.nativeStreams.get(modelRuntime)!;
     modelRuntime.stream = (model: any, context: any, options: any) =>
-      broker(model, context, options);
+      this.routeModelStream(native, model, context, options);
     modelRuntime.streamSimple = (model: any, context: any, options: any) =>
-      broker(model, context, options);
+      this.routeModelStream(native, model, context, options);
+    // setModel's preflight and provider status reads ignore the runtime-key
+    // override, so a brokered provider would look unconfigured. Surface a
+    // synthetic credential for exactly those.
+    modelRuntime.checkAuth = async (provider: string) => {
+      const status = await native.checkAuth(provider);
+      if (status) return status;
+      if (this.modelBroker && this.brokerProviders.has(provider)
+        && !this.localCredentialProviders.has(provider))
+        return { type: "api_key", source: "pix-desktop-broker" };
+      return status;
+    };
+    // A session still holding a model resolved from the broker overlay must
+    // re-resolve once that provider gains local credentials: the overlay
+    // object's placeholder URL is something a direct call would dial.
+    const session = this.runtime?.session;
+    const held = session?.model;
+    if (held && String(held.baseUrl) === "http://pix-desktop-broker.invalid"
+      && !session.isStreaming
+      && this.localCredentialProviders.has(String(held.provider))) {
+      try {
+        const resolved = modelRuntime.getModel(held.provider, held.id);
+        if (resolved) await session.setModel(resolved);
+      } catch { /* keep the held model; the broker still serves it */ }
+    }
+  }
+  private routeModelStream(
+    native: { stream: (model: any, context: any, options: any) => any; streamSimple: (model: any, context: any, options: any) => any },
+    model: any,
+    context: any,
+    options: any,
+  ) {
+    const provider = String(model.provider);
+    if (this.localCredentialProviders.has(provider))
+      return native.stream(model, context, options);
+    if (this.modelBroker)
+      return this.modelBroker(model, context, options);
+    if (this.brokerProviders.has(provider))
+      // A lingering host without its desktop: the fake registration's URL
+      // would only produce a confusing DNS failure. Say what is missing.
+      throw new Error(`${provider} is served by the PiX desktop; reconnect it to use this model`);
+    return native.stream(model, context, options);
+  }
+  /** Re-evaluates which brokered providers this machine serves by itself. */
+  async refreshBrokerAuth() {
+    if (!this.brokerProviders.size) return;
+    await this.replaceBrokerCatalog(
+      await this.modelRuntime(),
+      new Set(this.brokerProviders),
+      [...this.brokerModels],
+    );
   }
   /**
    * Options shared by every createAgentSessionServices call, so session and
@@ -984,6 +1095,9 @@ export class PiRuntime {
           },
           notify: () => undefined,
         });
+        // Deployed credentials move that provider from the desktop broker to
+        // direct calls; open sessions re-adopt through pushCatalogs.
+        await this.refreshBrokerAuth();
         return { ok: true };
       }
       case "loginOAuth": {
@@ -1025,6 +1139,8 @@ export class PiRuntime {
         return { ok: true };
       case "logout":
         await (await this.modelRuntime()).logout(input.provider);
+        // A revoked local credential hands the provider back to the broker.
+        await this.refreshBrokerAuth();
         return { ok: true };
       case "setLabel":
         s.sessionManager.appendLabelChange(input.entryId, input.label);
