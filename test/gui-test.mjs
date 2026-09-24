@@ -1028,9 +1028,9 @@ try {
       // Builds without PDF support fall through; the drag probes still run.
     }
   }
-  // Dragging the tree handle past its minimum must clamp at min-size, never
-  // collapse the panel: with collapsible panels the drag collapsed the tree
-  // to 0 and could not drag it back out, and the show/hide button desynced.
+  // The tree handle collapses the tree when dragged past its minimum and can
+  // drag it back out — the panel stays mounted while collapsed (the historic
+  // bug hid the handle, stranding the tree at 0 with no way back).
   {
     const treeWidth = () => cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
     const dragBy = async (dx) => {
@@ -1046,12 +1046,47 @@ try {
       return treeWidth();
     };
     const start = await treeWidth();
-    const shrunk = Math.min(await dragBy(200), await dragBy(200));
-    if (shrunk < 170)
-      throw new Error(`Dragging the tree narrow collapsed it: ${start} → ${shrunk}`);
-    const grown = await dragBy(-150);
-    if (grown <= shrunk)
-      throw new Error(`Dragging the tree back did not grow it: ${shrunk} → ${grown}`);
+    // Dragging past min-size snaps the collapsible tree shut; dragging back
+    // out reopens it at its floor, and the handle never disappears.
+    const collapsed = await dragBy(220);
+    if (collapsed > 0)
+      throw new Error(`Dragging the tree past its minimum did not collapse it: ${start} → ${collapsed}`);
+    // A collapsed tree only reopens once the drag reaches its min-size (reka
+    // rejects the layout otherwise), so pull past that distance.
+    const reopenedByDrag = await dragBy(-240);
+    if (reopenedByDrag < 180)
+      throw new Error(`Dragging a collapsed tree back out did not reopen it: ${reopenedByDrag}`);
+    const grown = await dragBy(-120);
+    if (grown <= reopenedByDrag)
+      throw new Error(`Dragging the tree wider did not grow it: ${reopenedByDrag} → ${grown}`);
+    // Resizing the chat/tool boundary must not reset a dragged tree width to
+    // its default: tree bounds derived from the live group width changed the
+    // panel constraints on every workbench drag, re-initializing the layout.
+    // The tree keeps its share of the panel and shrinks or grows with it.
+    const dragBoundaryBy = async (dx) => {
+      const handle = await cdp.evaluate(`(() => {
+        const r = document.querySelector('.resize-handle:has(+ #content-panel)').getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x, y: handle.y, button: "left", buttons: 0 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: handle.x, y: handle.y, button: "left", buttons: 1, clickCount: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x + dx, y: handle.y, buttons: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: handle.x + dx, y: handle.y, button: "left", buttons: 0, clickCount: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    };
+    const treeShare = () => cdp.evaluate("(() => { const tree = document.querySelector('.file-explorer'); const group = document.querySelector('.file-workspace'); return tree && group ? tree.getBoundingClientRect().width / group.getBoundingClientRect().width : 0; })()");
+    const draggedShare = await treeShare();
+    await dragBoundaryBy(120);
+    let widened = await treeShare();
+    if (Math.abs(widened - draggedShare) > 0.005)
+      throw new Error(`Workbench drag reset the tree's share: ${(draggedShare * 100).toFixed(1)}% → ${(widened * 100).toFixed(1)}%`);
+    await dragBoundaryBy(-120);
+    const restored = await treeWidth();
+    if (Math.abs(restored - grown) > 4)
+      throw new Error(`Restoring the workbench width moved the tree: ${grown} → ${restored}`);
+    // The toolbar button hides the tree and restores the pre-collapse width
+    // (the historic bug: the button and the drag collapsed state desynced).
+    const beforeHide = await treeWidth();
     await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
     await new Promise((resolve) => setTimeout(resolve, 300));
     if ((await treeWidth()) !== -1)
@@ -1059,8 +1094,8 @@ try {
     await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
     await new Promise((resolve) => setTimeout(resolve, 300));
     const reopened = await treeWidth();
-    if (reopened <= 0)
-      throw new Error("Tree toggle did not restore the explorer");
+    if (Math.abs(reopened - beforeHide) > 4)
+      throw new Error(`Tree toggle did not restore the pre-collapse width: ${beforeHide} → ${reopened}`);
   }
   const pdfShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(
@@ -1069,6 +1104,25 @@ try {
   );
   await cdp.evaluate("document.querySelector('[data-file-tab=\"sample.pdf\"] .tool-tab-close')?.click()");
   await cdp.evaluate("document.querySelector('[data-file-tab=\"README.md\"] .tool-tab-close')?.click()");
+  // Closing the last tool tab collapses the panel. Reopening Files from
+  // collapsed remounts the workspace while the panel animates open from 0
+  // width; a tree registered before the group settles renders flex-fill
+  // instead of its 200px default.
+  await cdp.evaluate(
+    "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').closeTool('files')",
+  );
+  await retry(async () => {
+    if (!(await cdp.evaluate("window.__pixTest.state().layout.collapsed.content")))
+      throw new Error("Closing the files tab did not collapse the panel");
+  });
+  await cdp.evaluate(
+    "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').openTool('files')",
+  );
+  await retry(async () => {
+    const width = await cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
+    if (Math.abs(width - 200) > 4)
+      throw new Error(`Files reopened from collapsed with the tree at ${width}px, expected 200px`);
+  });
   imagePreview = true;
   await cdp.evaluate("document.querySelector('[data-action=add-tool-tab]').click()");
   await retry(async () => {
