@@ -309,6 +309,19 @@ export class PiRuntime {
         return { type: "api_key", source: "pix-desktop-broker" };
       return status;
     };
+    // A session still holding a model resolved from the broker overlay must
+    // re-resolve once that provider gains local credentials: the overlay
+    // object's placeholder URL is something a direct call would dial.
+    const session = this.runtime?.session;
+    const held = session?.model;
+    if (held && String(held.baseUrl) === "http://pix-desktop-broker.invalid"
+      && !session.isStreaming
+      && this.localCredentialProviders.has(String(held.provider))) {
+      try {
+        const resolved = modelRuntime.getModel(held.provider, held.id);
+        if (resolved) await session.setModel(resolved);
+      } catch { /* keep the held model; the broker still serves it */ }
+    }
   }
   private routeModelStream(
     native: { stream: (model: any, context: any, options: any) => any; streamSimple: (model: any, context: any, options: any) => any },

@@ -1098,6 +1098,7 @@ function fakeModelRuntime(local: string[]) {
   const runtime: any = {
     registered: [] as string[],
     keys: new Set<string>(),
+    getModel: (provider: string, id: string) => ({ provider, id, baseUrl: "https://real.example" }),
     checkAuth: async (provider: string) => (local.includes(provider) ? { type: "api_key" } : null),
     registerProvider: (id: string) => runtime.registered.push(id),
     unregisterProvider: (id: string) => { runtime.registered = runtime.registered.filter((p: string) => p !== id); },
@@ -1130,9 +1131,20 @@ test("a host with local credentials serves those providers directly", async () =
   assert.deepEqual(await modelRuntime.checkAuth("anthropic"), { type: "api_key" });
   assert.equal(await modelRuntime.checkAuth("unknown"), null);
 
+  // A session holding an overlay-resolved model re-resolves when its
+  // provider gains local credentials; the placeholder URL must not leak
+  // into a direct call.
+  let reResolved: any = undefined;
+  runtime.runtime = { session: {
+    model: { provider: "openai", id: "gpt", baseUrl: "http://pix-desktop-broker.invalid" },
+    isStreaming: false,
+    setModel: async (model: any) => { reResolved = model; },
+  } };
+
   // A deployed credential moves its provider to direct calls...
   local.push("openai");
   await runtime.refreshBrokerAuth();
+  assert.equal(reResolved?.baseUrl, "https://real.example", "the stale overlay model is re-resolved");
   assert.deepEqual(modelRuntime.registered, [], "the overlay is stripped once credentials exist");
   assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "native");
 
