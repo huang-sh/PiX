@@ -70,6 +70,18 @@ async function serve() {
     async openExternal() {
       throw new Error("Opening local URLs is unavailable on the remote host");
     },
+    async openPath() {
+      throw new Error("Opening files with local applications is unavailable on the remote host");
+    },
+    async openWith() {
+      throw new Error("Opening files with local applications is unavailable on the remote host");
+    },
+    async openWithApps() {
+      throw new Error("Opening files with local applications is unavailable on the remote host");
+    },
+    async openWithApp() {
+      throw new Error("Opening files with local applications is unavailable on the remote host");
+    },
     showItemInFolder() {
       throw new Error("Opening the file manager is unavailable on the remote host");
     },

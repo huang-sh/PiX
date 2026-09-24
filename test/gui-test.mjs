@@ -65,7 +65,7 @@ writeFileSync(
     openLastSessionOnStartup: true,
     layout: {
       version: 3,
-      widths: { navigator: 248, chat: 356, content: 320 },
+      widths: { navigator: 248, chat: 356, content: 600 },
       collapsed: { navigator: false, chat: false, content: true },
       minimap: false,
       utility: { open: false, collapsed: false, height: 250, activeTab: "terminal" },
@@ -968,7 +968,7 @@ try {
   });
   await cdp.evaluate("document.querySelector('[data-file-path=\"README.md\"]')?.click()");
   await retry(async () => {
-    if (!(await cdp.evaluate("Boolean(document.querySelector('.code-editor')) && Boolean(document.querySelector('[data-file-tab=\"README.md\"]')) && document.querySelector('[data-file-path=\"README.md\"]')?.classList.contains('active')")))
+    if (!(await cdp.evaluate("Boolean(document.querySelector('[data-markdown-preview]')) && Boolean(document.querySelector('[data-file-tab=\"README.md\"]')) && document.querySelector('[data-file-path=\"README.md\"]')?.classList.contains('active')")))
       throw new Error("File did not open in the workspace");
   });
   const fileMainWidth = await cdp.evaluate("document.querySelector('.file-main').getBoundingClientRect().width");
@@ -983,6 +983,24 @@ try {
     if (!(await cdp.evaluate("Boolean(document.querySelector('.file-explorer'))")))
       throw new Error("File tree did not reopen");
   });
+  // Right-clicking a tree row offers copy-path; the copy lands with a toast.
+  {
+    const row = await cdp.evaluate(`(() => {
+      const r = document.querySelector('[data-file-path="README.md"]').getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    })()`);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: row.x, y: row.y, button: "right", clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: row.x, y: row.y, button: "right", clickCount: 1 });
+    await retry(async () => {
+      if (!(await cdp.evaluate("Boolean(document.querySelector('[data-action=tree-copy-path]')) && Boolean(document.querySelector('[data-action=tree-open-with]'))")))
+        throw new Error("Tree context menu did not open");
+    });
+    await cdp.evaluate("document.querySelector('[data-action=tree-copy-path]').click()");
+    await retry(async () => {
+      if (!(await cdp.evaluate("document.querySelector('.toast')?.textContent?.includes('Copied')")))
+        throw new Error("Copy path did not confirm with a toast");
+    });
+  }
   if (allowEmpty) {
     await cdp.evaluate("document.querySelector('[data-directory-path=\"resources\"] > summary')?.click()");
     await retry(async () => {
@@ -996,6 +1014,60 @@ try {
     if (!(await cdp.evaluate("document.querySelector('.image-preview img')?.naturalWidth > 0")))
       throw new Error("Image preview did not render");
   });
+  const hasPdfStep = await cdp.evaluate("Boolean(document.querySelector('[data-file-path=\"sample.pdf\"]'))");
+  if (hasPdfStep) {
+    await cdp.evaluate("document.querySelector('[data-file-path=\"sample.pdf\"]')?.click()");
+    try {
+      await retry(async () => {
+        if (!(await cdp.evaluate(
+          "Boolean(document.querySelector('[data-pdf-view]')) && document.querySelectorAll('.pdf-pages canvas').length >= 1 && document.querySelector('.pdf-canvas-stack canvas')?.width > 0",
+        )))
+          throw new Error("PDF preview did not render");
+      }, 3000);
+    } catch {
+      // Builds without PDF support fall through; the drag probes still run.
+    }
+  }
+  // Dragging the tree handle past its minimum must clamp at min-size, never
+  // collapse the panel: with collapsible panels the drag collapsed the tree
+  // to 0 and could not drag it back out, and the show/hide button desynced.
+  {
+    const treeWidth = () => cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
+    const dragBy = async (dx) => {
+      const handle = await cdp.evaluate(`(() => {
+        const r = document.querySelector('.file-resize-handle').getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x, y: handle.y, button: "left", buttons: 0 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: handle.x, y: handle.y, button: "left", buttons: 1, clickCount: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x + dx, y: handle.y, buttons: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: handle.x + dx, y: handle.y, button: "left", buttons: 0, clickCount: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return treeWidth();
+    };
+    const start = await treeWidth();
+    const shrunk = Math.min(await dragBy(200), await dragBy(200));
+    if (shrunk < 170)
+      throw new Error(`Dragging the tree narrow collapsed it: ${start} → ${shrunk}`);
+    const grown = await dragBy(-150);
+    if (grown <= shrunk)
+      throw new Error(`Dragging the tree back did not grow it: ${shrunk} → ${grown}`);
+    await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if ((await treeWidth()) !== -1)
+      throw new Error("Tree toggle did not hide the explorer");
+    await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const reopened = await treeWidth();
+    if (reopened <= 0)
+      throw new Error("Tree toggle did not restore the explorer");
+  }
+  const pdfShot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(
+    join(artifacts, "gui-pdf-preview.png"),
+    Buffer.from(pdfShot.data, "base64"),
+  );
+  await cdp.evaluate("document.querySelector('[data-file-tab=\"sample.pdf\"] .tool-tab-close')?.click()");
   await cdp.evaluate("document.querySelector('[data-file-tab=\"README.md\"] .tool-tab-close')?.click()");
   imagePreview = true;
   await cdp.evaluate("document.querySelector('[data-action=add-tool-tab]').click()");

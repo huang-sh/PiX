@@ -44,6 +44,13 @@ export interface Platform {
   pickSession(): Promise<string | undefined>;
   confirm(message: string, detail?: string): Promise<boolean>;
   openExternal(url: string): Promise<void>;
+  openPath(path: string): Promise<void>;
+  /** Windows opens the system Open With dialog; macOS a native app picker. */
+  openWith(path: string): Promise<void>;
+  /** Linux lists .desktop applications registered for the file's MIME type. */
+  openWithApps(path: string): Promise<{ id: string; name: string }[]>;
+  /** Launches one of the openWithApps entries on Linux. */
+  openWithApp(path: string, appId: string): Promise<void>;
   showItemInFolder(path: string): void;
   quit(): void;
 }
@@ -511,6 +518,28 @@ export class MainController {
         path = resolve(path);
       }
       this.platform.showItemInFolder(path);
+      return;
+    }
+    if (route === "app.openPath") {
+      // Local-side only: remote workspace files have no local filesystem path.
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      // safe() confines the path to the open project, so the renderer cannot
+      // ask the OS to open arbitrary files outside the workspace.
+      await this.platform.openPath(this.workspace.safe(String(v.path ?? "")));
+      return;
+    }
+    if (route === "app.openWith") {
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      await this.platform.openWith(this.workspace.safe(String(v.path ?? "")));
+      return;
+    }
+    if (route === "app.openWithApps") {
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      return this.platform.openWithApps(this.workspace.safe(String(v.path ?? "")));
+    }
+    if (route === "app.openWithApp") {
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      await this.platform.openWithApp(this.workspace.safe(String(v.path ?? "")), String(v.appId ?? ""));
       return;
     }
     if (route === "wsl.list") return WslHostClient.distributions();

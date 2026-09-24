@@ -13,7 +13,7 @@ import type { GitStatus } from "../src/shared/types.js";
 const platform: Platform = {
   pickProject: async () => undefined, pickSession: async () => undefined,
   confirm: async () => { throw new Error("Switching branches needs no extra dialog"); },
-  openExternal: async () => {}, showItemInFolder() {}, quit() {},
+  openExternal: async () => {}, openPath: async () => {}, openWith: async () => {}, openWithApps: async () => [], openWithApp: async () => {}, showItemInFolder() {}, quit() {},
 };
 const status: GitStatus = { available: true, branch: "feature", changes: [], ahead: 0, behind: 0, clean: true };
 

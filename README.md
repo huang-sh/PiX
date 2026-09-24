@@ -4,92 +4,90 @@
 
 <h1 align="center">PiX</h1>
 
-<p align="center">非线性的 AI Agent 工作台 —— 会话是一张图，随时分叉，上下文跟随分支</p>
+<p align="center">A non-linear AI agent workbench — sessions are graphs: branch anytime, and context follows the branch</p>
 
-<p align="center"><a href="README.en.md">English</a> · 中文</p>
+<p align="center">English · <a href="README.zh.md">中文</a></p>
 
 ---
 
 <p align="center">
-  <img src="assets/images/pix-session-tree.png" alt="PiX 会话图：从左到右生长的分支结构">
+  <img src="assets/images/pix-session-tree.png" alt="PiX session graph with branches growing left to right">
 </p>
 
-PiX 的会话不是一条线，而是一张会生长的图：每一轮对话都是图上的一个节点，任何一个节点都可以随时长出新分支。
+A PiX session is not a line — it is a graph that keeps growing: every conversation turn is a node, and any node can sprout a new branch at any time.
 
-## 非线性会话
+## Non-linear sessions
 
-传统的 AI 对话是一条单线时间轴：想换一个方向，要么推倒重来，要么在原对话里继续追问、让上下文越来越混乱。
+A traditional AI chat is a single timeline: to change direction you either start over or keep piling questions onto the same thread until the context becomes a mess.
 
-PiX 把会话组织成一张从左到右生长的图：
+PiX organizes a session as a graph that grows left to right:
 
-- 每一轮对话（你的提问 + 助手的回复与工具调用）是图上的一个节点。
-- 多个探索方向可以并存于同一张图上，随时切换分支继续推进，互不干扰。
-- 哪条路径走通了就继续深入，走不通的分支留在图上，随时可以回来换条路再试。
-- 会话就是真实的 Pi 会话，不发明新格式，离开 PiX 也能继续使用。
+- Every turn (your prompt plus the assistant's reply and tool calls) is a node on the graph.
+- Several directions can live on the same graph — switch to another branch at any time and keep going, without interference.
+- When a path works out, keep going deeper; dead ends stay on the graph, and you can always come back and try another route.
+- Sessions are real Pi sessions — no new format — so they remain usable outside PiX.
 
-## 随时创建分支
+## Branch anytime
 
-分支是 PiX 的日常动作，而不是需要预先规划的操作：
+Branching is an everyday action in PiX, not something you have to plan ahead:
 
-- **从任意一条用户消息分叉**（Fork）：对某一轮的答案不满意，直接从那里分出一条新分支换个问法或换个方案，原分支完好无损。
-- **从此轮继续**：在图上点选任意历史节点，从那一刻接着聊。
-- **克隆当前分支**：想做存档点时，克隆一份当前分支再放手尝试。每一个分支都在图中留存显示，随时切换。
+- **Fork from any user message**: unhappy with an answer? Fork a new branch from that turn with a different prompt or approach — the original branch stays untouched.
+- **Continue from a turn**: select any earlier node on the graph and pick up the conversation from that moment.
+- **Clone the active branch**: clone the current branch as a save point and experiment freely. Every branch stays visible on the graph, ready to switch back to at any time.
 
-## 上下文跟随分支
+## Context follows the branch
 
-切分支的时候，你不需要"重新配置上下文"——上下文本来就是分支的一部分：
+Switching branches never means re-setting up context — context is part of the branch:
 
-- **分支聊天面板**只显示当前活跃分支上的消息。切到另一个分支，聊天记录立刻跟着切换。
-- 单击节点只在图上高亮选中，不改变任何面板内容（图上的命令，如 /fork，作用于高亮的节点）；双击节点，主聊天面板对齐到那个节点。
-- 双击图上的节点，在主面板打开该节点的对话；Ctrl+双击（或右键菜单"在聊天面板中打开"）则把该分支固定到并排的第二、三个聊天列，最多同时显示 3 列，方便对比不同分支。同一条分支只保留一个面板，后打开的节点会替换该分支已有的面板。每列都能独立滚动、独立回复。在固定列里发送回复，该列会跟随新节点继续显示这条分支的对话，主面板不受影响；关闭全部固定列（或下次启动）后，聊天区宽度自动还原。
-- **分支上下文面板**跟随选中的节点，展示该轮的工作过程：思考过程、工具调用、耗时与步骤数，也可以直接在这里对选中节点发起回复。
+- The **branch chat panel** shows only the messages of the active branch. Switch to another branch and the chat switches with it.
+- A single click highlights a node on the graph without touching any panel (graph commands such as /fork act on the highlighted node); a double-click aligns the primary chat panel to that node.
+- Double-click a node on the graph to open its conversation in the primary chat panel. Ctrl+double-click (or the right-click menu's "Open in chat panel") pins that branch to a second or third side-by-side chat column — up to 3 columns at once for comparing branches. Each branch keeps a single panel: opening another node of an already-pinned branch retargets that column. Every column scrolls and replies independently. Replying from a pinned column grows that branch in place: the column follows the newly created node, and the primary column keeps the current selection. Closing the last pinned column — or the next start — restores the chat width.
+- The **branch context panel** follows the selected node and shows how that turn went: thinking, tool calls, duration, and step count — and you can reply to the selected node right from there.
 
 <p align="center">
-  <img src="assets/images/pix-multi-chat-panels.png" alt="多 chat panel：Ctrl+双击不同分支的节点，并排固定最多 3 个聊天列对比对话">
+  <img src="assets/images/pix-multi-chat-panels.png" alt="Multi chat panels: Ctrl+double-click nodes on different branches to pin up to three side-by-side chat columns for comparison">
 </p>
 
-## 内置扩展
+## Built-in extensions
 
-PiX 内置两个扩展，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
+PiX ships two built-in extensions, both loaded through Pi's extension mechanism. They carry native binaries, so they and their runtime dependencies ship with the installer — no separate install needed, and an npm copy you installed through Pi takes precedence.
 
-- **`@ff-labs/pi-fff` — 高速文件与内容搜索**：用 FFF（Rust 原生、SIMD 加速）替换内置的 `find` / `grep` 工具：`fffind` 模糊文件名搜索、`ffgrep` 内容搜索、`fff-multi-grep` 多模式搜索。会话开始时后台预索引，搜索即时返回；按 frecency 排序（常用文件靠前），git 修改与未跟踪文件加权。
-- **`@injaneity/pi-computer-use` — 桌面应用操控**：让智能体观察并操控 macOS、Windows、Linux 上的桌面应用：查找打开的应用与窗口、读取界面上的文本与控件、点击、输入、滚动、等待界面变化。适用于应用没有 API、只有图形界面的场景（macOS 助手要求 macOS 14 或更高版本）。
+- **`@ff-labs/pi-fff` — fast file and content search**: replaces the built-in `find` / `grep` tools with FFF (Rust-native, SIMD-accelerated): `fffind` fuzzy file-name search, `ffgrep` content search, and `fff-multi-grep` multi-pattern search. Files are pre-indexed in the background at session start so searches return instantly; results are frecency-ranked (frequently used files first) and boosted for git-modified and untracked files.
+- **`@injaneity/pi-computer-use` — desktop app control**: lets the agent observe and operate desktop apps on macOS, Windows, and Linux: find open apps and windows, read the text and controls on screen, click, type, scroll, and wait for the UI to change. Useful when an app has no API and the on-screen interface is all there is (the macOS helper requires macOS 14 or newer).
 
-`pi-web-access` 不随安装包分发：在设置 → 扩展页可一键安装到用户配置，之后通过 `pi update` 独立更新。它为智能体提供网页搜索、URL 抓取、PDF 抽取与 GitHub 研究能力；网页搜索服务仍使用你自己的配置与凭据。
+`pi-web-access` does not ship with the installer: install it with one click on the Settings → Extensions page and keep it current with `pi update`. It gives the agent web search, URL fetching, PDF extraction, and GitHub research; web search services still use your own configuration and credentials.
 
-此外，PiX 自身还带一个内部的 `file-changes` 扩展（不可卸载）：在智能体编辑、写入文件前后拍快照，为"变更"面板提供数据。
+PiX itself also adds one internal `file-changes` extension (not removable): it snapshots files before and after the agent edits or writes them to power the "Changes" panel.
 
-## 运行
+## Run
 
-需要 Node.js 22.19 或更高版本。PiX 以内嵌的本地 Web UI 运行：后端是 Node，前端在浏览器里打开。
+Requires Node.js 22.19 or newer. PiX is a local web UI: Node hosts the backend, and the frontend opens in your browser.
 
 ```bash
 npm install
 npm run dev
 ```
 
-浏览器会打开 `http://127.0.0.1:5173/`。生产构建：
+The browser opens `http://127.0.0.1:5173/`. For a production build:
 
 ```bash
 npm run build
 npm start
 ```
 
-PiX 内置 `@injaneity/pi-computer-use` 和 `@ff-labs/pi-fff`，均通过 Pi 扩展机制加载。`pi-web-access` 可在设置 → 扩展页一键安装到用户配置，之后通过 `pi update` 独立更新。
+`npm run verify` runs the full typecheck and test suite. `npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching.
 
-`npm run verify` 可执行完整的类型检查与测试。`npm run test:fff` 验证内置文件搜索；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络）。
+## Community
 
-## 交流群
-
-扫码加入微信交流群：
+Join our WeChat group:
 
 <p>
-  <img src="assets/images/Weixin.png" width="220" alt="PiX 微信交流群二维码">
+  <img src="assets/images/Weixin.png" width="220" alt="PiX WeChat group QR code">
 </p>
 
-## 贡献者
+## Contributors
 
-感谢所有为 PiX 做出贡献的人：
+Thanks to everyone who has contributed to PiX:
 
 <!-- CONTRIBUTORS:START -->
 <a href="https://github.com/huang-sh"><img src="https://avatars.githubusercontent.com/u/24741118?v=4&s=80" width="80" height="80" alt="huang-sh"></a>
@@ -100,4 +98,4 @@ PiX 内置 `@injaneity/pi-computer-use` 和 `@ff-labs/pi-fff`，均通过 Pi 扩
 <a href="https://github.com/jinjianghao"><img src="https://avatars.githubusercontent.com/u/147498917?v=4&s=80" width="80" height="80" alt="jinjianghao"></a>
 <!-- CONTRIBUTORS:END -->
 
-欢迎参与：问题反馈和功能建议请开 [issue](https://github.com/huang-sh/PiX/issues)；修 bug 或加功能请提交 Pull Request。
+Contributions are welcome: open an [issue](https://github.com/huang-sh/PiX/issues) for bugs and ideas, or send a pull request.

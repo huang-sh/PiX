@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "markstream-vue/index.css";
+@import "katex/dist/katex.min.css";
 
 :root {
   color-scheme: light;
@@ -760,6 +761,14 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .file-empty span { font-size: var(--font-size-caption); }
 .image-preview { display: grid; place-items: center; flex: 1; min-height: 0; overflow: auto; padding: 24px; background-color: var(--muted-surface); background-image: linear-gradient(45deg,var(--border) 25%,transparent 25%),linear-gradient(-45deg,var(--border) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--border) 75%),linear-gradient(-45deg,transparent 75%,var(--border) 75%); background-position: 0 0,0 8px,8px -8px,-8px 0; background-size: 16px 16px; }
 .image-preview img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 8px 30px rgb(15 30 26 / 14%); }
+.pdf-view { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--muted-surface); }
+.pdf-toolbar { display: flex; align-items: center; gap: 4px; flex: 0 0 34px; padding: 0 8px; border-bottom: 1px solid var(--border); }
+.pdf-zoom-level { min-width: 44px; color: var(--muted); font: var(--font-size-code)/1 var(--font-mono); text-align: center; }
+.pdf-page-count { margin-left: auto; color: var(--faint); font-size: var(--font-size-caption); }
+.pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 16px; flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+.pdf-canvas-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.pdf-pages canvas { box-shadow: 0 8px 30px rgb(15 30 26 / 14%); background: white; }
+.file-markdown { flex: 1; min-height: 0; overflow: auto; padding: 8px 24px 80px; }
 .code-editor { display: grid; grid-template-columns: minmax(52px, max-content) minmax(0,1fr); flex: 1; min-height: 0; overflow: hidden; background: var(--surface); }
 .code-editor > pre { margin: 0; overflow: hidden; padding: 10px 8px 80px 0; border-right: 1px solid color-mix(in srgb,var(--border) 62%,transparent); color: var(--faint); font: var(--font-size-code)/var(--line-height-code) var(--font-mono); text-align: right; user-select: none; }
 .tool-explorer { flex: 0 0 36%; min-height: 130px; overflow: auto; border-bottom: 1px solid var(--border); background: color-mix(in srgb,var(--muted-surface) 52%,var(--tool-surface)); }
