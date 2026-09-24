@@ -7,8 +7,8 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "@earendil-works/pi-server": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-server": "0.87.1",
     "@ff-labs/pi-fff": "0.10.6",
     "@injaneity/pi-computer-use": "0.5.1",
     "diff": "8.0.4",
