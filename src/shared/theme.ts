@@ -70,7 +70,7 @@ export const themeColors = {
     "accent": "#3568da",
     "accent-strong": "#2f4c8f",
     "accent-soft": "#edf3fe",
-    "ring": "rgba(65, 118, 230, 0.14)",
+    "ring": "rgba(53, 104, 218, 0.14)",
     "danger": "#d52121",
     "success": "#15803d",
     "running": "#d97706",
