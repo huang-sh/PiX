@@ -34,7 +34,7 @@ jobs:
             cat /tmp/avatars.md
             echo '<!-- CONTRIBUTORS:END -->'
           } > "$block"
-          for f in README.md README.zh.md; do
+          for f in README.md README.zh.md README.ja.md; do
             awk -v block="$block" '
               /<!-- CONTRIBUTORS:START -->/ { while ((getline line < block) > 0) print line; close(block); skip=1; next }
               /<!-- CONTRIBUTORS:END -->/ { skip=0; next }
@@ -47,7 +47,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md README.zh.md
+          git add README.md README.zh.md README.ja.md
           git diff --cached --quiet && { echo "Contributors unchanged."; exit 0; }
           git commit -m "chore: update contributor avatars"
           git push
