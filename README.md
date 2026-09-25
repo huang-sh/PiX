@@ -6,7 +6,7 @@
 
 <p align="center">A non-linear AI agent workbench — sessions are graphs: branch anytime, and context follows the branch</p>
 
-<p align="center">English · <a href="README.zh.md">中文</a></p>
+<p align="center">English · <a href="README.zh.md">中文</a> · <a href="README.ja.md">日本語</a></p>
 
 ---
 
