@@ -104,6 +104,7 @@ PiX に貢献してくださったすべての方に感謝します：
 <a href="https://github.com/kindredzhang"><img src="https://avatars.githubusercontent.com/u/120791467?v=4&s=80" width="80" height="80" alt="kindredzhang"></a>
 <a href="https://github.com/xxnuo"><img src="https://avatars.githubusercontent.com/u/54252779?v=4&s=80" width="80" height="80" alt="xxnuo"></a>
 <a href="https://github.com/jinjianghao"><img src="https://avatars.githubusercontent.com/u/147498917?v=4&s=80" width="80" height="80" alt="jinjianghao"></a>
+<a href="https://github.com/eltociear"><img src="https://avatars.githubusercontent.com/u/22633385?v=4&s=80" width="80" height="80" alt="eltociear"></a>
 <!-- CONTRIBUTORS:END -->
 
 コントリビューションを歓迎します。バグやアイデアは [issue](https://github.com/huang-sh/PiX/issues) を立てるか、プルリクエストを送ってください。
