@@ -1,16 +1,15 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// Both sides of this merge moved the wire on their own: usage.overview is a
-// new project route, and lingering hosts, reattachment, and credential
-// deployment added shutdown messages and the hello authorization flag. Each
-// change alone claimed 15, so the merged protocol is 16 to force hosts from
-// either lineage to reinstall. Installers compare both protocol and version.
-export const PIX_REMOTE_PROTOCOL = 16;
-export const PIX_HOST_VERSION = "0.0.24";
+// Pi 1.0 dialogs and model operations require an updated remote host.
+// Installers compare both protocol and product version.
+export const PIX_REMOTE_PROTOCOL = 17;
+export const PIX_HOST_VERSION = "0.0.25";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
 export const PROJECT_ROUTES = [
+  "ui.respond",
+  "ui.pending",
   "session.list",
   "session.snapshot",
   "session.open",
@@ -81,11 +80,13 @@ export interface HostEvent {
   event: DesktopEvent;
 }
 
+export type ModelOperation = "stream" | "streamSimple" | "generateImages" | "classify";
 export interface HostModelRequest {
   type: "model.request";
   id: string;
   provider: string;
   modelId: string;
+  operation?: ModelOperation;
   context: unknown;
   options: Record<string, unknown>;
 }

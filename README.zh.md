@@ -50,14 +50,22 @@ PiX 把会话组织成一张从左到右生长的图：
 
 ## 内置扩展
 
-PiX 内置两个扩展，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
+PiX 使用 Pi 1.0，并加载其 MCP、Codemode 和工具搜索扩展。已有 Pi v3 JSONL 会话可继续使用。分支聊天会显示工具图片和嵌套调用记录；Pi 保存嵌套调用的名称、参数和状态，但不会保存每个嵌套调用的完整输出。
+
+在会话所在主机的 `~/.pix/agent/mcp.json` 或已信任项目的 `.pi/mcp.json` 中配置 MCP。直接编辑这些文件后，运行 `/reload`，再用 `/mcp` 查看状态、`/mcp login [服务器名]` 登录、`/mcp reconnect [服务器名]` 重连。PiX 支持扩展的选择、输入和确认弹窗；依赖自定义 TUI 组件的扩展仍需在 Pi 终端中使用。
+
+连接采用默认 `codemode` 暴露方式的 MCP 服务器时，会自动启用 Codemode。手动启用时，在设置 → 工具与图片 → 默认工具的现有列表末尾追加 `, +codemode`，点击输入框外保存。这是项目设置，只需配置一次；新会话自动沿用，当前会话会在空闲时自动重载。在设置页这样修改时，无需手动 `/reload`。
+
+「Codemode 工具调用方式」控制启用后的行为，本身不是启用开关：`on`（与其他工具并用）保留直接工具调用，`only`（仅通过 Codemode 调用）让模型通过 Codemode 调用这些工具。服务器配置见 [Pi MCP 文档](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/mcp.md)。
+
+PiX 还内置两个带原生二进制的扩展，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
 
 - **`@ff-labs/pi-fff` — 高速文件与内容搜索**：用 FFF（Rust 原生、SIMD 加速）替换内置的 `find` / `grep` 工具：`fffind` 模糊文件名搜索、`ffgrep` 内容搜索、`fff-multi-grep` 多模式搜索。会话开始时后台预索引，搜索即时返回；按 frecency 排序（常用文件靠前），git 修改与未跟踪文件加权。
 - **`@injaneity/pi-computer-use` — 桌面应用操控**：让智能体观察并操控 macOS、Windows、Linux 上的桌面应用：查找打开的应用与窗口、读取界面上的文本与控件、点击、输入、滚动、等待界面变化。适用于应用没有 API、只有图形界面的场景（macOS 助手要求 macOS 14 或更高版本）。
 
 `pi-web-access` 不随安装包分发：在设置 → 扩展页可一键安装到用户配置，之后通过 `pi update` 独立更新。它为智能体提供网页搜索、URL 抓取、PDF 抽取与 GitHub 研究能力；网页搜索服务仍使用你自己的配置与凭据。
 
-此外，PiX 自身还带一个内部的 `file-changes` 扩展（不可卸载）：在智能体编辑、写入文件前后拍快照，为"变更"面板提供数据。
+此外，PiX 还加载内部扩展：`file-changes` 在智能体编辑、写入文件前后拍快照，为"变更"面板提供数据；`git-branch` 为每轮用户输入记录当时所在的 Git 分支。
 
 ## 下载
 
@@ -81,7 +89,7 @@ npm run dev
 
 `npm run verify` 可执行完整的类型检查、测试与启动冒烟验证。
 
-`npm run test:fff` 验证内置文件搜索；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络），均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；Linux 使用 `npm run dist:linux` 打包 AppImage、deb、rpm 和 tar.gz。CI 分别在 Apple Silicon、Intel 和 Ubuntu runner 上构建对应安装包，以包含正确的本机运行库。
+`npm run test:fff` 验证内置文件搜索与 Codemode；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络），均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；Linux 使用 `npm run dist:linux` 打包 AppImage、deb、rpm 和 tar.gz。CI 分别在 Apple Silicon、Intel 和 Ubuntu runner 上构建对应安装包，以包含正确的本机运行库。
 
 </details>
 

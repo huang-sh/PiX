@@ -385,6 +385,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .turn-copy p { display: -webkit-box; grid-column: 2 / 4; min-height: 34px; margin: 0; overflow: hidden; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .turn-copy p.node-running { display: flex; align-items: center; gap: 5px; color: var(--accent-strong); }
 .node-footer { display: grid; grid-template-columns: auto minmax(0,1fr) minmax(0,auto) auto; align-items: center; gap: 2px; min-height: 30px; margin: 5px -8px -8px; padding: 3px 2px 0; border-top: 1px solid var(--border); color: var(--faint); }
+.nested-tool { margin-left: 16px; border-left: 1px solid var(--border); padding-left: 10px; }
 .node-context-usage { display: flex; align-items: center; gap: 2px; min-width: 0; height: 21px; padding: 0 2px; white-space: nowrap; grid-column: 2; justify-self: end; }
 .node-context-usage i { --usage: 0deg; position: relative; flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--accent) var(--usage), var(--border) 0); }
 .node-context-usage i::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--surface); }

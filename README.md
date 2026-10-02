@@ -50,14 +50,22 @@ Switching branches never means re-setting up context — context is part of the 
 
 ## Built-in extensions
 
-PiX ships two built-in extensions, both loaded through Pi's extension mechanism. They carry native binaries, so they and their runtime dependencies ship with the installer — no separate install needed, and an npm copy you installed through Pi takes precedence.
+PiX embeds Pi 1.0, including its MCP, Codemode and tool-search extensions. Existing Pi v3 JSONL sessions keep working. Tool images and nested call records appear in the branch chat; Pi saves nested call names, arguments and status, but not every nested output.
+
+Configure MCP in `~/.pix/agent/mcp.json` or a trusted project's `.pi/mcp.json`, on the machine running the session. After editing these files, run `/reload`, then `/mcp` for status, `/mcp login [server]` to sign in, or `/mcp reconnect [server]` to reconnect. PiX supports extension selection, input and confirmation dialogs; TUI-specific custom components still need the Pi terminal.
+
+Connecting an MCP server with the default `codemode` exposure activates Codemode automatically. To enable it yourself, append `, +codemode` to the existing list in Settings → Tools & images → Default tools, then click outside the field to save. This is a project setting: new sessions inherit it, and PiX automatically reloads the current session when it is idle. No manual `/reload` is needed for this settings-page change.
+
+The Codemode tool access setting controls how an active Codemode tool presents other tools; it does not enable Codemode. `on` (Alongside other tools) keeps direct tool calls available; `only` (Only through Codemode) hides those direct calls from the model. See [Pi's MCP configuration](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/mcp.md) for server configuration.
+
+PiX also bundles two extensions with native binaries. They and their runtime dependencies ship with the installer — no separate install needed, and an npm copy you installed through Pi takes precedence.
 
 - **`@ff-labs/pi-fff` — fast file and content search**: replaces the built-in `find` / `grep` tools with FFF (Rust-native, SIMD-accelerated): `fffind` fuzzy file-name search, `ffgrep` content search, and `fff-multi-grep` multi-pattern search. Files are pre-indexed in the background at session start so searches return instantly; results are frecency-ranked (frequently used files first) and boosted for git-modified and untracked files.
 - **`@injaneity/pi-computer-use` — desktop app control**: lets the agent observe and operate desktop apps on macOS, Windows, and Linux: find open apps and windows, read the text and controls on screen, click, type, scroll, and wait for the UI to change. Useful when an app has no API and the on-screen interface is all there is (the macOS helper requires macOS 14 or newer).
 
 `pi-web-access` does not ship with the installer: install it with one click on the Settings → Extensions page and keep it current with `pi update`. It gives the agent web search, URL fetching, PDF extraction, and GitHub research; web search services still use your own configuration and credentials.
 
-PiX itself also adds one internal `file-changes` extension (not removable): it snapshots files before and after the agent edits or writes them to power the "Changes" panel.
+PiX also loads internal extensions: `file-changes` snapshots files before and after the agent edits or writes them to power the "Changes" panel; `git-branch` records the working Git branch for each user turn.
 
 ## Download
 
@@ -81,7 +89,7 @@ npm run dev
 
 `npm run verify` runs the full typecheck, test, and startup smoke suite.
 
-`npm run test:fff` checks bundled file search; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; on Linux, `npm run dist:linux` packages AppImage, deb, rpm, and tar.gz. CI builds on separate Apple Silicon, Intel, and Ubuntu runners to include the matching native libraries.
+`npm run test:fff` checks bundled file search and Codemode; `npm run test:web` checks the web extension's installed layout (a real npm install, needs network) and page fetching, both with isolated settings. On macOS, `npm run dist:mac` packages the current machine's architecture; on Linux, `npm run dist:linux` packages AppImage, deb, rpm, and tar.gz. CI builds on separate Apple Silicon, Intel, and Ubuntu runners to include the matching native libraries.
 
 </details>
 

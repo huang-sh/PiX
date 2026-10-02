@@ -141,16 +141,19 @@ async function serve() {
     lastLive = Date.now();
     const modelStreams = new Map<string, BrokerModelStream>();
     brokerOwner = socket;
-    controller.projectRuntime.setModelBroker((model, context, options) => {
+    controller.projectRuntime.setModelBroker((model, context, options, operation = "streamSimple") => {
       const id = randomBytes(16).toString("hex");
       const stream = new BrokerModelStream(model);
       // A lingering host serves sessions between desktop connections; a
       // brokered call with no live socket must fail fast instead of hanging.
       if (socket.readyState !== WebSocket.OPEN) {
         stream.fail("Desktop model broker is not connected");
-        return stream;
+        return operation === "generateImages" || operation === "classify" ? stream.result() : stream;
       }
-      const abort = () => send(socket, { type: "model.cancel", id });
+      const abort = () => {
+        send(socket, { type: "model.cancel", id });
+        stream.fail("Model request aborted", true);
+      };
       modelStreams.set(id, stream);
       options?.signal?.addEventListener("abort", abort, { once: true });
       void stream.result().finally(() => {
@@ -162,10 +165,12 @@ async function serve() {
         id,
         provider: String(model.provider),
         modelId: String(model.id),
+        operation,
         context,
         options: brokerOptions(options),
       });
-      return stream;
+      if (options?.signal?.aborted) abort();
+      return operation === "generateImages" || operation === "classify" ? stream.result() : stream;
     });
     send(socket, {
       type: "hello",

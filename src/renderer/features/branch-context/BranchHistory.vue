@@ -75,9 +75,20 @@ const { t } = useI18n();
                   <code v-if="message.toolInput" :title="message.toolInput">{{ message.toolInput }}</code>
                 </summary>
                 <pre>{{ message.text || t("common.noOutput") }}</pre>
+                <MessageImages :images="message.images" />
+                <div v-if="message.nestedCalls?.length" class="nested-tools">
+                  <small>{{ t('branch.nestedCalls') }}</small>
+                  <p v-if="!message.nestedCallsComplete">{{ t('branch.nestedCallsIncomplete') }}</p>
+                  <details v-for="call in message.nestedCalls" :key="call.id" :class="{ error: call.status !== 'ok' }">
+                    <summary><strong>{{ call.name }}</strong> · {{ t(`branch.nestedStatus.${call.status === 'ok' ? 'ok' : call.status === 'error' ? 'error' : 'unfinished'}`) }}</summary>
+                    <pre v-if="call.input">{{ call.input }}</pre>
+                    <pre v-if="call.error">{{ call.error }}</pre>
+                  </details>
+                </div>
               </details>
-              <div v-else-if="message.text" class="process-item assistant">
+              <div v-else-if="message.text || message.images?.length" class="process-item assistant">
                 <MarkdownRenderer :content="message.text" :custom-id="message.entryId" />
+                <MessageImages :images="message.images" />
                 <div class="message-actions">
                   <ContextStatus :status="message.contextStatus" />
                   <CopyButton :text="message.text" />
@@ -99,9 +110,10 @@ const { t } = useI18n();
           </div>
         </article>
 
-        <article v-if="turn.terminal?.text" class="branch-message assistant"
+        <article v-if="turn.terminal && (turn.terminal.text || turn.terminal.images?.length)" class="branch-message assistant"
           :class="turn.running || turn.terminal.isError ? 'progress-response' : 'final-response'">
           <MarkdownRenderer :content="turn.terminal.text" :custom-id="turn.terminal.entryId" />
+          <MessageImages :images="turn.terminal.images" />
           <div class="message-actions">
             <ContextStatus :status="turn.terminal.contextStatus" />
             <CopyButton :text="turn.terminal.text" />
@@ -111,3 +123,8 @@ const { t } = useI18n();
       </section>
   </div>
 </template>
+
+<style scoped>
+.nested-tools { margin: 8px 0 0 16px; padding-left: 10px; border-left: 1px solid var(--border); }
+.nested-tools small { color: var(--muted); }
+</style>

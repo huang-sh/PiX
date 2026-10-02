@@ -101,6 +101,25 @@ test("connection loss rejects requests, cancels model work and notifies once", a
   await assert.rejects(client.request("session.list"), /not connected/);
 });
 
+test("remote transport returns image and classifier results and cancels either operation", async t => {
+  const { client, socket } = transport(t);
+  for (const operation of ["generateImages", "classify"] as const) {
+    const result = { api: "test", provider: "test", model: "model", timestamp: 1, stopReason: "stop" as const,
+      ...(operation === "generateImages" ? { output: [] } : { answers: {} }) };
+    client.setModelBroker(async request => { assert.equal(request.operation, operation); return result as any; });
+    socket.emit("message", JSON.stringify({ type: "model.request", id: operation, operation }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(socket.sent.at(-1), { type: "model.event", id: operation, event: { type: "result", result } });
+    client.setModelBroker((_request, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+    }));
+    socket.emit("message", JSON.stringify({ type: "model.request", id: operation, operation }));
+    socket.emit("message", JSON.stringify({ type: "model.cancel", id: operation }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(socket.sent.at(-1), { type: "model.failure", id: operation, error: "cancelled" });
+  }
+});
+
 test("ordinary requests time out and late responses do not poison subsequent requests", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { client, socket } = transport(t);
@@ -336,6 +355,21 @@ function remoteSnapshot(path = "/old/session.jsonl", running = false): SessionSn
       runs: running ? [{ branchId: "branch", runId: "run", status: "running" }] : [] },
   } as unknown as SessionSnapshot;
 }
+
+test("dialog replies retain their remote owner after switching back to a local project", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const id = projectId(project);
+  controller.configure(controller.localProjectPath);
+  const events: any[] = [];
+  controller.onEvent(event => events.push(event));
+  const request = { id: "question", kind: "input", title: "Code", source: "/old" };
+  old.emit({ type: "ui.request", payload: request });
+  assert.deepEqual(events.at(-1), { type: "ui.request", payload: { ...request, projectId: id } });
+  await controller.invoke("ui.respond", { id: request.id, projectId: id, value: "1234" });
+  assert.deepEqual(old.calls.at(-1), ["ui.respond", { id: request.id, value: "1234" }]);
+  old.request = async route => route === "ui.pending" ? [request] : [];
+  assert.deepEqual(await controller.invoke("ui.pending"), [{ ...request, projectId: id }]);
+});
 
 for (const order of [["A", "B"], ["B", "A"]]) {
   test(`remote session selection follows click order when replies arrive ${order.join(" then ")}`, async t => {
@@ -1105,7 +1139,9 @@ function fakeModelRuntime(local: string[]) {
     setRuntimeApiKey: async (id: string) => { runtime.keys.add(id); },
     removeRuntimeApiKey: async (id: string) => { runtime.keys.delete(id); },
     stream: () => "native",
-    streamSimple: () => "native",
+    streamSimple: () => "native-simple",
+    generateImages: () => "native-image",
+    classify: () => "native-classifier",
   };
   return runtime;
 }
@@ -1126,6 +1162,15 @@ test("a host with local credentials serves those providers directly", async () =
   assert.deepEqual([...modelRuntime.keys], ["openai"], "no fake runtime key shadows a local credential");
   assert.equal(modelRuntime.stream({ provider: "anthropic" }, {}, {}), "native");
   assert.equal(modelRuntime.stream({ provider: "openai" }, {}, {}), "brokered");
+  const operations: string[] = [];
+  const broker = runtime.modelBroker;
+  runtime.modelBroker = (_model, _context, _options, operation) => { operations.push(operation!); return "routed"; };
+  for (const [operation, expected] of [["streamSimple", "native-simple"], ["generateImages", "native-image"], ["classify", "native-classifier"]]) {
+    assert.equal(modelRuntime[operation!]({ provider: "anthropic" }, {}, {}), expected);
+    assert.equal(modelRuntime[operation!]({ provider: "openai" }, {}, {}), "routed");
+  }
+  assert.deepEqual(operations, ["streamSimple", "generateImages", "classify"]);
+  runtime.modelBroker = broker;
   // setModel's preflight must see brokered providers as configured.
   assert.deepEqual(await modelRuntime.checkAuth("openai"), { type: "api_key", source: "pix-desktop-broker" });
   assert.deepEqual(await modelRuntime.checkAuth("anthropic"), { type: "api_key" });
