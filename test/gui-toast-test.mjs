@@ -23,6 +23,13 @@ export default function(pi) {
     handler: (_args, ctx) => ctx.ui.notify("Toast warn line", "warning") });
   pi.registerCommand("toast-fail", { description: "Error toast",
     handler: () => { throw new Error("Toast failure line"); } });
+  pi.registerCommand("dialog-check", { description: "Extension dialogs",
+    handler: async (_args, ctx) => {
+      const choice = await ctx.ui.select("Choose MCP server", ["local", "remote"]);
+      const code = await ctx.ui.input("Verification code", "Paste code");
+      const confirmed = await ctx.ui.confirm("Connect server?", "Use the selected server for this session.");
+      ctx.ui.notify(JSON.stringify({ choice, code, confirmed }), "info");
+    } });
 }
 `);
 mkdirSync(join(testHome, ".pix"), { recursive: true });
@@ -235,6 +242,34 @@ try {
   await dismissToast();
   await waitForToastGone();
   results.errorClickDismisses = true;
+
+  await dispatch("dialog-check");
+  const waitForDialog = (selector) => retry(async () => {
+    if (!(await cdp.evaluate(`Boolean(document.querySelector('[data-extension-dialog] ${selector}'))`)))
+      throw new Error(`dialog missing ${selector}`);
+  });
+  await waitForDialog("select");
+  await shot("gui-extension-select.png");
+  await cdp.evaluate(`(() => {
+    const select = document.querySelector('[data-extension-dialog] select');
+    select.value = 'remote'; select.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('[data-extension-dialog] button[type="submit"]').click();
+  })()`);
+  await waitForDialog("input");
+  await cdp.evaluate(`(() => {
+    const input = document.querySelector('[data-extension-dialog] input');
+    input.value = '1234'; input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await shot("gui-extension-input.png");
+  await cdp.evaluate(`document.querySelector('[data-extension-dialog] button[type="submit"]').click()`);
+  await retry(async () => {
+    if (!(await cdp.evaluate(`document.querySelector('[data-extension-dialog]')?.textContent.includes('Connect server?')`)))
+      throw new Error("confirmation missing");
+  });
+  await shot("gui-extension-confirm.png");
+  await cdp.evaluate(`document.querySelector('[data-extension-dialog] button[type="button"]').click()`);
+  await waitForToast('"confirmed":false');
+  results.extensionDialogsRoundTrip = (await cdp.evaluate(toastProbe)).text.includes('"choice":"remote","code":"1234"');
 
   await cdp.close();
 } finally {

@@ -41,7 +41,7 @@ export interface WslHostOptions extends RemoteConnectOptions {
 type ModelBroker = (
   request: HostModelRequest,
   signal: AbortSignal,
-) => Promise<AsyncIterable<unknown>> | AsyncIterable<unknown>;
+) => Promise<AsyncIterable<unknown> | import("@earendil-works/pi-ai").AssistantImages | import("@earendil-works/pi-ai").ClassifierResult> | AsyncIterable<unknown>;
 
 const READY_MARKER = "PIX_AGENT_HOST_READY ";
 /** The ssh transport options shared by spawn and reattach connections. */
@@ -681,7 +681,13 @@ export class WslHostClient {
     this.modelRequests.set(request.id, controller);
     try {
       if (!this.modelBroker) throw new Error("Desktop model broker is unavailable");
-      const stream = await this.modelBroker(request, controller.signal);
+      const result = await this.modelBroker(request, controller.signal);
+      if (request.operation === "generateImages" || request.operation === "classify") {
+        if (this.socket.readyState === WebSocket.OPEN)
+          this.socket.send(JSON.stringify({ type: "model.event", id: request.id, event: { type: "result", result } }));
+        return;
+      }
+      const stream = result as AsyncIterable<unknown>;
       for await (const event of stream) {
         if (this.socket.readyState !== WebSocket.OPEN) break;
         this.socket.send(JSON.stringify({

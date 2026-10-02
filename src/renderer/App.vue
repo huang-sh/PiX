@@ -27,6 +27,7 @@ import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
 import { createRunCommand, runCommandKey } from "./features/commands/runCommand";
 import ImagePreview from "./components/ImagePreview.vue";
+import ExtensionDialogHost from "./components/ExtensionDialogHost.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
@@ -637,6 +638,7 @@ onBeforeUnmount(() => {
     </Button>
   </div>
   <ImagePreview />
+  <ExtensionDialogHost />
   <DialogRoot :open="renameOpen" @update:open="renameOpen = $event">
     <DialogPortal>
       <DialogOverlay class="dialog-overlay" />

@@ -3,6 +3,7 @@ import { acceptDomainUpdate } from "./registry";
 export const en = {
   settings: {
     preferences: "Preferences",
+    mcpHint: "MCP: edit ~/.pix/agent/mcp.json or the trusted project's .pi/mcp.json on the session host. Use /reload, then /mcp to check status, sign in or reconnect. To use Codemode without MCP, add +codemode to default tools. Mode 'only' routes callable tools through Codemode.",
     back: "Back to workbench",
     resizeNav: "Resize settings sidebar",
     saving: "Saving…",
@@ -325,6 +326,7 @@ export const en = {
       providerRetryTimeout: "Provider retry timeout (ms)",
       providerMaxRetries: "Provider maximum retries",
       defaultTools: "Default tools",
+      codemodeMode: "Codemode tool exposure",
       resizeImages: "Resize images",
       blockImages: "Block images",
       skillCommands: "Skill commands",
@@ -383,6 +385,7 @@ export const en = {
 
 export const zhCN: typeof en = {
   settings: {
+    mcpHint: "MCP：在会话所在主机编辑 ~/.pix/agent/mcp.json 或已信任项目的 .pi/mcp.json。运行 /reload 后，用 /mcp 查看状态、登录或重连。单独使用 Codemode 时，在默认工具中加入 +codemode；only 模式通过 Codemode 调用工具。",
     preferences: "偏好设置",
     back: "返回工作台",
     resizeNav: "调整设置侧栏宽度",
@@ -706,6 +709,7 @@ export const zhCN: typeof en = {
       providerRetryTimeout: "提供商重试超时（毫秒）",
       providerMaxRetries: "提供商最大重试次数",
       defaultTools: "默认工具",
+      codemodeMode: "Codemode 工具暴露方式",
       resizeImages: "自动缩放图片",
       blockImages: "屏蔽图片",
       skillCommands: "技能命令",

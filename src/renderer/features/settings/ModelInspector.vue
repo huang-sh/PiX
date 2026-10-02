@@ -31,7 +31,7 @@ const {
           </label>
           <Button size="sm" class="model-primary-button" :disabled="providerBusy === selectedProvider.id || !keyDrafts[selectedProvider.id]?.trim()">{{ t("settings.saveKey") }}</Button>
         </form>
-        <div v-else-if="selectedProvider.authTypes.includes('oauth')" class="provider-auth">
+        <div v-if="selectedProvider.authTypes.includes('oauth')" class="provider-auth">
           <Button variant="outline" size="sm" :data-provider-oauth="selectedProvider.id" data-oauth-method="browser" :disabled="providerBusy === selectedProvider.id" @click="loginOAuth(selectedProvider, 'browser')">
             {{ providerBusy === selectedProvider.id ? t("settings.waitingSignIn") : t("settings.browser") }}
           </Button>
@@ -39,7 +39,7 @@ const {
             {{ t("settings.deviceCode") }}
           </Button>
         </div>
-        <small v-else class="provider-auth-note">{{ t("settings.providerSetupNote") }}</small>
+        <small v-if="!selectedProvider.authTypes.length" class="provider-auth-note">{{ t("settings.providerSetupNote") }}</small>
         <Button v-if="selectedProvider.status" variant="ghost" size="sm" class="provider-remove" :disabled="providerBusy === selectedProvider.id" @click="logout(selectedProvider)">{{ t("settings.removeProviderCredentials") }}</Button>
         <section v-if="customModels.some(model => model.provider === selectedProvider!.id)" data-custom-model-list>
           <div class="provider-model-heading"><strong>{{ t("settings.customModels") }}</strong></div>

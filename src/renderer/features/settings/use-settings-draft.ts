@@ -142,6 +142,7 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
       case "tools":
         return [
           { path: "defaultTools", label: "settings.rows.defaultTools", scope: "project", fallback: defaultToolsFallback },
+          { path: "codemode.mode", label: "settings.rows.codemodeMode", scope: "project", type: "select", options: ["on", "only"], fallback: "on" },
           { path: "images.autoResize", label: "settings.rows.resizeImages", scope: "global", type: "check", fallback: true },
           { path: "images.blockImages", label: "settings.rows.blockImages", scope: "global", type: "check", fallback: false },
           { path: "enableSkillCommands", label: "settings.rows.skillCommands", scope: "global", type: "check", fallback: true, description: "settings.rows.skillCommandsDesc" },

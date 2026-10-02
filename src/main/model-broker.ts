@@ -11,7 +11,12 @@ const optionNames = [
   "timeoutMs",
   "maxRetries",
   "serviceTier",
+  "metadata",
+  "toolChoice",
 ] as const;
+
+export const brokerModelKey = (model: { provider: string; id: string; type?: string }) =>
+  `${model.provider}\0${model.id}${model.type && model.type !== "chat" ? `\0${model.type}` : ""}`;
 
 export function brokerOptions(input: unknown) {
   const source = input && typeof input === "object"
@@ -70,7 +75,7 @@ export class BrokerModelStream implements AsyncIterable<any> {
   private readonly resultPromise: Promise<any>;
   private resolveResult!: (value: any) => void;
 
-  constructor(model: any) {
+  constructor(private model: any) {
     this.partial = {
       role: "assistant",
       content: [],
@@ -93,6 +98,12 @@ export class BrokerModelStream implements AsyncIterable<any> {
 
   push(wire: any) {
     if (this.ended) return;
+    if (wire.type === "result") {
+      this.ended = true;
+      this.resolveResult(wire.result);
+      while (this.waiting.length) this.waiting.shift()!({ value: undefined, done: true });
+      return;
+    }
     const event = this.inflate(wire);
     const waiter = this.waiting.shift();
     if (waiter) waiter({ value: event, done: false });
@@ -104,11 +115,19 @@ export class BrokerModelStream implements AsyncIterable<any> {
     }
   }
 
-  fail(message: string) {
+  fail(message: string, aborted = false) {
+    if (this.model.type === "image" || this.model.type === "classifier") {
+      this.push({ type: "result", result: {
+        api: this.model.api, provider: this.model.provider, model: this.model.id,
+        ...(this.model.type === "image" ? { output: [] } : { answers: {} }),
+        stopReason: aborted ? "aborted" : "error", errorMessage: message, timestamp: Date.now(),
+      } });
+      return;
+    }
     this.push({
       type: "error",
-      reason: "error",
-      error: { ...this.partial, stopReason: "error", errorMessage: message },
+      reason: aborted ? "aborted" : "error",
+      error: { ...this.partial, stopReason: aborted ? "aborted" : "error", errorMessage: message },
     });
   }
 

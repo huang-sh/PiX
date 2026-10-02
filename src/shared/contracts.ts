@@ -138,6 +138,10 @@ export function validateRouteInput(
 ): Record<string, unknown> {
   const v = input === undefined ? {} : obj(input);
   switch (route) {
+    case "ui.pending":
+      return {};
+    case "ui.respond":
+      return { id: str(v.id, "id"), value: str(v.value, "value", true), projectId: str(v.projectId, "projectId", true) };
     case "wsl.connect":
       return {
         distro: str(v.distro, "distro"),
@@ -393,15 +397,19 @@ export function validateRouteInput(
             : [],
           ...(Array.isArray(v.models) ? { models: v.models.map((value) => {
             const m = obj(value);
-            return {
-              provider: str(m.provider, "provider"), id: str(m.id, "id"),
+            if (m.type !== undefined && !["chat", "image", "classifier"].includes(String(m.type)))
+              throw new Error("Invalid model type");
+            const base = { provider: str(m.provider, "provider"), id: str(m.id, "id"),
               name: str(m.name, "name"), api: str(m.api, "api"),
+              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"], cost: obj(m.cost) };
+            if (m.type === "image") return { ...base, type: "image", output: Array.isArray(m.output) && m.output.includes("text") ? ["text", "image"] : ["image"] };
+            if (m.type === "classifier") return { ...base, type: "classifier", contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER) };
+            return {
+              ...base,
               reasoning: m.reasoning === true,
               thinkingLevelMap: m.thinkingLevelMap === undefined ? undefined : obj(m.thinkingLevelMap),
-              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"],
               contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
               maxTokens: integer(m.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
-              cost: obj(m.cost),
             };
           }) } : {}),
         };

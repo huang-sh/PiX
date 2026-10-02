@@ -7,6 +7,7 @@ import type {
   AgentControl,
   BrokerModel,
   DesktopEvent,
+  ExtensionDialog,
   ProjectGroup,
   ProjectInfo,
   RemoteConnectStage,
@@ -19,7 +20,7 @@ import type {
 import { projectId } from "../shared/types.js";
 import type { HostHandle, ProjectRoute } from "../shared/remote-protocol.js";
 import { WslHostClient, RemoteHostUnreachable, HostStarted } from "./wsl-host-client.js";
-import { brokerOptions } from "./model-broker.js";
+import { brokerModelKey, brokerOptions } from "./model-broker.js";
 import type { PiRuntime } from "./pi-runtime.js";
 import type { SettingsService } from "./services.js";
 import type { Platform } from "./controller.js";
@@ -165,6 +166,12 @@ export class RemoteWorkspacePool {
   slot(id: string): RemoteSlot | undefined {
     return this.remotePool.get(id);
   }
+  async pendingDialogs(): Promise<ExtensionDialog[]> {
+    const results = await Promise.allSettled([...this.remotePool.entries()].filter(([, slot]) => slot.client.connected)
+      .map(async ([id, slot]) => (await slot.client.request<ExtensionDialog[]>("ui.pending"))
+        .map(dialog => ({ ...dialog, projectId: id }))));
+    return results.flatMap(result => result.status === "fulfilled" ? result.value : []);
+  }
   brokerModelsFor(client: WslHostClient): Set<string> | undefined {
     return this.brokerModels.get(client);
   }
@@ -172,6 +179,10 @@ export class RemoteWorkspacePool {
     if (!project) return;
     const slot = this.remotePool.get(projectId(project));
     if (!slot) return;
+    if (event.type === "ui.request" || event.type === "ui.dismiss") {
+      this.host.emit({ ...event, payload: { ...(event.payload as object), projectId: projectId(project) } });
+      return;
+    }
     const active = slot === this.active();
     if (event.type === "sessions") {
       const payload = event.payload as { current?: SessionSnapshot; sessions?: SessionSummary[]; projects?: ProjectGroup[]; deletedPath?: string };
@@ -264,7 +275,7 @@ export class RemoteWorkspacePool {
   private async syncModelBroker(client: WslHostClient) {
     const models = await this.host.projectRuntime.control({ action: "getModels", broker: true }) as BrokerModel[];
     const allowed = new Set(
-      models.map((model) => `${model.provider}\0${model.id}`),
+      models.map(brokerModelKey),
     );
     await client.request("agent.control", {
       action: "setBrokerProviders",
@@ -275,12 +286,15 @@ export class RemoteWorkspacePool {
   }
   private async attachModelBroker(client: WslHostClient) {
     client.setModelBroker(async (request, signal) => {
-      if (!this.brokerModels.get(client)?.has(`${request.provider}\0${request.modelId}`))
+      const operation = request.operation ?? "streamSimple";
+      if (!["stream", "streamSimple", "generateImages", "classify"].includes(operation)) throw new Error("Invalid model operation");
+      const type = operation === "generateImages" ? "image" : operation === "classify" ? "classifier" : "chat";
+      if (!this.brokerModels.get(client)?.has(brokerModelKey({ provider: request.provider, id: request.modelId, type })))
         throw new Error("The remote host requested a model that is not enabled locally");
       const runtime = await this.host.projectRuntime.modelRuntime();
-      const model = runtime.getModel(request.provider, request.modelId);
+      const model = type === "chat" ? runtime.getModel(request.provider, request.modelId) : runtime.getModelOfType(type, request.provider, request.modelId);
       if (!model) throw new Error("The requested desktop model was not found");
-      return runtime.streamSimple(model, request.context, {
+      return runtime[operation](model, request.context, {
         ...brokerOptions(request.options),
         signal,
       });
