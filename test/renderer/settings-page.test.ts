@@ -766,6 +766,85 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
+  it("groups model types and keeps default, cycling and thinking settings chat-only", async () => {
+    const catalog: RuntimeModel[] = [
+      { provider: "mixed", id: "shared", name: "Chat model" },
+      { provider: "mixed", id: "shared", name: "Painter", type: "image" },
+      { provider: "mixed", id: "judge", name: "Classifier", type: "classifier" },
+      { provider: "chat-only", id: "other", type: "chat" },
+    ];
+    const providers: RuntimeProvider[] = ["mixed", "chat-only"].map(id => ({
+      id, name: id, authTypes: ["api_key"], status: { type: "api_key" },
+    }));
+    const persisted: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") {
+        for (const [key, value] of Object.entries((payload as UpdatePayload).patch ?? {})) {
+          if (value === null) delete persisted.piGlobal[key];
+          else persisted.piGlobal[key] = value;
+        }
+        return structuredClone(persisted);
+      }
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action: string }).action;
+      if (action === "getModels") return catalog;
+      if (action === "getProviders") return providers;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    const previousLocale = i18n.global.locale.value;
+    try {
+      await flushPromises();
+      expect(desktop.invoke).toHaveBeenCalledWith("agent.control", { action: "getModels", allTypes: true });
+      expect(useSessionStore().models.map(model => model.id)).toEqual(["shared", "other"]);
+      expect(wrapper.get('[data-model-type-filter="chat"]').text()).toContain("2");
+      expect(wrapper.get('[data-model-type-filter="image"]').text()).toContain("1");
+      expect(wrapper.get('[data-model-type-filter="classifier"]').text()).toContain("1");
+      await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
+      expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["chat", "image", "classifier"]);
+      const image = wrapper.get('[data-model-group="image"] [data-model="mixed/shared"]');
+      const chat = wrapper.get('[data-model-group="chat"] [data-model="mixed/shared"]');
+      await image.get(".model-select").trigger("click");
+      expect(image.get(".model-select").attributes("aria-pressed")).toBe("true");
+      expect(chat.get(".model-select").attributes("aria-pressed")).toBe("false");
+      expect(image.find(".model-cycle").exists()).toBe(false);
+      expect(wrapper.find('[data-model-action="default"]').exists()).toBe(false);
+      expect(wrapper.find('[data-setting-path="modelThinkingLevels"]').exists()).toBe(false);
+      expect(wrapper.get(".model-actions").text()).toContain("+codemode");
+      await chat.get(".model-select").trigger("click");
+      expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
+      expect(wrapper.find('[data-setting-path="modelThinkingLevels"]').exists()).toBe(true);
+      await chat.get(".model-cycle input").setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch?.enabledModels).toEqual(["chat-only/other"]);
+      await chat.get(".model-cycle input").setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch?.enabledModels).toBeNull();
+      const imageFilter = wrapper.get('[data-model-type-filter="image"]');
+      (imageFilter.element as HTMLButtonElement).focus();
+      await imageFilter.trigger("click");
+      expect(document.activeElement).toBe(imageFilter.element);
+      expect(wrapper.find(".model-inspector").exists()).toBe(false);
+      expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["mixed"]);
+      await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
+      expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["image"]);
+      await wrapper.get("[data-model-search]").setValue("judge");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(0);
+      await wrapper.get(".model-empty button").trigger("click");
+      expect(wrapper.get('[data-model-type-filter="all"]').attributes("aria-pressed")).toBe("true");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(2);
+      i18n.global.locale.value = "zh-CN";
+      await flushPromises();
+      expect(wrapper.get('[data-model-type-filter="image"]').text()).toContain("图像生成");
+      expect(wrapper.get('[data-model-type-filter="classifier"]').text()).toContain("分类器");
+    } finally {
+      i18n.global.locale.value = previousLocale;
+      wrapper.unmount();
+    }
+  });
+
   it("forces a catalog refresh only on click and updates the composer after it completes", async () => {
     let finishRefresh!: () => void;
     const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
@@ -801,7 +880,7 @@ describe("SettingsPage auto-save", () => {
     await flushPromises();
     expect(vi.mocked(desktop.invoke).mock.calls.slice(1)).toEqual([
       ["agent.control", { action: "getCustomModels" }],
-      ["agent.control", { action: "getModels" }], ["agent.control", { action: "getProviders" }],
+      ["agent.control", { action: "getModels", allTypes: true }], ["agent.control", { action: "getProviders" }],
     ]);
     expect(useSessionStore().models.map(model => model.id)).toContain("new-model");
     expect(layout.notice?.message).toContain("Model catalogs refreshed");

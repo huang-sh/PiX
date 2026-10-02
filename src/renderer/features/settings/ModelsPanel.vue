@@ -15,7 +15,7 @@ const {
   providerBusy, runtimeError, providerFilters, filteredProviders, providerSections, providerModels,
   selectedProvider, expandedProvider, editingProvider, toggleProvider, toggleProviderSetup, loadRuntime,
   customModelSaved, selectedRuntimeModel, selectedThinkingLevels, modelThinkingOverride,
-  setModelThinkingOverride, setAllCycling,
+  setModelThinkingOverride, setAllCycling, modelType, modelTypeFilters, filterModelType, isChatModel,
 } = useModelsContext();
 </script>
 
@@ -43,6 +43,10 @@ const {
         <a href="#model-preferences"><SlidersHorizontal :size="13" />{{ t("settings.modelPreferences") }}<ChevronDown :size="13" /></a>
       </div>
     </section>
+    <div class="model-filters model-type-filters" role="group" :aria-label="t('settings.modelTypeFilterLabel')">
+      <button v-for="filter in modelTypeFilters" :key="filter.id" type="button" :data-model-type-filter="filter.id" :aria-pressed="modelType === filter.id" @click="filterModelType(filter.id)">{{ t(`settings.modelTypes.${filter.id}`) }}<span>{{ filter.count }}</span></button>
+    </div>
+    <p class="model-type-hint">{{ t('settings.modelTypesHint') }}</p>
     <Button v-if="!addingCustomModel" variant="outline" data-add-custom-model :disabled="runtimeBusy || !!providerBusy" @click="editingCustomModel = undefined; addingCustomModel = true">{{ t("settings.addCustomModel") }}</Button>
     <CustomModelForm v-if="addingCustomModel" :model="editingCustomModel" @saved="customModelSaved" @cancel="addingCustomModel = false; editingCustomModel = undefined" />
     <section class="provider-card model-card" :aria-busy="runtimeBusy">
@@ -64,7 +68,7 @@ const {
       <div v-if="runtimeBusy && !providers.length" class="model-empty" role="status"><RefreshCw :size="26" class="spin" /><strong>{{ t("settings.loadingProviders") }}</strong></div>
       <div v-else-if="!filteredProviders.length && !runtimeError" class="model-empty">
         <Search :size="28" /><strong>{{ t("settings.noMatchingModels") }}</strong><p>{{ t("settings.modelSearchHint") }}</p>
-        <Button v-if="modelQuery || providerFilter !== 'all'" variant="outline" @click="modelQuery = ''; providerFilter = 'all'">{{ t("settings.modelResetFilters") }}</Button>
+        <Button v-if="modelQuery || providerFilter !== 'all' || modelType !== 'all'" variant="outline" @click="modelQuery = ''; providerFilter = 'all'; filterModelType('all')">{{ t("settings.modelResetFilters") }}</Button>
       </div>
       <template v-else-if="filteredProviders.length">
       <template v-for="section in providerSections" :key="section.id">
@@ -112,7 +116,7 @@ const {
       <header class="model-options-header">
         <span class="model-preferences-title"><SlidersHorizontal :size="19" /><span><strong>{{ t("settings.modelPreferences") }}</strong><small>{{ t("settings.modelPreferencesHint") }}</small></span></span>
       </header>
-      <label v-if="selectedRuntimeModel" class="setting-row" data-setting-path="modelThinkingLevels">
+      <label v-if="selectedRuntimeModel && isChatModel(selectedRuntimeModel)" class="setting-row" data-setting-path="modelThinkingLevels">
         <span>
           <strong>{{ t("settings.thinkingFor", { id: selectedRuntimeModel.id }) }}</strong>
           <small>{{ t("settings.thinkingOverrideHint") }}</small>

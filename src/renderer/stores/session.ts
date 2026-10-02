@@ -309,14 +309,15 @@ export const useSessionStore = defineStore("session", {
     async fetchCommands(): Promise<RuntimeCommand[]> {
       return desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
     },
-    // Single source of truth for the model catalog: every path that can change
+    // Refreshes the shared chat catalog: every path that can change
     // it (bootstrap, settings open, login/logout, catalog refresh, session
     // open) reloads through here so pickers never serve a stale list. The
     // catalog is global — project-less fetch is fine, the runtime serves model
     // actions without an open session.
-    async loadModels(): Promise<RuntimeModel[]> {
-      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
-      this.models = models;
+    async loadModels(allTypes = false): Promise<RuntimeModel[]> {
+      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels", ...(allTypes ? { allTypes: true } : {}) });
+      // Settings can inspect every type; prompt pickers only accept chat models.
+      this.models = models.filter(model => !model.type || model.type === "chat");
       return models;
     },
     // A deliberate pick in a model menu is what "last set" means: it becomes the

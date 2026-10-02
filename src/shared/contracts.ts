@@ -279,6 +279,8 @@ export function validateRouteInput(
       return { layout: layoutState(v.layout) };
     case "agent.control": {
       const action = str(v.action, "action")!;
+      if (action === "getModels")
+        return { action, ...(v.allTypes === undefined ? {} : { allTypes: booleanField(v.allTypes, "allTypes") }) };
       if (action === "deleteNode")
         return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId") };
       if (action === "exportBranchSession")

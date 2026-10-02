@@ -154,8 +154,11 @@ accepts them only when started with `--allow-credential-deploy`), and the
 page lists deployed hosts with a per-host revoke. OAuth logins never
 leave the desktop, logins the server already had are never removed, and a
 desktop logout only revokes providers this desktop deployed. The model
-picker still lists the desktop's configured models; server-only providers
-are not surfaced.
+picker still lists the desktop's configured chat models; server-only providers
+are not surfaced. Model settings also lists available image and classifier
+models, with type counts, filters and grouped provider details. Only chat models
+participate in default-model, cycling and thinking preferences; image and
+classifier models are called through Codemode.
 
 The broker carries `stream`, `streamSimple`, `generateImages` and `classify`.
 Its catalog includes chat, image and classifier models without credential

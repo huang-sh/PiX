@@ -934,15 +934,18 @@ export class PiRuntime {
           return { ...base, reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
             contextWindow: m.contextWindow, maxTokens: m.maxTokens };
         });
-        return (await modelRuntime.getAvailable()).map(
+        return (await (input.allTypes ? modelRuntime.getAllAvailable() : modelRuntime.getAvailable())).map(
           (m: any): RuntimeModel => ({
             provider: String(m.provider),
             id: String(m.id),
             name: m.name,
+            ...(input.allTypes ? { type: m.type ?? "chat" } : {}),
             contextWindow: m.contextWindow,
-            reasoning: Boolean(m.reasoning),
             ...(m.input ? { input: m.input } : {}),
-            thinkingLevels: getSupportedThinkingLevels(m),
+            ...(m.type === "image" || m.type === "classifier" ? {} : {
+              reasoning: Boolean(m.reasoning),
+              thinkingLevels: getSupportedThinkingLevels(m),
+            }),
           }),
         );
       }

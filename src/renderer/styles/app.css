@@ -1226,6 +1226,8 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .model-search-clear:hover { background: var(--muted-surface); }
 .model-filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 17px 0 5px; }
 .model-filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.model-type-filters { margin-top: 18px; }
+.model-type-hint { margin: 7px 0 16px; color: var(--muted); font-size: var(--font-size-small); line-height: 1.6; }
 .model-filters button { display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 6px 10px; border-radius: 8px; color: var(--muted); font-size: var(--font-size-small); }
 .model-filters button:hover { background: var(--muted-surface); }
 .model-filters button[aria-pressed="true"] { background: var(--muted-surface); color: var(--text); font-weight: 600; }
@@ -1318,6 +1320,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .model-inspector .model-row { grid-template-columns: minmax(0,1fr); gap: 8px; }
 .model-inspector .model-meta { justify-content: flex-start; padding-left: 29px; }
 .model-inspector > .model-actions { position: static; flex-shrink: 0; flex-direction: row; flex-wrap: wrap; gap: 12px; margin-top: 0; padding: 16px 20px; }
+.model-inspector > .model-actions > small { white-space: normal; }
 @container (max-width: 700px) {
   .model-card .provider-section-grid { grid-template-columns: minmax(0,1fr); }
   .model-overview { grid-template-columns: minmax(0,1fr); }

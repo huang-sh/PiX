@@ -1298,6 +1298,40 @@ try {
   });
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings.png"), Buffer.from(screenshot.data, "base64"));
+  // Offline catalog browsing only: these dummy keys stay in the isolated test home.
+  for (const provider of ["openrouter", "typesafe"])
+    await cdp.evaluate(`window.pix.invoke('agent.control', { action: 'loginApiKey', provider: '${provider}', apiKey: 'pix-gui-test-key' })`);
+  await cdp.evaluate("document.querySelector('[data-settings-category=general]').click()");
+  await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("['image', 'classifier'].every(type => Number(document.querySelector('[data-model-type-filter=' + type + '] span')?.textContent) > 0)")))
+      throw new Error("Image and classifier catalogs did not reach settings");
+  });
+  for (const type of ["image", "classifier"]) {
+    await cdp.evaluate(`(() => {
+      const search = document.querySelector('[data-model-search]');
+      search.value = '';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-model-type-filter=${type}]').click();
+    })()`);
+    await retry(async () => {
+      if (!(await cdp.evaluate("Boolean(document.querySelector('.provider-model-toggle'))")))
+        throw new Error(`No providers for ${type} models`);
+    });
+    await cdp.evaluate("document.querySelector('.provider-model-toggle').click()");
+    await retry(async () => {
+      const value = await cdp.evaluate(`({
+        groups: [...document.querySelectorAll('[data-model-group]')].map(el => el.dataset.modelGroup),
+        chatControls: Boolean(document.querySelector('[data-model-action=default], .model-cycle, [data-setting-path=modelThinkingLevels]')),
+        hint: document.querySelector('.model-actions')?.textContent,
+        hintWraps: getComputedStyle(document.querySelector('.model-actions > small')).whiteSpace !== 'nowrap',
+      })`);
+      if (value.groups.join() !== type || value.chatControls || !value.hint?.includes("+codemode") || !value.hintWraps)
+        throw new Error(`Invalid ${type} model controls: ${JSON.stringify(value)}`);
+    });
+    screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, `gui-settings-${type}.png`), Buffer.from(screenshot.data, "base64"));
+  }
   await cdp.evaluate("document.querySelector('[data-settings-category=appearance]').click()");
   const themePreview = await cdp.evaluate(`(() => {
     const input = document.querySelector('[data-setting-path=theme] select');

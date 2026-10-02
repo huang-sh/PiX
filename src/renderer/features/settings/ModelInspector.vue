@@ -11,7 +11,7 @@ const {
   editingProvider, selectedProvider, keyDrafts, providerBusy, saveApiKey, loginOAuth, logout, customModels,
   runtimeBusy, editingCustomModel, addingCustomModel, expandedProvider, providerModels, modelKey,
   selectedModel, currentModel, defaultModel, modelSettingsKey, cyclingEnabled, toggleCycling,
-  selectedRuntimeModel, applyModel,
+  selectedRuntimeModel, applyModel, providerModelGroups, isChatModel,
 } = useModelsContext();
 </script>
 
@@ -53,12 +53,14 @@ const {
       <div v-if="expandedProvider === selectedProvider.id" class="provider-model-list" :data-provider-models="selectedProvider.id">
         <div class="provider-model-heading"><strong>{{ t("settings.chooseModel") }}</strong><span>{{ t("settings.chooseModelHint") }}</span></div>
         <p v-if="!providerModels(selectedProvider).length" class="settings-empty">{{ t("settings.noModels") }}</p>
-        <article v-for="model in providerModels(selectedProvider)" :key="modelKey(model)" class="model-row" :class="{ selected: selectedModel === modelKey(model) }" :data-model="`${model.provider}/${model.id}`">
+        <section v-for="group in providerModelGroups(selectedProvider)" :key="group.type" :data-model-group="group.type" :aria-label="t(`settings.modelTypes.${group.type}`)">
+        <div class="provider-model-heading"><strong>{{ t(`settings.modelTypes.${group.type}`) }} · {{ group.models.length }}</strong><span>{{ t(`settings.modelTypeHints.${group.type}`) }}</span></div>
+        <article v-for="model in group.models" :key="modelKey(model)" class="model-row" :class="{ selected: selectedModel === modelKey(model) }" :data-model="`${model.provider}/${model.id}`" :data-model-type="group.type">
           <button type="button" class="model-select" :aria-pressed="selectedModel === modelKey(model)" @click="selectedModel = modelKey(model)">
             <span class="model-selection-mark" aria-hidden="true"><Check v-if="selectedModel === modelKey(model)" :size="12" /></span>
             <span><strong>{{ model.id }}</strong><small>{{ model.name || model.provider }}</small><span v-if="model.contextWindow || model.reasoning" class="model-specs"><span v-if="model.contextWindow">{{ t("settings.modelContext", { n: model.contextWindow.toLocaleString(locale) }) }}</span><span v-if="model.reasoning"><Sparkles :size="11" />{{ t("settings.modelReasoning") }}</span></span></span>
           </button>
-          <span class="model-meta">
+          <span v-if="isChatModel(model)" class="model-meta">
             <Button v-if="customModels.some(item => item.provider === model.provider && item.modelId === model.id)" variant="outline" size="sm" :data-edit-custom-model="`${model.provider}/${model.id}`" :disabled="runtimeBusy || !!providerBusy" @click="editingCustomModel = customModels.find(item => item.provider === model.provider && item.modelId === model.id); addingCustomModel = true">{{ t("settings.editCustomModel") }}</Button>
             <em v-if="currentModel === modelKey(model)" class="active">{{ t("settings.badgeCurrent") }}</em>
             <em v-if="defaultModel === modelKey(model)" class="default">{{ t("settings.badgeDefault") }}</em>
@@ -66,12 +68,13 @@ const {
             <label class="model-cycle" :title="t('settings.cycleTitle')"><input type="checkbox" :checked="cyclingEnabled(model)" @change="toggleCycling(model)" />{{ t("settings.cycle") }}</label>
           </span>
         </article>
-
+        </section>
       </div>
     </div>
     <footer v-if="expandedProvider" class="model-actions">
       <span><small>{{ t("settings.selectedModelLabel") }}</small><strong>{{ selectedRuntimeModel?.id || '—' }}</strong></span>
-      <Button class="model-primary-button" data-model-action="default" :disabled="!selectedModel || selectedModel === defaultModel" @click="applyModel">{{ t(selectedModel === defaultModel ? "settings.alreadyDefault" : "settings.setDefault") }}</Button>
+      <Button v-if="selectedRuntimeModel && isChatModel(selectedRuntimeModel)" class="model-primary-button" data-model-action="default" :disabled="selectedModel === defaultModel" @click="applyModel">{{ t(selectedModel === defaultModel ? "settings.alreadyDefault" : "settings.setDefault") }}</Button>
+      <small v-else>{{ t("settings.nonChatModelHint") }}</small>
     </footer>
   </aside>
 </template>

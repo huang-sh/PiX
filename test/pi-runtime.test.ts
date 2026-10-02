@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
 import { pixAgentDir } from "../src/main/paths.js";
+import { validateRouteInput } from "../src/shared/contracts.js";
 import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
 test("extension commands deliver notifications and errors before and after reload", async () => {
@@ -272,6 +273,31 @@ test("model refresh reports provider failures and timeouts without changing the 
   await assert.rejects(runtime.control({ action: "refreshModels" }), /timed out/);
   assert.equal(runtime.runtime.session, session);
   assert.equal(session.model, activeModel);
+});
+
+test("settings can list every model type without exposing credentials or changing the chat catalog", async () => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  const chat = { provider: "test", id: "shared-id", reasoning: true };
+  const image = { provider: "test", id: "shared-id", type: "image", headers: { Authorization: "secret" } };
+  const classifier = { provider: "test", id: "judge", type: "classifier", apiKey: "secret" };
+  runtime.modelServices = { modelRuntime: {
+    getAvailable: async () => [chat],
+    getAllAvailable: async () => [chat, image, classifier],
+  } };
+  const input = validateRouteInput("agent.control", { action: "getModels", allTypes: true }) as AgentControl;
+  const catalog = await runtime.control(input) as Array<Record<string, unknown>>;
+  assert.deepEqual(catalog.map(model => [model.type, model.id]), [
+    ["chat", "shared-id"], ["image", "shared-id"], ["classifier", "judge"],
+  ]);
+  assert.ok(!JSON.stringify(catalog).includes("secret"));
+  for (const model of catalog.slice(1)) {
+    assert.equal(model.reasoning, undefined);
+    assert.equal(model.thinkingLevels, undefined);
+  }
+  const chatOnly = await runtime.control({ action: "getModels" }) as Array<Record<string, unknown>>;
+  assert.equal(chatOnly.length, 1);
+  assert.equal(chatOnly[0]!.id, chat.id);
+  assert.throws(() => validateRouteInput("agent.control", { action: "getModels", allTypes: "yes" }), /boolean/);
 });
 
 test("reports each model's supported thinking levels", async () => {

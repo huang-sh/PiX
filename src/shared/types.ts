@@ -169,6 +169,7 @@ export interface SessionProjection {
   activeNodeId: string | null;
 }
 export interface RuntimeModel {
+  type?: "chat" | "image" | "classifier";
   provider: string;
   id: string;
   name?: string;
@@ -494,7 +495,7 @@ export type AgentControl =
     }
   | { action: "deleteSkill"; path: string }
   | { action: "setSkillManualOnly"; path: string; manualOnly: boolean }
-  | { action: "getModels"; broker?: boolean }
+  | { action: "getModels"; broker?: boolean; allTypes?: boolean }
   | { action: "getExtensions"; reload?: boolean }
   | { action: "installExtension" | "removeExtension"; source: string }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }

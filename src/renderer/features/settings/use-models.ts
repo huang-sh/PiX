@@ -18,9 +18,14 @@ export function useModels(
   const session = useSessionStore();
   const { t } = useI18n();
 
-  // The model catalog lives in the session store so every consumer (settings,
-  // graph, branch context) reads one list; this page only reloads it.
-  const models = computed(() => session.models);
+  // Settings includes image/classifier models; the shared prompt catalog stays chat-only.
+  const models = ref<RuntimeModel[]>([]);
+  const modelTypes = ["chat", "image", "classifier"] as const;
+  const modelType = ref<"all" | typeof modelTypes[number]>("all");
+  const modelTypeFilters = computed(() => [
+    { id: "all" as const, count: models.value.length },
+    ...modelTypes.map(type => ({ id: type, count: models.value.filter(model => (model.type ?? "chat") === type).length })),
+  ]);
   const runtimeProviders = ref<RuntimeProvider[]>([]);
   const modelQuery = ref("");
   const addingCustomModel = ref(false);
@@ -49,7 +54,8 @@ export function useModels(
   ] as const);
   const filteredProviders = computed(() => {
     const query = modelQuery.value.trim().toLowerCase();
-    return providers.value.filter((provider) => providerFilter.value === "all" || (providerFilter.value === "configured" ? !!provider.status : !provider.status)).filter((provider) =>
+    return providers.value.filter((provider) => providerFilter.value === "all" || (providerFilter.value === "configured" ? !!provider.status : !provider.status))
+      .filter(provider => modelType.value === "all" || providerModels(provider).length > 0).filter((provider) =>
       !query ||
       `${provider.name} ${provider.id}`.toLowerCase().includes(query) ||
       models.value.some((model) =>
@@ -86,7 +92,24 @@ export function useModels(
   );
 
   function modelKey(model: RuntimeModel) {
-    return `${model.provider}\0${model.id}`;
+    return `${model.provider}\0${model.id}${isChatModel(model) ? "" : `\0${model.type}`}`;
+  }
+
+  function isChatModel(model: RuntimeModel) {
+    return !model.type || model.type === "chat";
+  }
+
+  function filterModelType(type: typeof modelType.value) {
+    modelType.value = type;
+    expandedProvider.value = "";
+    editingProvider.value = "";
+  }
+
+  function providerModelGroups(provider: RuntimeProvider) {
+    const available = providerModels(provider);
+    return modelTypes.map(type => ({
+      type, models: available.filter(model => (model.type ?? "chat") === type),
+    })).filter(group => group.models.length);
   }
 
   function providerModels(provider: RuntimeProvider) {
@@ -95,6 +118,7 @@ export function useModels(
     return models.value
       .filter((model) =>
         model.provider === provider.id &&
+        (modelType.value === "all" || (model.type ?? "chat") === modelType.value) &&
         (!query || providerMatches || `${model.id} ${model.name ?? ""}`.toLowerCase().includes(query)),
       )
       .sort((a, b) =>
@@ -141,9 +165,10 @@ export function useModels(
   async function loadRuntimeCatalog() {
     const [customResult, modelResult, providerResult] = await Promise.allSettled([
       session.control<CustomModelInput[]>({ action: "getCustomModels" }),
-      session.loadModels(),
+      session.loadModels(true),
       session.control<RuntimeProvider[]>({ action: "getProviders" }),
     ]);
+    if (modelResult.status === "fulfilled") models.value = modelResult.value;
     if (customResult.status === "fulfilled") customModels.value = Array.isArray(customResult.value) ? customResult.value : [];
     if (providerResult.status === "fulfilled") runtimeProviders.value = Array.isArray(providerResult.value) ? providerResult.value : [];
     normalizeSelectedModel();
@@ -188,6 +213,7 @@ export function useModels(
   }
 
   function cyclingEnabled(model: RuntimeModel) {
+    if (!isChatModel(model)) return false;
     const patterns = draft.value?.piGlobal.enabledModels;
     if (patterns === undefined) return true;
     const id = modelSettingsKey(model);
@@ -198,13 +224,14 @@ export function useModels(
   }
 
   function toggleCycling(model: RuntimeModel) {
-    if (!draft.value) return;
-    const enabled = models.value.filter(cyclingEnabled).map(modelSettingsKey);
+    if (!draft.value || !isChatModel(model)) return;
+    const chatModels = models.value.filter(isChatModel);
+    const enabled = chatModels.filter(cyclingEnabled).map(modelSettingsKey);
     const id = modelSettingsKey(model);
     const next = cyclingEnabled(model)
       ? enabled.filter((item) => item !== id)
       : [...new Set([...enabled, id])];
-    draft.value.piGlobal.enabledModels = next.length === models.value.length ? undefined : next;
+    draft.value.piGlobal.enabledModels = next.length === chatModels.length ? undefined : next;
     save("global");
   }
 
@@ -216,12 +243,12 @@ export function useModels(
 
   function modelThinkingOverride() {
     const model = selectedRuntimeModel.value;
-    if (!model) return "";
+    if (!model || !isChatModel(model)) return "";
     return draft.value?.piGlobal.modelThinkingLevels?.[modelSettingsKey(model)] ?? "";
   }
 
   function setModelThinkingOverride(event: Event) {
-    if (!draft.value || !selectedRuntimeModel.value) return;
+    if (!draft.value || !selectedRuntimeModel.value || !isChatModel(selectedRuntimeModel.value)) return;
     const key = modelSettingsKey(selectedRuntimeModel.value);
     const level = (event.target as HTMLSelectElement).value;
     const overrides = draft.value.piGlobal.modelThinkingLevels ??= {};
@@ -234,7 +261,7 @@ export function useModels(
   // used by new sessions.
   async function applyModel() {
     const model = models.value.find((item) => modelKey(item) === selectedModel.value);
-    if (!model) return;
+    if (!model || !isChatModel(model)) return;
     try {
       const settings = await desktop.invoke<SettingsBundle>("settings.update", {
         scope: "global",
@@ -296,6 +323,11 @@ export function useModels(
 
   return {
     models,
+    modelType,
+    modelTypeFilters,
+    filterModelType,
+    providerModelGroups,
+    isChatModel,
     modelQuery,
     addingCustomModel,
     customModels,
