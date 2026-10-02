@@ -1,0 +1,12 @@
+{
+  "name": "pix-durable-probe",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test probe.test.mjs" },
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-durable": "1.0.0"
+  }
+}
