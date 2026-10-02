@@ -8,6 +8,32 @@ nearest user ancestors, and derives branch chat from the selected leaf path.
 `entryAnchorForNode()` returns the raw entry belonging to that node on the
 currently active branch, avoiding cross-branch navigation mistakes.
 
+Pi 1.0 keeps the v3 JSONL format. `parentToolCallId` identifies live nested
+tool calls; `nestedCalls` on a saved tool result contains a bounded summary of
+names, arguments and status, not each nested result. These are tool calls,
+not PiX graph branches or Durable conversations. PiX projects their summaries
+and persisted image blocks into branch chat.
+
+## Pi 1.0 SDK integration
+
+PiX embeds `pi-coding-agent` and `pi-ai`; it does not use `pi-server`.
+`PiRuntime` explicitly registers the official Codemode, MCP and tool-search
+extension factories because SDK sessions do not load them automatically.
+The built-in MCP extension uses PiX's agent profile, including on remote hosts.
+Loading an extension and activating its tools are separate steps; see the
+[user instructions](README.md#built-in-extensions) for Codemode activation.
+
+Extension UI is bound in RPC mode. Selection, input and confirmation use
+`ExtensionDialogs` and the `ui.request` / `ui.dismiss` events; replies use
+`ui.respond` so they can resolve a command waiting for input. `ui.pending`
+restores in-memory requests after a renderer reconnect. Remote requests retain
+their `projectId` even when the user switches projects. Abort or runtime close
+cancels the corresponding requests. Custom TUI components are unsupported.
+
+Pi Durable remains an [isolated recovery probe](experimental/pi-durable/README.md),
+with its own dependencies and storage. It is not loaded or packaged by PiX,
+and upgrading the SDK does not add automatic process-crash recovery to PiX.
+
 ## Desktop authority
 
 ```text
@@ -131,10 +157,18 @@ desktop logout only revokes providers this desktop deployed. The model
 picker still lists the desktop's configured models; server-only providers
 are not surfaced.
 
+The broker carries `stream`, `streamSimple`, `generateImages` and `classify`.
+Its catalog includes chat, image and classifier models without credential
+fields, and each request is checked against the advertised catalog. Image and
+classifier calls return one result rather than chat stream events. The Pi 1.0
+integration uses remote protocol 17 and host version 0.0.25; host installers
+check both values so older hosts are updated before use.
+
 **Shutdown.** Quitting flushes pending background history writes, aborts
 every local run (settling as `interrupted` with recovered inputs — this is
 in-process continuation, not persisted resumption), releases the graph
-ownership files, and disposes every pooled host. Per-graph parallelism stays
+ownership files, stops idle remote hosts, and detaches from busy remote hosts
+so they can finish and be reattached later. Per-graph parallelism stays
 capped by `PIX_MAX_PARALLEL_RUNS` (default 8); nothing bounds how many
 sessions may run at once beyond the user starting them, which is why the
 navigator's running markers are the visibility surface for it.
@@ -151,6 +185,13 @@ independently. PiX reads:
 
 Project settings override global settings. PiX-specific layout and appearance
 are stored in `~/.pix/gui.settings.json`.
+
+Settings-page edits save on change. For Pi settings, the renderer schedules a
+reload of the current session after a short quiet period, waiting while it is
+streaming or compacting; a new session reads the saved settings directly.
+Adding `+codemode` under Default tools therefore needs no manual `/reload`.
+`codemode.mode` only controls tool exposure after activation. Direct edits to
+MCP configuration files still require `/reload` in an existing session.
 
 Model choice resolves in two scopes. Inside a session a draft inherits the model
 of the node it branches from (`node.footer.model`), falling back to the session's

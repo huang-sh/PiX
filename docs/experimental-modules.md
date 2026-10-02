@@ -1,6 +1,8 @@
 # 实验模块（experimental modules)
 
-实验功能在转正前以可开关模块的形式寄生在应用里：代码集中放置、默认关闭、关闭时完全惰性。当前唯一的实验模块是操作历史（`experimentalHistory`，位于 `src/renderer/experimental/history/`）。
+应用内的实验功能在转正前以可开关模块的形式寄生在应用里：代码集中放置、默认关闭、关闭时完全惰性。当前唯一的应用内实验模块是操作历史（`experimentalHistory`，位于 `src/renderer/experimental/history/`）。
+
+仓库还包含独立的 [Pi Durable 恢复实验](../experimental/pi-durable/README.md)，用于验证进程崩溃恢复、请求去重和分叉隔离。它不加载到应用、不随安装包分发，也没有设置页开关；下列应用内模块约定不适用于这个独立实验。
 
 ## 约定
 
