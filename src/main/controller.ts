@@ -20,6 +20,7 @@ import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/s
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
+import { ExtensionDialogs } from "./extension-dialogs.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { ProgressLedger } from "./progress-ledger.js";
 import { RemoteWorkspacePool, migratesSession, unavailable, type RemoteSlot } from "./remote-pool.js";
@@ -57,6 +58,7 @@ export interface Platform {
 /** Model actions whose catalog or credential change must reach open sessions. */
 const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 export class MainController {
+  readonly dialogs = new ExtensionDialogs(event => this.emit(event));
   project: ProjectInfo | null;
   settings: SettingsService;
   library: LibraryService;
@@ -105,7 +107,7 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files = new SessionFiles(path, dir);
-    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url));
+    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url), this.dialogs);
     this.registry = new SessionRegistry({
       createRuntime: entry => this.createSessionRuntime(entry),
       onEvent: (entry, event) => this.routeSessionEvent(entry, event),
@@ -145,7 +147,7 @@ export class MainController {
    * created after a remote host connects streaming through the desktop broker.
    */
   createSessionRuntime(entry: SessionEntry): GraphRuntime {
-    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url));
+    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url), this.dialogs);
     runtime.modelBroker = this.projectRuntime.modelBroker;
     runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
     runtime.brokerModels = [...this.projectRuntime.brokerModels];
@@ -528,6 +530,15 @@ export class MainController {
   }
   async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
     const v = validateRouteInput(route, raw);
+    if (route === "ui.respond") {
+      if (v.projectId) {
+        const slot = this.pool.slot(String(v.projectId));
+        if (!slot) throw new Error("Remote host is not connected");
+        return slot.client.request(route, { id: v.id, value: v.value });
+      }
+      return this.dialogs.respond(String(v.id), v.value as string | undefined);
+    }
+    if (route === "ui.pending") return [...this.dialogs.list(), ...await this.pool.pendingDialogs()];
     const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
       ? ++this.viewRequest : this.viewRequest;
     if (route === "app.revealSession") {
@@ -1018,6 +1029,7 @@ export class MainController {
   }
   /** Full shutdown: local sessions and every pooled host, awaited together. */
   closeAll(): Promise<void> {
+    this.dialogs.cancel();
     return Promise.all([this.closeSessions(), this.pool.closeAllRemote()]).then(() => {});
   }
   dispose() {

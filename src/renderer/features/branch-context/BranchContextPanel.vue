@@ -435,7 +435,8 @@ onBeforeUnmount(() => {
             <details
               v-if="item.kind === 'tool'"
               class="process-item process-tool"
-              :class="item.status"
+              :class="[item.status, { 'nested-tool': item.parentToolCallId }]"
+              :data-parent-tool-call="item.parentToolCallId"
               :open="item.status === 'running'"
               @toggle="toggleLiveTool(item.id, $event)"
             >
@@ -446,6 +447,7 @@ onBeforeUnmount(() => {
                 <code v-if="item.input" :title="item.input">{{ item.input }}</code>
               </summary>
               <pre v-if="item.status === 'running' || expandedLiveTools.has(item.id)">{{ (item.status === 'running' ? liveText(item.text) : item.text) || (item.status === "running" ? t("branch.running") : t("common.noOutput")) }}</pre>
+              <MessageImages v-if="item.status === 'running' || expandedLiveTools.has(item.id)" :images="item.images" />
             </details>
             <div v-else-if="item.text" class="process-item assistant">
               <MarkdownRenderer

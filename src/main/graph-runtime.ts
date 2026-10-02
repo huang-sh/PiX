@@ -124,7 +124,7 @@ export class GraphRuntime extends PiRuntime {
           try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch (e) { debugLog("graph-runtime: worker snapshot refresh", e); }
         }
       }
-    }, this.openExternal);
+    }, this.openExternal, this.dialogs);
     child.mod = this.mod;
     child.factory = this.factory.bind(this);
     child.modelBroker = this.modelBroker;

@@ -3,6 +3,7 @@ import { acceptDomainUpdate } from "./registry";
 export const en = {
   settings: {
     preferences: "Preferences",
+    mcpHint: "MCP: edit ~/.pix/agent/mcp.json or the trusted project's .pi/mcp.json on the session host. Use /reload, then /mcp to check status, sign in or reconnect.",
     back: "Back to workbench",
     resizeNav: "Resize settings sidebar",
     saving: "Saving…",
@@ -325,6 +326,9 @@ export const en = {
       providerRetryTimeout: "Provider retry timeout (ms)",
       providerMaxRetries: "Provider maximum retries",
       defaultTools: "Default tools",
+      defaultToolsDesc: "Comma-separated tool names. Append +codemode to enable Codemode in new or reloaded sessions.",
+      codemodeMode: "Codemode tool access",
+      codemodeModeDesc: "Controls tool access while Codemode is active. This setting does not enable Codemode.",
       resizeImages: "Resize images",
       blockImages: "Block images",
       skillCommands: "Skill commands",
@@ -365,6 +369,8 @@ export const en = {
     websocket: "WebSocket",
     "websocket-cached": "WebSocket (cached)",
     off: "Off",
+    on: "Alongside other tools",
+    only: "Only through Codemode",
     minimal: "Minimal",
     low: "Low",
     medium: "Medium",
@@ -383,6 +389,7 @@ export const en = {
 
 export const zhCN: typeof en = {
   settings: {
+    mcpHint: "MCP：在会话所在主机编辑 ~/.pix/agent/mcp.json 或已信任项目的 .pi/mcp.json。运行 /reload 后，用 /mcp 查看状态、登录或重连。",
     preferences: "偏好设置",
     back: "返回工作台",
     resizeNav: "调整设置侧栏宽度",
@@ -706,6 +713,9 @@ export const zhCN: typeof en = {
       providerRetryTimeout: "提供商重试超时（毫秒）",
       providerMaxRetries: "提供商最大重试次数",
       defaultTools: "默认工具",
+      defaultToolsDesc: "工具名用逗号分隔。在末尾加入 +codemode 可启用 Codemode，新会话或重载后生效。",
+      codemodeMode: "Codemode 工具调用方式",
+      codemodeModeDesc: "控制 Codemode 启用后的工具调用方式；此项本身不会启用 Codemode。",
       resizeImages: "自动缩放图片",
       blockImages: "屏蔽图片",
       skillCommands: "技能命令",
@@ -746,6 +756,8 @@ export const zhCN: typeof en = {
     websocket: "WebSocket",
     "websocket-cached": "WebSocket（缓存）",
     off: "关闭",
+    on: "与其他工具并用",
+    only: "仅通过 Codemode 调用",
     minimal: "最低",
     low: "低",
     medium: "中",

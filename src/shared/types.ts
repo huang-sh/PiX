@@ -1,4 +1,4 @@
-import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { AnyModel, Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
 import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
@@ -18,7 +18,11 @@ export interface CustomModelInput {
   reasoning: boolean;
   imageInput: boolean;
 }
-export type BrokerModel = Pick<Model<Api>, "provider" | "id" | "name" | "api" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost">;
+type BrokerFields = "provider" | "id" | "name" | "api" | "input" | "cost";
+export type BrokerModel =
+  | (Pick<Model<Api>, BrokerFields | "reasoning" | "thinkingLevelMap" | "contextWindow" | "maxTokens"> & { type?: "chat" })
+  | Pick<Extract<AnyModel, { type: "image" }>, BrokerFields | "type" | "output">
+  | Pick<Extract<AnyModel, { type: "classifier" }>, BrokerFields | "type" | "contextWindow">;
 
 /** Panels whose collapse flag persists; the layout validation and the
  *  PanelId union both derive from this list. */
@@ -126,6 +130,8 @@ export interface BranchMessage {
   timestamp: string;
   toolName?: string;
   toolInput?: string;
+  nestedCalls?: Array<{ id: string; name: string; input: string; status: string; error?: string }>;
+  nestedCallsComplete?: boolean;
   isError?: boolean;
   errorMessage?: string;
   contextStatus?: "excluded" | "modified";
@@ -137,6 +143,8 @@ export interface AgentActivityItem {
   thinking?: string;
   title?: string;
   input?: string;
+  parentToolCallId?: string;
+  images?: PromptImage[];
   timestamp: string;
   status: "running" | "complete" | "error";
   pass: number;
@@ -510,6 +518,8 @@ export type AgentControl =
   | { action: "setLabel"; entryId: string; label?: string }
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
+  | "ui.respond"
+  | "ui.pending"
   | "app.bootstrap"
   | "app.pickProject"
   | "app.openProject"
@@ -567,8 +577,19 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
   payload: unknown;
+}
+export interface ExtensionDialog {
+  id: string;
+  title: string;
+  source: string;
+  kind: "select" | "input" | "confirm";
+  options?: string[];
+  placeholder?: string;
+  message?: string;
+  /** Assigned by the desktop when the request comes from a remote host. */
+  projectId?: string;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";
 export interface DesktopApi {

@@ -50,7 +50,13 @@ PiX 把会话组织成一张从左到右生长的图：
 
 ## 内置扩展
 
-PiX 内置两个扩展，均通过 Pi 扩展机制加载；两者含原生二进制，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
+PiX 使用 Pi 1.0，并启用其 MCP、Codemode 和工具搜索扩展。已有 Pi v3 JSONL 会话可继续使用。分支聊天会显示工具图片和嵌套调用记录；Pi 保存嵌套调用的名称、参数和状态，但不会保存每个嵌套调用的完整输出。
+
+在会话所在主机的 `~/.pix/agent/mcp.json` 或已信任项目的 `.pi/mcp.json` 中配置 MCP。运行 `/reload` 后，用 `/mcp` 查看状态、`/mcp login [服务器名]` 登录、`/mcp reconnect [服务器名]` 重连。PiX 支持扩展的选择、输入和确认弹窗；依赖自定义 TUI 组件的扩展仍需在 Pi 终端中使用。
+
+MCP 默认会自动启用 Codemode。单独使用时，在设置 → 工具 → 默认工具中加入 `+codemode`；`codemode.mode: "only"` 让可调用工具通过 Codemode 使用。服务器配置见 [Pi MCP 文档](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/mcp.md)。
+
+PiX 还内置两个带原生二进制的扩展，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
 
 - **`@ff-labs/pi-fff` — 高速文件与内容搜索**：用 FFF（Rust 原生、SIMD 加速）替换内置的 `find` / `grep` 工具：`fffind` 模糊文件名搜索、`ffgrep` 内容搜索、`fff-multi-grep` 多模式搜索。会话开始时后台预索引，搜索即时返回；按 frecency 排序（常用文件靠前），git 修改与未跟踪文件加权。
 - **`@injaneity/pi-computer-use` — 桌面应用操控**：让智能体观察并操控 macOS、Windows、Linux 上的桌面应用：查找打开的应用与窗口、读取界面上的文本与控件、点击、输入、滚动、等待界面变化。适用于应用没有 API、只有图形界面的场景（macOS 助手要求 macOS 14 或更高版本）。

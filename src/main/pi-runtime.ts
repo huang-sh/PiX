@@ -2,6 +2,8 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
+import type { ExtensionDialogs } from "./extension-dialogs.js";
+import type { ModelOperation } from "../shared/remote-protocol.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { pixGitBranchExtension } from "./extensions/git-branch.js";
@@ -246,13 +248,15 @@ export class PiRuntime {
   modelServices: any;
   brokerProviders = new Set<string>();
   brokerModels: BrokerModel[] = [];
-  modelBroker?: (model: any, context: any, options: any) => any;
+  modelBroker?: (model: any, context: any, options: any, operation?: ModelOperation) => any;
   /** Brokered providers this machine serves with its own credentials. */
   private localCredentialProviders = new Set<string>();
   /** Original model-runtime methods per runtime, saved before brokering. */
   private readonly nativeStreams = new WeakMap<object, {
     stream: (model: any, context: any, options: any) => any;
     streamSimple: (model: any, context: any, options: any) => any;
+    generateImages?: (model: any, context: any, options: any) => any;
+    classify?: (model: any, context: any, options: any) => any;
     checkAuth: (provider: string) => Promise<any>;
   }>();
   /** Model runtimes currently overlaid with the fake broker registration. */
@@ -277,6 +281,7 @@ export class PiRuntime {
     dir: string | null,
     emit: (e: unknown) => void,
     openExternal: (url: string) => Promise<void>,
+    readonly dialogs?: ExtensionDialogs,
   ) {
     this.cwd = cwd;
     this.dir = dir;
@@ -290,6 +295,8 @@ export class PiRuntime {
     this.dir = dir;
   }
   async pi() {
+    // Built-in MCP config, credentials and logs use Pi's process-wide profile.
+    process.env.PI_CODING_AGENT_DIR = this.agentDir();
     return (this.mod ??= await import("@earendil-works/pi-coding-agent"));
   }
   async exportSnapshotHtml(manager: any, outputPath: string): Promise<string> {
@@ -334,13 +341,13 @@ export class PiRuntime {
     );
     return this.modelServices.modelRuntime;
   }
-  setModelBroker(broker?: (model: any, context: any, options: any) => any) {
+  setModelBroker(broker?: PiRuntime["modelBroker"]) {
     this.modelBroker = broker;
   }
 
   async configuredProviderIds() {
     const modelRuntime = await this.modelRuntime();
-    return [...new Set((await modelRuntime.getAvailable()).map((model: any) => String(model.provider)))];
+    return [...new Set((await modelRuntime.getAllAvailable()).map((model: any) => String(model.provider)))];
   }
 
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
@@ -432,13 +439,14 @@ export class PiRuntime {
       this.nativeStreams.set(modelRuntime, {
         stream: modelRuntime.stream.bind(modelRuntime),
         streamSimple: modelRuntime.streamSimple.bind(modelRuntime),
+        generateImages: modelRuntime.generateImages?.bind(modelRuntime),
+        classify: modelRuntime.classify?.bind(modelRuntime),
         checkAuth: modelRuntime.checkAuth.bind(modelRuntime),
       });
     const native = this.nativeStreams.get(modelRuntime)!;
-    modelRuntime.stream = (model: any, context: any, options: any) =>
-      this.routeModelStream(native, model, context, options);
-    modelRuntime.streamSimple = (model: any, context: any, options: any) =>
-      this.routeModelStream(native, model, context, options);
+    for (const operation of ["stream", "streamSimple", "generateImages", "classify"] as const)
+      modelRuntime[operation] = (model: any, context: any, options: any) =>
+        this.routeModelOperation(operation, native[operation], model, context, options);
     // setModel's preflight and provider status reads ignore the runtime-key
     // override, so a brokered provider would look unconfigured. Surface a
     // synthetic credential for exactly those.
@@ -464,22 +472,22 @@ export class PiRuntime {
       } catch { /* keep the held model; the broker still serves it */ }
     }
   }
-  private routeModelStream(
-    native: { stream: (model: any, context: any, options: any) => any; streamSimple: (model: any, context: any, options: any) => any },
+  private routeModelOperation(
+    operation: ModelOperation,
+    native: ((model: any, context: any, options: any) => any) | undefined,
     model: any,
     context: any,
     options: any,
   ) {
     const provider = String(model.provider);
-    if (this.localCredentialProviders.has(provider))
-      return native.stream(model, context, options);
-    if (this.modelBroker)
-      return this.modelBroker(model, context, options);
-    if (this.brokerProviders.has(provider))
+    if (this.brokerProviders.has(provider) && !this.localCredentialProviders.has(provider)) {
+      if (this.modelBroker) return this.modelBroker(model, context, options, operation);
       // A lingering host without its desktop: the fake registration's URL
       // would only produce a confusing DNS failure. Say what is missing.
       throw new Error(`${provider} is served by the PiX desktop; reconnect it to use this model`);
-    return native.stream(model, context, options);
+    }
+    if (!native) throw new Error(`Model runtime does not support ${operation}`);
+    return native(model, context, options);
   }
   /** Re-evaluates which brokered providers this machine serves by itself. */
   async refreshBrokerAuth() {
@@ -525,6 +533,11 @@ export class PiRuntime {
       // pi-builtin/), and remote server hosts (server npm dependencies).
       resourceLoaderOptions: {
         extensionFactories: [
+          { name: "codemode", builtin: true, factory: pi.createCodemodeExtension() },
+          { name: "mcp", builtin: true, factory: pi.createMcpExtension({
+            openUrl: (url: string) => { void this.openExternal(url).catch(error => debugLog("mcp: open sign-in URL", error)); },
+          }) },
+          { name: "tool-search", builtin: true, factory: pi.createToolSearchExtension() },
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
           pixGitBranchExtension,
         ] as InlineExtension[],
@@ -569,8 +582,11 @@ export class PiRuntime {
         sessionManager,
         sessionStartEvent,
       });
-      const notify = (message: string, level = "info") =>
+      let signInMessage: string | undefined;
+      const notify = (message: string, level = "info") => {
+        if (/https?:\/\//.test(message)) signInMessage = message;
         this.emit({ type: "notice", payload: { message, level, source: "extension" } });
+      };
       const unsupported = async () => {
         throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
       };
@@ -579,9 +595,15 @@ export class PiRuntime {
         uiContext: {
           ...created.session.extensionRunner.getUIContext(),
           notify,
-          select: unsupported,
-          confirm: unsupported,
-          input: unsupported,
+          select: (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) =>
+            this.dialogs?.request(created.session, { kind: "select", title, options, source: cwd }, opts) ?? unsupported(),
+          confirm: async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
+            (await (this.dialogs?.request(created.session, { kind: "confirm", title, message, options: ["yes"], source: cwd }, opts) ?? unsupported())) === "yes",
+          input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+            const message = signInMessage;
+            signInMessage = undefined;
+            return this.dialogs?.request(created.session, { kind: "input", title, placeholder, message, source: cwd }, opts) ?? unsupported();
+          },
           editor: unsupported,
           custom: unsupported,
         },
@@ -732,7 +754,7 @@ export class PiRuntime {
     const pi = await this.pi();
     const manager = pi.SessionManager.create(cwd, dir);
     const path = manager.getSessionFile();
-    // Open an explicitly persisted header: SDK otherwise defers the first user input.
+    // The registry needs an empty file before the SDK persists the first user message.
     durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
     return path;
   }
@@ -879,6 +901,7 @@ export class PiRuntime {
         await s.followUp(input.text, input.images);
         break;
       case "abort":
+        this.dialogs?.cancel(s);
         await s.abort();
         break;
       case "clearQueue":
@@ -904,11 +927,13 @@ export class PiRuntime {
       }
       case "getModels": {
         const modelRuntime = await this.modelRuntime();
-        if (input.broker) return (await modelRuntime.getAvailable()).map((m: any): BrokerModel => ({
-          provider: m.provider, id: m.id, name: m.name, api: m.api,
-          reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
-          input: m.input, contextWindow: m.contextWindow, maxTokens: m.maxTokens, cost: m.cost,
-        }));
+        if (input.broker) return (await modelRuntime.getAllAvailable()).map((m: any): BrokerModel => {
+          const base = { provider: m.provider, id: m.id, name: m.name, api: m.api, input: m.input, cost: m.cost };
+          if (m.type === "image") return { ...base, type: "image", output: m.output };
+          if (m.type === "classifier") return { ...base, type: "classifier", contextWindow: m.contextWindow };
+          return { ...base, reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
+            contextWindow: m.contextWindow, maxTokens: m.maxTokens };
+        });
         return (await modelRuntime.getAvailable()).map(
           (m: any): RuntimeModel => ({
             provider: String(m.provider),
@@ -1107,14 +1132,18 @@ export class PiRuntime {
             if (prompt.type === "select") {
               const selected = prompt.options.find((option: any) => option.id === input.method);
               if (selected) return selected.id;
-              throw new Error(`OAuth method ${input.method} is not supported by this provider.`);
+              const choice = await this.dialogs?.request(this, { kind: "select", title: prompt.message,
+                options: prompt.options.map((option: any) => option.label), source: input.provider }, { signal: prompt.signal });
+              const method = prompt.options.find((option: any) => option.label === choice);
+              if (method) return method.id;
+              throw new Error("Sign-in cancelled");
             }
-            if (prompt.type === "manual_code" && prompt.signal)
-              return new Promise<string>((_resolve, reject) => {
-                const abort = () => reject(new Error("OAuth browser prompt closed"));
-                if (prompt.signal.aborted) abort();
-                else prompt.signal.addEventListener("abort", abort, { once: true });
-              });
+            if (prompt.type === "manual_code" || prompt.type === "text") {
+              const value = await this.dialogs?.request(this, { kind: "input", title: prompt.message,
+                placeholder: prompt.placeholder, source: input.provider }, { signal: prompt.signal });
+              if (value !== undefined) return value;
+              throw new Error("Sign-in cancelled");
+            }
             throw new Error("This OAuth provider requires interactive Pi /login setup.");
           },
           notify: (event: any) => {
@@ -1172,7 +1201,9 @@ export class PiRuntime {
   }
   private async closeRuntime() {
     const runtime = this.runtime;
+    this.dialogs?.cancel(this);
     if (!runtime) return;
+    this.dialogs?.cancel(runtime.session);
     this.closing = true;
     this.unsubscribe?.();
     try {
@@ -1188,6 +1219,8 @@ export class PiRuntime {
     }
   }
   dispose() {
+    this.dialogs?.cancel(this);
+    if (this.runtime) this.dialogs?.cancel(this.runtime.session);
     this.unsubscribe?.();
     this.runtime?.session?.dispose?.();
     this.runtime = undefined;
