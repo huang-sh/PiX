@@ -164,7 +164,7 @@ The broker carries `stream`, `streamSimple`, `generateImages` and `classify`.
 Its catalog includes chat, image and classifier models without credential
 fields, and each request is checked against the advertised catalog. Image and
 classifier calls return one result rather than chat stream events. The Pi 1.0
-integration uses remote protocol 17 and host version 0.0.25; host installers
+integration uses remote protocol 17 and host version 0.0.26; host installers
 check both values so older hosts are updated before use.
 
 **Shutdown.** Quitting flushes pending background history writes, aborts
