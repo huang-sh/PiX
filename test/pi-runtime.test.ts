@@ -300,6 +300,21 @@ test("settings can list every model type without exposing credentials or changin
   assert.throws(() => validateRouteInput("agent.control", { action: "getModels", allTypes: "yes" }), /boolean/);
 });
 
+test("provider model types include the full catalog before credentials are configured", async () => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  runtime.modelServices = { modelRuntime: {
+    getProviders: () => [{ id: "unconfigured", name: "Unconfigured", auth: { apiKey: { login: true } } }],
+    getAllModels: (provider: string) => {
+      assert.equal(provider, "unconfigured");
+      return [{ id: "chat" }, { id: "image", type: "image" }, { id: "judge", type: "classifier" }, { id: "judge-2", type: "classifier" }];
+    },
+    checkAuth: async () => undefined,
+  } };
+  assert.deepEqual(await runtime.control({ action: "getProviders" }), [{
+    id: "unconfigured", name: "Unconfigured", modelTypes: ["chat", "image", "classifier"], authTypes: ["api_key"], status: undefined,
+  }]);
+});
+
 test("reports each model's supported thinking levels", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.modelServices = { modelRuntime: { getAvailable: async () => [

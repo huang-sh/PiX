@@ -35,7 +35,7 @@ export function useModels(
     ...runtimeProviders.value,
     ...[...new Set(customModels.value.map((model) => model.provider))]
       .filter((id) => !runtimeProviders.value.some((provider) => provider.id === id))
-      .map((id) => ({ id, name: id, authTypes: ["api_key" as const] })),
+      .map((id) => ({ id, name: id, modelTypes: ["chat" as const], authTypes: ["api_key" as const] })),
   ]);
   const providerFilter = ref<"all" | "configured" | "other">("all");
   const selectedModel = ref("");
@@ -48,7 +48,8 @@ export function useModels(
   const runtimeError = ref("");
 
   const providersOfType = computed(() => providers.value.filter(provider =>
-    modelType.value === "all" || models.value.some(model => model.provider === provider.id && (model.type ?? "chat") === modelType.value),
+    modelType.value === "all" || provider.modelTypes?.includes(modelType.value) ||
+    models.value.some(model => model.provider === provider.id && (model.type ?? "chat") === modelType.value),
   ));
   const providerFilters = computed(() => [
     { id: "all", count: providersOfType.value.length },
@@ -58,13 +59,12 @@ export function useModels(
   const filteredProviders = computed(() => {
     const query = modelQuery.value.trim().toLowerCase();
     return providersOfType.value.filter((provider) => providerFilter.value === "all" || (providerFilter.value === "configured" ? !!provider.status : !provider.status))
-      .filter(provider => modelType.value === "all" || providerModels(provider).length > 0).filter((provider) =>
+      .filter((provider) =>
       !query ||
       `${provider.name} ${provider.id}`.toLowerCase().includes(query) ||
-      models.value.some((model) =>
-        model.provider === provider.id &&
-        `${model.id} ${model.name ?? ""}`.toLowerCase().includes(query),
-      ) || customModels.value.some((model) => model.provider === provider.id && `${model.modelId} ${model.name ?? ""}`.toLowerCase().includes(query))
+      providerModels(provider).length > 0 ||
+      ((modelType.value === "all" || modelType.value === "chat") && customModels.value.some((model) =>
+        model.provider === provider.id && `${model.modelId} ${model.name ?? ""}`.toLowerCase().includes(query)))
     );
   });
   const providerSections = computed(() => [

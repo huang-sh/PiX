@@ -766,6 +766,47 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
+  it("keeps unconfigured providers in category filters even without available models", async () => {
+    const providers: RuntimeProvider[] = [
+      { id: "ready", name: "Ready", modelTypes: ["classifier"], authTypes: ["api_key"], status: { type: "api_key" } },
+      { id: "pending", name: "Pending", modelTypes: ["image", "classifier"], authTypes: ["api_key"] },
+      { id: "chat-only", name: "Chat only", modelTypes: ["chat"], authTypes: ["api_key"] },
+    ];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action: string }).action;
+      if (action === "getModels") return [{ provider: "ready", id: "judge", type: "classifier" }];
+      if (action === "getProviders") return providers;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      await wrapper.get('[data-model-type-filter="classifier"]').trigger("click");
+      expect(wrapper.get('[data-model-type-filter="classifier"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="all"] span').text()).toBe("2");
+      expect(wrapper.get('[data-provider-filter="configured"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("1");
+      await wrapper.get('[data-provider-filter="other"]').trigger("click");
+      expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["pending"]);
+      expect(wrapper.find('[data-provider="pending"] .provider-model-toggle').exists()).toBe(false);
+      await wrapper.get('[data-provider-configure="pending"]').trigger("click");
+      expect(wrapper.find('[data-provider-api-key="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-type-filter="image"]').trigger("click");
+      expect(wrapper.get('[data-model-type-filter="image"] span').text()).toBe("0");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("1");
+      expect(wrapper.find('[data-provider="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-search]').setValue("Pending");
+      expect(wrapper.find('[data-provider="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-search]').setValue("missing");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(0);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("groups model types and keeps default, cycling and thinking settings chat-only", async () => {
     const catalog: RuntimeModel[] = [
       { provider: "mixed", id: "shared", name: "Chat model" },

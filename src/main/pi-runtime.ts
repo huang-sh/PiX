@@ -1051,6 +1051,9 @@ export class PiRuntime {
             .map(async (p: any): Promise<RuntimeProvider> => ({
               id: p.id,
               name: p.name,
+              modelTypes: [...new Set<NonNullable<RuntimeModel["type"]>>(
+                modelRuntime.getAllModels(p.id).map((model: any) => model.type ?? "chat"),
+              )],
               authTypes: [
                 ...(p.auth?.apiKey?.login ? ["api_key" as const] : []),
                 ...(p.auth?.oauth?.login ? ["oauth" as const] : []),

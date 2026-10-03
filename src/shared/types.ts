@@ -183,6 +183,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export interface RuntimeProvider {
   id: string;
   name: string;
+  modelTypes?: Array<NonNullable<RuntimeModel["type"]>>;
   authTypes: Array<"api_key" | "oauth">;
   status?: { type: "api_key" | "oauth"; source?: string };
 }
