@@ -47,14 +47,17 @@ export function useModels(
   const providerBusy = ref("");
   const runtimeError = ref("");
 
+  const providersOfType = computed(() => providers.value.filter(provider =>
+    modelType.value === "all" || models.value.some(model => model.provider === provider.id && (model.type ?? "chat") === modelType.value),
+  ));
   const providerFilters = computed(() => [
-    { id: "all", count: providers.value.length },
-    { id: "configured", count: providers.value.filter((provider) => provider.status).length },
-    { id: "other", count: providers.value.filter((provider) => !provider.status).length },
+    { id: "all", count: providersOfType.value.length },
+    { id: "configured", count: providersOfType.value.filter((provider) => provider.status).length },
+    { id: "other", count: providersOfType.value.filter((provider) => !provider.status).length },
   ] as const);
   const filteredProviders = computed(() => {
     const query = modelQuery.value.trim().toLowerCase();
-    return providers.value.filter((provider) => providerFilter.value === "all" || (providerFilter.value === "configured" ? !!provider.status : !provider.status))
+    return providersOfType.value.filter((provider) => providerFilter.value === "all" || (providerFilter.value === "configured" ? !!provider.status : !provider.status))
       .filter(provider => modelType.value === "all" || providerModels(provider).length > 0).filter((provider) =>
       !query ||
       `${provider.name} ${provider.id}`.toLowerCase().includes(query) ||

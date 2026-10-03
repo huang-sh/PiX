@@ -828,6 +828,9 @@ describe("SettingsPage auto-save", () => {
       expect(document.activeElement).toBe(imageFilter.element);
       expect(wrapper.find(".model-inspector").exists()).toBe(false);
       expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["mixed"]);
+      expect(wrapper.get('[data-provider-filter="all"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="configured"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("0");
       await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
       expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["image"]);
       await wrapper.get("[data-model-search]").setValue("judge");

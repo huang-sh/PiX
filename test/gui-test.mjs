@@ -1332,6 +1332,33 @@ try {
     screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(artifacts, `gui-settings-${type}.png`), Buffer.from(screenshot.data, "base64"));
   }
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-model-type-filter=all]').click();
+    document.querySelector('.settings-page > main').scrollTop = 0;
+  })()`);
+  await retry(async () => {
+    const value = await cdp.evaluate(`({
+      overviewHeight: document.querySelector('.model-overview').getBoundingClientRect().height,
+      firstProviderBottom: document.querySelector('[data-provider]').getBoundingClientRect().bottom,
+      viewportHeight: innerHeight,
+      currentSessionPanel: Boolean(document.querySelector('.model-session-summary')),
+    })`);
+    if (value.overviewHeight > 130 || value.firstProviderBottom > value.viewportHeight || value.currentSessionPanel)
+      throw new Error(`Model settings overview is too tall: ${JSON.stringify(value)}`);
+  });
+  screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(artifacts, "gui-settings-overview.png"), Buffer.from(screenshot.data, "base64"));
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 860, height: 820, deviceScaleFactor: 1, mobile: false });
+  try {
+    await retry(async () => {
+      const fits = await cdp.evaluate(`[...document.querySelectorAll('.model-workspace, .model-toolbar, .provider-group')].every(el => el.scrollWidth <= el.clientWidth + 1)`);
+      if (!fits) throw new Error("Model settings overflow in a narrow window");
+    });
+    screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, "gui-settings-narrow.png"), Buffer.from(screenshot.data, "base64"));
+  } finally {
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+  }
   await cdp.evaluate("document.querySelector('[data-settings-category=appearance]').click()");
   const themePreview = await cdp.evaluate(`(() => {
     const input = document.querySelector('[data-setting-path=theme] select');

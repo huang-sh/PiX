@@ -51,7 +51,6 @@ const {
       </div>
 
       <div v-if="expandedProvider === selectedProvider.id" class="provider-model-list" :data-provider-models="selectedProvider.id">
-        <div class="provider-model-heading"><strong>{{ t("settings.chooseModel") }}</strong><span>{{ t("settings.chooseModelHint") }}</span></div>
         <p v-if="!providerModels(selectedProvider).length" class="settings-empty">{{ t("settings.noModels") }}</p>
         <section v-for="group in providerModelGroups(selectedProvider)" :key="group.type" :data-model-group="group.type" :aria-label="t(`settings.modelTypes.${group.type}`)">
         <div class="provider-model-heading"><strong>{{ t(`settings.modelTypes.${group.type}`) }} · {{ group.models.length }}</strong><span>{{ t(`settings.modelTypeHints.${group.type}`) }}</span></div>
