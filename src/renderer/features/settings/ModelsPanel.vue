@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { Bot, Box, Check, ChevronDown, ChevronRight, CircleAlert, KeyRound, RefreshCw, Search, SlidersHorizontal, X } from "@lucide/vue";
+import { Box, Check, ChevronDown, ChevronRight, CircleAlert, KeyRound, RefreshCw, Search, SlidersHorizontal, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
-import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
 import CustomModelForm from "./CustomModelForm.vue";
 import SettingRow from "./SettingRow.vue";
 import { useModelsContext, useSettingsDraftContext } from "./settings-context";
 
 const { t } = useI18n();
-const session = useSessionStore();
 const { draft, rows, optionLabel } = useSettingsDraftContext();
 const {
   models, modelQuery, addingCustomModel, editingCustomModel, providers, providerFilter, runtimeBusy,
@@ -30,12 +28,6 @@ const {
           <span v-if="draft?.effective.defaultProvider" class="model-summary-provider">{{ draft?.effective.defaultProvider }}</span>
           <p>{{ t("settings.defaultModelHint") }}</p>
         </div>
-      </div>
-      <div class="model-session-summary">
-        <span class="model-eyebrow"><Bot :size="14" />{{ t("settings.sessionModelLabel") }}</span>
-        <strong>{{ session.current?.runtime.model?.id || t("settings.noSessionModel") }}</strong>
-        <span v-if="session.current?.runtime.model" class="model-summary-provider">{{ session.current.runtime.model.provider }}</span>
-        <p>{{ t("settings.sessionModelHint") }}</p>
       </div>
       <div class="model-overview-footer">
         <span><Check :size="14" />{{ t("settings.connectedProviderCount", { n: providerFilters[1].count }) }}</span>
