@@ -26,7 +26,7 @@
 
 /* Density changes spacing, not the size of text people need to read. */
 :root[data-density="compact"] { --panel-header-height: 42px; }
-:root[data-density="compact"] .setting-row,
+:root[data-density="compact"] .setting-row { min-height: 64px; padding-block: 8px; }
 :root[data-density="compact"] .provider-group { padding-block: 8px; }
 :root[data-density="compact"] .model-row { min-height: 52px; padding-block: 7px; }
 

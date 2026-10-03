@@ -1359,6 +1359,19 @@ try {
   } finally {
     await cdp.send("Emulation.clearDeviceMetricsOverride");
   }
+  const compactSettingHeight = await cdp.evaluate(`(() => {
+    const root = document.documentElement;
+    const original = root.dataset.density;
+    try {
+      root.dataset.density = 'compact';
+      return document.querySelector('[data-setting-path=enabledModels]').getBoundingClientRect().height;
+    } finally {
+      if (original === undefined) delete root.dataset.density;
+      else root.dataset.density = original;
+    }
+  })()`);
+  if (Math.abs(compactSettingHeight - 64) > 1)
+    throw new Error(`Compact settings row should be 64px, got ${compactSettingHeight}px`);
   await cdp.evaluate("document.querySelector('[data-settings-category=appearance]').click()");
   const themePreview = await cdp.evaluate(`(() => {
     const input = document.querySelector('[data-setting-path=theme] select');

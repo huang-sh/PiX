@@ -194,16 +194,20 @@ export function useModels(
     }
   }
 
-  async function customModelSaved(provider: string) {
+  async function customModelSaved(provider: string, modelId: string) {
     const edited = !!editingCustomModel.value;
     addingCustomModel.value = false;
     editingCustomModel.value = undefined;
     try {
       await loadRuntimeCatalog();
       if (!edited) {
-        const available = models.value.some((model) => model.provider === provider);
-        editingProvider.value = available ? "" : provider;
-        expandedProvider.value = available ? provider : "";
+        filterModelType("chat");
+        providerFilter.value = "all";
+        modelQuery.value = "";
+        const model = models.value.find((model) => isChatModel(model) && model.provider === provider && model.id === modelId);
+        selectedModel.value = model ? modelKey(model) : "";
+        editingProvider.value = model ? "" : provider;
+        expandedProvider.value = model ? provider : "";
       }
       layout.showNotice(t(edited ? "settings.customModelUpdated" : "settings.customModelSaved"));
     } catch (error) {

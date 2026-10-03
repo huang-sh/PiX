@@ -7,7 +7,7 @@ import { useSessionStore } from "../../stores/session";
 import Button from "../../components/ui/Button.vue";
 
 const props = defineProps<{ model?: CustomModelInput }>();
-const emit = defineEmits<{ saved: [provider: string]; cancel: [] }>();
+const emit = defineEmits<{ saved: [provider: string, modelId: string]; cancel: [] }>();
 const { t } = useI18n();
 const session = useSessionStore();
 const busy = ref(false);
@@ -32,7 +32,7 @@ async function save() {
   try {
     await session.control({ ...draft, action: props.model ? "updateCustomModel" : "addCustomModel", apiKey: keyless.value ? "pix-local" : draft.apiKey });
     draft.apiKey = "";
-    emit("saved", draft.provider.trim());
+    emit("saved", draft.provider.trim(), draft.modelId.trim());
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {

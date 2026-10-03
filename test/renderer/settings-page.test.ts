@@ -488,9 +488,15 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
-  it("adds a custom model and refreshes the shared picker catalog", async () => {
-    const available: RuntimeModel[] = [];
-    const providers: RuntimeProvider[] = [];
+  it.each(["all", "image", "classifier"])("reveals and selects a custom chat model added from the %s category", async (type) => {
+    const available: RuntimeModel[] = [
+      { provider: "existing", id: "old-chat", type: "chat" },
+      { provider: "existing", id: "paint", type: "image" },
+      { provider: "existing", id: "judge", type: "classifier" },
+    ];
+    const providers: RuntimeProvider[] = [
+      { id: "existing", name: "Existing", authTypes: ["api_key"], status: { type: "api_key" } },
+    ];
     vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
       if (route !== "agent.control") return settings;
       const v = payload as Record<string, unknown>;
@@ -511,6 +517,10 @@ describe("SettingsPage auto-save", () => {
     layout.settingsCategory = "models";
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
     await flushPromises();
+    await wrapper.get(`[data-model-type-filter="${type}"]`).trigger("click");
+    await wrapper.get('[data-provider="existing"] .provider-model-toggle').trigger("click");
+    await wrapper.get('[data-model-search]').setValue("existing");
+    await wrapper.get('[data-provider-filter="other"]').trigger("click");
     await wrapper.get("[data-add-custom-model]").trigger("click");
     await wrapper.get('[name="provider"]').setValue("local-llm");
     await wrapper.get('[name="modelId"]').setValue("custom-model");
@@ -521,9 +531,14 @@ describe("SettingsPage auto-save", () => {
     await wrapper.get("[data-custom-model-form]").trigger("submit");
     await flushPromises();
     expect(wrapper.find("[data-custom-model-form]").exists()).toBe(false);
-    expect(useSessionStore().models).toEqual(available);
+    expect(useSessionStore().models).toEqual(available.filter(model => !model.type || model.type === "chat"));
+    expect(wrapper.get('[data-model-type-filter="chat"]').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get('[data-provider-filter="all"]').attributes("aria-pressed")).toBe("true");
+    expect((wrapper.get('[data-model-search]').element as HTMLInputElement).value).toBe("");
     expect(wrapper.find('[data-provider="local-llm"]').exists()).toBe(true);
-    expect(wrapper.get("#model-details-panel").text()).toContain("custom-model");
+    expect(wrapper.get('[data-model="local-llm/custom-model"] .model-select').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get(".model-actions strong").text()).toBe("custom-model");
+    expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
     wrapper.unmount();
   });
 
