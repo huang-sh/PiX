@@ -162,15 +162,17 @@ export class GraphFiles {
     }
     durableWrite(file, JSON.stringify(value) + "\n");
   }
-  private readJson(file: string) {
+  private readJson(file: string, readOnly = false) {
     try { return JSON.parse(readFileSync(file, "utf8")); }
     catch (error) {
       if (!existsSync(`${file}.bak`)) throw error;
       const backup = readFileSync(`${file}.bak`, "utf8");
       const value = JSON.parse(backup);
-      if (existsSync(file)) copyFileSync(file, `${file}.damaged-${randomUUID()}`);
-      durableWrite(file, backup);
-      this.recoveryMessages.push(`Recovered metadata: ${basename(file)}`);
+      if (!readOnly) {
+        if (existsSync(file)) copyFileSync(file, `${file}.damaged-${randomUUID()}`);
+        durableWrite(file, backup);
+      }
+      this.recoveryMessages.push(`${readOnly ? "Read backup metadata" : "Recovered metadata"}: ${basename(file)}`);
       return value;
     }
   }
@@ -203,12 +205,13 @@ export class GraphFiles {
     if (this.locked) rmSync(join(this.dir, "owner.json"), { force: true });
     this.locked = false;
   }
-  load() {
-    this.finishDeletion();
+  load({ readOnly = false }: { readOnly?: boolean } = {}) {
+    if (readOnly && !existsSync(this.dir)) return;
+    if (!readOnly) this.finishDeletion();
     const cursor = join(this.dir, "cursor.json");
     if (existsSync(cursor)) {
       try {
-        const leaf = this.readJson(cursor).leafId;
+        const leaf = this.readJson(cursor, readOnly).leafId;
         if (leaf !== null && typeof leaf !== "string") throw new Error("Invalid saved leaf");
         this.leafId = leaf; this.hasSavedLeaf = true;
       }
@@ -217,20 +220,20 @@ export class GraphFiles {
     for (const name of readdirSync(this.dir).filter(n => n.endsWith(".jsonl.origin.json"))) {
       let record: BranchRecord;
       try {
-        record = this.readJson(join(this.dir, name));
+        record = this.readJson(join(this.dir, name), readOnly);
         if (basename(this.origin(record.id)) !== name || !record.inherited || typeof record.request?.text !== "string"
           || !inheritsConsistently(record)
           || !["prepared", "running", "idle", "interrupted"].includes(record.status)) throw new Error("Invalid branch origin");
         parseStrict(encodeSession({ header: record.header, entries: record.baseline }));
       }
       catch { this.recoveryMessages.push(`Branch metadata unavailable; original session retained: ${name}`); continue; }
-      if (record.status === "prepared" && !existsSync(this.path(record.id))) {
+      if (!readOnly && record.status === "prepared" && !existsSync(this.path(record.id))) {
         const initial = encodeSession({ header: record.header, entries: record.baseline });
         parseStrict(initial);
         durableWrite(this.path(record.id), initial);
         durableWrite(this.checkpointPath(record.id), initial);
       }
-      const interrupted = record.status === "prepared" || record.status === "running";
+      const interrupted = !readOnly && (record.status === "prepared" || record.status === "running");
       if (interrupted) {
         record.status = "interrupted";
         record.error = "Execution interrupted; saved input retained. No tools were automatically replayed.";
@@ -242,7 +245,7 @@ export class GraphFiles {
     // after restart, including failures before Pi appended its first user message.
     for (const name of readdirSync(this.dir).filter(n => /^request-[a-zA-Z0-9-]+\.json$/.test(n))) {
       try {
-        const input = this.readJson(join(this.dir, name));
+        const input = this.readJson(join(this.dir, name), readOnly);
         if ((input.state === "prepared" || input.state === "queued") && typeof input.text === "string")
           this.recoveredInputs.push({ requestId: input.requestId, text: input.text, nodeId: input.nodeId, images: input.images });
       } catch { this.recoveryMessages.push(`Saved input unavailable; original retained: ${name}`); }
@@ -429,25 +432,42 @@ export class GraphFiles {
     const fd = openSync(this.main, "r+");
     try { fsyncSync(fd); } finally { closeSync(fd); }
   }
-  readBranch(record: BranchRecord): SessionData {
-    try { return readStrict(this.path(record.id)); }
+  readBranch(record: BranchRecord, { readOnly = false }: { readOnly?: boolean } = {}): SessionData {
+    const file = this.path(record.id);
+    if (readOnly && record.status === "prepared" && !existsSync(file))
+      return { header: record.header, entries: record.baseline };
+    // Parse and recover the same captured bytes while another process can append.
+    let original: string | undefined;
+    try {
+      original = readFileSync(file, "utf8");
+      return parseStrict(original);
+    }
     catch (error) {
-      record.error = `Source needs recovery; original retained: ${String(error)}`;
-      record.status = "interrupted";
-      this.recoveryMessages.push(record.error);
-      if (existsSync(this.path(record.id))) {
-        const raw = readFileSync(this.path(record.id), "utf8").trimEnd();
+      if (!readOnly) {
+        record.error = `Source needs recovery; original retained: ${String(error)}`;
+        record.status = "interrupted";
+        this.recoveryMessages.push(record.error);
+      }
+      if (original !== undefined) {
+        const raw = original.trimEnd();
         const prefix = raw.slice(0, raw.lastIndexOf("\n") + 1);
         try {
           const data = parseStrict(prefix);
           this.delta(record, data);
-          durableWrite(`${this.path(record.id)}.recovered`, encodeSession(data));
-          this.save(record);
+          if (!readOnly) {
+            durableWrite(`${file}.recovered`, encodeSession(data));
+            this.save(record);
+          } else {
+            let completeTail = false;
+            try { JSON.parse(raw.slice(raw.lastIndexOf("\n") + 1)); completeTail = true; } catch {}
+            if (completeTail) this.recoveryMessages.push(`Read branch prefix; invalid final record retained: ${record.id}: ${String(error)}`);
+          }
           return data;
         } catch (e) { debugLog(`graph-files: branch ${record.id} prefix recovery failed`, e); }
       }
       const checkpoint = readStrict(this.checkpointPath(record.id));
-      this.save(record);
+      if (readOnly) this.recoveryMessages.push(`Read branch checkpoint; source unavailable: ${record.id}`);
+      else this.save(record);
       return checkpoint;
     }
   }

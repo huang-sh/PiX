@@ -22,13 +22,14 @@ import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { ExtensionDialogs } from "./extension-dialogs.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { ProgressLedger } from "./progress-ledger.js";
 import { RemoteWorkspacePool, migratesSession, unavailable, type RemoteSlot } from "./remote-pool.js";
 import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
-import { sessionModifiedAt } from "./graph-files.js";
+import { GraphFiles, sessionModifiedAt } from "./graph-files.js";
 import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
@@ -509,7 +510,7 @@ export class MainController {
       return decorate(files.list());
     }
   }
-  fallback(path: string, files = this.files): SessionSnapshot {
+  fallback(path: string, files = this.files, warn?: (message: string) => void): SessionSnapshot {
     const x = files.read(path),
       summary = files.list().find((s) => s.path === resolve(path)) ?? {
         id: String(x.header?.id ?? path),
@@ -521,12 +522,41 @@ export class MainController {
         firstMessage: "",
       },
       leaf = x.entries.at(-1)?.id ?? null;
-    return {
+    // An owned graph can still be viewed in full. Read its sidecar without
+    // acquiring ownership or running recovery against another process's files.
+    const graph = new GraphFiles(summary.path);
+    try { graph.load({ readOnly: true }); }
+    catch (error) {
+      debugLog("controller: read-only graph metadata", error);
+      graph.recoveryMessages.push(`Branch metadata unavailable: ${String(error)}`);
+    }
+    const selectedLeaf = graph.hasSavedLeaf && (graph.leafId === null || x.entries.some(entry => entry.id === graph.leafId))
+      ? graph.leafId : leaf;
+    const snapshot: SessionSnapshot = {
       session: summary,
       entries: x.entries,
-      projection: projectSession(x.entries, leaf),
+      projection: projectSession(x.entries, selectedLeaf),
       runtime: unavailable(),
     };
+    const branches = new Map<string, { snapshot: SessionSnapshot }>();
+    for (const record of graph.records.values()) {
+      try {
+        const data = graph.readBranch(record, { readOnly: true });
+        branches.set(record.id, { snapshot: { ...snapshot, entries: data.entries,
+          projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null) } });
+      } catch (error) {
+        debugLog(`controller: read-only branch ${record.id}`, error);
+        graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${String(error)}`);
+      }
+    }
+    const cache = new GraphSnapshotCache();
+    cache.update(graph, snapshot, branches);
+    for (const record of graph.records.values()) {
+      const error = cache.error(record.id);
+      if (error) graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${error}`);
+    }
+    if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
+    return { ...snapshot, ...cache.view(snapshot, new Set()) };
   }
   async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
     const v = validateRouteInput(route, raw);
@@ -752,14 +782,11 @@ export class MainController {
           files.dir,
           p,
           error => {
-            if (request === this.viewRequest) this.emit({
-              type: "notice",
-              payload: {
-                level: "warning",
-                message: `Read-only session: ${error instanceof Error ? error.message : String(error)}`,
-              },
-            });
-            return this.fallback(p, files);
+            const warn = (message: string) => {
+              if (request === this.viewRequest) this.emit({ type: "notice", payload: { level: "warning", message } });
+            };
+            warn(`Read-only session: ${error instanceof Error ? error.message : String(error)}`);
+            return this.fallback(p, files, warn);
           },
         );
         // The registry refuses a snapshot for an entry it no longer owns, and a
