@@ -99,7 +99,8 @@ child.stderr.on("data", (chunk) => (stderr += String(chunk)));
 function testEnv() {
   return {
     ...process.env,
-    ...(devServer ? { ELECTRON_RENDERER_URL: devServer.resolvedUrls.local[0] } : {}),
+    // A production smoke must load this worktree's build, not an inherited dev server.
+    ELECTRON_RENDERER_URL: devServer?.resolvedUrls.local[0] ?? "",
     PIX_HOME: testHome,
     PIX_PROJECT: allowEmpty ? root : join(root, "test", "workspace"),
     PI_OFFLINE: "1",

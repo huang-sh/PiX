@@ -50,7 +50,7 @@ Switching branches never means re-setting up context — context is part of the 
 
 ## Built-in extensions
 
-PiX embeds Pi 1.0, including its MCP, Codemode and tool-search extensions. Existing Pi v3 JSONL sessions keep working. Tool images and nested call records appear in the branch chat; Pi saves nested call names, arguments and status, but not every nested output.
+PiX embeds Pi 1.1, including its MCP, Codemode and tool-search extensions. Existing Pi v3 JSONL sessions keep working. Tool images and nested call records appear in the branch chat; Pi saves nested call names, arguments and status, but not every nested output.
 
 Settings → Model groups available models into Chat, Image generation and Classifiers, with counts and type filters. Image and classifier models are used through Codemode; only chat models appear in conversation pickers or support default, cycling and thinking preferences.
 
@@ -58,7 +58,7 @@ Configure MCP in `~/.pix/agent/mcp.json` or a trusted project's `.pi/mcp.json`, 
 
 Connecting an MCP server with the default `codemode` exposure activates Codemode automatically. To enable it yourself, append `, +codemode` to the existing list in Settings → Tools & images → Default tools, then click outside the field to save. This is a project setting: new sessions inherit it, and PiX automatically reloads the current session when it is idle. No manual `/reload` is needed for this settings-page change.
 
-The Codemode tool access setting controls how an active Codemode tool presents other tools; it does not enable Codemode. `on` (Alongside other tools) keeps direct tool calls available; `only` (Only through Codemode) hides those direct calls from the model. See [Pi's MCP configuration](https://github.com/earendil-works/pi/blob/v1.0.0/packages/coding-agent/docs/mcp.md) for server configuration.
+The Codemode tool access setting controls how an active Codemode tool presents other tools; it does not enable Codemode. `on` (Alongside other tools) keeps direct tool calls available; `only` (Only through Codemode) hides those direct calls from the model. See [Pi's MCP configuration](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/mcp.md) for server configuration.
 
 PiX also bundles two extensions with native binaries. They and their runtime dependencies ship with the installer — no separate install needed, and an npm copy you installed through Pi takes precedence.
 

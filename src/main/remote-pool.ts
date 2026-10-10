@@ -21,7 +21,7 @@ import { projectId } from "../shared/types.js";
 import type { HostHandle, ProjectRoute } from "../shared/remote-protocol.js";
 import { WslHostClient, RemoteHostUnreachable, HostStarted } from "./wsl-host-client.js";
 import { brokerModelKey, brokerOptions } from "./model-broker.js";
-import type { PiRuntime } from "./pi-runtime.js";
+import { piSdkVersion, type PiRuntime } from "./pi-runtime.js";
 import type { SettingsService } from "./services.js";
 import type { Platform } from "./controller.js";
 
@@ -647,6 +647,34 @@ export class RemoteWorkspacePool {
           // (the pid is verified first) and let a fresh host take over.
           this.forgetHandle(remembered.key);
           await WslHostClient.killHost(remembered.handle).catch(() => {});
+        }
+      }
+      const piVersion = client ? await piSdkVersion() : undefined;
+      if (remembered && client && client.hello.piVersion !== piVersion) {
+        // An older host can still own a running graph. Only replace it when
+        // session.list proves it idle; otherwise keep the link until the next
+        // reconnect rather than racing a second host against its graph lock.
+        let idle = false;
+        try {
+          idle = !(await client.request<SessionSummary[]>("session.list"))
+            .some(session => session.running);
+        } catch (error) { debugLog("remote-pool: check host before upgrade", error); }
+        abort.signal.throwIfAborted();
+        if (idle) {
+          // A failed shutdown must not start a competing host. Keep the
+          // remembered handle so the next attempt can reattach safely.
+          try { await client.dispose(); }
+          catch (error) {
+            await client.abandon().catch(() => {});
+            client = undefined;
+            throw error;
+          }
+          client = undefined;
+          this.forgetHandle(remembered.key);
+        } else {
+          this.host.emit({ type: "notice", payload: { level: "warning",
+            message: `The remote host is still running Pi ${client.hello.piVersion ?? "unknown"}. After its tasks finish, close and reopen the remote workspace to upgrade it to Pi ${piVersion}.`,
+          } });
         }
       }
       if (!client) {

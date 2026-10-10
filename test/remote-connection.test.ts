@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { WslHostClient, RemoteHostUnreachable, HostStarted, launcherScript } from "../src/main/wsl-host-client.js";
 import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
@@ -327,7 +328,7 @@ function controllerFixture(t: TestContext, seed?: (home: string) => void) {
 function candidate(controller: MainController) {
   const events = new EventEmitter();
   return {
-    hello: { cwd: "/new" } as { cwd: string } & Record<string, unknown>, connected: true, disposed: false, abandoned: false, reattached: false,
+    hello: { cwd: "/new", piVersion: PI_VERSION } as { cwd: string } & Record<string, unknown>, connected: true, disposed: false, abandoned: false, reattached: false,
     handle: undefined as any,
     calls: [] as any[],
     async request(route: string, input?: any): Promise<any> {
@@ -753,7 +754,7 @@ test("reattach speaks the token handshake against a lingering host", async (t) =
 test("a remembered lingering host is reattached instead of spawned", async (t) => {
   const { controller, old } = controllerFixture(t, seedLingeringHost);
   const fresh = candidate(controller);
-  fresh.hello = { cwd: "/old" };
+  fresh.hello = { cwd: "/old", piVersion: PI_VERSION };
   fresh.reattached = true;
   fresh.handle = seededHandle;
   old.connected = false;  // drop the pooled fast path so the reattach path runs
@@ -764,6 +765,66 @@ test("a remembered lingering host is reattached instead of spawned", async (t) =
   assert.equal(spawn.mock.callCount(), 0, "attaching beats spawning a second host");
   assert.equal(controller.wsl, fresh);
   assert.equal((result as { project: ProjectInfo }).project.path, "/old");
+});
+
+test("an idle host using the old Pi is stopped before the upgraded host starts", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;
+  const obsolete = candidate(controller);
+  obsolete.hello = { cwd: "/old", piVersion: "1.0.0" };
+  obsolete.reattached = true;
+  obsolete.handle = seededHandle;
+  const fresh = candidate(controller);
+  fresh.hello = { cwd: "/old", piVersion: PI_VERSION };
+  fresh.handle = { ...seededHandle, pid: 5252 };
+  t.mock.method(WslHostClient, "reattach", async () => obsolete as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => {
+    assert.equal(obsolete.disposed, true, "the old host releases its graph lock before replacement");
+    return fresh as any;
+  });
+  await controller.connectSsh("old", "/old");
+  assert.equal(spawn.mock.callCount(), 1);
+  assert.equal(controller.wsl, fresh);
+});
+
+test("a running host using the old Pi remains attached until a later reconnect", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;
+  const busy = candidate(controller);
+  busy.hello = { cwd: "/old", piVersion: "1.0.0" };
+  busy.reattached = true;
+  busy.handle = seededHandle;
+  busy.request = async (route: string) => route === "session.list"
+    ? [{ ...remoteSnapshot().session, running: true }]
+    : controller.settings.bundle();
+  t.mock.method(WslHostClient, "reattach", async () => busy as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not spawn"); });
+  const events: any[] = [];
+  controller.onEvent(event => events.push(event));
+  await controller.connectSsh("old", "/old");
+  assert.equal(controller.wsl, busy);
+  assert.equal(busy.disposed, false);
+  assert.equal(spawn.mock.callCount(), 0);
+  assert.ok(events.some(event => event.type === "notice" && /close and reopen the remote workspace/.test(event.payload.message)));
+});
+
+test("an old host with unknown running state is never replaced speculatively", async (t) => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;
+  const uncertain = candidate(controller);
+  uncertain.hello = { cwd: "/old", piVersion: "1.0.0" };
+  uncertain.reattached = true;
+  uncertain.handle = seededHandle;
+  uncertain.request = async (route: string) => {
+    if (route === "session.list") throw new Error("cannot inspect runs");
+    return controller.settings.bundle();
+  };
+  t.mock.method(WslHostClient, "reattach", async () => uncertain as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not spawn"); });
+  await assert.rejects(controller.connectSsh("old", "/old"), /cannot inspect runs/);
+  assert.equal(uncertain.disposed, false);
+  assert.equal(spawn.mock.callCount(), 0);
+  assert.match(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"), /"pid":4242/);
 });
 
 test("an unreachable server keeps the lingering host's handle", async (t) => {
@@ -799,7 +860,7 @@ test("a stale remembered host is stopped and replaced by a fresh spawn", async (
 test("a cancelled attempt abandons a reattached host instead of stopping it", async (t) => {
   const { controller, old } = controllerFixture(t, seedLingeringHost);
   const pending = candidate(controller);
-  pending.hello = { cwd: "/old" };
+  pending.hello = { cwd: "/old", piVersion: PI_VERSION };
   pending.reattached = true;
   old.connected = false;  // drop the pooled fast path so the reattach path runs
   let release!: () => void;
@@ -824,7 +885,7 @@ test("automatic recovery reattaches to the lingering host", async (t) => {
   const { controller, old, project } = controllerFixture(t, seedLingeringHost);
   old.handle = seededHandle as any;
   const fresh = candidate(controller);
-  fresh.hello = { cwd: "/old" };
+  fresh.hello = { cwd: "/old", piVersion: PI_VERSION };
   fresh.reattached = true;
   fresh.handle = seededHandle;
   t.mock.method(WslHostClient, "reattach", async () => fresh as any);
@@ -1333,7 +1394,7 @@ test("a link death after READY redials the surviving host instead of wasting it"
     throw new HostStarted("connect ECONNREFUSED 127.0.0.1:54114", startedHandle as never);
   });
   const reattached = candidate(controller);
-  reattached.hello = { cwd: "/old" };
+  reattached.hello = { cwd: "/old", piVersion: PI_VERSION };
   reattached.reattached = true;
   reattached.handle = { kind: "ssh", target: "old", port: 41515, token: "survivor", pid: 6262 };
   const reattach = t.mock.method(WslHostClient, "reattach", async () => reattached as any);

@@ -19,6 +19,7 @@ import {
 } from "../shared/remote-protocol.js";
 import type { DesktopEvent } from "../shared/types.js";
 import { brokerOptions, BrokerModelStream } from "../main/model-broker.js";
+import { piSdkVersion } from "../main/pi-runtime.js";
 
 const READY_MARKER = "PIX_AGENT_HOST_READY ";
 
@@ -335,8 +336,9 @@ function report(error: unknown) {
   );
 }
 if (command === "version") {
+  const piVersion = await piSdkVersion();
   process.stdout.write(
-    `${JSON.stringify({ version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL })}\n`,
+    `${JSON.stringify({ version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL, piVersion })}\n`,
   );
 } else if (command === "serve") {
   // Node aborts the process on unhandled rejections and on stream 'error'

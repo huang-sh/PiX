@@ -81,6 +81,11 @@ export const MODEL_ACTIONS = [
   "setBrokerProviders",
 ] as const satisfies readonly AgentControl["action"][];
 
+export async function piSdkVersion(): Promise<string> {
+  const { VERSION } = await import("@earendil-works/pi-coding-agent");
+  return VERSION;
+}
+
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
   FileSettingsStorage: new (cwd: string, agentDir: string) => {
