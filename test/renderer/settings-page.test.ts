@@ -488,9 +488,15 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
-  it("adds a custom model and refreshes the shared picker catalog", async () => {
-    const available: RuntimeModel[] = [];
-    const providers: RuntimeProvider[] = [];
+  it.each(["all", "image", "classifier"])("reveals and selects a custom chat model added from the %s category", async (type) => {
+    const available: RuntimeModel[] = [
+      { provider: "existing", id: "old-chat", type: "chat" },
+      { provider: "existing", id: "paint", type: "image" },
+      { provider: "existing", id: "judge", type: "classifier" },
+    ];
+    const providers: RuntimeProvider[] = [
+      { id: "existing", name: "Existing", authTypes: ["api_key"], status: { type: "api_key" } },
+    ];
     vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
       if (route !== "agent.control") return settings;
       const v = payload as Record<string, unknown>;
@@ -511,6 +517,10 @@ describe("SettingsPage auto-save", () => {
     layout.settingsCategory = "models";
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
     await flushPromises();
+    await wrapper.get(`[data-model-type-filter="${type}"]`).trigger("click");
+    await wrapper.get('[data-provider="existing"] .provider-model-toggle').trigger("click");
+    await wrapper.get('[data-model-search]').setValue("existing");
+    await wrapper.get('[data-provider-filter="other"]').trigger("click");
     await wrapper.get("[data-add-custom-model]").trigger("click");
     await wrapper.get('[name="provider"]').setValue("local-llm");
     await wrapper.get('[name="modelId"]').setValue("custom-model");
@@ -521,9 +531,14 @@ describe("SettingsPage auto-save", () => {
     await wrapper.get("[data-custom-model-form]").trigger("submit");
     await flushPromises();
     expect(wrapper.find("[data-custom-model-form]").exists()).toBe(false);
-    expect(useSessionStore().models).toEqual(available);
+    expect(useSessionStore().models).toEqual(available.filter(model => !model.type || model.type === "chat"));
+    expect(wrapper.get('[data-model-type-filter="chat"]').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get('[data-provider-filter="all"]').attributes("aria-pressed")).toBe("true");
+    expect((wrapper.get('[data-model-search]').element as HTMLInputElement).value).toBe("");
     expect(wrapper.find('[data-provider="local-llm"]').exists()).toBe(true);
-    expect(wrapper.get("#model-details-panel").text()).toContain("custom-model");
+    expect(wrapper.get('[data-model="local-llm/custom-model"] .model-select').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get(".model-actions strong").text()).toBe("custom-model");
+    expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -766,6 +781,129 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
+  it("keeps unconfigured providers in category filters even without available models", async () => {
+    const providers: RuntimeProvider[] = [
+      { id: "ready", name: "Ready", modelTypes: ["classifier"], authTypes: ["api_key"], status: { type: "api_key" } },
+      { id: "pending", name: "Pending", modelTypes: ["image", "classifier"], authTypes: ["api_key"] },
+      { id: "chat-only", name: "Chat only", modelTypes: ["chat"], authTypes: ["api_key"] },
+    ];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action: string }).action;
+      if (action === "getModels") return [{ provider: "ready", id: "judge", type: "classifier" }];
+      if (action === "getProviders") return providers;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      await wrapper.get('[data-model-type-filter="classifier"]').trigger("click");
+      expect(wrapper.get('[data-model-type-filter="classifier"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="all"] span').text()).toBe("2");
+      expect(wrapper.get('[data-provider-filter="configured"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("1");
+      await wrapper.get('[data-provider-filter="other"]').trigger("click");
+      expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["pending"]);
+      expect(wrapper.find('[data-provider="pending"] .provider-model-toggle').exists()).toBe(false);
+      await wrapper.get('[data-provider-configure="pending"]').trigger("click");
+      expect(wrapper.find('[data-provider-api-key="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-type-filter="image"]').trigger("click");
+      expect(wrapper.get('[data-model-type-filter="image"] span').text()).toBe("0");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("1");
+      expect(wrapper.find('[data-provider="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-search]').setValue("Pending");
+      expect(wrapper.find('[data-provider="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-search]').setValue("missing");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(0);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("groups model types and keeps default, cycling and thinking settings chat-only", async () => {
+    const catalog: RuntimeModel[] = [
+      { provider: "mixed", id: "shared", name: "Chat model" },
+      { provider: "mixed", id: "shared", name: "Painter", type: "image" },
+      { provider: "mixed", id: "judge", name: "Classifier", type: "classifier" },
+      { provider: "chat-only", id: "other", type: "chat" },
+    ];
+    const providers: RuntimeProvider[] = ["mixed", "chat-only"].map(id => ({
+      id, name: id, authTypes: ["api_key"], status: { type: "api_key" },
+    }));
+    const persisted: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") {
+        for (const [key, value] of Object.entries((payload as UpdatePayload).patch ?? {})) {
+          if (value === null) delete persisted.piGlobal[key];
+          else persisted.piGlobal[key] = value;
+        }
+        return structuredClone(persisted);
+      }
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action: string }).action;
+      if (action === "getModels") return catalog;
+      if (action === "getProviders") return providers;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    const previousLocale = i18n.global.locale.value;
+    try {
+      await flushPromises();
+      expect(desktop.invoke).toHaveBeenCalledWith("agent.control", { action: "getModels", allTypes: true });
+      expect(useSessionStore().models.map(model => model.id)).toEqual(["shared", "other"]);
+      expect(wrapper.get('[data-model-type-filter="chat"]').text()).toContain("2");
+      expect(wrapper.get('[data-model-type-filter="image"]').text()).toContain("1");
+      expect(wrapper.get('[data-model-type-filter="classifier"]').text()).toContain("1");
+      await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
+      expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["chat", "image", "classifier"]);
+      const image = wrapper.get('[data-model-group="image"] [data-model="mixed/shared"]');
+      const chat = wrapper.get('[data-model-group="chat"] [data-model="mixed/shared"]');
+      await image.get(".model-select").trigger("click");
+      expect(image.get(".model-select").attributes("aria-pressed")).toBe("true");
+      expect(chat.get(".model-select").attributes("aria-pressed")).toBe("false");
+      expect(image.find(".model-cycle").exists()).toBe(false);
+      expect(wrapper.find('[data-model-action="default"]').exists()).toBe(false);
+      expect(wrapper.find('[data-setting-path="modelThinkingLevels"]').exists()).toBe(false);
+      expect(wrapper.get(".model-actions").text()).toContain("+codemode");
+      await chat.get(".model-select").trigger("click");
+      expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
+      expect(wrapper.find('[data-setting-path="modelThinkingLevels"]').exists()).toBe(true);
+      await chat.get(".model-cycle input").setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch?.enabledModels).toEqual(["chat-only/other"]);
+      await chat.get(".model-cycle input").setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch?.enabledModels).toBeNull();
+      const imageFilter = wrapper.get('[data-model-type-filter="image"]');
+      (imageFilter.element as HTMLButtonElement).focus();
+      await imageFilter.trigger("click");
+      expect(document.activeElement).toBe(imageFilter.element);
+      expect(wrapper.find(".model-inspector").exists()).toBe(false);
+      expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["mixed"]);
+      expect(wrapper.get('[data-provider-filter="all"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="configured"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("0");
+      await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
+      expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["image"]);
+      await wrapper.get("[data-model-search]").setValue("judge");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(0);
+      await wrapper.get(".model-empty button").trigger("click");
+      expect(wrapper.get('[data-model-type-filter="all"]').attributes("aria-pressed")).toBe("true");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(2);
+      i18n.global.locale.value = "zh-CN";
+      await flushPromises();
+      expect(wrapper.get('[data-model-type-filter="image"]').text()).toContain("图像生成");
+      expect(wrapper.get('[data-model-type-filter="classifier"]').text()).toContain("分类器");
+    } finally {
+      i18n.global.locale.value = previousLocale;
+      wrapper.unmount();
+    }
+  });
+
   it("forces a catalog refresh only on click and updates the composer after it completes", async () => {
     let finishRefresh!: () => void;
     const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
@@ -801,7 +939,7 @@ describe("SettingsPage auto-save", () => {
     await flushPromises();
     expect(vi.mocked(desktop.invoke).mock.calls.slice(1)).toEqual([
       ["agent.control", { action: "getCustomModels" }],
-      ["agent.control", { action: "getModels" }], ["agent.control", { action: "getProviders" }],
+      ["agent.control", { action: "getModels", allTypes: true }], ["agent.control", { action: "getProviders" }],
     ]);
     expect(useSessionStore().models.map(model => model.id)).toContain("new-model");
     expect(layout.notice?.message).toContain("Model catalogs refreshed");

@@ -1,6 +1,6 @@
 {
   "name": "pix",
-  "version": "0.0.23",
+  "version": "0.0.26",
   "private": true,
   "license": "MPL-2.0",
   "desktopName": "pix",
@@ -15,6 +15,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "install:server:wsl": "node scripts/install-wsl-server.mjs",
     "test:wsl": "node scripts/install-wsl-server.mjs && node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && node test/wsl-server-test.mjs",
+    "test:wsl:upgrade": "npm run build:server && node test/wsl-upgrade-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && vue-tsc --noEmit -p tsconfig.app.json",
     "build": "npm run build:server && electron-vite build",
     "test": "node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && node --test out-test/test/*.test.js && npm run test:renderer && npm run test:terminal",
@@ -30,6 +31,7 @@
     "test:gui:terminal": "npm run build && node test/terminal-gui-test.mjs",
     "test:gui:typography": "npm run build && node test/typography-gui-test.mjs",
     "test:gui:stop": "npm run build && node test/gui-stop-button-check.mjs",
+    "test:gui:chat-switch": "npm run build && node test/gui-session-chat-switch.mjs",
     "test:gui:wiki": "npm run build && node test/wiki-gui-check.mjs",
     "test:gui:wsl": "node scripts/install-wsl-server.mjs && npm run build && node test/gui-test.mjs --wsl",
     "test:gui:ssh": "npm run build && node test/gui-test.mjs --ssh",
@@ -44,9 +46,8 @@
     "postinstall": "node node_modules/electron/install.js"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.87.0",
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "@earendil-works/pi-server": "0.87.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@lucide/vue": "^1.39.0",
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",

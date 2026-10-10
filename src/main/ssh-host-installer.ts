@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RemoteConnectStage } from "../shared/types.js";
 import { debugLog } from "./debug-log.js";
+import { piSdkVersion } from "./pi-runtime.js";
 import {
   PIX_HOST_VERSION,
   PIX_REMOTE_PROTOCOL,
@@ -13,6 +14,8 @@ import {
 export interface RemoteConnectOptions {
   signal?: AbortSignal;
   onProgress?: (stage: RemoteConnectStage) => void;
+  /** Starts the host so it accepts desktop credential deployment. */
+  deployCredentials?: boolean;
 }
 
 export function validateSshHost(host: string) {
@@ -142,7 +145,13 @@ export async function ensureWslHostInstalled(distro: string, force = false, opti
   }, force, options);
 }
 
-async function ensureHostInstalled(transport: {
+export function hostIsCurrent(version: { version?: string; protocol?: number; piVersion?: string }, piVersion: string) {
+  return version.version === PIX_HOST_VERSION
+    && version.protocol === PIX_REMOTE_PROTOCOL
+    && version.piVersion === piVersion;
+}
+
+export async function ensureHostInstalled(transport: {
   exec(command: string, timeoutMs?: number): Promise<string>;
   upload(source: string, stage: string): Promise<void>;
 }, force: boolean, options: RemoteConnectOptions) {
@@ -156,11 +165,7 @@ async function ensureHostInstalled(transport: {
       30_000,
     );
     const version = JSON.parse(output) as { version?: string; protocol?: number };
-    if (
-      version.version === PIX_HOST_VERSION &&
-      version.protocol === PIX_REMOTE_PROTOCOL
-    )
-      return;
+    if (hostIsCurrent(version, await piSdkVersion())) return;
   } catch (error) {
     signal?.throwIfAborted();
     // Authentication and network failures will not be fixed by installing a host.

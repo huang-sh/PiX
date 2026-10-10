@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
 import { pixAgentDir } from "../src/main/paths.js";
+import { validateRouteInput } from "../src/shared/contracts.js";
 import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
 test("extension commands deliver notifications and errors before and after reload", async () => {
@@ -272,6 +273,46 @@ test("model refresh reports provider failures and timeouts without changing the 
   await assert.rejects(runtime.control({ action: "refreshModels" }), /timed out/);
   assert.equal(runtime.runtime.session, session);
   assert.equal(session.model, activeModel);
+});
+
+test("settings can list every model type without exposing credentials or changing the chat catalog", async () => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  const chat = { provider: "test", id: "shared-id", reasoning: true };
+  const image = { provider: "test", id: "shared-id", type: "image", headers: { Authorization: "secret" } };
+  const classifier = { provider: "test", id: "judge", type: "classifier", apiKey: "secret" };
+  runtime.modelServices = { modelRuntime: {
+    getAvailable: async () => [chat],
+    getAllAvailable: async () => [chat, image, classifier],
+  } };
+  const input = validateRouteInput("agent.control", { action: "getModels", allTypes: true }) as AgentControl;
+  const catalog = await runtime.control(input) as Array<Record<string, unknown>>;
+  assert.deepEqual(catalog.map(model => [model.type, model.id]), [
+    ["chat", "shared-id"], ["image", "shared-id"], ["classifier", "judge"],
+  ]);
+  assert.ok(!JSON.stringify(catalog).includes("secret"));
+  for (const model of catalog.slice(1)) {
+    assert.equal(model.reasoning, undefined);
+    assert.equal(model.thinkingLevels, undefined);
+  }
+  const chatOnly = await runtime.control({ action: "getModels" }) as Array<Record<string, unknown>>;
+  assert.equal(chatOnly.length, 1);
+  assert.equal(chatOnly[0]!.id, chat.id);
+  assert.throws(() => validateRouteInput("agent.control", { action: "getModels", allTypes: "yes" }), /boolean/);
+});
+
+test("provider model types include the full catalog before credentials are configured", async () => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  runtime.modelServices = { modelRuntime: {
+    getProviders: () => [{ id: "unconfigured", name: "Unconfigured", auth: { apiKey: { login: true } } }],
+    getAllModels: (provider: string) => {
+      assert.equal(provider, "unconfigured");
+      return [{ id: "chat" }, { id: "image", type: "image" }, { id: "judge", type: "classifier" }, { id: "judge-2", type: "classifier" }];
+    },
+    checkAuth: async () => undefined,
+  } };
+  assert.deepEqual(await runtime.control({ action: "getProviders" }), [{
+    id: "unconfigured", name: "Unconfigured", modelTypes: ["chat", "image", "classifier"], authTypes: ["api_key"], status: undefined,
+  }]);
 });
 
 test("reports each model's supported thinking levels", async () => {
@@ -564,6 +605,9 @@ test("factory loads bundled packages as additional extension paths", async () =>
   const packages = ["npm:@injaneity/pi-computer-use"];
   const fakePi = {
     getAgentDir: () => "/agent",
+    createCodemodeExtension: () => () => {},
+    createMcpExtension: () => () => {},
+    createToolSearchExtension: () => () => {},
     SettingsManager: {
       create: () => ({ getPackages: () => packages, getShellPath: () => undefined }),
     },
@@ -581,8 +625,8 @@ test("factory loads bundled packages as additional extension paths", async () =>
   // The user's own install suppresses the bundled copy.
   await create();
   assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
-  assert.equal(servicesOptions.resourceLoaderOptions.extensionFactories[0].name, "file-changes");
-  assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories[0].factory, "function");
+  assert.deepEqual(servicesOptions.resourceLoaderOptions.extensionFactories.slice(0, 3).map((entry: any) => entry.name), ["codemode", "mcp", "tool-search"]);
+  assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories.find((entry: any) => entry.name === "file-changes").factory, "function");
 
   // The bundled copy loads once no user install is configured. Factory
   // resolves relative to pi-runtime's compiled location (out-test/src/main),

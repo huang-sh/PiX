@@ -101,7 +101,7 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         ];
       case "appearance":
         return [
-          { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal", "peach"] },
+          { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal", "peach", "paper", "graphite"] },
           { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
           { path: "canvasDotGrid", label: "settings.rows.canvasDotGrid", scope: "app", type: "check", fallback: true, description: "settings.rows.canvasDotGridDesc" },
           { path: "canvasDotGridSpacing", label: "settings.rows.canvasDotGridSpacing", scope: "app", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSpacingDesc" },
@@ -141,7 +141,8 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         ];
       case "tools":
         return [
-          { path: "defaultTools", label: "settings.rows.defaultTools", scope: "project", fallback: defaultToolsFallback },
+          { path: "defaultTools", label: "settings.rows.defaultTools", scope: "project", fallback: defaultToolsFallback, description: "settings.rows.defaultToolsDesc" },
+          { path: "codemode.mode", label: "settings.rows.codemodeMode", scope: "project", type: "select", options: ["on", "only"], fallback: "on", description: "settings.rows.codemodeModeDesc" },
           { path: "images.autoResize", label: "settings.rows.resizeImages", scope: "global", type: "check", fallback: true },
           { path: "images.blockImages", label: "settings.rows.blockImages", scope: "global", type: "check", fallback: false },
           { path: "enableSkillCommands", label: "settings.rows.skillCommands", scope: "global", type: "check", fallback: true, description: "settings.rows.skillCommandsDesc" },

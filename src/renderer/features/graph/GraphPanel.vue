@@ -78,6 +78,7 @@ const readableZoom = 0.9;
 const DRAFT_SIZE = { width: 440, height: 320 };
 const booted = ref(false);
 const deleteError = ref("");
+const reopenError = ref("");
 const searchOpen = ref(false);
 const searchQuery = ref("");
 // A plain click highlights a card without rebinding the chat panel — only a
@@ -87,8 +88,9 @@ watch(() => session.focusedNode, () => { session.highlightedNode = null; });
 const searchInput = ref<HTMLInputElement>();
 // -1 = no hit visited yet, so the first Enter lands on the first hit.
 const searchPosition = ref(-1);
-const recoveringDeletion = ref(false);
-const deletionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
+const reopeningSession = ref(false);
+const sessionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
+watch(() => session.current?.session.path, () => { deleteError.value = ""; reopenError.value = ""; });
 const promptCache = new Map<string, PromptNodeData>();
 function stablePrompt(data: PromptNodeData) {
   const previous = promptCache.get(data.node.id);
@@ -503,14 +505,15 @@ async function exportSession(id: string) {
   }
 }
 
-async function recoverDeletion() {
+async function reopenSession() {
   const path = session.current?.session.path;
-  if (!path || recoveringDeletion.value) return;
-  recoveringDeletion.value = true;
+  if (!path || reopeningSession.value) return;
+  reopeningSession.value = true;
   deleteError.value = "";
+  reopenError.value = "";
   try { await session.open(path); }
-  catch (error) { deleteError.value = String(error); }
-  finally { recoveringDeletion.value = false; }
+  catch (error) { reopenError.value = String(error); }
+  finally { reopeningSession.value = false; }
 }
 
 async function compose(id: string, direction?: BranchDirection) {
@@ -877,9 +880,9 @@ watch(
 
 <template>
   <main class="panel graph-panel">
-    <div v-if="deleteError || deletionNeedsRecovery" class="graph-delete-error" role="alert">
-      {{ t('graph.deleteFailed', { error: deleteError || session.current?.graph?.storageError }) }}
-      <Button v-if="deletionNeedsRecovery" data-action="node-delete-recover" variant="outline" :disabled="recoveringDeletion" @click="recoverDeletion">
+    <div v-if="deleteError || reopenError || sessionNeedsRecovery" class="graph-delete-error" role="alert">
+      {{ t(deleteError ? 'graph.deleteFailed' : 'graph.recoveryNeeded', { error: deleteError || reopenError || session.current?.graph?.storageError }) }}
+      <Button v-if="sessionNeedsRecovery" data-action="node-delete-recover" variant="outline" :disabled="reopeningSession" @click="reopenSession">
         {{ t('graph.reopenSession') }}
       </Button>
     </div>

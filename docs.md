@@ -8,6 +8,32 @@ nearest user ancestors, and derives branch chat from the selected leaf path.
 `entryAnchorForNode()` returns the raw entry belonging to that node on the
 currently active branch, avoiding cross-branch navigation mistakes.
 
+Pi 1.0 keeps the v3 JSONL format. `parentToolCallId` identifies live nested
+tool calls; `nestedCalls` on a saved tool result contains a bounded summary of
+names, arguments and status, not each nested result. These are tool calls,
+not PiX graph branches or Durable conversations. PiX projects their summaries
+and persisted image blocks into branch chat.
+
+## Pi 1.0 SDK integration
+
+PiX embeds `pi-coding-agent` and `pi-ai`; it does not use `pi-server`.
+`PiRuntime` explicitly registers the official Codemode, MCP and tool-search
+extension factories because SDK sessions do not load them automatically.
+The built-in MCP extension uses PiX's agent profile, including on remote hosts.
+Loading an extension and activating its tools are separate steps; see the
+[user instructions](README.md#built-in-extensions) for Codemode activation.
+
+Extension UI is bound in RPC mode. Selection, input and confirmation use
+`ExtensionDialogs` and the `ui.request` / `ui.dismiss` events; replies use
+`ui.respond` so they can resolve a command waiting for input. `ui.pending`
+restores in-memory requests after a renderer reconnect. Remote requests retain
+their `projectId` even when the user switches projects. Abort or runtime close
+cancels the corresponding requests. Custom TUI components are unsupported.
+
+Pi Durable remains an [isolated recovery probe](experimental/pi-durable/README.md),
+with its own dependencies and storage. It is not loaded or packaged by PiX,
+and upgrading the SDK does not add automatic process-crash recovery to PiX.
+
 ## Desktop authority
 
 ```text
@@ -101,12 +127,52 @@ host whose `session.list` still reports running work, bounded by
 5 min). Recycling a host also closes its remote terminals and shell runs —
 `slotBusy` only weighs session runs, so a shell-only workspace recycles when
 its idle window passes. Disconnects keep the slot until replaced so the
-degraded bootstrap can present remembered rows and a reconnect banner.
+degraded bootstrap can present remembered rows. An unplanned disconnect of
+the workspace in view recovers on its own: the connection is retried with
+exponential backoff (capped by `PIX_REMOTE_RECONNECT_MAX_MS`, default 30 s)
+until it returns, the user switches or closes the workspace, or the app
+quits; a restored transport is announced as `remote.connection
+{connected:true}` so the view rehydrates without a manual click. Background
+hosts are not reconnected — the idle recycler reaps them as before.
+
+**Lingering hosts and model autonomy.** Hosts start detached from their
+ssh/wsl launcher and outlive the connection: an unplanned disconnect leaves
+their running work alive, and the host exits on its own after
+`PIX_HOST_LINGER_MS` (default 10 min) with no client and no running
+sessions — or immediately on the desktop's `shutdown` message. Each host's
+port, token and pid are remembered in `~/.pix/remote-hosts.json`, so any
+later connect (manual, automatic retry, or a fresh desktop session)
+reattaches to the lingering host instead of tripping its graph lock with a
+second one; an unreachable server keeps its handle, a reachable but dead
+host is stopped by its verified pid first. Quitting parks hosts that are
+mid-run for the next session to reattach to. Model calls prefer the host's
+own credentials (its pi CLI login, environment, or deployed keys) and call
+providers directly; the desktop brokers only providers the host cannot
+authenticate itself. The Remote settings page holds the opt-in
+`deployModelCredentialsToRemote`: when on, connecting pushes this
+desktop's model API keys and custom model definitions to the host (which
+accepts them only when started with `--allow-credential-deploy`), and the
+page lists deployed hosts with a per-host revoke. OAuth logins never
+leave the desktop, logins the server already had are never removed, and a
+desktop logout only revokes providers this desktop deployed. The model
+picker still lists the desktop's configured chat models; server-only providers
+are not surfaced. Model settings also lists available image and classifier
+models, with type counts, filters and grouped provider details. Only chat models
+participate in default-model, cycling and thinking preferences; image and
+classifier models are called through Codemode.
+
+The broker carries `stream`, `streamSimple`, `generateImages` and `classify`.
+Its catalog includes chat, image and classifier models without credential
+fields, and each request is checked against the advertised catalog. Image and
+classifier calls return one result rather than chat stream events. The Pi 1.0
+integration uses remote protocol 17 and host version 0.0.26; host installers
+check both values so older hosts are updated before use.
 
 **Shutdown.** Quitting flushes pending background history writes, aborts
 every local run (settling as `interrupted` with recovered inputs — this is
 in-process continuation, not persisted resumption), releases the graph
-ownership files, and disposes every pooled host. Per-graph parallelism stays
+ownership files, stops idle remote hosts, and detaches from busy remote hosts
+so they can finish and be reattached later. Per-graph parallelism stays
 capped by `PIX_MAX_PARALLEL_RUNS` (default 8); nothing bounds how many
 sessions may run at once beyond the user starting them, which is why the
 navigator's running markers are the visibility surface for it.
@@ -148,6 +214,13 @@ independently. PiX reads:
 
 Project settings override global settings. PiX-specific layout and appearance
 are stored in `~/.pix/gui.settings.json`.
+
+Settings-page edits save on change. For Pi settings, the renderer schedules a
+reload of the current session after a short quiet period, waiting while it is
+streaming or compacting; a new session reads the saved settings directly.
+Adding `+codemode` under Default tools therefore needs no manual `/reload`.
+`codemode.mode` only controls tool exposure after activation. Direct edits to
+MCP configuration files still require `/reload` in an existing session.
 
 Model choice resolves in two scopes. Inside a session a draft inherits the model
 of the node it branches from (`node.footer.model`), falling back to the session's

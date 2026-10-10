@@ -138,18 +138,69 @@ export function bootstrapPixProfile(home: string) {
   quarantineCorruptSettings(join(home, ".pix", "gui.settings.json"));
   const source = join(home, ".pi", "agent");
   const target = join(home, ".pix", "agent");
-  if (
-    !existsSync(source) ||
-    existsSync(join(target, "auth.json")) ||
-    existsSync(join(target, "models.json"))
-  )
-    return;
-  mkdirSync(target, { recursive: true });
-  cpSync(source, target, {
-    recursive: true,
-    force: false,
-    // Sessions live in each project's .pi/sessions; CLI history stays there.
-    filter: (src) => basename(src) !== "sessions",
+  if (existsSync(source) && !existsSync(target)) {
+    mkdirSync(target, { recursive: true });
+    cpSync(source, target, {
+      recursive: true,
+      force: false,
+      // Sessions live in each project's .pi/sessions; CLI history stays there.
+      filter: (src) => basename(src) !== "sessions",
+    });
+  }
+  migrateAzureProvider(target);
+}
+
+/** Pi 1.1 renamed the built-in Azure provider, but kept its API ID unchanged. */
+function migrateAzureProvider(agentDir: string) {
+  const oldId = "azure-openai-responses";
+  const newId = "azure";
+  const migrate = (name: string, update: (data: Record<string, unknown>) => boolean) => {
+    const path = join(agentDir, name);
+    if (!existsSync(path)) return;
+    let temp: string | undefined;
+    try {
+      const data = JSON.parse(readFileSync(path, "utf8"));
+      if (!data || typeof data !== "object" || Array.isArray(data) || !update(data)) return;
+      temp = `${path}.${randomUUID()}.tmp`;
+      writeFileSync(temp, JSON.stringify(data, null, 2) + "\n", {
+        flag: "wx", mode: name === "auth.json" ? 0o600 : statSync(path).mode & 0o777,
+      });
+      renameSync(temp, path);
+    } catch (error) { debugLog(`services: migrate ${name} Azure provider`, error); }
+    finally {
+      if (temp) try { rmSync(temp, { force: true }); }
+      catch (error) { debugLog(`services: remove ${name} migration temp file`, error); }
+    }
+  };
+  migrate("auth.json", data => {
+    if (!Object.hasOwn(data, oldId)) return false;
+    if (!Object.hasOwn(data, newId)) data[newId] = data[oldId];
+    delete data[oldId];
+    return true;
+  });
+  migrate("settings.json", data => {
+    let changed = false;
+    if (data.defaultProvider === oldId) { data.defaultProvider = newId; changed = true; }
+    const patterns = data.enabledModels;
+    if (Array.isArray(patterns)) {
+      const updated = patterns.map((pattern: unknown) =>
+        typeof pattern === "string" && pattern.startsWith(`${oldId}/`)
+          ? `${newId}/${pattern.slice(oldId.length + 1)}` : pattern);
+      if (updated.some((pattern, index) => pattern !== patterns[index])) {
+        data.enabledModels = updated;
+        changed = true;
+      }
+    }
+    return changed;
+  });
+  migrate("models.json", data => {
+    const providers = data.providers;
+    if (!providers || typeof providers !== "object" || Array.isArray(providers)
+      || !Object.hasOwn(providers, oldId) || Object.hasOwn(providers, newId)) return false;
+    const catalog = providers as Record<string, unknown>;
+    catalog[newId] = catalog[oldId];
+    delete catalog[oldId];
+    return true;
   });
 }
 /**
@@ -185,6 +236,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "openLinksInApp",
     "closeToTray",
     "canvasDotGrid",
+    "deployModelCredentialsToRemote",
     "experimentalHistory",
   ])
     expectBoolean(key);
@@ -194,6 +246,18 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     if (out.keyboardShortcuts !== undefined) validateShortcutOverrides(out.keyboardShortcuts);
   } catch {
     drop("keyboardShortcuts");
+  }
+  if (out.usage !== undefined) {
+    const providers = (out.usage as { unbilledProviders?: unknown }).unbilledProviders;
+    const unbilled = [
+      ...new Set(
+        (Array.isArray(providers) ? providers : []).filter(
+          (p): p is string => typeof p === "string" && /^[^/\s]+$/u.test(p),
+        ),
+      ),
+    ];
+    if (unbilled.length) out.usage = { unbilledProviders: unbilled };
+    else drop("usage");
   }
   return out;
 }
@@ -246,6 +310,7 @@ export class SettingsService {
       canvasDotGrid: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
+      deployModelCredentialsToRemote: false,
       experimentalHistory: false,
     };
     // Normalize the raw file before the defaults merge, so a dropped key is
@@ -850,4 +915,18 @@ export function configuredSessionDir(
   if (typeof v === "string" && v.trim())
     return isAbsolute(v) ? resolve(v) : resolve(project, v);
   return join(project, ".pi", "sessions");
+}
+/**
+ * A historical project's session directory for the usage panel's
+ * all-projects scope: only sessionDir differs from the bundle in effect,
+ * and the project's own settings file wins over the global default.
+ */
+export function historySessionDir(project: ProjectInfo, bundle: SettingsBundle) {
+  const own = readJson<PiSettings>(join(project.path, ".pi", "settings.json")).sessionDir;
+  const effective =
+    typeof own === "string" && own.trim() ? own : bundle.piGlobal.sessionDir;
+  return configuredSessionDir(project.path, {
+    ...bundle,
+    effective: { ...bundle.effective, sessionDir: effective },
+  });
 }

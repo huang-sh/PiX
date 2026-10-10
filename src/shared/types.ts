@@ -1,4 +1,4 @@
-import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { AnyModel, Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
 import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
@@ -19,7 +19,11 @@ export interface CustomModelInput {
   reasoning: boolean;
   imageInput: boolean;
 }
-export type BrokerModel = Pick<Model<Api>, "provider" | "id" | "name" | "api" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost">;
+type BrokerFields = "provider" | "id" | "name" | "api" | "input" | "cost";
+export type BrokerModel =
+  | (Pick<Model<Api>, BrokerFields | "reasoning" | "thinkingLevelMap" | "contextWindow" | "maxTokens"> & { type?: "chat" })
+  | Pick<Extract<AnyModel, { type: "image" }>, BrokerFields | "type" | "output">
+  | Pick<Extract<AnyModel, { type: "classifier" }>, BrokerFields | "type" | "contextWindow">;
 
 /** Panels whose collapse flag persists; the layout validation and the
  *  PanelId union both derive from this list. */
@@ -127,6 +131,8 @@ export interface BranchMessage {
   timestamp: string;
   toolName?: string;
   toolInput?: string;
+  nestedCalls?: Array<{ id: string; name: string; input: string; status: string; error?: string }>;
+  nestedCallsComplete?: boolean;
   isError?: boolean;
   errorMessage?: string;
   contextStatus?: "excluded" | "modified";
@@ -138,6 +144,8 @@ export interface AgentActivityItem {
   thinking?: string;
   title?: string;
   input?: string;
+  parentToolCallId?: string;
+  images?: PromptImage[];
   timestamp: string;
   status: "running" | "complete" | "error";
   pass: number;
@@ -162,6 +170,7 @@ export interface SessionProjection {
   activeNodeId: string | null;
 }
 export interface RuntimeModel {
+  type?: "chat" | "image" | "classifier";
   provider: string;
   id: string;
   name?: string;
@@ -175,6 +184,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export interface RuntimeProvider {
   id: string;
   name: string;
+  modelTypes?: Array<NonNullable<RuntimeModel["type"]>>;
   authTypes: Array<"api_key" | "oauth">;
   status?: { type: "api_key" | "oauth"; source?: string };
 }
@@ -358,10 +368,19 @@ export interface AppSettings {
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /**
+   * Deploys this desktop's model API keys and custom models to remote hosts,
+   * so remote work runs without the desktop. Off by default; the host only
+   * accepts them when started with this authorization.
+   */
+  deployModelCredentialsToRemote: boolean;
   /** Experimental features are opt-in, default off, and may change or disappear. */
   experimentalHistory: boolean;
   /** Latest release the user chose to stop being notified about. */
   updateSkippedVersion?: string;
+  /** Usage panel preferences: providers on flat subscription plans (coding
+   *  plans) whose per-token costs should not count as billed. */
+  usage?: { unbilledProviders?: string[] };
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -479,7 +498,7 @@ export type AgentControl =
     }
   | { action: "deleteSkill"; path: string }
   | { action: "setSkillManualOnly"; path: string; manualOnly: boolean }
-  | { action: "getModels"; broker?: boolean }
+  | { action: "getModels"; broker?: boolean; allTypes?: boolean }
   | { action: "getExtensions"; reload?: boolean }
   | { action: "installExtension" | "removeExtension"; source: string }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }
@@ -503,6 +522,8 @@ export type AgentControl =
   | { action: "setLabel"; entryId: string; label?: string }
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
+  | "ui.respond"
+  | "ui.pending"
   | "app.bootstrap"
   | "app.pickProject"
   | "app.openProject"
@@ -525,6 +546,8 @@ export type DesktopRoute =
   | "remote.cancel"
   | "remote.directories"
   | "remote.openProject"
+  | "remote.deployed"
+  | "remote.revoke"
   | "session.list"
   | "session.snapshot"
   | "session.open"
@@ -532,6 +555,7 @@ export type DesktopRoute =
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "usage.overview"
   | "library.pin"
   | "library.archiveSession"
   | "library.archiveProject"
@@ -559,8 +583,19 @@ export type DesktopRoute =
   | "wiki.state"
   | "wiki.control";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available" | "wiki";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss" | "wiki";
   payload: unknown;
+}
+export interface ExtensionDialog {
+  id: string;
+  title: string;
+  source: string;
+  kind: "select" | "input" | "confirm";
+  options?: string[];
+  placeholder?: string;
+  message?: string;
+  /** Assigned by the desktop when the request comes from a remote host. */
+  projectId?: string;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";
 export interface DesktopApi {

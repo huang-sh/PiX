@@ -138,6 +138,10 @@ export function validateRouteInput(
 ): Record<string, unknown> {
   const v = input === undefined ? {} : obj(input);
   switch (route) {
+    case "ui.pending":
+      return {};
+    case "ui.respond":
+      return { id: str(v.id, "id"), value: str(v.value, "value", true), projectId: str(v.projectId, "projectId", true) };
     case "wsl.connect":
       return {
         distro: str(v.distro, "distro"),
@@ -155,6 +159,10 @@ export function validateRouteInput(
     case "workspace.directories":
     case "workspace.open":
       return { path: str(v.path, "path") };
+    case "remote.deployed":
+      return {};
+    case "remote.revoke":
+      return { id: str(v.id, "id") };
     case "app.openExternal":
       return { url: externalUrl(v.url) };
     case "app.openPath":
@@ -191,6 +199,14 @@ export function validateRouteInput(
         // Set by undo of "create session": refuse to unlink a file that
         // grew message entries behind the journal's back.
         ...(v.pristineOnly === true ? { pristineOnly: true } : {}),
+      };
+    case "usage.overview":
+      return {
+        range:
+          v.range === "today" || v.range === "7d" || v.range === "30d" || v.range === "all"
+            ? v.range
+            : "30d",
+        scope: v.scope === "all" ? "all" : "project",
       };
     case "library.pin":
       return { path: str(v.path, "path"), pinned: v.pinned === true };
@@ -238,8 +254,8 @@ export function validateRouteInput(
     case "settings.update": {
       const patch = obj(v.patch);
       if (v.scope !== "project" && v.scope !== "global" && Object.hasOwn(patch, "theme") &&
-          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach")
-        throw new Error("theme must be light, dark, teal, peach or system");
+          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach" && patch.theme !== "paper" && patch.theme !== "graphite")
+        throw new Error("theme must be light, dark, teal, peach, paper, graphite or system");
       return {
         scope:
           v.scope === "project"
@@ -287,6 +303,8 @@ export function validateRouteInput(
     }
     case "agent.control": {
       const action = str(v.action, "action")!;
+      if (action === "getModels")
+        return { action, ...(v.allTypes === undefined ? {} : { allTypes: booleanField(v.allTypes, "allTypes") }) };
       if (action === "deleteNode")
         return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId") };
       if (action === "exportBranchSession")
@@ -405,15 +423,19 @@ export function validateRouteInput(
             : [],
           ...(Array.isArray(v.models) ? { models: v.models.map((value) => {
             const m = obj(value);
-            return {
-              provider: str(m.provider, "provider"), id: str(m.id, "id"),
+            if (m.type !== undefined && !["chat", "image", "classifier"].includes(String(m.type)))
+              throw new Error("Invalid model type");
+            const base = { provider: str(m.provider, "provider"), id: str(m.id, "id"),
               name: str(m.name, "name"), api: str(m.api, "api"),
+              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"], cost: obj(m.cost) };
+            if (m.type === "image") return { ...base, type: "image", output: Array.isArray(m.output) && m.output.includes("text") ? ["text", "image"] : ["image"] };
+            if (m.type === "classifier") return { ...base, type: "classifier", contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER) };
+            return {
+              ...base,
               reasoning: m.reasoning === true,
               thinkingLevelMap: m.thinkingLevelMap === undefined ? undefined : obj(m.thinkingLevelMap),
-              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"],
               contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
               maxTokens: integer(m.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
-              cost: obj(m.cost),
             };
           }) } : {}),
         };

@@ -99,7 +99,8 @@ child.stderr.on("data", (chunk) => (stderr += String(chunk)));
 function testEnv() {
   return {
     ...process.env,
-    ...(devServer ? { ELECTRON_RENDERER_URL: devServer.resolvedUrls.local[0] } : {}),
+    // A production smoke must load this worktree's build, not an inherited dev server.
+    ELECTRON_RENDERER_URL: devServer?.resolvedUrls.local[0] ?? "",
     PIX_HOME: testHome,
     PIX_PROJECT: allowEmpty ? root : join(root, "test", "workspace"),
     PI_OFFLINE: "1",
@@ -1028,9 +1029,9 @@ try {
       // Builds without PDF support fall through; the drag probes still run.
     }
   }
-  // Dragging the tree handle past its minimum must clamp at min-size, never
-  // collapse the panel: with collapsible panels the drag collapsed the tree
-  // to 0 and could not drag it back out, and the show/hide button desynced.
+  // The tree handle collapses the tree when dragged past its minimum and can
+  // drag it back out — the panel stays mounted while collapsed (the historic
+  // bug hid the handle, stranding the tree at 0 with no way back).
   {
     const treeWidth = () => cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
     const dragBy = async (dx) => {
@@ -1046,12 +1047,47 @@ try {
       return treeWidth();
     };
     const start = await treeWidth();
-    const shrunk = Math.min(await dragBy(200), await dragBy(200));
-    if (shrunk < 170)
-      throw new Error(`Dragging the tree narrow collapsed it: ${start} → ${shrunk}`);
-    const grown = await dragBy(-150);
-    if (grown <= shrunk)
-      throw new Error(`Dragging the tree back did not grow it: ${shrunk} → ${grown}`);
+    // Dragging past min-size snaps the collapsible tree shut; dragging back
+    // out reopens it at its floor, and the handle never disappears.
+    const collapsed = await dragBy(220);
+    if (collapsed > 0)
+      throw new Error(`Dragging the tree past its minimum did not collapse it: ${start} → ${collapsed}`);
+    // A collapsed tree only reopens once the drag reaches its min-size (reka
+    // rejects the layout otherwise), so pull past that distance.
+    const reopenedByDrag = await dragBy(-240);
+    if (reopenedByDrag < 180)
+      throw new Error(`Dragging a collapsed tree back out did not reopen it: ${reopenedByDrag}`);
+    const grown = await dragBy(-120);
+    if (grown <= reopenedByDrag)
+      throw new Error(`Dragging the tree wider did not grow it: ${reopenedByDrag} → ${grown}`);
+    // Resizing the chat/tool boundary must not reset a dragged tree width to
+    // its default: tree bounds derived from the live group width changed the
+    // panel constraints on every workbench drag, re-initializing the layout.
+    // The tree keeps its share of the panel and shrinks or grows with it.
+    const dragBoundaryBy = async (dx) => {
+      const handle = await cdp.evaluate(`(() => {
+        const r = document.querySelector('.resize-handle:has(+ #content-panel)').getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x, y: handle.y, button: "left", buttons: 0 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: handle.x, y: handle.y, button: "left", buttons: 1, clickCount: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: handle.x + dx, y: handle.y, buttons: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: handle.x + dx, y: handle.y, button: "left", buttons: 0, clickCount: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    };
+    const treeShare = () => cdp.evaluate("(() => { const tree = document.querySelector('.file-explorer'); const group = document.querySelector('.file-workspace'); return tree && group ? tree.getBoundingClientRect().width / group.getBoundingClientRect().width : 0; })()");
+    const draggedShare = await treeShare();
+    await dragBoundaryBy(120);
+    let widened = await treeShare();
+    if (Math.abs(widened - draggedShare) > 0.005)
+      throw new Error(`Workbench drag reset the tree's share: ${(draggedShare * 100).toFixed(1)}% → ${(widened * 100).toFixed(1)}%`);
+    await dragBoundaryBy(-120);
+    const restored = await treeWidth();
+    if (Math.abs(restored - grown) > 4)
+      throw new Error(`Restoring the workbench width moved the tree: ${grown} → ${restored}`);
+    // The toolbar button hides the tree and restores the pre-collapse width
+    // (the historic bug: the button and the drag collapsed state desynced).
+    const beforeHide = await treeWidth();
     await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
     await new Promise((resolve) => setTimeout(resolve, 300));
     if ((await treeWidth()) !== -1)
@@ -1059,8 +1095,8 @@ try {
     await cdp.evaluate("document.querySelector('[data-action=toggle-file-tree]')?.click()");
     await new Promise((resolve) => setTimeout(resolve, 300));
     const reopened = await treeWidth();
-    if (reopened <= 0)
-      throw new Error("Tree toggle did not restore the explorer");
+    if (Math.abs(reopened - beforeHide) > 4)
+      throw new Error(`Tree toggle did not restore the pre-collapse width: ${beforeHide} → ${reopened}`);
   }
   const pdfShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(
@@ -1069,6 +1105,25 @@ try {
   );
   await cdp.evaluate("document.querySelector('[data-file-tab=\"sample.pdf\"] .tool-tab-close')?.click()");
   await cdp.evaluate("document.querySelector('[data-file-tab=\"README.md\"] .tool-tab-close')?.click()");
+  // Closing the last tool tab collapses the panel. Reopening Files from
+  // collapsed remounts the workspace while the panel animates open from 0
+  // width; a tree registered before the group settles renders flex-fill
+  // instead of its 200px default.
+  await cdp.evaluate(
+    "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').closeTool('files')",
+  );
+  await retry(async () => {
+    if (!(await cdp.evaluate("window.__pixTest.state().layout.collapsed.content")))
+      throw new Error("Closing the files tab did not collapse the panel");
+  });
+  await cdp.evaluate(
+    "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').openTool('files')",
+  );
+  await retry(async () => {
+    const width = await cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
+    if (Math.abs(width - 200) > 4)
+      throw new Error(`Files reopened from collapsed with the tree at ${width}px, expected 200px`);
+  });
   imagePreview = true;
   await cdp.evaluate("document.querySelector('[data-action=add-tool-tab]').click()");
   await retry(async () => {
@@ -1244,6 +1299,80 @@ try {
   });
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(artifacts, "gui-settings.png"), Buffer.from(screenshot.data, "base64"));
+  // Offline catalog browsing only: these dummy keys stay in the isolated test home.
+  for (const provider of ["openrouter", "typesafe"])
+    await cdp.evaluate(`window.pix.invoke('agent.control', { action: 'loginApiKey', provider: '${provider}', apiKey: 'pix-gui-test-key' })`);
+  await cdp.evaluate("document.querySelector('[data-settings-category=general]').click()");
+  await cdp.evaluate("document.querySelector('[data-settings-category=models]').click()");
+  await retry(async () => {
+    if (!(await cdp.evaluate("['image', 'classifier'].every(type => Number(document.querySelector('[data-model-type-filter=' + type + '] span')?.textContent) > 0)")))
+      throw new Error("Image and classifier catalogs did not reach settings");
+  });
+  for (const type of ["image", "classifier"]) {
+    await cdp.evaluate(`(() => {
+      const search = document.querySelector('[data-model-search]');
+      search.value = '';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-model-type-filter=${type}]').click();
+    })()`);
+    await retry(async () => {
+      if (!(await cdp.evaluate("Boolean(document.querySelector('.provider-model-toggle'))")))
+        throw new Error(`No providers for ${type} models`);
+    });
+    await cdp.evaluate("document.querySelector('.provider-model-toggle').click()");
+    await retry(async () => {
+      const value = await cdp.evaluate(`({
+        groups: [...document.querySelectorAll('[data-model-group]')].map(el => el.dataset.modelGroup),
+        chatControls: Boolean(document.querySelector('[data-model-action=default], .model-cycle, [data-setting-path=modelThinkingLevels]')),
+        hint: document.querySelector('.model-actions')?.textContent,
+        hintWraps: getComputedStyle(document.querySelector('.model-actions > small')).whiteSpace !== 'nowrap',
+      })`);
+      if (value.groups.join() !== type || value.chatControls || !value.hint?.includes("+codemode") || !value.hintWraps)
+        throw new Error(`Invalid ${type} model controls: ${JSON.stringify(value)}`);
+    });
+    screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, `gui-settings-${type}.png`), Buffer.from(screenshot.data, "base64"));
+  }
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-model-type-filter=all]').click();
+    document.querySelector('.settings-page > main').scrollTop = 0;
+  })()`);
+  await retry(async () => {
+    const value = await cdp.evaluate(`({
+      overviewHeight: document.querySelector('.model-overview').getBoundingClientRect().height,
+      firstProviderBottom: document.querySelector('[data-provider]').getBoundingClientRect().bottom,
+      viewportHeight: innerHeight,
+      currentSessionPanel: Boolean(document.querySelector('.model-session-summary')),
+    })`);
+    if (value.overviewHeight > 130 || value.firstProviderBottom > value.viewportHeight || value.currentSessionPanel)
+      throw new Error(`Model settings overview is too tall: ${JSON.stringify(value)}`);
+  });
+  screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(artifacts, "gui-settings-overview.png"), Buffer.from(screenshot.data, "base64"));
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 860, height: 820, deviceScaleFactor: 1, mobile: false });
+  try {
+    await retry(async () => {
+      const fits = await cdp.evaluate(`[...document.querySelectorAll('.model-workspace, .model-toolbar, .provider-group')].every(el => el.scrollWidth <= el.clientWidth + 1)`);
+      if (!fits) throw new Error("Model settings overflow in a narrow window");
+    });
+    screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, "gui-settings-narrow.png"), Buffer.from(screenshot.data, "base64"));
+  } finally {
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+  }
+  const compactSettingHeight = await cdp.evaluate(`(() => {
+    const root = document.documentElement;
+    const original = root.dataset.density;
+    try {
+      root.dataset.density = 'compact';
+      return document.querySelector('[data-setting-path=enabledModels]').getBoundingClientRect().height;
+    } finally {
+      if (original === undefined) delete root.dataset.density;
+      else root.dataset.density = original;
+    }
+  })()`);
+  if (Math.abs(compactSettingHeight - 64) > 1)
+    throw new Error(`Compact settings row should be 64px, got ${compactSettingHeight}px`);
   await cdp.evaluate("document.querySelector('[data-settings-category=appearance]').click()");
   const themePreview = await cdp.evaluate(`(() => {
     const input = document.querySelector('[data-setting-path=theme] select');

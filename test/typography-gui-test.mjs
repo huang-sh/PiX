@@ -157,7 +157,7 @@ try {
   await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('.chat-composer textarea'))"), true));
 
   const report = [];
-  for (const theme of ['light', 'dark', 'teal', 'peach']) {
+  for (const theme of ['light', 'dark', 'teal', 'peach', 'paper', 'graphite']) {
     await evaluate("window.__pixTest.settings()");
     await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('[data-settings-category=appearance]'))"), true));
     await evaluate("document.querySelector('[data-settings-category=appearance]').click()");

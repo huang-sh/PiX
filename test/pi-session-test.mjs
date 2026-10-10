@@ -48,7 +48,10 @@ const command = shim ? process.execPath : bin;
 const prefixArgs = shim
   ? [join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js")]
   : [];
-const env = { ...process.env, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" };
+const agentDir = join(dir, "agent");
+mkdirSync(agentDir);
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
+const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" };
 const version = spawnSync(command, [...prefixArgs, "--version"], { env, encoding: "utf8", timeout: 15_000, windowsHide: true });
 if (version.error || version.status !== 0)
   throw new Error(`Pi version check failed: ${version.error ?? version.stderr}`);
@@ -69,6 +72,8 @@ async function request(file) {
       "rpc",
       "--offline",
       "--no-approve",
+      "--no-extensions",
+      "--no-skills",
       "--session",
       join(dir, file),
       "--session-dir",

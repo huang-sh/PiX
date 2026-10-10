@@ -1,19 +1,22 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// Git branch listing and switching require an updated remote host.
+// Pi 1.0 dialogs and model operations require an updated remote host.
 // Installers compare both protocol and product version.
-export const PIX_REMOTE_PROTOCOL = 14;
-export const PIX_HOST_VERSION = "0.0.23";
+export const PIX_REMOTE_PROTOCOL = 17;
+export const PIX_HOST_VERSION = "0.0.26";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
 export const PROJECT_ROUTES = [
+  "ui.respond",
+  "ui.pending",
   "session.list",
   "session.snapshot",
   "session.open",
   "session.stop",
   "session.rename",
   "session.delete",
+  "usage.overview",
   "agent.control",
   "workspace.tree",
   "workspace.directories",
@@ -67,6 +70,8 @@ export interface HostHello {
   arch: string;
   /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
+  /** Whether the desktop may deploy its model credentials to this host. */
+  allowCredentialDeploy?: boolean;
 }
 
 export interface HostEvent {
@@ -75,11 +80,13 @@ export interface HostEvent {
   event: DesktopEvent;
 }
 
+export type ModelOperation = "stream" | "streamSimple" | "generateImages" | "classify";
 export interface HostModelRequest {
   type: "model.request";
   id: string;
   provider: string;
   modelId: string;
+  operation?: ModelOperation;
   context: unknown;
   options: Record<string, unknown>;
 }
@@ -101,6 +108,22 @@ export interface HostModelCancel {
   id: string;
 }
 
+/** Tells a lingering host the desktop is done with it; it shuts down now. */
+export interface ClientShutdown {
+  type: "shutdown";
+}
+
+/** Identifies a lingering host across desktop sessions, for reattachment. */
+export interface HostHandle {
+  kind: "ssh" | "wsl";
+  /** SSH host alias or WSL distribution naming the machine. */
+  target: string;
+  /** Loopback port and auth token of the running host, plus its pid. */
+  port: number;
+  token: string;
+  pid: number;
+}
+
 export type HostMessage =
   | HostHello
   | HostResponse
@@ -110,4 +133,5 @@ export type HostMessage =
 export type ClientMessage =
   | HostRequest
   | ClientModelEvent
-  | ClientModelFailure;
+  | ClientModelFailure
+  | ClientShutdown;

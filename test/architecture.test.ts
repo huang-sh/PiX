@@ -17,6 +17,10 @@ test("Pi SDK is isolated to the main runtime adapter and its internal extensions
     ["/main/extensions/file-changes.ts", "/main/extensions/git-branch.ts", "/main/pi-runtime.ts"],
   );
 });
+test("the standalone host declares PiX's YAML runtime dependency", () => {
+  const server = JSON.parse(readFileSync(resolve(process.cwd(), "server/package.json"), "utf8"));
+  assert.ok(server.dependencies?.yaml, "host imports yaml from skill-files.ts; Pi's transitive copy is not sufficient");
+});
 test("renderer has no Node, Electron, or Pi authority", () => {
   const text = walk(join(root, "renderer"))
     .map((p) => readFileSync(p, "utf8"))

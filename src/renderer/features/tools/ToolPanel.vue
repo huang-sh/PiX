@@ -46,35 +46,68 @@ const terminalConnected = computed(() => !workspace.project?.remote ||
   Boolean(session.projects.find((record) => record.id === session.activeProjectId)?.connected));
 const { t } = useI18n();
 
-// Panels are declared in percent (reka-ui boots px-sized panels at their min
-// size before the group is measured), but the percent base must be the
-// group's live width: a boot-time snapshot diverges from the hydrated layout
-// and from later drags, which used to render the tree narrower than its
-// 180px floor. min/max props are reactive, so reka re-clamps as the base
-// moves; the store width only bridges the first frame before measuring.
+// The tree's bounds are percents of the group's settled width, captured once:
+// percents keep the dragged ratio when the workbench narrows or widens the
+// panel (the tree shrinks and grows with it), and freezing them matters —
+// live-updating the min/max props makes reka re-initialize the layout from
+// the default size, discarding the drag. The workspace can mount while the
+// content panel still animates open from 0, and a base captured mid-animation
+// would be wrong forever, so the tree waits until the group's width goes
+// quiet; the percent editor needs no measurement and renders right away.
+// Test environments without ResizeObserver render unmeasured, as before.
+const filesMeasured = ref(false);
 const fileGroupWidth = ref(0);
-let fileGroupObserver: ResizeObserver | undefined;
+let filesObserver: ResizeObserver | undefined;
+let filesSettleTimer: ReturnType<typeof setTimeout> | undefined;
+const pct = (px: number) =>
+  Math.min(95, Math.max(0, (px / Math.max(1, fileGroupWidth.value)) * 100));
 const bindFileGroup = (instance: unknown) => {
   const element = (instance as { $el?: unknown } | null)?.$el;
-  fileGroupObserver?.disconnect();
-  fileGroupObserver = undefined;
+  filesObserver?.disconnect();
+  filesObserver = undefined;
+  clearTimeout(filesSettleTimer);
+  filesSettleTimer = undefined;
+  filesMeasured.value = false;
   fileGroupWidth.value = 0;
   if (!(element instanceof HTMLElement)) return;
-  fileGroupWidth.value = element.getBoundingClientRect().width;
-  if (typeof ResizeObserver === "undefined") return;
-  fileGroupObserver = new ResizeObserver(() => {
-    fileGroupWidth.value = element.getBoundingClientRect().width;
+  const width = element.getBoundingClientRect().width;
+  if (width > 0 || typeof ResizeObserver === "undefined") {
+    if (width > 0) fileGroupWidth.value = width;
+    filesMeasured.value = true;
+    return;
+  }
+  filesObserver = new ResizeObserver(() => {
+    clearTimeout(filesSettleTimer);
+    filesSettleTimer = setTimeout(() => {
+      filesObserver?.disconnect();
+      filesObserver = undefined;
+      fileGroupWidth.value = element.getBoundingClientRect().width;
+      filesMeasured.value = true;
+    }, 80);
   });
-  fileGroupObserver.observe(element);
+  filesObserver.observe(element);
 };
-onBeforeUnmount(() => fileGroupObserver?.disconnect());
-const pct = (px: number) => {
-  const base = fileGroupWidth.value || layout.layout.widths.content;
-  return Math.min(95, Math.max(0, (px / Math.max(1, base)) * 100));
-};
+onBeforeUnmount(() => {
+  filesObserver?.disconnect();
+  clearTimeout(filesSettleTimer);
+});
 const launchUrl = ref(workspace.browserUrl);
 const fileQuery = ref("");
 const fileTreeOpen = ref(true);
+const fileTreePanel = ref<{ collapse: () => void; expand: () => void }>();
+// reka emits a spurious expand when a collapsible panel first gains a size,
+// which used to revert a hide clicked before the panel mounted. Only an
+// expand that follows a real collapse reopens the tree.
+let fileTreeCollapsed = false;
+function fileTreeCollapse() {
+  fileTreeCollapsed = true;
+  fileTreeOpen.value = false;
+}
+function fileTreeExpand() {
+  if (!fileTreeCollapsed) return;
+  fileTreeCollapsed = false;
+  fileTreeOpen.value = true;
+}
 const lineNumbers = ref<HTMLElement>();
 const hasDesktop = Boolean(window.pix);
 const tools: { id: ContentTab; label: string; icon: unknown }[] = [
@@ -229,7 +262,15 @@ function closeFile(id: string) {
 }
 
 function toggleFileTree() {
-  fileTreeOpen.value = !fileTreeOpen.value;
+  // The ref flips first so unmeasured environments (jsdom, where the splitter
+  // never initializes) still toggle the aside; collapse()/expand() assert
+  // there, and @collapse/@expand re-confirm the ref once they run for real.
+  const opening = !fileTreeOpen.value;
+  fileTreeOpen.value = opening;
+  try {
+    if (opening) fileTreePanel.value?.expand();
+    else fileTreePanel.value?.collapse();
+  } catch {}
 }
 
 
@@ -382,17 +423,23 @@ async function save(tab: WorkspaceTab) {
     }}</pre>
 
     <template v-else-if="layout.contentSection === 'files'">
-      <!-- No auto-save-id and no collapsible flag: the tree always opens at
-           the default width, and dragging its handle can only resize down to
-           min-size — hiding the tree is the toolbar button's job alone, so a
-           dragged handle can never collapse it into an unexpandable state. -->
+      <!-- The tree's bounds are percents frozen at the group's settled width:
+           live-derived percents changed on every workbench drag, which made
+           reka re-initialize the layout and reset the tree to its default,
+           while px units froze the width instead of letting the tree shrink
+           with the panel. The tree also waits for filesMeasured so the base
+           is never captured mid-animation. The panel itself stays mounted
+           while collapsed so its handle can drag it back out (reka snaps a
+           collapsible panel shut past min-size and reopens past the halfway
+           point); the button restores the pre-collapse width. No auto-save-
+           id: the tree always opens at the default width. -->
       <SplitterGroup
         :ref="bindFileGroup"
         id="pix-file-workspace"
         direction="horizontal"
         class="file-workspace"
       >
-        <SplitterPanel id="file-editor-panel" :order="1" :min-size="pct(100)">
+        <SplitterPanel id="file-editor-panel" :order="1" :min-size="20">
           <main class="file-main">
           <header class="file-toolbar">
             <nav class="file-breadcrumb" :aria-label="t('tools.filePath')">
@@ -473,21 +520,30 @@ async function save(tab: WorkspaceTab) {
           </main>
         </SplitterPanel>
 
+        <!-- Gated with the tree: a handle with no right-hand panel makes
+             reka's drag assert, and dragging before the group settles can
+             only misresize anyway. Stays mounted once the tree is collapsed —
+             the handle is what drags a collapsed tree back out. -->
         <SplitterResizeHandle
-          v-if="fileTreeOpen"
+          v-if="filesMeasured"
           class="resize-handle file-resize-handle"
           :aria-label="t('tools.resizeTree')"
         />
 
         <SplitterPanel
-          v-if="fileTreeOpen"
+          v-if="filesMeasured"
+          ref="fileTreePanel"
           id="file-tree-panel"
           :order="2"
-          :default-size="pct(200)"
+          collapsible
+          :collapsed-size="0"
+          :default-size="fileTreeOpen ? pct(200) : 0"
           :min-size="pct(180)"
           :max-size="pct(800)"
+          @collapse="fileTreeCollapse"
+          @expand="fileTreeExpand"
         >
-          <aside class="file-explorer">
+          <aside v-if="fileTreeOpen" class="file-explorer">
             <div class="file-filter">
               <Search :size="14" />
               <input v-model="fileQuery" type="search" :placeholder="t('tools.filterFiles')" :aria-label="t('tools.filterFiles')" />

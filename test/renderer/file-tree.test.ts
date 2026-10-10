@@ -44,6 +44,9 @@ describe("file tree filtering", () => {
     workspace.project = { name: "project", path: "/project" };
 
     const wrapper = mount(ToolPanel, { global: { plugins: [pinia, i18n] } });
+    // The tree panel and its handle mount one flush after the group binds
+    // (filesMeasured gates them).
+    await flushPromises();
     expect(wrapper.get('[role="separator"]').attributes("aria-label")).toBe(
       i18n.global.t("tools.resizeTree"),
     );

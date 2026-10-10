@@ -28,6 +28,7 @@ import Button from "./components/ui/Button.vue";
 import CommandPalette from "./features/commands/CommandPalette.vue";
 import { createRunCommand, runCommandKey } from "./features/commands/runCommand";
 import ImagePreview from "./components/ImagePreview.vue";
+import ExtensionDialogHost from "./components/ExtensionDialogHost.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
@@ -61,6 +62,7 @@ const wslBusy = ref(false);
 const wslError = ref("");
 const remoteStages = ref<RemoteConnectStage[]>([]);
 const remoteDisconnected = ref(false);
+const remoteReconnecting = ref(false);
 const remoteDisconnectNotice = ref("");
 // The disconnect message can carry a host stack trace; only its first line fits a notice.
 function remoteLostText(message?: string) {
@@ -110,6 +112,9 @@ async function hydrate(data: BootstrapData, openFirst = false, request = ++sessi
   session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current, request);
   remoteDisconnected.value = Boolean(data.project?.remote &&
     !data.projects?.find((record) => record.id === session.activeProjectId)?.connected);
+  // A degraded remote bootstrap means the main process is already retrying the
+  // connection; the banner reflects that instead of asking for a manual click.
+  remoteReconnecting.value = remoteDisconnected.value;
   remoteDisconnectNotice.value = "";
   if (remoteDisconnected.value) {
     session.loading = false;
@@ -320,9 +325,13 @@ async function disconnectRemote() {
   }
 }
 
-async function activateProject(record: ProjectGroup, request = ++session.viewRequest) {
+async function activateProject(record: ProjectGroup, request?: number) {
+  // Staying in the connected project does not replace the current view. Let a
+  // pending session.open finish in both the renderer and the main process.
+  if (record.id === session.activeProjectId && record.connected)
+    return request === undefined || request === session.viewRequest;
+  request ??= ++session.viewRequest;
   if (request !== session.viewRequest) return false;
-  if (record.id === session.activeProjectId && record.connected && !session.loading) return true;
   session.loading = true;
   try {
     const remote = record.project.remote;
@@ -366,7 +375,8 @@ async function reconnectRemote() {
 }
 
 async function inProject(record: ProjectGroup, action: () => Promise<void>) {
-  const request = ++session.viewRequest;
+  const request = record.id === session.activeProjectId && record.connected
+    ? session.viewRequest : ++session.viewRequest;
   if (!(await activateProject(record, request)) || request !== session.viewRequest) return;
   try {
     await action();
@@ -474,14 +484,23 @@ function onEvent(wireEvent: DesktopEvent) {
     return;
   }
   if (event.type === "remote.connection") {
-    const payload = event.payload as { projectId: string; connected: boolean; message?: string };
+    const payload = event.payload as { projectId: string; connected: boolean; reconnecting?: boolean; message?: string };
     if (!payload.connected) {
       session.disconnected(payload.projectId);
       if (payload.projectId === session.activeProjectId) {
         remoteDisconnected.value = true;
-        remoteDisconnectNotice.value = remoteLostText(payload.message);
-        layout.showNotice(remoteDisconnectNotice.value, "error");
+        remoteReconnecting.value = Boolean(payload.reconnecting);
+        if (payload.reconnecting) {
+          remoteDisconnectNotice.value = "";
+        } else {
+          remoteDisconnectNotice.value = remoteLostText(payload.message);
+          layout.showNotice(remoteDisconnectNotice.value, "error");
+        }
       }
+    } else if (payload.projectId === session.activeProjectId && remoteDisconnected.value) {
+      // The main process restored the transport; rehydrate through the pooled
+      // host and reopen the session the workspace was showing.
+      void reconnectRemote();
     }
     return;
   }
@@ -562,6 +581,11 @@ onMounted(() => {
         remoteBrowseRoot: remoteBrowseRoot.value,
       })),
       openSession: session.open,
+      renameSession: (path: string) => {
+        const record = session.projects.find(item => item.id === session.activeProjectId);
+        if (!record) throw new Error("No active project");
+        return renameProjectSession(record, path, "");
+      },
       selectNode: session.selectNode,
       openChatColumn: layout.openChatColumn,
       closeChatColumn: layout.closeChatColumn,
@@ -621,12 +645,14 @@ onBeforeUnmount(() => {
     </Button>
   </div>
   <div v-if="remoteDisconnected" class="remote-disconnected" role="alert">
-    <span>{{ remoteDisconnectNotice || t("remote.connectionLost") }}</span>
+    <span v-if="remoteReconnecting">{{ t("remote.reconnecting") }}</span>
+    <span v-else>{{ remoteDisconnectNotice || t("remote.connectionLost") }}</span>
     <Button data-action="remote-reconnect" variant="outline" :disabled="session.loading" @click="reconnectRemote">
       {{ session.loading ? t("remote.connecting") : t("remote.reconnect") }}
     </Button>
   </div>
   <ImagePreview />
+  <ExtensionDialogHost />
   <DialogRoot :open="renameOpen" @update:open="renameOpen = $event">
     <DialogPortal>
       <DialogOverlay class="dialog-overlay" />

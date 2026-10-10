@@ -1,7 +1,8 @@
 import test from "node:test";
+import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
@@ -318,6 +319,42 @@ test("tree ownership is exclusive and released sessions can reopen", () => {
     assert.ok(graph.dir.endsWith(".pix-tree"));
     assert.equal(readFileSync(graph.path("A"), "utf8"), original);
     assert.throws(() => new GraphFiles(graph.main).acquire(), /already open/);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a stale lock whose pid was recycled by an unrelated process is taken over", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-lock-recycled-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    // A live process that is not Pi: whatever sleeper the platform gives us.
+    const holder =
+      process.platform === "win32"
+        ? spawn("ping", ["-n", "30", "127.0.0.1"], { windowsHide: true })
+        : spawn("sh", ["-c", "sleep 30"]);
+    try {
+      mkdirSync(graph.dir, { recursive: true });
+      writeFileSync(join(graph.dir, "owner.json"), JSON.stringify({ pid: holder.pid, host: hostname() }));
+      // The recycled holder must not keep the session hostage.
+      graph.acquire();
+    } finally {
+      holder.kill();
+    }
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a corrupt or shapeless lock guards nothing and is replaced", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-lock-corrupt-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    mkdirSync(graph.dir, { recursive: true });
+    writeFileSync(join(graph.dir, "owner.json"), "{not json");
+    graph.acquire();
+    graph.release();
+    writeFileSync(join(graph.dir, "owner.json"), JSON.stringify({ host: hostname() }));
+    graph.acquire();
+    graph.release();
+    writeFileSync(join(graph.dir, "owner.json"), JSON.stringify({ pid: "not-a-pid", host: hostname() }));
+    graph.acquire();
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 

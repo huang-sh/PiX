@@ -313,14 +313,15 @@ export const useSessionStore = defineStore("session", {
     async fetchCommands(): Promise<RuntimeCommand[]> {
       return desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
     },
-    // Single source of truth for the model catalog: every path that can change
+    // Refreshes the shared chat catalog: every path that can change
     // it (bootstrap, settings open, login/logout, catalog refresh, session
     // open) reloads through here so pickers never serve a stale list. The
     // catalog is global — project-less fetch is fine, the runtime serves model
     // actions without an open session.
-    async loadModels(): Promise<RuntimeModel[]> {
-      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
-      this.models = models;
+    async loadModels(allTypes = false): Promise<RuntimeModel[]> {
+      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels", ...(allTypes ? { allTypes: true } : {}) });
+      // Settings can inspect every type; prompt pickers only accept chat models.
+      this.models = models.filter(model => !model.type || model.type === "chat");
       return models;
     },
     // A deliberate pick in a model menu is what "last set" means: it becomes the
@@ -598,15 +599,18 @@ export const useSessionStore = defineStore("session", {
       }
       const request = ++this.viewRequest;
       const project = this.activeProjectId;
-      const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
-      if (request !== this.viewRequest || project !== this.activeProjectId) return null;
-      // The reply is authoritative for the new file, and the broadcast event may
-      // still be in flight: without adopting it here the list and slash commands
-      // would keep serving the session that was just replaced.
-      if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
-      this.focusedNode = this.current?.projection.activeNodeId ?? null;
-      await Promise.all([this.refresh(), this.loadCommands()]);
-      return snapshot;
+      this.loading = true;
+      try {
+        const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
+        if (request !== this.viewRequest || project !== this.activeProjectId) return null;
+        // The reply is authoritative for the new file, and the broadcast event may
+        // still be in flight: without adopting it here the list and slash commands
+        // would keep serving the session that was just replaced.
+        if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
+        this.focusedNode = this.current?.projection.activeNodeId ?? null;
+        await Promise.all([this.refresh(), this.loadCommands()]);
+        return snapshot;
+      } finally { if (request === this.viewRequest) this.loading = false; }
     },
     async importSession() {
       const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(

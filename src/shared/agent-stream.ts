@@ -1,5 +1,6 @@
 import type { AgentActivity, AgentActivityItem } from "./types.js";
 import { withoutToolLabels } from "./session.js";
+import { isPromptImage } from "./images.js";
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -137,6 +138,7 @@ export function reduceAgentActivity(
         kind: "tool",
         title: typeof event.toolName === "string" ? event.toolName : "Tool",
         input: inputText(event.args),
+        ...(typeof event.parentToolCallId === "string" ? { parentToolCallId: event.parentToolCallId } : {}),
         text: "",
         timestamp: new Date().toISOString(),
         status: "running",
@@ -151,8 +153,10 @@ export function reduceAgentActivity(
     });
   }
   if (type === "tool_execution_end") {
+    const content = record(event.result)?.content;
     return updateItem(activity, id, {
       text: agentResultText(event.result),
+      ...(Array.isArray(content) ? { images: content.filter(isPromptImage) } : {}),
       status: event.isError === true ? "error" : "complete",
     });
   }

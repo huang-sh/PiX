@@ -126,6 +126,9 @@ export class SessionRegistry {
     const settled = this.settled.get(path);
     if (settled?.runtime) {
       try {
+        // A persistence failure left this runtime's memory unverified against
+        // disk. Rebuild it instead of serving a cached writable snapshot.
+        if (settled.runtime.needsReopen) throw new Error("Session storage needs recovery");
         const snapshot = settled.runtime.snapshot();
         settled.lastUsed = Date.now();
         if (selection === this.selection) this.setActive(settled);

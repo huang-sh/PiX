@@ -16,6 +16,10 @@ Each result has its own snapshot, so later edits cannot change historical diffs.
 Graph workers share their root session's snapshot directory; UUIDs and branch-local
 entries keep records separate. Remote hosts record and serve their own snapshots.
 
+Pi 1.0 Codemode calls to `tools.edit` and `tools.write` pass through these same
+awaited hooks, so they retain file snapshots even though Pi saves only a summary
+of each nested call in the outer tool result.
+
 Coverage is limited to project-local `edit` / `write` calls. Shell commands, other
 tools and paths outside the project are not tracked. Binary/non-UTF-8 files, files
 over 2 MiB, and diffs that would store more text than the file itself show status
@@ -35,6 +39,9 @@ No undo is included in this version.
 tools: net totals, failed edits, reverts, binary/large files, interleaved writers,
 restart and graph forks. `test/renderer/file-changes.test.ts` covers the card, the
 diff parser and the tab lifecycle in jsdom.
+
+`test/pi-1.test.ts` also runs a real Codemode nested write and checks the file
+change record and nested-call history after reopening the session.
 
 The docking layout and the built app are only observable in a real window, so
 `npm run test:gui:changes` builds the app, writes a turn with three files through a

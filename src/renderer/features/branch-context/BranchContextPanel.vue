@@ -99,10 +99,13 @@ const composerRunning = computed(() => Boolean(session.current?.graph
   ? selectedRun.value?.status === "running"
   : session.current?.runtime.isStreaming));
 
-function stopComposer() {
+async function stopComposer() {
   const run = session.current?.graph ? selectedRun.value : undefined;
-  if (run) void session.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId });
-  else void session.control({ action: "abort" });
+  try {
+    await session.control(run ? { action: "branchAbort", branchId: run.branchId, runId: run.runId } : { action: "abort" });
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 const composerTarget = computed(() =>
   panelNode.value
@@ -546,7 +549,8 @@ onBeforeUnmount(() => {
             <details
               v-if="item.kind === 'tool'"
               class="process-item process-tool"
-              :class="item.status"
+              :class="[item.status, { 'nested-tool': item.parentToolCallId }]"
+              :data-parent-tool-call="item.parentToolCallId"
               :open="item.status === 'running'"
               @toggle="toggleLiveTool(item.id, $event)"
             >
@@ -557,6 +561,7 @@ onBeforeUnmount(() => {
                 <code v-if="item.input" :title="item.input">{{ item.input }}</code>
               </summary>
               <pre v-if="item.status === 'running' || expandedLiveTools.has(item.id)">{{ (item.status === 'running' ? liveText(item.text) : item.text) || (item.status === "running" ? t("branch.running") : t("common.noOutput")) }}</pre>
+              <MessageImages v-if="item.status === 'running' || expandedLiveTools.has(item.id)" :images="item.images" />
             </details>
             <div v-else-if="item.text" class="process-item assistant">
               <MarkdownRenderer

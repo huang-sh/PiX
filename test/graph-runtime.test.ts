@@ -14,6 +14,140 @@ async function until(check: () => boolean) {
   throw new Error("Timed out waiting for graph state");
 }
 
+test("an interrupted response can be followed by another prompt", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-abort-followup-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    let started = false;
+    faux.setResponses([
+      async (_context, options) => {
+        started = true;
+        await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        return fauxAssistantMessage("", { stopReason: "aborted" });
+      },
+      fauxAssistantMessage("after interrupt"),
+    ]);
+    await runtime.control({ action: "promptAt", requestId: "interrupted", nodeId: null, text: "first", provider: "faux", modelId: "test" });
+    await until(() => started);
+    const running = runtime.snapshot().graph!.runs.find(run => run.status === "running")!;
+    await runtime.control({ action: "branchAbort", branchId: running.branchId, runId: running.runId });
+    assert.equal(runtime.snapshot().graph!.runs.find(run => run.branchId === "main")?.status, "idle");
+    const target = runtime.snapshot().projection.activeNodeId;
+    await runtime.control({ action: "promptAt", requestId: "followup", nodeId: target, text: "second", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "second")
+      && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after interrupt"));
+
+    let branchStarted = false;
+    faux.setResponses([
+      async (_context, options) => {
+        branchStarted = true;
+        await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        return fauxAssistantMessage("", { stopReason: "aborted" });
+      },
+      fauxAssistantMessage("branch after interrupt"),
+    ]);
+    await runtime.control({ action: "promptAt", requestId: "branch-interrupted", nodeId: null,
+      text: "branch first", provider: "faux", modelId: "test" });
+    await until(() => branchStarted);
+    const branch = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-interrupted")!;
+    assert.equal(branch.status, "running");
+    await runtime.control({ action: "branchAbort", branchId: branch.branchId, runId: branch.runId });
+    assert.equal(runtime.snapshot().graph!.runs.find(run => run.branchId === branch.branchId)?.status, "idle");
+    const branchNode = runtime.snapshot().projection.nodes.find(node => node.title === "branch first")!;
+    await runtime.control({ action: "promptAt", requestId: "branch-followup", nodeId: branchNode.id,
+      text: "branch second", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "branch second")
+      && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("branch after interrupt"));
+  } finally {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("failed persistence after abort blocks writes until the graph is reopened", { timeout: 20000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pix-abort-storage-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const interrupted = (started: () => void) => async (_context: unknown, options?: { signal?: AbortSignal }) => {
+    started();
+    await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return fauxAssistantMessage("", { stopReason: "aborted" });
+  };
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    const path = runtime.graph!.main;
+    let mainStarted = false;
+    faux.setResponses([interrupted(() => { mainStarted = true; })]);
+    await runtime.control({ action: "promptAt", requestId: "main-fault", nodeId: null, text: "first", provider: "faux", modelId: "test" });
+    await until(() => mainStarted);
+    const sealMain = t.mock.method(runtime.graph!, "sealMain", () => { throw new Error("simulated main EIO"); });
+    const main = runtime.snapshot().graph!.runs.find(run => run.status === "running")!;
+    await assert.rejects(runtime.control({ action: "branchAbort", branchId: main.branchId, runId: main.runId }), /storage failure.*main EIO/);
+    assert.equal(runtime.snapshot().runtime.available, false);
+    assert.match(runtime.snapshot().graph!.storageError ?? "", /Reopen this session.*main EIO/);
+    await assert.rejects(runtime.control({ action: "promptAt", requestId: "blocked-main", nodeId: null, text: "must not send" }), /Reopen this session/);
+    assert.equal(readdirSync(runtime.graph!.dir).some(name => name.includes("blocked-main")), false);
+    sealMain.mock.restore();
+    await runtime.open(path);
+    assert.equal(runtime.snapshot().runtime.available, true);
+
+    let branchStarted = false;
+    faux.setResponses([interrupted(() => { branchStarted = true; })]);
+    await runtime.control({ action: "promptAt", requestId: "branch-fault", nodeId: null, text: "branch", provider: "faux", modelId: "test" });
+    await until(() => branchStarted);
+    const sealBranch = t.mock.method(runtime.graph!, "seal", () => { throw new Error("simulated branch EIO"); });
+    const branch = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-fault")!;
+    await assert.rejects(runtime.control({ action: "branchAbort", branchId: branch.branchId, runId: branch.runId }), /storage failure.*branch EIO/);
+    assert.equal(runtime.snapshot().runtime.available, false);
+    await assert.rejects(runtime.control({ action: "promptAt", requestId: "blocked-branch", nodeId: null, text: "must not send" }), /Reopen this session/);
+    sealBranch.mock.restore();
+    await runtime.open(path);
+    assert.equal(runtime.snapshot().runtime.available, true);
+    faux.setResponses([fauxAssistantMessage("after reopen")]);
+    await runtime.control({ action: "promptAt", requestId: "recovered", nodeId: runtime.snapshot().projection.activeNodeId,
+      text: "safe again", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after reopen"));
+    const failedCursor = t.mock.method(runtime.graph!, "saveLeaf", () => { throw new Error("simulated cursor EIO"); });
+    await assert.rejects(runtime.close(), /simulated cursor EIO/);
+    assert.equal(runtime.graph, undefined, "a failed close releases graph ownership");
+    failedCursor.mock.restore();
+    await runtime.open(path);
+    assert.equal(runtime.snapshot().runtime.available, true);
+  } finally {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("permanent node deletion preserves tools and deduplication, and recovers failed commits", { timeout: 30000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "pix-delete-runtime-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;

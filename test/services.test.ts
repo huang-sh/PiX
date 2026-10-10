@@ -22,6 +22,7 @@ import {
   bootstrapPixProfile,
 } from "../src/main/services.js";
 import { projectId } from "../src/shared/types.js";
+import { PiRuntime } from "../src/main/pi-runtime.js";
 const root = resolve(process.cwd(), "test", "workspace");
 test("workspace reads real files and blocks traversal", () => {
   const w = new WorkspaceService(root);
@@ -231,6 +232,75 @@ test("bootstrap copies the pi agent profile once", () => {
     rmSync(temp, { recursive: true, force: true });
   }
 });
+test("bootstrap migrates legacy Azure auth and model preferences without re-creating logged-out keys", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-azure-migration-"));
+  try {
+    const agent = join(temp, ".pix", "agent");
+    mkdirSync(agent, { recursive: true });
+    const authPath = join(agent, "auth.json");
+    const settingsPath = join(agent, "settings.json");
+    const modelsPath = join(agent, "models.json");
+    const key = { type: "api_key", key: "fixture-secret" };
+    writeFileSync(authPath, JSON.stringify({ "azure-openai-responses": key, other: { type: "api_key", key: "keep" } }));
+    writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "azure-openai-responses", defaultModel: "gpt-4o",
+      enabledModels: ["azure-openai-responses/gpt-4o", "other/*"] }));
+    writeFileSync(modelsPath, JSON.stringify({ providers: { "azure-openai-responses": { baseUrl: "https://example.invalid" } } }));
+
+    bootstrapPixProfile(temp);
+    assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), { azure: key, other: { type: "api_key", key: "keep" } });
+    assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), { defaultProvider: "azure", defaultModel: "gpt-4o",
+      enabledModels: ["azure/gpt-4o", "other/*"] });
+    assert.deepEqual(JSON.parse(readFileSync(modelsPath, "utf8")), { providers: { azure: { baseUrl: "https://example.invalid" } } });
+    writeFileSync(authPath, JSON.stringify({ other: { type: "api_key", key: "keep" } }));
+    const cli = join(temp, ".pi", "agent");
+    mkdirSync(cli, { recursive: true });
+    writeFileSync(join(cli, "auth.json"), JSON.stringify({ "azure-openai-responses": key }));
+    bootstrapPixProfile(temp);
+    assert.ok(!Object.hasOwn(JSON.parse(readFileSync(authPath, "utf8")), "azure"), "logout stays logged out");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("migrated Azure credentials expose models through the Pi 1.1 runtime", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-azure-runtime-"));
+  const previousHome = process.env.PIX_HOME;
+  const previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = temp;
+  const agent = join(temp, ".pix", "agent");
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(join(agent, "auth.json"), JSON.stringify({ "azure-openai-responses": {
+    type: "api_key", key: "fixture-only",
+  } }));
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  try {
+    bootstrapPixProfile(temp);
+    const models = await runtime.control({ action: "getModels" });
+    assert.ok(Array.isArray(models) && models.some(model => model.provider === "azure"));
+  } finally {
+    await runtime.close();
+    if (previousHome === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previousHome;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("Azure migration preserves existing new credentials and malformed files", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-azure-collision-"));
+  try {
+    const agent = join(temp, ".pix", "agent");
+    mkdirSync(agent, { recursive: true });
+    const authPath = join(agent, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ azure: { type: "api_key", key: "new" },
+      "azure-openai-responses": { type: "api_key", key: "old" } }));
+    const settingsPath = join(agent, "settings.json");
+    writeFileSync(settingsPath, "{malformed");
+    bootstrapPixProfile(temp);
+    assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), { azure: { type: "api_key", key: "new" } });
+    assert.equal(readFileSync(settingsPath, "utf8"), "{malformed");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("bootstrap parks a corrupt gui settings file instead of losing it", () => {
   const temp = mkdtempSync(join(tmpdir(), "pix-bootstrap-corrupt-"));
   try {

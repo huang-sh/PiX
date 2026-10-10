@@ -1,5 +1,9 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
+import type { ExtensionDialogs } from "./extension-dialogs.js";
+import type { ModelOperation } from "../shared/remote-protocol.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { pixGitBranchExtension } from "./extensions/git-branch.js";
@@ -36,6 +40,19 @@ import type {
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
+import {
+  aggregateUsage,
+  dedupeUsageRecords,
+  estimateUsageCosts,
+  usageAmount,
+  type UsageOverview,
+  type UsageProjectRef,
+  type UsageRange,
+  type UsageRecord,
+  type UsageSessionInput,
+} from "../shared/usage.js";
+import { loadPricingTable, pricingResolver } from "./usage-pricing.js";
+import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
@@ -63,6 +80,11 @@ export const MODEL_ACTIONS = [
   "logout",
   "setBrokerProviders",
 ] as const satisfies readonly AgentControl["action"][];
+
+export async function piSdkVersion(): Promise<string> {
+  const { VERSION } = await import("@earendil-works/pi-coding-agent");
+  return VERSION;
+}
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -94,6 +116,133 @@ export async function piSettingsSdk(): Promise<PiSettingsSdk> {
   return import(moduleUrl.href);
 }
 
+/** Usage that no single model reply owns (summaries, tool-side billing). */
+const UNATTRIBUTED_USAGE_MODEL = "Tools/summaries";
+
+/**
+ * One billed event per assistant reply, auxiliary usage entry, and summary
+ * generation, attributing each the way the SDK's own accounting does
+ * (getUsageCostBreakdown): replies to their reporting model, everything else
+ * into the shared tools bucket.
+ */
+function usageRecordsOf(entries: any[]): UsageRecord[] {
+  const records: UsageRecord[] = [];
+  for (const entry of entries) {
+    let model: string | undefined;
+    let usage: any;
+    if (entry.type === "message" && entry.message?.role === "assistant") {
+      const message = entry.message;
+      model = `${message.provider}/${message.responseModel ?? message.model}`;
+      usage = message.usage;
+    } else if (entry.type === "usage") {
+      model = `${entry.provider}/${entry.model}`;
+      usage = entry.usage;
+    } else if (entry.type === "branch_summary" || entry.type === "compaction") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      usage = entry.usage;
+    } else if (entry.type === "message" && entry.message?.role === "toolResult") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      usage = entry.message.usage;
+    }
+    if (!model || !usage) continue;
+    records.push({
+      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
+      model,
+      usage: usageAmount(usage),
+      ...(typeof entry.id === "string" ? { entryId: entry.id } : {}),
+    });
+  }
+  return records;
+}
+
+const usageMessageText = (message: any): string => {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  return Array.isArray(content)
+    ? content
+        .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+        .map((part: any) => part.text)
+        .join(" ")
+    : "";
+};
+
+/** Reduces one open session manager to the identity + billed events aggregateUsage takes. */
+function sessionUsage(
+  manager: any,
+  path: string,
+  modified: string,
+  project?: UsageProjectRef,
+): UsageSessionInput {
+  const header = manager.getHeader(),
+    entries = manager.getEntries();
+  const firstUser = usageMessageText(
+    entries.find((e: any) => e.type === "message" && e.message?.role === "user")?.message,
+  );
+  const name = manager.getSessionName();
+  const clip = (s: string, n: number) => {
+    const c = s.replace(/\s+/g, " ").trim();
+    return c.length > n ? `${c.slice(0, n - 1)}…` : c;
+  };
+  return {
+    id: String(header?.id ?? basename(path)),
+    path,
+    ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
+    created: String(header?.timestamp ?? entries[0]?.timestamp ?? modified),
+    modified,
+    messageCount: entries.filter((e: any) => e.type === "message").length,
+    firstMessage: clip(firstUser, 120),
+    records: usageRecordsOf(entries),
+    ...(project ? { project } : {}),
+  };
+}
+
+/** Safety valve for pathological trees; real projects stay far below this. */
+const MAX_SESSION_FILES_PER_DIR = 5000;
+
+/** Every .jsonl under a session directory, top level first, sidecars after.
+ *  .pix-tree holds the graph model's worker/branch sessions; .pix-graph is
+ *  its orphaned predecessor (a "<session>.jsonl.pix-graph" sibling) and stays
+ *  out of the accounting. */
+function sessionFilesUnder(root: string): string[] {
+  const files: string[] = [];
+  const queue: string[] = [root];
+  while (queue.length && files.length < MAX_SESSION_FILES_PER_DIR) {
+    const dir = queue.shift()!;
+    for (const name of readdirSync(dir).sort()) {
+      if (name.endsWith(".pix-graph")) continue;
+      const path = join(dir, name);
+      try {
+        if (statSync(path).isDirectory()) queue.push(path);
+        else if (name.endsWith(".jsonl")) files.push(path);
+      } catch { /* vanished between listing and stat */ }
+    }
+  }
+  return files;
+}
+
+/**
+ * One session file's parsed usage, served from the persistent scan cache
+ * (mtime + size validation, clones on every hand-out) and reduced through the
+ * SDK on a miss.
+ */
+function cachedSessionUsage(
+  pi: any,
+  path: string,
+  dir: string,
+  cwd: string,
+  project: UsageProjectRef | undefined,
+): UsageSessionInput {
+  const stat = statSync(path);
+  const cached = usageScanCache.get(path, stat, project);
+  if (cached) return cached;
+  usageScanCache.set(
+    path,
+    stat,
+    sessionUsage(pi.SessionManager.open(path, dir, cwd), path, stat.mtime.toISOString(), project),
+  );
+  return usageScanCache.get(path, stat, project)!;
+}
+
 export class PiRuntime {
   mod: any;
   runtime: any;
@@ -104,7 +253,19 @@ export class PiRuntime {
   modelServices: any;
   brokerProviders = new Set<string>();
   brokerModels: BrokerModel[] = [];
-  modelBroker?: (model: any, context: any, options: any) => any;
+  modelBroker?: (model: any, context: any, options: any, operation?: ModelOperation) => any;
+  /** Brokered providers this machine serves with its own credentials. */
+  private localCredentialProviders = new Set<string>();
+  /** Original model-runtime methods per runtime, saved before brokering. */
+  private readonly nativeStreams = new WeakMap<object, {
+    stream: (model: any, context: any, options: any) => any;
+    streamSimple: (model: any, context: any, options: any) => any;
+    generateImages?: (model: any, context: any, options: any) => any;
+    classify?: (model: any, context: any, options: any) => any;
+    checkAuth: (provider: string) => Promise<any>;
+  }>();
+  /** Model runtimes currently overlaid with the fake broker registration. */
+  private readonly brokerOverlays = new WeakMap<object, Set<string>>();
   openExternal: (url: string) => Promise<void>;
   private closing = false;
   private pendingControls = new Set<Promise<unknown>>();
@@ -125,6 +286,7 @@ export class PiRuntime {
     dir: string | null,
     emit: (e: unknown) => void,
     openExternal: (url: string) => Promise<void>,
+    readonly dialogs?: ExtensionDialogs,
   ) {
     this.cwd = cwd;
     this.dir = dir;
@@ -138,6 +300,8 @@ export class PiRuntime {
     this.dir = dir;
   }
   async pi() {
+    // Built-in MCP config, credentials and logs use Pi's process-wide profile.
+    process.env.PI_CODING_AGENT_DIR = this.agentDir();
     return (this.mod ??= await import("@earendil-works/pi-coding-agent"));
   }
   async exportSnapshotHtml(manager: any, outputPath: string): Promise<string> {
@@ -149,6 +313,24 @@ export class PiRuntime {
   }
   agentDir() {
     return pixAgentDir();
+  }
+  /**
+   * This machine's stored API keys, for deployment to a remote host the user
+   * opted in. OAuth credentials stay put: they are bound to this desktop.
+   */
+  listApiKeys(): Record<string, string> {
+    try {
+      const stored = JSON.parse(readFileSync(join(this.agentDir(), "auth.json"), "utf8")) as Record<string, unknown>;
+      const keys: Record<string, string> = {};
+      for (const [provider, credential] of Object.entries(stored)) {
+        const key = (credential as { type?: string; key?: unknown } | null);
+        if (key?.type === "api_key" && typeof key.key === "string" && key.key)
+          keys[provider] = key.key;
+      }
+      return keys;
+    } catch {
+      return {};
+    }
   }
   async modelRuntime() {
     if (this.runtime?.session?.modelRuntime)
@@ -164,13 +346,13 @@ export class PiRuntime {
     );
     return this.modelServices.modelRuntime;
   }
-  setModelBroker(broker?: (model: any, context: any, options: any) => any) {
+  setModelBroker(broker?: PiRuntime["modelBroker"]) {
     this.modelBroker = broker;
   }
 
   async configuredProviderIds() {
     const modelRuntime = await this.modelRuntime();
-    return [...new Set((await modelRuntime.getAvailable()).map((model: any) => String(model.provider)))];
+    return [...new Set((await modelRuntime.getAllAvailable()).map((model: any) => String(model.provider)))];
   }
 
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
@@ -211,32 +393,115 @@ export class PiRuntime {
 
   /** Switches one model runtime over to a catalog, dropping the providers that left it. */
   private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
-    for (const provider of this.brokerProviders)
-      if (!providers.has(provider)) {
-        await modelRuntime.removeRuntimeApiKey(provider);
-        modelRuntime.unregisterProvider(provider);
-      }
+    const overlays = this.brokerOverlays.get(modelRuntime);
+    if (overlays)
+      for (const provider of [...overlays])
+        if (!providers.has(provider)) await this.stripBrokerOverlay(modelRuntime, provider);
     this.brokerProviders = providers;
     this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
 
+  /** Removes one provider's fake registration and runtime key, restoring its native form. */
+  private async stripBrokerOverlay(modelRuntime: any, provider: string) {
+    const overlays = this.brokerOverlays.get(modelRuntime);
+    if (!overlays?.has(provider)) return;
+    overlays.delete(provider);
+    // Best-effort: a provider the SDK cannot fully restore still reaches the
+    // broker on the next catalog sync.
+    await modelRuntime.removeRuntimeApiKey(provider).catch(() => {});
+    try { modelRuntime.unregisterProvider(provider); } catch { /* see above */ }
+  }
+
   async applyModelBroker(modelRuntime: any) {
+    if (!modelRuntime) return;
+    const overlays = this.brokerOverlays.get(modelRuntime) ?? new Set<string>();
+    this.brokerOverlays.set(modelRuntime, overlays);
+    // Strip every overlay before evaluating credentials: the fake runtime
+    // key would shadow this machine's real ones in checkAuth.
+    for (const provider of [...overlays]) await this.stripBrokerOverlay(modelRuntime, provider);
+    const local = new Set<string>();
     for (const provider of this.brokerProviders) {
+      try {
+        // A host with its own login (pi CLI, env, or deployed credentials)
+        // serves that provider directly; the desktop brokers only the rest.
+        if (await modelRuntime.checkAuth(provider)) local.add(provider);
+      } catch { /* unreachable credentials fall back to the broker */ }
+    }
+    this.localCredentialProviders = local;
+    for (const provider of this.brokerProviders) {
+      if (local.has(provider)) continue;
       const models = this.brokerModels.filter((model) => model.provider === provider);
       if (models.length) modelRuntime.registerProvider(provider, {
         baseUrl: "http://pix-desktop-broker.invalid",
         models,
       });
-    }
-    for (const provider of this.brokerProviders)
       await modelRuntime.setRuntimeApiKey(provider, "pix-desktop-broker");
+      overlays.add(provider);
+    }
     if (!this.modelBroker) return;
-    const broker = this.modelBroker;
-    modelRuntime.stream = (model: any, context: any, options: any) =>
-      broker(model, context, options);
-    modelRuntime.streamSimple = (model: any, context: any, options: any) =>
-      broker(model, context, options);
+    if (!this.nativeStreams.has(modelRuntime))
+      this.nativeStreams.set(modelRuntime, {
+        stream: modelRuntime.stream.bind(modelRuntime),
+        streamSimple: modelRuntime.streamSimple.bind(modelRuntime),
+        generateImages: modelRuntime.generateImages?.bind(modelRuntime),
+        classify: modelRuntime.classify?.bind(modelRuntime),
+        checkAuth: modelRuntime.checkAuth.bind(modelRuntime),
+      });
+    const native = this.nativeStreams.get(modelRuntime)!;
+    for (const operation of ["stream", "streamSimple", "generateImages", "classify"] as const)
+      modelRuntime[operation] = (model: any, context: any, options: any) =>
+        this.routeModelOperation(operation, native[operation], model, context, options);
+    // setModel's preflight and provider status reads ignore the runtime-key
+    // override, so a brokered provider would look unconfigured. Surface a
+    // synthetic credential for exactly those.
+    modelRuntime.checkAuth = async (provider: string) => {
+      const status = await native.checkAuth(provider);
+      if (status) return status;
+      if (this.modelBroker && this.brokerProviders.has(provider)
+        && !this.localCredentialProviders.has(provider))
+        return { type: "api_key", source: "pix-desktop-broker" };
+      return status;
+    };
+    // A session still holding a model resolved from the broker overlay must
+    // re-resolve once that provider gains local credentials: the overlay
+    // object's placeholder URL is something a direct call would dial.
+    const session = this.runtime?.session;
+    const held = session?.model;
+    if (held && String(held.baseUrl) === "http://pix-desktop-broker.invalid"
+      && !session.isStreaming
+      && this.localCredentialProviders.has(String(held.provider))) {
+      try {
+        const resolved = modelRuntime.getModel(held.provider, held.id);
+        if (resolved) await session.setModel(resolved);
+      } catch { /* keep the held model; the broker still serves it */ }
+    }
+  }
+  private routeModelOperation(
+    operation: ModelOperation,
+    native: ((model: any, context: any, options: any) => any) | undefined,
+    model: any,
+    context: any,
+    options: any,
+  ) {
+    const provider = String(model.provider);
+    if (this.brokerProviders.has(provider) && !this.localCredentialProviders.has(provider)) {
+      if (this.modelBroker) return this.modelBroker(model, context, options, operation);
+      // A lingering host without its desktop: the fake registration's URL
+      // would only produce a confusing DNS failure. Say what is missing.
+      throw new Error(`${provider} is served by the PiX desktop; reconnect it to use this model`);
+    }
+    if (!native) throw new Error(`Model runtime does not support ${operation}`);
+    return native(model, context, options);
+  }
+  /** Re-evaluates which brokered providers this machine serves by itself. */
+  async refreshBrokerAuth() {
+    if (!this.brokerProviders.size) return;
+    await this.replaceBrokerCatalog(
+      await this.modelRuntime(),
+      new Set(this.brokerProviders),
+      [...this.brokerModels],
+    );
   }
   /**
    * Options shared by every createAgentSessionServices call, so session and
@@ -273,6 +538,11 @@ export class PiRuntime {
       // pi-builtin/), and remote server hosts (server npm dependencies).
       resourceLoaderOptions: {
         extensionFactories: [
+          { name: "codemode", builtin: true, factory: pi.createCodemodeExtension() },
+          { name: "mcp", builtin: true, factory: pi.createMcpExtension({
+            openUrl: (url: string) => { void this.openExternal(url).catch(error => debugLog("mcp: open sign-in URL", error)); },
+          }) },
+          { name: "tool-search", builtin: true, factory: pi.createToolSearchExtension() },
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
           pixGitBranchExtension,
         ] as InlineExtension[],
@@ -317,8 +587,11 @@ export class PiRuntime {
         sessionManager,
         sessionStartEvent,
       });
-      const notify = (message: string, level = "info") =>
+      let signInMessage: string | undefined;
+      const notify = (message: string, level = "info") => {
+        if (/https?:\/\//.test(message)) signInMessage = message;
         this.emit({ type: "notice", payload: { message, level, source: "extension" } });
+      };
       const unsupported = async () => {
         throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
       };
@@ -327,9 +600,15 @@ export class PiRuntime {
         uiContext: {
           ...created.session.extensionRunner.getUIContext(),
           notify,
-          select: unsupported,
-          confirm: unsupported,
-          input: unsupported,
+          select: (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) =>
+            this.dialogs?.request(created.session, { kind: "select", title, options, source: cwd }, opts) ?? unsupported(),
+          confirm: async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
+            (await (this.dialogs?.request(created.session, { kind: "confirm", title, message, options: ["yes"], source: cwd }, opts) ?? unsupported())) === "yes",
+          input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+            const message = signInMessage;
+            signInMessage = undefined;
+            return this.dialogs?.request(created.session, { kind: "input", title, placeholder, message, source: cwd }, opts) ?? unsupported();
+          },
           editor: unsupported,
           custom: unsupported,
         },
@@ -400,6 +679,46 @@ export class PiRuntime {
       })
       .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
   }
+  /**
+   * Aggregated usage across session files, for the settings page's usage
+   * panel. Read-only: each file is opened through the SDK's SessionManager
+   * (cached by mtime) and reduced in place; an unreadable file is skipped
+   * like the session list skips it. Costs the provider did not report are
+   * estimated from the cached public price table while the scan runs;
+   * subscription-billed providers the user marked cost nothing. Scans default
+   * to this runtime's project; the controller passes one entry per local
+   * project for the all-projects scope.
+   */
+  async usageOverview(
+    range: UsageRange,
+    unbilledProviders: readonly string[] = [],
+    scans?: Array<{ project?: UsageProjectRef; dir: string }>,
+  ): Promise<UsageOverview> {
+    const { cwd, dir } = this;
+    if (!cwd || !dir) throw new Error("Open a project first");
+    const pi = await this.pi();
+    const pricing = loadPricingTable();
+    const targets = scans?.length ? scans : [{ dir }];
+    const sessions: UsageSessionInput[] = [];
+    for (const target of targets) {
+      const root = canonicalPath(target.dir);
+      if (!existsSync(root)) continue;
+      // The graph model gives every branch and worker its own session file
+      // under .pix-graph/.pix-tree sidecar directories, so the scan walks the
+      // whole tree — copied prefixes are deduped by entry id afterwards.
+      for (const path of sessionFilesUnder(root)) {
+        try {
+          sessions.push(cachedSessionUsage(pi, path, target.dir, cwd, target.project));
+        } catch (e) { debugLog("pi-runtime: usage scan", e); }
+      }
+    }
+    const table = await pricing;
+    // Forks, branch exports, and imports copy entries between files with ids
+    // intact; the copies would bill twice without this pass.
+    dedupeUsageRecords(sessions);
+    estimateUsageCosts(sessions, pricingResolver(table), new Set(unbilledProviders));
+    return aggregateUsage(sessions, range);
+  }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
@@ -440,7 +759,7 @@ export class PiRuntime {
     const pi = await this.pi();
     const manager = pi.SessionManager.create(cwd, dir);
     const path = manager.getSessionFile();
-    // Open an explicitly persisted header: SDK otherwise defers the first user input.
+    // The registry needs an empty file before the SDK persists the first user message.
     durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
     return path;
   }
@@ -587,6 +906,7 @@ export class PiRuntime {
         await s.followUp(input.text, input.images);
         break;
       case "abort":
+        this.dialogs?.cancel(s);
         await s.abort();
         break;
       case "clearQueue":
@@ -612,20 +932,25 @@ export class PiRuntime {
       }
       case "getModels": {
         const modelRuntime = await this.modelRuntime();
-        if (input.broker) return (await modelRuntime.getAvailable()).map((m: any): BrokerModel => ({
-          provider: m.provider, id: m.id, name: m.name, api: m.api,
-          reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
-          input: m.input, contextWindow: m.contextWindow, maxTokens: m.maxTokens, cost: m.cost,
-        }));
-        return (await modelRuntime.getAvailable()).map(
+        if (input.broker) return (await modelRuntime.getAllAvailable()).map((m: any): BrokerModel => {
+          const base = { provider: m.provider, id: m.id, name: m.name, api: m.api, input: m.input, cost: m.cost };
+          if (m.type === "image") return { ...base, type: "image", output: m.output };
+          if (m.type === "classifier") return { ...base, type: "classifier", contextWindow: m.contextWindow };
+          return { ...base, reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
+            contextWindow: m.contextWindow, maxTokens: m.maxTokens };
+        });
+        return (await (input.allTypes ? modelRuntime.getAllAvailable() : modelRuntime.getAvailable())).map(
           (m: any): RuntimeModel => ({
             provider: String(m.provider),
             id: String(m.id),
             name: m.name,
+            ...(input.allTypes ? { type: m.type ?? "chat" } : {}),
             contextWindow: m.contextWindow,
-            reasoning: Boolean(m.reasoning),
             ...(m.input ? { input: m.input } : {}),
-            thinkingLevels: getSupportedThinkingLevels(m),
+            ...(m.type === "image" || m.type === "classifier" ? {} : {
+              reasoning: Boolean(m.reasoning),
+              thinkingLevels: getSupportedThinkingLevels(m),
+            }),
           }),
         );
       }
@@ -731,6 +1056,9 @@ export class PiRuntime {
             .map(async (p: any): Promise<RuntimeProvider> => ({
               id: p.id,
               name: p.name,
+              modelTypes: [...new Set<NonNullable<RuntimeModel["type"]>>(
+                modelRuntime.getAllModels(p.id).map((model: any) => model.type ?? "chat"),
+              )],
               authTypes: [
                 ...(p.auth?.apiKey?.login ? ["api_key" as const] : []),
                 ...(p.auth?.oauth?.login ? ["oauth" as const] : []),
@@ -803,6 +1131,9 @@ export class PiRuntime {
           },
           notify: () => undefined,
         });
+        // Deployed credentials move that provider from the desktop broker to
+        // direct calls; open sessions re-adopt through pushCatalogs.
+        await this.refreshBrokerAuth();
         return { ok: true };
       }
       case "loginOAuth": {
@@ -812,14 +1143,18 @@ export class PiRuntime {
             if (prompt.type === "select") {
               const selected = prompt.options.find((option: any) => option.id === input.method);
               if (selected) return selected.id;
-              throw new Error(`OAuth method ${input.method} is not supported by this provider.`);
+              const choice = await this.dialogs?.request(this, { kind: "select", title: prompt.message,
+                options: prompt.options.map((option: any) => option.label), source: input.provider }, { signal: prompt.signal });
+              const method = prompt.options.find((option: any) => option.label === choice);
+              if (method) return method.id;
+              throw new Error("Sign-in cancelled");
             }
-            if (prompt.type === "manual_code" && prompt.signal)
-              return new Promise<string>((_resolve, reject) => {
-                const abort = () => reject(new Error("OAuth browser prompt closed"));
-                if (prompt.signal.aborted) abort();
-                else prompt.signal.addEventListener("abort", abort, { once: true });
-              });
+            if (prompt.type === "manual_code" || prompt.type === "text") {
+              const value = await this.dialogs?.request(this, { kind: "input", title: prompt.message,
+                placeholder: prompt.placeholder, source: input.provider }, { signal: prompt.signal });
+              if (value !== undefined) return value;
+              throw new Error("Sign-in cancelled");
+            }
             throw new Error("This OAuth provider requires interactive Pi /login setup.");
           },
           notify: (event: any) => {
@@ -844,6 +1179,8 @@ export class PiRuntime {
         return { ok: true };
       case "logout":
         await (await this.modelRuntime()).logout(input.provider);
+        // A revoked local credential hands the provider back to the broker.
+        await this.refreshBrokerAuth();
         return { ok: true };
       case "setLabel":
         s.sessionManager.appendLabelChange(input.entryId, input.label);
@@ -875,7 +1212,9 @@ export class PiRuntime {
   }
   private async closeRuntime() {
     const runtime = this.runtime;
+    this.dialogs?.cancel(this);
     if (!runtime) return;
+    this.dialogs?.cancel(runtime.session);
     this.closing = true;
     this.unsubscribe?.();
     try {
@@ -891,6 +1230,8 @@ export class PiRuntime {
     }
   }
   dispose() {
+    this.dialogs?.cancel(this);
+    if (this.runtime) this.dialogs?.cancel(this.runtime.session);
     this.unsubscribe?.();
     this.runtime?.session?.dispose?.();
     this.runtime = undefined;

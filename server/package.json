@@ -1,19 +1,19 @@
 {
   "name": "@pix/server",
-  "version": "0.0.23",
+  "version": "0.0.26",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "@earendil-works/pi-server": "0.87.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@ff-labs/pi-fff": "0.10.6",
     "@injaneity/pi-computer-use": "0.5.1",
     "diff": "8.0.4",
     "node-pty": "^1.2.0-beta.15",
-    "ws": "8.21.0"
+    "ws": "8.21.0",
+    "yaml": "^2.9.0"
   },
   "allowScripts": {
     "node-pty@1.2.0-beta.15": true

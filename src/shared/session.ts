@@ -96,9 +96,19 @@ function toolInput(v: unknown): string {
 }
 function calls(e: RawSessionEntry) {
   const c = msg(e)?.content;
-  return Array.isArray(c)
+  return (Array.isArray(c)
     ? c.filter((x) => rec(x)?.type === "toolCall").length
-    : 0;
+    : 0) + nestedCalls(e).length;
+}
+function nestedCalls(e: RawSessionEntry): NonNullable<BranchMessage["nestedCalls"]> {
+  const calls = rec(msg(e)?.nestedCalls)?.calls;
+  if (!Array.isArray(calls)) return [];
+  return calls.flatMap(value => {
+    const call = rec(value);
+    if (!call || typeof call.id !== "string" || typeof call.name !== "string") return [];
+    return [{ id: call.id, name: call.name, input: toolInput(call.arguments), status: String(call.status),
+      ...(typeof call.error === "string" ? { error: call.error } : {}) }];
+  });
 }
 function error(e: RawSessionEntry) {
   const m = msg(e);
@@ -306,7 +316,7 @@ export function projectSession(
         turnId,
         role: r as "user" | "assistant",
         text: text(e),
-        ...(r === "user" && images(e).length ? { images: images(e) } : {}),
+        ...(images(e).length ? { images: images(e) } : {}),
         thinking: r === "assistant" ? thinkingText(msg(e)?.content) : undefined,
         timestamp: e.timestamp,
         isError: r === "assistant" ? error(e) || undefined : undefined,
@@ -321,6 +331,8 @@ export function projectSession(
         turnId,
         role: "tool",
         text: text(e),
+        ...(images(e).length ? { images: images(e) } : {}),
+        ...(nestedCalls(e).length ? { nestedCalls: nestedCalls(e), nestedCallsComplete: rec(msg(e)?.nestedCalls)?.complete === true } : {}),
         timestamp: e.timestamp,
         toolName: tool(e),
         toolInput: e.type === "bash_execution"

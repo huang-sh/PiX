@@ -18,8 +18,11 @@ import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js"
 import { canonicalPath } from "./paths.js";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
+import { ExtensionDialogs } from "./extension-dialogs.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { WikiService, type WikiModelReply } from "./wiki-service.js";
 import { workspaceWikiDir } from "./wiki-compiler.js";
 import type { WikiStatus } from "../shared/wiki.js";
@@ -29,11 +32,12 @@ import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
-import { sessionModifiedAt } from "./graph-files.js";
+import { GraphFiles, sessionModifiedAt } from "./graph-files.js";
 import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
   GitService,
+  historySessionDir,
   managedSessionFile,
   SessionFiles,
   SettingsService,
@@ -58,6 +62,7 @@ export interface Platform {
 /** Model actions whose catalog or credential change must reach open sessions. */
 const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 export class MainController {
+  readonly dialogs = new ExtensionDialogs(event => this.emit(event));
   project: ProjectInfo | null;
   settings: SettingsService;
   library: LibraryService;
@@ -107,7 +112,7 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files = new SessionFiles(path, dir);
-    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url));
+    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url), this.dialogs);
     this.registry = new SessionRegistry({
       createRuntime: entry => this.createSessionRuntime(entry),
       onEvent: (entry, event) => this.routeSessionEvent(entry, event),
@@ -160,7 +165,7 @@ export class MainController {
    * created after a remote host connects streaming through the desktop broker.
    */
   createSessionRuntime(entry: SessionEntry): GraphRuntime {
-    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url));
+    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url), this.dialogs);
     runtime.modelBroker = this.projectRuntime.modelBroker;
     runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
     runtime.brokerModels = [...this.projectRuntime.brokerModels];
@@ -296,6 +301,7 @@ export class MainController {
       // while the other runs' aborts are already in flight.
       await Promise.allSettled(runs.map(run => runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
       this.scheduleBackgroundRefresh(entry);
+      if (runtime.needsReopen) throw new Error(runtime.snapshot().graph?.storageError ?? "Session storage needs recovery");
       return { stopped: Boolean(runs.length) };
     }
     const slot = owner ? this.pool.slot(owner) : this.pool.active();
@@ -500,6 +506,39 @@ export class MainController {
       ...old.filter((session) => session.path !== snapshot.session.path),
     ]);
   }
+  /**
+   * Session directories behind the usage panel's all-projects scope: every
+   * local project in the history, the project in view first. Remote projects
+   * stay on their hosts, which answer the same route with their own scans.
+   */
+  private usageScans(bundle: SettingsBundle): Array<{ project: { id: string; name: string; path: string }; dir: string }> {
+    const current = this.project && !this.project.remote ? this.project : null;
+    const projects = [
+      ...(current ? [current] : []),
+      ...this.settings
+        .projectHistory()
+        .filter((record) => !record.project.remote && record.project.path !== current?.path)
+        .map((record) => record.project),
+    ];
+    // Two history entries can resolve to one directory (case variants, or a
+    // shared custom sessionDir); scanning it twice would double every number.
+    // The project in view wins the attribution. Windows paths compare
+    // case-insensitively: realpath keeps the caller's spelling.
+    const seenDirs = new Set<string>();
+    const dirKey = (dir: string) =>
+      process.platform === "win32" ? canonicalPath(dir).toLowerCase() : canonicalPath(dir);
+    return projects
+      .map((project) => ({
+        project: { id: projectId(project), name: project.name, path: project.path },
+        dir: historySessionDir(project, bundle),
+      }))
+      .filter((scan) => {
+        const key = dirKey(scan.dir);
+        if (seenDirs.has(key) || !existsSync(scan.dir)) return false;
+        seenDirs.add(key);
+        return true;
+      });
+  }
   async sessions() {
     const files = this.files;
     const running = this.registry.runningPaths();
@@ -521,7 +560,7 @@ export class MainController {
       return decorate(files.list());
     }
   }
-  fallback(path: string, files = this.files): SessionSnapshot {
+  fallback(path: string, files = this.files, warn?: (message: string) => void): SessionSnapshot {
     const x = files.read(path),
       summary = files.list().find((s) => s.path === resolve(path)) ?? {
         id: String(x.header?.id ?? path),
@@ -533,15 +572,53 @@ export class MainController {
         firstMessage: "",
       },
       leaf = x.entries.at(-1)?.id ?? null;
-    return {
+    // An owned graph can still be viewed in full. Read its sidecar without
+    // acquiring ownership or running recovery against another process's files.
+    const graph = new GraphFiles(summary.path);
+    try { graph.load({ readOnly: true }); }
+    catch (error) {
+      debugLog("controller: read-only graph metadata", error);
+      graph.recoveryMessages.push(`Branch metadata unavailable: ${String(error)}`);
+    }
+    const selectedLeaf = graph.hasSavedLeaf && (graph.leafId === null || x.entries.some(entry => entry.id === graph.leafId))
+      ? graph.leafId : leaf;
+    const snapshot: SessionSnapshot = {
       session: summary,
       entries: x.entries,
-      projection: projectSession(x.entries, leaf),
+      projection: projectSession(x.entries, selectedLeaf),
       runtime: unavailable(),
     };
+    const branches = new Map<string, { snapshot: SessionSnapshot }>();
+    for (const record of graph.records.values()) {
+      try {
+        const data = graph.readBranch(record, { readOnly: true });
+        branches.set(record.id, { snapshot: { ...snapshot, entries: data.entries,
+          projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null) } });
+      } catch (error) {
+        debugLog(`controller: read-only branch ${record.id}`, error);
+        graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${String(error)}`);
+      }
+    }
+    const cache = new GraphSnapshotCache();
+    cache.update(graph, snapshot, branches);
+    for (const record of graph.records.values()) {
+      const error = cache.error(record.id);
+      if (error) graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${error}`);
+    }
+    if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
+    return { ...snapshot, ...cache.view(snapshot, new Set()) };
   }
   async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
     const v = validateRouteInput(route, raw);
+    if (route === "ui.respond") {
+      if (v.projectId) {
+        const slot = this.pool.slot(String(v.projectId));
+        if (!slot) throw new Error("Remote host is not connected");
+        return slot.client.request(route, { id: v.id, value: v.value });
+      }
+      return this.dialogs.respond(String(v.id), v.value as string | undefined);
+    }
+    if (route === "ui.pending") return [...this.dialogs.list(), ...await this.pool.pendingDialogs()];
     const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
       ? ++this.viewRequest : this.viewRequest;
     if (route === "app.revealSession") {
@@ -588,6 +665,8 @@ export class MainController {
     if (route === "ssh.list") return listSshHosts();
     if (route === "remote.cancel") return this.pool.cancelRemote();
     if (route === "remote.directories") return this.pool.browseDirectories(v);
+    if (route === "remote.deployed") return this.pool.deployedWorkspaces();
+    if (route === "remote.revoke") return this.pool.revokeDeployedCredentials(String(v.id));
     if (route === "wsl.connect")
       return this.pool.connectWsl(String(v.distro), String(v.cwd), Boolean(v.browse));
     if (route === "ssh.connect")
@@ -634,6 +713,8 @@ export class MainController {
       // Pooled hosts and live entries would write the forgotten project back
       // into the history through their events; they go with the entry.
       if (slot) await this.pool.dropSlot(slot, true);
+      // Removing the project also gives up on any lingering host it left.
+      this.pool.forgetHost(id);
       await this.registry.disposeProject(id);
       this.settings.forgetProject(id);
       return this.projectGroups();
@@ -666,6 +747,7 @@ export class MainController {
         "session.import",
         "session.rename",
         "session.delete",
+        "usage.overview",
         "workspace.tree",
         "workspace.read",
         "workspace.write",
@@ -750,14 +832,11 @@ export class MainController {
           files.dir,
           p,
           error => {
-            if (request === this.viewRequest) this.emit({
-              type: "notice",
-              payload: {
-                level: "warning",
-                message: `Read-only session: ${error instanceof Error ? error.message : String(error)}`,
-              },
-            });
-            return this.fallback(p, files);
+            const warn = (message: string) => {
+              if (request === this.viewRequest) this.emit({ type: "notice", payload: { level: "warning", message } });
+            };
+            warn(`Read-only session: ${error instanceof Error ? error.message : String(error)}`);
+            return this.fallback(p, files, warn);
           },
         );
         // The registry refuses a snapshot for an entry it no longer owns, and a
@@ -850,6 +929,27 @@ export class MainController {
         this.rememberProject(sessions);
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
+      }
+      case "usage.overview": {
+        const bundle = this.settings.bundle();
+        const scans =
+          v.scope === "all"
+            ? this.usageScans(bundle)
+            : this.project && !this.project.remote && this.files.dir
+              ? [{
+                  project: {
+                    id: projectId(this.project),
+                    name: this.project.name,
+                    path: this.project.path,
+                  },
+                  dir: this.files.dir,
+                }]
+              : undefined;
+        return this.projectRuntime.usageOverview(
+          v.range as UsageRange,
+          bundle.app.usage?.unbilledProviders ?? [],
+          scans,
+        );
       }
       case "library.pin":
       case "library.archiveSession":
@@ -1041,6 +1141,7 @@ export class MainController {
   }
   /** Full shutdown: local sessions and every pooled host, awaited together. */
   closeAll(): Promise<void> {
+    this.dialogs.cancel();
     return Promise.all([this.closeSessions(), this.pool.closeAllRemote()]).then(() => {});
   }
   dispose() {
