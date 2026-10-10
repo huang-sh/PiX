@@ -31,6 +31,7 @@ export class GraphRuntime extends PiRuntime {
   private mainWork?: Promise<void>;
   private accepted = new Map<string, Promise<SessionSnapshot>>();
   private storageError?: string;
+  private writeFailure?: string;
   private revision = 0;
   private epoch = randomUUID();
   private stopping = false;
@@ -51,6 +52,17 @@ export class GraphRuntime extends PiRuntime {
   get recovering() {
     return Boolean(this.deletionRecovery);
   }
+  /** A failed persistence check requires rebuilding this session from disk. */
+  get needsReopen() { return Boolean(this.writeFailure); }
+  private failStorage(error: unknown) {
+    this.writeFailure ??= `Reopen this session to recover a storage failure: ${String(error)}`;
+    this.storageError = this.writeFailure;
+    this.notify();
+  }
+  private persist<T>(write: () => T): T {
+    try { return write(); }
+    catch (error) { this.failStorage(error); throw error; }
+  }
   /** Cheap liveness probe for list decoration and guards; never bumps the snapshot revision. */
   get busy() {
     const state = this.state();
@@ -69,7 +81,7 @@ export class GraphRuntime extends PiRuntime {
     return this.exclusive(() => this.openInternal(path));
   }
   private async openInternal(path: string) {
-    if (this.graph?.main === path && this.runtime && !this.deletionRecovery) return this.snapshot();
+    if (this.graph?.main === path && this.runtime && !this.deletionRecovery && !this.writeFailure) return this.snapshot();
     const recovery = this.deletionRecovery?.snapshot.session.path === path ? this.deletionRecovery : undefined;
     await this.closeInternal();
     this.deletionRecovery = recovery;
@@ -98,6 +110,7 @@ export class GraphRuntime extends PiRuntime {
         }
       }
       this.storageError = graph.recoveryMessages.join("; ") || undefined;
+      this.writeFailure = undefined;
       this.deletionRecovery = undefined;
       return this.snapshot();
     } catch (error) {
@@ -182,11 +195,14 @@ export class GraphRuntime extends PiRuntime {
         error: record.error, runtime: snap.runtime });
     }
     const { entries: values, projection } = this.snapshotCache.view(main, active);
-    return { ...main, entries: values, projection,
+    return { ...main, runtime: this.writeFailure ? { ...main.runtime, available: false } : main.runtime,
+      entries: values, projection,
       graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, runs, storageError: this.storageError,
         recoveredInputs: this.graph.recoveredInputs } };
   }
   override control(input: AgentControl): Promise<unknown> {
+    if (this.writeFailure && !["abort", "branchAbort", "newSession", "getModels", "getProviders", "commands"].includes(input.action))
+      return Promise.reject(new Error(this.writeFailure));
     if (this.deleting) return Promise.reject(new Error("Node deletion is in progress"));
     if (this.deletionRecovery && input.action !== "newSession")
       return Promise.reject(new Error("Reopen this session to recover the failed node deletion"));
@@ -197,11 +213,23 @@ export class GraphRuntime extends PiRuntime {
     if (input.action === "branchAbort") {
       if (input.branchId === "main") {
         if (input.runId !== this.rootRunId) return Promise.reject(new Error("This run has already ended"));
-        return super.control({ action: "abort" });
+        const settled = this.mainWork;
+        return super.control({ action: "abort" }).then(async () => {
+          await settled;
+          if (this.writeFailure) throw new Error(this.writeFailure);
+          return this.snapshot();
+        });
       }
       const record = this.graph?.records.get(input.branchId);
       if (!record || record.runId !== input.runId) return Promise.reject(new Error("Unknown or stale run"));
-      return this.workers.get(record.id)?.pi.control({ action: "abort" }).then(() => this.snapshot()) ?? Promise.resolve(this.snapshot());
+      const worker = this.workers.get(record.id);
+      if (!worker) return Promise.resolve(this.snapshot());
+      const settled = worker.work;
+      return worker.pi.control({ action: "abort" }).then(async () => {
+        await settled;
+        if (this.writeFailure) throw new Error(this.writeFailure);
+        return this.snapshot();
+      });
     }
     if (input.action === "promptAt") return this.acceptAt(input);
     if (input.action === "exportJsonl" || input.action === "exportHtml")
@@ -222,7 +250,7 @@ export class GraphRuntime extends PiRuntime {
       const result = await super.control(input);
       if ((input.action === "fork" || input.action === "clone") && this.runtime)
         return this.openInternal(this.runtime.session.sessionFile);
-      if (this.graph && this.runtime) this.graph.saveLeaf(this.runtime.session.sessionManager.getLeafId());
+      if (this.graph && this.runtime) this.persist(() => this.graph!.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
       return result;
     });
   }
@@ -231,6 +259,7 @@ export class GraphRuntime extends PiRuntime {
       if (!/^[a-zA-Z0-9-]{1,100}$/.test(input.requestId)) throw new Error("Invalid request ID");
       const graph = this.graph;
       if (this.stopping || !graph) throw new Error("Open a writable graph first");
+      if (this.writeFailure) throw new Error(this.writeFailure);
       const file = join(graph.dir, `request-${input.requestId}.json`);
       const pending = this.accepted.get(file);
       if (pending) return pending;
@@ -240,7 +269,7 @@ export class GraphRuntime extends PiRuntime {
         // A retry must preserve the input already acknowledged on disk.
         input = { ...saved, action: "promptAt" };
       } else {
-        durableWrite(file, JSON.stringify({ ...input, state: "queued" }) + "\n");
+        this.persist(() => durableWrite(file, JSON.stringify({ ...input, state: "queued" }) + "\n"));
       }
       const request = this.exclusive(async () => {
         if (this.graph !== graph) throw new Error("Session changed; submitted input has been retained");
@@ -316,6 +345,7 @@ export class GraphRuntime extends PiRuntime {
   private async startAt(input: PromptAt) {
     if (!/^[a-zA-Z0-9-]{1,100}$/.test(input.requestId)) throw new Error("Invalid request ID");
     if (this.stopping || !this.graph || !this.runtime) throw new Error("Open a writable graph first");
+    if (this.writeFailure) throw new Error(this.writeFailure);
     const graph = this.graph;
     const duplicate = [...graph.records.values()].find(r => r.requestId === input.requestId);
     const intentFile = join(graph.dir, `request-${input.requestId}.json`);
@@ -329,23 +359,25 @@ export class GraphRuntime extends PiRuntime {
     const root = super.snapshot();
     const onMain = !this.mainWork && !root.runtime.isStreaming && (input.nodeId === root.projection.activeNodeId || (!input.nodeId && !root.entries.some(e => e.type === "message")));
     if (onMain) {
-      durableWrite(intentFile, JSON.stringify({ ...input, state: "prepared" }) + "\n");
+      this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "prepared" }) + "\n"));
       this.rootRunId = randomUUID();
       this.rootRequest = input;
       this.rootBefore = new Set(root.entries.map(e => e.id));
       this.eventScope = { graphId: graph.main, branchId: "main", runId: this.rootRunId };
       await this.configurePrompt(this, input);
       const work = super.control({ action: "prompt", text: input.text, images: input.images });
-      this.mainWork = work.then(() => {}, () => {});
-      void work.then(() => {
-        graph.sealMain(this.data(this));
-        durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n");
-      },
-        error => { this.storageError = String(error); }).finally(() => {
-        this.mainWork = undefined;
-        if (this.runtime) graph.saveLeaf(this.runtime.session.sessionManager.getLeafId());
-        this.notify();
-      }).catch(error => { this.storageError = String(error); });
+      const settled = work.then(() => {
+        this.persist(() => graph.sealMain(this.data(this)));
+        this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n"));
+      }, error => { if (!this.writeFailure) this.storageError = String(error); }).finally(() => {
+        try {
+          if (this.runtime) this.persist(() => graph.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
+        } finally {
+          if (this.mainWork === settled) this.mainWork = undefined;
+          this.notify();
+        }
+      }).catch(error => { if (!this.writeFailure) this.storageError = String(error); });
+      this.mainWork = settled;
       return this.snapshot();
     }
     const parentId = node?.branchId ?? "main";
@@ -374,7 +406,7 @@ export class GraphRuntime extends PiRuntime {
       : node?.leafEntryId ?? "";
     const record: BranchRecord = { id: randomUUID(), parentId, forkEntryId: node?.leafEntryId ?? "", requestId: input.requestId,
       request: input, inherited, header: data.header, baseline: structuredClone(data.entries), status: "prepared", runId: randomUUID() };
-    graph.create(record, data);
+    this.persist(() => graph.create(record, data));
     const child = this.child(record);
     const worker: Worker = { pi: child, snapshot: this.fileSnapshot(record, data) };
     this.workers.set(record.id, worker);
@@ -385,9 +417,9 @@ export class GraphRuntime extends PiRuntime {
     const worker = this.workers.get(record.id)!;
     const child = worker.pi;
     record.status = "prepared";
-    graph.save(record);
+    this.persist(() => graph.save(record));
     const intentFile = join(graph.dir, `request-${input.requestId}.json`);
-    durableWrite(intentFile, JSON.stringify({ ...input, branchId: record.id, runId: record.runId, state: "prepared" }) + "\n");
+    this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, branchId: record.id, runId: record.runId, state: "prepared" }) + "\n"));
     try {
       child.eventScope = { graphId: graph.main, branchId: record.id, runId: record.runId };
       await child.open(graph.path(record.id));
@@ -397,13 +429,13 @@ export class GraphRuntime extends PiRuntime {
         thinkingLevel: input.thinkingLevel ?? thinkingLevel,
       });
       worker.before = new Set(child.runtime.session.sessionManager.getEntries().map((e: RawSessionEntry) => e.id));
-      record.status = "running"; graph.save(record);
+      record.status = "running"; this.persist(() => graph.save(record));
       worker.work = this.executeBranch(worker, record);
-      void worker.work.catch(error => { this.storageError = String(error); this.notify(); });
+      void worker.work.catch(error => { if (!this.writeFailure) this.storageError = String(error); this.notify(); });
       return this.snapshot();
     } catch (error) {
       try { await child.close(); } catch (e) { debugLog("graph-runtime: worker close after start failure", e); }
-      record.status = "interrupted"; record.error = String(error); graph.save(record);
+      record.status = "interrupted"; record.error = String(error); this.persist(() => graph.save(record));
       throw error;
     }
   }
@@ -420,22 +452,22 @@ export class GraphRuntime extends PiRuntime {
       await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images });
       await worker.pi.waitForWrites();
       const manager = worker.pi.runtime.session.sessionManager;
-      graph.seal(record, this.data(worker.pi));
+      this.persist(() => graph.seal(record, this.data(worker.pi)));
       worker.snapshot = worker.pi.snapshot();
       await worker.pi.close();
       // Shutdown extensions can append records; seal the final on-disk state.
-      const data = graph.seal(record, structuredClone({ header: manager.getHeader(), entries: manager.getEntries() }));
+      const data = this.persist(() => graph.seal(record, structuredClone({ header: manager.getHeader(), entries: manager.getEntries() })));
       worker.snapshot = this.fileSnapshot(record, data);
       record.status = "idle";
-      durableWrite(join(graph.dir, `request-${record.requestId}.json`), JSON.stringify({ ...record.request, requestId: record.requestId,
-        branchId: record.id, runId: record.runId, state: "settled" }) + "\n");
+      this.persist(() => durableWrite(join(graph.dir, `request-${record.requestId}.json`), JSON.stringify({ ...record.request, requestId: record.requestId,
+        branchId: record.id, runId: record.runId, state: "settled" }) + "\n"));
     } catch (error) {
       record.status = "interrupted"; record.error = String(error);
       try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
     } finally {
       worker.work = undefined;
-      graph.save(record);
-      this.notify();
+      try { this.persist(() => graph.save(record)); }
+      finally { this.notify(); }
     }
   }
   // Capture completed SDK entries in one synchronous turn. Streaming partial
@@ -501,14 +533,19 @@ export class GraphRuntime extends PiRuntime {
       await worker.pi.close();
       await worker.work;
     }));
-    if (this.graph && this.runtime) this.graph.saveLeaf(this.runtime.session.sessionManager.getLeafId());
-    await super.close();
-    await this.mainWork;
+    let failure: unknown;
+    try {
+      if (this.graph && this.runtime) this.graph.saveLeaf(this.runtime.session.sessionManager.getLeafId());
+    } catch (error) { failure = error; }
+    try { await super.close(); } catch (error) { failure ??= error; }
+    try { await this.mainWork; } catch (error) { failure ??= error; }
     this.mainWork = undefined;
-    this.graph?.release();
-    this.graph = undefined; this.workers.clear(); this.lastMain = undefined; this.snapshotCache = new GraphSnapshotCache();
-    this.deletionRecovery = undefined;
-    this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
+    try { this.graph?.release(); } finally {
+      this.graph = undefined; this.workers.clear(); this.lastMain = undefined; this.snapshotCache = new GraphSnapshotCache();
+      this.deletionRecovery = undefined;
+      this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
+    }
+    if (failure) throw failure;
   }
   override dispose() { void this.close().catch(() => {}); }
   override setProject(): never {

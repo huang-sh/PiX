@@ -577,15 +577,18 @@ export const useSessionStore = defineStore("session", {
       }
       const request = ++this.viewRequest;
       const project = this.activeProjectId;
-      const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
-      if (request !== this.viewRequest || project !== this.activeProjectId) return null;
-      // The reply is authoritative for the new file, and the broadcast event may
-      // still be in flight: without adopting it here the list and slash commands
-      // would keep serving the session that was just replaced.
-      if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
-      this.focusedNode = this.current?.projection.activeNodeId ?? null;
-      await Promise.all([this.refresh(), this.loadCommands()]);
-      return snapshot;
+      this.loading = true;
+      try {
+        const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
+        if (request !== this.viewRequest || project !== this.activeProjectId) return null;
+        // The reply is authoritative for the new file, and the broadcast event may
+        // still be in flight: without adopting it here the list and slash commands
+        // would keep serving the session that was just replaced.
+        if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
+        this.focusedNode = this.current?.projection.activeNodeId ?? null;
+        await Promise.all([this.refresh(), this.loadCommands()]);
+        return snapshot;
+      } finally { if (request === this.viewRequest) this.loading = false; }
     },
     async importSession() {
       const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(

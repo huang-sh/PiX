@@ -280,6 +280,7 @@ export class MainController {
       // while the other runs' aborts are already in flight.
       await Promise.allSettled(runs.map(run => runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
       this.scheduleBackgroundRefresh(entry);
+      if (runtime.needsReopen) throw new Error(runtime.snapshot().graph?.storageError ?? "Session storage needs recovery");
       return { stopped: Boolean(runs.length) };
     }
     const slot = owner ? this.pool.slot(owner) : this.pool.active();

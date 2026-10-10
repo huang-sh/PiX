@@ -324,9 +324,13 @@ async function disconnectRemote() {
   }
 }
 
-async function activateProject(record: ProjectGroup, request = ++session.viewRequest) {
+async function activateProject(record: ProjectGroup, request?: number) {
+  // Staying in the connected project does not replace the current view. Let a
+  // pending session.open finish in both the renderer and the main process.
+  if (record.id === session.activeProjectId && record.connected)
+    return request === undefined || request === session.viewRequest;
+  request ??= ++session.viewRequest;
   if (request !== session.viewRequest) return false;
-  if (record.id === session.activeProjectId && record.connected && !session.loading) return true;
   session.loading = true;
   try {
     const remote = record.project.remote;
@@ -370,7 +374,8 @@ async function reconnectRemote() {
 }
 
 async function inProject(record: ProjectGroup, action: () => Promise<void>) {
-  const request = ++session.viewRequest;
+  const request = record.id === session.activeProjectId && record.connected
+    ? session.viewRequest : ++session.viewRequest;
   if (!(await activateProject(record, request)) || request !== session.viewRequest) return;
   try {
     await action();
@@ -572,6 +577,11 @@ onMounted(() => {
         remoteBrowseRoot: remoteBrowseRoot.value,
       })),
       openSession: session.open,
+      renameSession: (path: string) => {
+        const record = session.projects.find(item => item.id === session.activeProjectId);
+        if (!record) throw new Error("No active project");
+        return renameProjectSession(record, path, "");
+      },
       selectNode: session.selectNode,
       openChatColumn: layout.openChatColumn,
       closeChatColumn: layout.closeChatColumn,

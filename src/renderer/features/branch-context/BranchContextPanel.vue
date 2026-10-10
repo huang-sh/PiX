@@ -96,10 +96,13 @@ const composerRunning = computed(() => Boolean(session.current?.graph
   ? selectedRun.value?.status === "running"
   : session.current?.runtime.isStreaming));
 
-function stopComposer() {
+async function stopComposer() {
   const run = session.current?.graph ? selectedRun.value : undefined;
-  if (run) void session.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId });
-  else void session.control({ action: "abort" });
+  try {
+    await session.control(run ? { action: "branchAbort", branchId: run.branchId, runId: run.runId } : { action: "abort" });
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 const composerTarget = computed(() =>
   panelNode.value

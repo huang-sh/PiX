@@ -146,6 +146,8 @@ describe("graph node context menu deletion", () => {
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
     expect(session.deleteBlockedReason).toBe("graph.blockedReadonly");
+    expect(wrapper.find('[role="alert"]').text()).toContain("Session needs recovery");
+    expect(wrapper.find('[role="alert"]').text()).not.toContain("Could not delete node");
     const invoke = vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error("still unavailable"));
     await wrapper.find('[data-action="node-delete-recover"]').trigger("click");
     await flushPromises();

@@ -449,6 +449,38 @@ test("session.stop aborts a background run and preserves its file", { timeout: 3
   }
 });
 
+test("session.stop reports a failed save instead of claiming the run stopped cleanly", { timeout: 30000 }, async (t) => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", name: "Faux", reasoning: false, contextWindow: 128_000 }] });
+    injectFaux(controller, faux);
+    await controller.invoke("agent.control", { action: "newSession" });
+    await controller.invoke("agent.control", { action: "setModel", provider: "faux", modelId: "faux-1" });
+    const path = controller.current!.session.path;
+    let started = false;
+    faux.setResponses([async (_context: unknown, options?: { signal?: AbortSignal }) => {
+      started = true;
+      await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }]);
+    await controller.invoke("agent.control", { action: "promptAt", requestId: "stop-fault", nodeId: null,
+      text: "hello", provider: "faux", modelId: "faux-1" });
+    await until(() => started);
+    const runtime = controller.registry.entry(path)!.runtime!;
+    const seal = t.mock.method(runtime.graph!, "sealMain", () => { throw new Error("simulated stop EIO"); });
+    await assert.rejects(controller.invoke("session.stop", { path }), /storage failure.*stop EIO/);
+    assert.equal(runtime.snapshot().runtime.available, false);
+    seal.mock.restore();
+    const reopened = await controller.invoke("session.open", { path }) as SessionSnapshot;
+    assert.equal(reopened.runtime.available, true);
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("concurrent opens of a cold session share one runtime", { timeout: 30000 }, async () => {
   const ws = workspace();
   const controller = new MainController(ws, platform);
@@ -1176,7 +1208,7 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
     const dir = controller.files.dir!;
     const path = join(dir, "dying.jsonl");
     writeFileSync(path, "");
-    let builds = 0, broken = false;
+    let builds = 0, broken = false, needsReopen = false;
     const snapshot = (): SessionSnapshot =>
       ({ session: { path }, entries: [], projection: { nodes: [] } }) as never;
     controller.createSessionRuntime = () => {
@@ -1184,6 +1216,7 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
       return {
         async open() {},
         snapshot: () => { if (instance === 1 && broken) throw new Error("runtime died"); return snapshot(); },
+        get needsReopen() { return instance === 2 && needsReopen; },
         state: () => ({}),
         async close() {},
       } as never;
@@ -1195,6 +1228,9 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
 
     assert.equal(reopened.session.path, path, "the session reopens on a fresh runtime");
     assert.equal(builds, 2, "the dead cached runtime is replaced, not reused");
+    needsReopen = true;
+    await controller.invoke("session.open", { path });
+    assert.equal(builds, 3, "a storage-failed runtime is rebuilt even if its snapshot is readable");
   } finally {
     await controller.closeSessions();
     controller.dispose();
