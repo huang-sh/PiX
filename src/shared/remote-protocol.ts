@@ -1,9 +1,8 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// Pi 1.0 dialogs and model operations require an updated remote host.
-// Installers compare both protocol and product version.
+// Installers compare protocol and product version so outdated hosts are upgraded.
 export const PIX_REMOTE_PROTOCOL = 17;
-export const PIX_HOST_VERSION = "0.0.26";
+export const PIX_HOST_VERSION = "0.0.27";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
