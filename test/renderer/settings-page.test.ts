@@ -986,6 +986,40 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
+  it.each(["api_key", "oauth"] as const)("keeps a visible retry warning after a saved %s credential cannot refresh its catalog", async type => {
+    const providers: RuntimeProvider[] = [{ id: "openrouter", name: "OpenRouter", authTypes: [type] }];
+    const available: RuntimeModel[] = [{ provider: "openrouter", id: "cached-model" }];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action?: string }).action;
+      if (action === "getModels") return available;
+      if (action === "getProviders") return providers;
+      if (action === "loginApiKey" || action === "loginOAuth") {
+        providers[0].status = { type };
+        return { ok: true, catalogError: "Network unavailable" };
+      }
+      return {};
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      await wrapper.get('[data-provider-configure="openrouter"]').trigger("click");
+      if (type === "api_key") {
+        await wrapper.get('[data-provider-api-key="openrouter"]').setValue("test-key");
+        await wrapper.get("form.provider-auth").trigger("submit");
+      } else await wrapper.get('[data-provider-oauth="openrouter"][data-oauth-method="browser"]').trigger("click");
+      await flushPromises();
+      expect(layout.notice?.level).toBe("warning");
+      expect(layout.notice?.message).toContain("Credentials saved");
+      expect(layout.notice?.message).toContain("Refresh models");
+      expect(layout.notice?.message).toContain("Network unavailable");
+      expect(wrapper.find("form.provider-auth").exists()).toBe(false);
+      expect(useSessionStore().models.map(model => model.id)).toEqual(["cached-model"]);
+    } finally { wrapper.unmount(); }
+  });
+
   it("re-points the settings selection when logout removes the selected model", async () => {
     let available: RuntimeModel[] = [
       { provider: "openai", id: "gpt-base" },

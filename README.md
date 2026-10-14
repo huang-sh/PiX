@@ -52,7 +52,7 @@ Switching branches never means re-setting up context — context is part of the 
 
 PiX embeds Pi 1.2, including its MCP, Codemode and tool-search extensions. Existing Pi v3 JSONL sessions keep working. Tool rows show elapsed time while running and saved durations after completion. Tool images and nested call records appear in the branch chat; Pi saves nested call names, arguments, status and duration, but not every nested output.
 
-Settings → Model groups available models into Chat, Image generation and Classifiers, with counts and type filters. Image and classifier models are used through Codemode; only chat models appear in conversation pickers or support default, cycling and thinking preferences.
+Settings → Model groups available models into Chat, Image generation and Classifiers, with counts and type filters. Image and classifier models are used through Codemode; only chat models appear in conversation pickers or support default, cycling and thinking preferences. Saving OpenRouter credentials automatically refreshes the key's available chat models.
 
 Configure MCP in `~/.pix/agent/mcp.json` or a trusted project's `.pi/mcp.json`, on the machine running the session. After editing these files, run `/reload`, then `/mcp` for status, `/mcp login [server]` to sign in, or `/mcp reconnect [server]` to reconnect. PiX supports extension selection, input and confirmation dialogs; TUI-specific custom components still need the Pi terminal.
 

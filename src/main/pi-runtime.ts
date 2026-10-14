@@ -355,6 +355,29 @@ export class PiRuntime {
     return [...new Set((await modelRuntime.getAllAvailable()).map((model: any) => String(model.provider)))];
   }
 
+  private async refreshModelCatalog(provider?: string) {
+    const signal = AbortSignal.timeout(15_000);
+    const modelRuntime = await this.modelRuntime();
+    const result: ModelsRefreshResult = await modelRuntime.refresh({
+      allowNetwork: true, force: true, signal,
+      ...(provider ? { providers: [provider] } : {}),
+    });
+    if (result.aborted || signal.aborted)
+      throw new Error("Model catalog refresh timed out. Please try again.");
+    if (result.errors.size) {
+      const details = Array.from(result.errors, ([id, error]) => `${id}: ${error.message}`).join("; ");
+      throw new Error(`Could not refresh model catalogs: ${details}`);
+    }
+  }
+
+  private async refreshLoginCatalog(provider: string) {
+    // Strip broker placeholders before OpenRouter looks up the new key's models.
+    await this.refreshBrokerAuth();
+    if (provider !== "openrouter") return;
+    try { await this.refreshModelCatalog(provider); }
+    catch (error) { return error instanceof Error ? error.message : String(error); }
+  }
+
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
     await this.replaceBrokerCatalog(await this.modelRuntime(), new Set(providers), models);
   }
@@ -915,19 +938,7 @@ export class PiRuntime {
       case "getState":
         return this.state();
       case "refreshModels": {
-        const signal = AbortSignal.timeout(15_000);
-        const modelRuntime = await this.modelRuntime();
-        const result: ModelsRefreshResult = await modelRuntime.refresh({
-          allowNetwork: true,
-          force: true,
-          signal,
-        });
-        if (result.aborted || signal.aborted)
-          throw new Error("Model catalog refresh timed out. Please try again.");
-        if (result.errors.size) {
-          const details = Array.from(result.errors, ([provider, error]) => `${provider}: ${error.message}`).join("; ");
-          throw new Error(`Could not refresh model catalogs: ${details}`);
-        }
+        await this.refreshModelCatalog();
         return { ok: true };
       }
       case "getModels": {
@@ -1131,10 +1142,8 @@ export class PiRuntime {
           },
           notify: () => undefined,
         });
-        // Deployed credentials move that provider from the desktop broker to
-        // direct calls; open sessions re-adopt through pushCatalogs.
-        await this.refreshBrokerAuth();
-        return { ok: true };
+        const catalogError = await this.refreshLoginCatalog(input.provider);
+        return { ok: true, ...(catalogError ? { catalogError } : {}) };
       }
       case "loginOAuth": {
         const modelRuntime = await this.modelRuntime();
@@ -1172,7 +1181,8 @@ export class PiRuntime {
         const status = await modelRuntime.checkAuth(input.provider);
         if (status?.type !== "oauth")
           throw new Error("OAuth completed without a usable credential");
-        return { ok: true, status };
+        const catalogError = await this.refreshLoginCatalog(input.provider);
+        return { ok: true, status, ...(catalogError ? { catalogError } : {}) };
       }
       case "setBrokerProviders":
         await this.configureBrokerProviders(input.providers, input.models);

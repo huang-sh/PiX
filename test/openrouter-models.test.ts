@@ -8,7 +8,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import type { BrokerModel, RuntimeModel } from "../src/shared/types.js";
 
-test("OpenRouter refresh filters by key and regional endpoint, preserves limits/prices and restores the offline catalog", async t => {
+test("OpenRouter login immediately filters by key and regional endpoint, preserves limits/prices and restores the offline catalog", async t => {
   const root = mkdtempSync(join(tmpdir(), "pix-openrouter-"));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const authPath = join(root, "auth.json");
@@ -40,11 +40,8 @@ test("OpenRouter refresh filters by key and regional endpoint, preserves limits/
   runtime.agentDir = () => root;
   runtime.modelServices = { modelRuntime };
   for (const index of [0, 1]) {
-    if (index === 1) {
-      configure("eu");
-      await runtime.control({ action: "loginApiKey", provider: "openrouter", apiKey: "test-key-b" });
-    }
-    await runtime.control({ action: "refreshModels" });
+    configure(index === 0 ? "us" : "eu");
+    await runtime.control({ action: "loginApiKey", provider: "openrouter", apiKey: index === 0 ? "test-key-a" : "test-key-b" });
     const chat = (await runtime.control({ action: "getModels" }) as RuntimeModel[]).filter(model => model.provider === "openrouter");
     assert.deepEqual(chat.map(model => model.id), [candidates[index]!.id]);
     assert.equal(chat[0]!.contextWindow, 75000 + index);

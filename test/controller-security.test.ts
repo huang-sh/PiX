@@ -225,7 +225,7 @@ test("remote OAuth login runs on the desktop and only syncs models", async () =>
   }]);
 });
 
-test("remote OpenRouter refresh preserves personalized limits/prices and revokes models removed from the desktop catalog", async () => {
+test("remote OpenRouter refresh and login preserve personalized limits/prices and revoke old models", async () => {
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
@@ -243,8 +243,10 @@ test("remote OpenRouter refresh preserves personalized limits/prices and revokes
   });
   for (const model of [first, second]) {
     models = [model]; localCalls.length = 0; remoteCalls.length = 0;
-    await controller.invoke("agent.control", { action: "refreshModels" });
-    assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels", broker: true }]);
+    const input = model === first ? { action: "refreshModels" }
+      : { action: "loginApiKey", provider: "openrouter", apiKey: "test-key-b" };
+    await controller.invoke("agent.control", input);
+    assert.deepEqual(localCalls, [input, { action: "getModels", broker: true }]);
     assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openrouter"], models } }]);
     assert.ok(controller.remoteBrokerModels.has(`openrouter\0${model.id}`));
   }

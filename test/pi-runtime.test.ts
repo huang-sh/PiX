@@ -275,6 +275,53 @@ test("model refresh reports provider failures and timeouts without changing the 
   assert.equal(session.model, activeModel);
 });
 
+test("OpenRouter login refreshes only its catalog after broker auth, while other providers stay offline", async t => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  const calls: string[] = [];
+  const signal = new AbortController().signal;
+  t.mock.method(AbortSignal, "timeout", (ms: number) => { assert.equal(ms, 15000); return signal; });
+  runtime.modelServices = { modelRuntime: {
+    login: async (provider: string, _type: string, interaction: any) => {
+      assert.equal(await interaction.prompt({ type: "secret" }), "test-key");
+      calls.push(`login:${provider}`);
+    },
+    refresh: async (options: unknown) => {
+      assert.deepEqual(options, { allowNetwork: true, force: true, signal, providers: ["openrouter"] });
+      calls.push("refresh");
+      return { aborted: false, errors: new Map() };
+    },
+  } };
+  t.mock.method(runtime, "refreshBrokerAuth", async () => { calls.push("brokerAuth"); });
+  for (const provider of ["openrouter", "anthropic"]) {
+    calls.length = 0;
+    assert.deepEqual(await runtime.control({ action: "loginApiKey", provider, apiKey: "test-key" }), { ok: true });
+    assert.deepEqual(calls, [`login:${provider}`, "brokerAuth", ...(provider === "openrouter" ? ["refresh"] : [])]);
+  }
+});
+
+test("failed OpenRouter catalog refreshes retain API key/OAuth saves and return a retry warning", async t => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("the caller owns the warning"), async () => undefined);
+  let savedType: string | undefined;
+  let outcome = { aborted: false, errors: new Map([["openrouter", new Error("Network unavailable")]]) };
+  runtime.modelServices = { modelRuntime: {
+    login: async (_provider: string, type: string) => { savedType = type; },
+    checkAuth: async () => ({ type: savedType }),
+    refresh: async () => outcome,
+  } };
+  t.mock.method(runtime, "refreshBrokerAuth", async () => {});
+  for (const action of ["loginApiKey", "loginOAuth"] as const) {
+    savedType = undefined;
+    const result = await runtime.control({ action, provider: "openrouter", apiKey: "test-key", method: "browser" } as AgentControl) as any;
+    assert.equal(result.ok, true);
+    assert.equal(savedType, action === "loginApiKey" ? "api_key" : "oauth");
+    assert.match(result.catalogError, /openrouter: Network unavailable/);
+  }
+  outcome = { aborted: true, errors: new Map() };
+  const result = await runtime.control({ action: "loginApiKey", provider: "openrouter", apiKey: "test-key" }) as any;
+  assert.equal(result.ok, true);
+  assert.match(result.catalogError, /timed out/);
+});
+
 test("settings can list every model type without exposing credentials or changing the chat catalog", async () => {
   const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
   const chat = { provider: "test", id: "shared-id", reasoning: true };

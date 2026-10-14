@@ -286,11 +286,13 @@ export function useModels(
     if (!apiKey) return;
     providerBusy.value = provider.id;
     try {
-      await session.control({ action: "loginApiKey", provider: provider.id, apiKey });
+      const result = await session.control<{ catalogError?: string }>({ action: "loginApiKey", provider: provider.id, apiKey });
       keyDrafts[provider.id] = "";
       editingProvider.value = "";
       await loadRuntimeCatalog();
-      layout.showNotice(t("settings.apiKeySaved", { name: provider.name }));
+      layout.showNotice(result.catalogError
+        ? t("settings.credentialsSavedCatalogFailed", { error: result.catalogError })
+        : t("settings.apiKeySaved", { name: provider.name }), result.catalogError ? "warning" : "info");
     } catch (error) {
       layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
@@ -301,12 +303,14 @@ export function useModels(
   async function loginOAuth(provider: RuntimeProvider, method: "browser" | "device-code") {
     providerBusy.value = provider.id;
     try {
-      await session.control({ action: "loginOAuth", provider: provider.id, method });
+      const result = await session.control<{ catalogError?: string }>({ action: "loginOAuth", provider: provider.id, method });
       await loadRuntimeCatalog();
       if (!providers.value.find((item) => item.id === provider.id)?.status)
         throw new Error(`${provider.name} login did not produce a usable credential.`);
       editingProvider.value = "";
-      layout.showNotice(t("settings.signedIn", { name: provider.name }));
+      layout.showNotice(result.catalogError
+        ? t("settings.credentialsSavedCatalogFailed", { error: result.catalogError })
+        : t("settings.signedIn", { name: provider.name }), result.catalogError ? "warning" : "info");
     } catch (error) {
       layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     } finally {
