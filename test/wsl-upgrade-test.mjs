@@ -48,14 +48,14 @@ try {
     },
   };
   await shell(`mkdir -p ${quote(root)}/versions/legacy/bin ${quote(workspace)} && ln -s ${quote(root)}/versions/legacy ${quote(root)}/current`);
-  const legacy = { version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL, piVersion: "1.0.0" };
+  const legacy = { version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL, piVersion: "1.1.0" };
   const fake = `#!/bin/sh\nprintf '%s\\n' ${quote(JSON.stringify(legacy))}\n`;
   await shell(`printf %s ${quote(fake)} > ${quote(root)}/versions/legacy/bin/pix-agent-host && chmod 700 ${quote(root)}/versions/legacy/bin/pix-agent-host`);
   assert.deepEqual(JSON.parse(await transport.exec('"$HOME/.pix/server/current/bin/pix-agent-host" version')), legacy);
 
   const progress = [];
   await ensureHostInstalled(transport, false, { onProgress: stage => progress.push(stage) });
-  assert.ok(progress.includes("upload") && progress.includes("install"), "Pi 1.0 must be replaced despite matching host/protocol versions");
+  assert.ok(progress.includes("upload") && progress.includes("install"), "Pi 1.1 must be replaced despite matching host/protocol versions");
   const installed = JSON.parse(await transport.exec('"$HOME/.pix/server/current/bin/pix-agent-host" version'));
   assert.deepEqual(installed, { version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL, piVersion: await piSdkVersion() });
   let uploadedAgain = false;
@@ -80,7 +80,7 @@ try {
     const created = await client.request("agent.control", { action: "newSession" });
     assert.equal(created.session.cwd, workspace);
     console.log(JSON.stringify({ ok: true, distro, installed, workspace,
-      checks: ["real WSL install", "simulated Pi 1.0 version triggers upgrade", "no redundant install", "WebSocket handshake", "new session"] }));
+      checks: ["real WSL install", "simulated Pi 1.1 version triggers upgrade", "no redundant install", "WebSocket handshake", "new session"] }));
   } finally {
     if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
     if (previous.wslEnv === undefined) delete process.env.WSLENV; else process.env.WSLENV = previous.wslEnv;

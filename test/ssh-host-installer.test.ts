@@ -14,6 +14,7 @@ test("remote installation checks the Pi SDK version as well as host and protocol
   const host = { version: PIX_HOST_VERSION, protocol: PIX_REMOTE_PROTOCOL };
   assert.equal(hostIsCurrent({ ...host, piVersion }, piVersion), true);
   assert.equal(hostIsCurrent({ ...host, piVersion: "1.0.0" }, piVersion), false);
+  assert.equal(hostIsCurrent({ ...host, piVersion: "1.1.0" }, piVersion), false);
   assert.equal(hostIsCurrent(host, piVersion), false, "Pi 1.0 hosts had no SDK version in `version` output");
 });
 

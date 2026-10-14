@@ -50,7 +50,7 @@ PiX 把会话组织成一张从左到右生长的图：
 
 ## 内置扩展
 
-PiX 使用 Pi 1.1，并加载其 MCP、Codemode 和工具搜索扩展。已有 Pi v3 JSONL 会话可继续使用。分支聊天会显示工具图片和嵌套调用记录；Pi 保存嵌套调用的名称、参数和状态，但不会保存每个嵌套调用的完整输出。
+PiX 使用 Pi 1.2，并加载其 MCP、Codemode 和工具搜索扩展。已有 Pi v3 JSONL 会话可继续使用。分支聊天会显示工具图片和嵌套调用记录；Pi 保存嵌套调用的名称、参数和状态，但不会保存每个嵌套调用的完整输出。
 
 设置 → 模型按「对话 / 图像生成 / 分类器」展示可用模型，并提供数量统计和类别筛选。图像与分类器模型通过 Codemode 调用；只有对话模型会出现在会话选择器中，并支持默认模型、轮换和思考级别设置。
 
@@ -58,7 +58,7 @@ PiX 使用 Pi 1.1，并加载其 MCP、Codemode 和工具搜索扩展。已有 P
 
 连接采用默认 `codemode` 暴露方式的 MCP 服务器时，会自动启用 Codemode。手动启用时，在设置 → 工具与图片 → 默认工具的现有列表末尾追加 `, +codemode`，点击输入框外保存。这是项目设置，只需配置一次；新会话自动沿用，当前会话会在空闲时自动重载。在设置页这样修改时，无需手动 `/reload`。
 
-「Codemode 工具调用方式」控制启用后的行为，本身不是启用开关：`on`（与其他工具并用）保留直接工具调用，`only`（仅通过 Codemode 调用）让模型通过 Codemode 调用这些工具。服务器配置见 [Pi MCP 文档](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/mcp.md)。
+「Codemode 工具调用方式」控制启用后的行为，本身不是启用开关：`on`（与其他工具并用）保留直接工具调用，`only`（仅通过 Codemode 调用）让模型通过 Codemode 调用这些工具。服务器配置见 [Pi MCP 文档](https://github.com/earendil-works/pi/blob/v1.2.0/packages/coding-agent/docs/mcp.md)。
 
 PiX 还内置两个带原生二进制的扩展，扩展及运行依赖随安装包分发，无需另行安装（如果已通过 Pi 安装同名 npm 包，则优先使用你安装的版本）。
 

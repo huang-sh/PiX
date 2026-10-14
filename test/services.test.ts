@@ -260,7 +260,7 @@ test("bootstrap migrates legacy Azure auth and model preferences without re-crea
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
 
-test("migrated Azure credentials expose models through the Pi 1.1 runtime", async () => {
+test("migrated Azure credentials expose models through the Pi runtime", async () => {
   const temp = mkdtempSync(join(tmpdir(), "pix-azure-runtime-"));
   const previousHome = process.env.PIX_HOME;
   const previousAgent = process.env.PI_CODING_AGENT_DIR;
