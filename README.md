@@ -50,7 +50,7 @@ Switching branches never means re-setting up context — context is part of the 
 
 ## Built-in extensions
 
-PiX embeds Pi 1.2, including its MCP, Codemode and tool-search extensions. Existing Pi v3 JSONL sessions keep working. Tool images and nested call records appear in the branch chat; Pi saves nested call names, arguments and status, but not every nested output.
+PiX embeds Pi 1.2, including its MCP, Codemode and tool-search extensions. Existing Pi v3 JSONL sessions keep working. Tool rows show elapsed time while running and saved durations after completion. Tool images and nested call records appear in the branch chat; Pi saves nested call names, arguments, status and duration, but not every nested output.
 
 Settings → Model groups available models into Chat, Image generation and Classifiers, with counts and type filters. Image and classifier models are used through Codemode; only chat models appear in conversation pickers or support default, cycling and thinking preferences.
 

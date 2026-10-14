@@ -36,7 +36,7 @@ test("dialogs validate replies, cancel per owner, and dismiss on abort or timeou
   assert.equal(events.filter(event => event.type === "ui.dismiss").length, 4);
 });
 
-test("Pi 1.0 Codemode runs nested writes through PiX hooks and restores their records", { timeout: 60000 }, async t => {
+test("Codemode runs nested writes through PiX hooks and restores records and tool timings", { timeout: 60000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), "pix-pi1-"));
   const events: any[] = [];
   const runtime = new PiRuntime(root, join(root, "sessions"), event => events.push(event), async () => {});
@@ -71,11 +71,29 @@ test("Pi 1.0 Codemode runs nested writes through PiX hooks and restores their re
   assert.equal(snapshot.projection.nodes.at(-1)!.toolCallCount, 2);
   const call = snapshot.projection.messages.find(message => message.toolName === "codemode");
   assert.equal(call?.nestedCalls?.[0]?.name, "write");
+  assert.ok(typeof call?.durationMs === "number" && call.durationMs >= 0);
+  assert.ok(typeof call.nestedCalls![0]!.durationMs === "number" && call.nestedCalls![0]!.durationMs! >= 0);
+  assert.ok(events.some(event => event.type === "agent" && event.payload?.type === "tool_execution_end" && typeof event.payload.durationMs === "number"));
   const path = snapshot.session.path;
   await runtime.close();
   await runtime.open(path);
   assert.deepEqual(runtime.snapshot().projection.messages.find(message => message.toolName === "codemode")?.nestedCalls, call!.nestedCalls);
+  assert.equal(runtime.snapshot().projection.messages.find(message => message.toolName === "codemode")?.durationMs, call.durationMs);
   assert.ok(events.some(event => event.payload?.parentToolCallId));
+});
+
+test("tool projections retain valid zero durations and leave untimed legacy or damaged entries unmarked", () => {
+  const entries: RawSessionEntry[] = [{ id: "u", parentId: null, timestamp: "1", type: "message", message: { role: "user", content: "test" } }];
+  for (const durationMs of [0, 1234, undefined, -1, NaN, Infinity, "12"]) {
+    const id = String(entries.length);
+    entries.push({ id, parentId: entries.at(-1)!.id, timestamp: id, type: "message", message: {
+      role: "toolResult", toolName: "codemode", content: [], durationMs,
+      nestedCalls: { complete: true, calls: [{ id: `nested-${id}`, name: "write", status: "ok", durationMs }] },
+    } });
+  }
+  const tools = projectSession(entries, entries.at(-1)!.id).messages.filter(message => message.role === "tool");
+  assert.deepEqual(tools.map(message => message.durationMs), [0, 1234, undefined, undefined, undefined, undefined, undefined]);
+  assert.deepEqual(tools.map(message => message.nestedCalls![0]!.durationMs), tools.map(message => message.durationMs));
 });
 
 test("image and classifier catalogs cross the broker without credentials and remain separate from chat", async () => {

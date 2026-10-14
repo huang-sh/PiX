@@ -129,6 +129,8 @@ export function reduceAgentActivity(
   const id = `tool:${toolCallId}`;
   if (type !== "tool_execution_start" && toolEvent && !activity.items.some(item => item.id === id)) {
     activity = reduceAgentActivity(activity, { ...event, type: "tool_execution_start" })!;
+    // Joining an existing call gives no reliable start time.
+    activity = updateItem(activity, id, { timestamp: undefined });
   }
   if (type === "tool_execution_start") {
     return {
@@ -154,9 +156,11 @@ export function reduceAgentActivity(
   }
   if (type === "tool_execution_end") {
     const content = record(event.result)?.content;
+    const durationMs = event.durationMs;
     return updateItem(activity, id, {
       text: agentResultText(event.result),
       ...(Array.isArray(content) ? { images: content.filter(isPromptImage) } : {}),
+      ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0 ? { durationMs } : {}),
       status: event.isError === true ? "error" : "complete",
     });
   }

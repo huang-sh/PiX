@@ -107,6 +107,7 @@ function nestedCalls(e: RawSessionEntry): NonNullable<BranchMessage["nestedCalls
     const call = rec(value);
     if (!call || typeof call.id !== "string" || typeof call.name !== "string") return [];
     return [{ id: call.id, name: call.name, input: toolInput(call.arguments), status: String(call.status),
+      ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs) && call.durationMs >= 0 ? { durationMs: call.durationMs } : {}),
       ...(typeof call.error === "string" ? { error: call.error } : {}) }];
   });
 }
@@ -310,6 +311,7 @@ export function projectSession(
     const r = role(e);
     const o = owners.get(id);
     const turnId = o ? `turn:${o}` : (nodes[0]?.id ?? `turn:${e.id}`);
+    const durationMs = msg(e)?.durationMs;
     if (e.type === "message" && (r === "user" || r === "assistant"))
       messages.push({
         entryId: id,
@@ -335,6 +337,7 @@ export function projectSession(
         ...(nestedCalls(e).length ? { nestedCalls: nestedCalls(e), nestedCallsComplete: rec(msg(e)?.nestedCalls)?.complete === true } : {}),
         timestamp: e.timestamp,
         toolName: tool(e),
+        ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0 ? { durationMs } : {}),
         toolInput: e.type === "bash_execution"
           ? toolInput(e.command)
           : toolInputs.get(String(msg(e)?.toolCallId ?? "")),

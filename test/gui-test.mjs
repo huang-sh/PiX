@@ -1554,6 +1554,47 @@ try {
       throw new Error(`Empty tool panel did not close: ${JSON.stringify(value)}`);
   });
   result.emptyToolPanelClosed = true;
+  // A synthetic stream in the isolated GUI profile exercises the timer's layout.
+  if (await cdp.evaluate("Boolean(window.__pixTest.state().current?.graph && window.__pixTest.state().current?.projection.activeNodeId)")) {
+    await cdp.evaluate(`(() => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;
+      const session = pinia._s.get('session'), layout = pinia._s.get('layout');
+      const nodeId = session.current.projection.activeNodeId;
+      layout.layout.collapsed.chat = false;
+      session.focusedNode = nodeId;
+      session.current.graph.runs = session.current.graph.runs.filter(run => run.nodeId !== nodeId)
+        .concat([{ branchId: 'timing-probe', runId: 'timing-probe', nodeId, status: 'running' }]);
+      window.__toolTimingScope = { graphId: session.current.graph.id, branchId: 'timing-probe', runId: 'timing-probe' };
+      session.onAgentEvent({ ...window.__toolTimingScope, type: 'agent_start' });
+      session.onAgentEvent({ ...window.__toolTimingScope, type: 'tool_execution_start', toolCallId: 'timed-tool', toolName: 'codemode',
+        args: { code: 'text(await tools.read({ path: "a-long-path-that-must-ellipsize-in-the-chat-column" }));' } });
+    })()`);
+    await retry(async () => {
+      const timing = await cdp.evaluate(`(() => {
+        const timer = document.querySelector('.agent-process.live .process-tool .tool-duration');
+        if (!timer) return null;
+        const row = timer.closest('summary'), input = row.querySelector('code');
+        return { text: timer.textContent, title: timer.title, fits: timer.getBoundingClientRect().right <= row.getBoundingClientRect().right,
+          noOverlap: input.getBoundingClientRect().right <= timer.getBoundingClientRect().left, clipped: input.scrollWidth > input.clientWidth };
+      })()`);
+      if (!timing || timing.text.endsWith('ms') || !timing.title.startsWith('Elapsed') || !timing.fits || !timing.noOverlap || !timing.clipped)
+        throw new Error('Tool timer did not advance or fit beside long arguments: ' + JSON.stringify(timing));
+    });
+    screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(artifacts, "gui-tool-timing.png"), Buffer.from(screenshot.data, "base64"));
+    await cdp.evaluate(`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session').onAgentEvent({
+      ...window.__toolTimingScope, type: 'tool_execution_end', toolCallId: 'timed-tool', durationMs: 1337, result: { content: [{ type: 'text', text: 'done' }] }
+    })`);
+    await retry(async () => {
+      const timing = await cdp.evaluate(`(() => {
+        const timer = document.querySelector('.agent-process.live .process-tool .tool-duration');
+        return timer && { text: timer.textContent, title: timer.title };
+      })()`);
+      if (timing?.text !== '1.3s' || timing.title !== 'Took 1.3s')
+        throw new Error('Tool timer did not adopt its saved SDK duration: ' + JSON.stringify(timing));
+    });
+    result.toolTiming = true;
+  }
   result.settings = true;
   result.exitSmooth = true;
   writeFileSync(

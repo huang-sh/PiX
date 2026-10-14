@@ -130,7 +130,8 @@ export interface BranchMessage {
   timestamp: string;
   toolName?: string;
   toolInput?: string;
-  nestedCalls?: Array<{ id: string; name: string; input: string; status: string; error?: string }>;
+  durationMs?: number;
+  nestedCalls?: Array<{ id: string; name: string; input: string; status: string; error?: string; durationMs?: number }>;
   nestedCallsComplete?: boolean;
   isError?: boolean;
   errorMessage?: string;
@@ -145,7 +146,8 @@ export interface AgentActivityItem {
   input?: string;
   parentToolCallId?: string;
   images?: PromptImage[];
-  timestamp: string;
+  timestamp?: string;
+  durationMs?: number;
   status: "running" | "complete" | "error";
   pass: number;
   errorMessage?: string;

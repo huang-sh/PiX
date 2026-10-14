@@ -225,22 +225,30 @@ test("remote OAuth login runs on the desktop and only syncs models", async () =>
   }]);
 });
 
-test("remote model refresh uses the desktop catalog and resyncs the model broker", async () => {
+test("remote OpenRouter refresh preserves personalized limits/prices and revokes models removed from the desktop catalog", async () => {
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
+  const first = { provider: "openrouter", id: "allowed-a", api: "openai-completions", contextWindow: 75000, maxTokens: 4096,
+    cost: { input: 2, output: 7, cacheRead: 1, cacheWrite: 0 } };
+  const second = { ...first, id: "allowed-b", contextWindow: 80000, maxTokens: 8192 };
+  let models = [first];
   controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
-    return input.action === "getModels" ? [{ provider: "openai", id: "new-model" }] : { ok: true };
+    return input.action === "getModels" ? models : { ok: true };
   };
   attachRemote(controller, async (route, input) => {
     remoteCalls.push({ route, input });
     return { ok: true };
   });
-  await controller.invoke("agent.control", { action: "refreshModels" });
-  assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels", broker: true }]);
-  assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openai"], models: [{ provider: "openai", id: "new-model" }] } }]);
-  assert.ok(controller.remoteBrokerModels.has("openai\0new-model"));
+  for (const model of [first, second]) {
+    models = [model]; localCalls.length = 0; remoteCalls.length = 0;
+    await controller.invoke("agent.control", { action: "refreshModels" });
+    assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels", broker: true }]);
+    assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openrouter"], models } }]);
+    assert.ok(controller.remoteBrokerModels.has(`openrouter\0${model.id}`));
+  }
+  assert.equal(controller.remoteBrokerModels.has("openrouter\0allowed-a"), false, "the previous key's model cannot remain broker-enabled");
 });
 
 test("adding a remote custom model saves credentials on the desktop only", async () => {

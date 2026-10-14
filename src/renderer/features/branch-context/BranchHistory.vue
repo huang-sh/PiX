@@ -6,6 +6,7 @@ import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
 import ContextStatus from "./ContextStatus.vue";
+import ToolDuration from "./ToolDuration.vue";
 import FileChanges from "./FileChanges.vue";
 import type { FileChange } from "../../../shared/file-changes";
 
@@ -73,6 +74,7 @@ const { t } = useI18n();
                   <Terminal :size="13" />
                   <strong>{{ message.toolName || t("branch.tool") }}<ContextStatus :status="message.contextStatus" /></strong>
                   <code v-if="message.toolInput" :title="message.toolInput">{{ message.toolInput }}</code>
+                  <ToolDuration :duration-ms="message.durationMs" />
                 </summary>
                 <pre>{{ message.text || t("common.noOutput") }}</pre>
                 <MessageImages :images="message.images" />
@@ -80,7 +82,7 @@ const { t } = useI18n();
                   <small>{{ t('branch.nestedCalls') }}</small>
                   <p v-if="!message.nestedCallsComplete">{{ t('branch.nestedCallsIncomplete') }}</p>
                   <details v-for="call in message.nestedCalls" :key="call.id" :class="{ error: call.status !== 'ok' }">
-                    <summary><strong>{{ call.name }}</strong> · {{ t(`branch.nestedStatus.${call.status === 'ok' ? 'ok' : call.status === 'error' ? 'error' : 'unfinished'}`) }}</summary>
+                    <summary><strong>{{ call.name }}</strong> · {{ t(`branch.nestedStatus.${call.status === 'ok' ? 'ok' : call.status === 'error' ? 'error' : 'unfinished'}`) }} <ToolDuration :duration-ms="call.durationMs" /></summary>
                     <pre v-if="call.input">{{ call.input }}</pre>
                     <pre v-if="call.error">{{ call.error }}</pre>
                   </details>

@@ -9,6 +9,7 @@ import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
 import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import BranchHistory, { type HistoryTurn as Turn } from "./BranchHistory.vue";
+import ToolDuration from "./ToolDuration.vue";
 import PromptComposer from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
@@ -448,6 +449,7 @@ onBeforeUnmount(() => {
                 <Terminal v-else :size="13" />
                 <strong>{{ item.title }}</strong>
                 <code v-if="item.input" :title="item.input">{{ item.input }}</code>
+                <ToolDuration :running="activity.active && item.status === 'running'" :started-at="item.timestamp" :duration-ms="item.durationMs" />
               </summary>
               <pre v-if="item.status === 'running' || expandedLiveTools.has(item.id)">{{ (item.status === 'running' ? liveText(item.text) : item.text) || (item.status === "running" ? t("branch.running") : t("common.noOutput")) }}</pre>
               <MessageImages v-if="item.status === 'running' || expandedLiveTools.has(item.id)" :images="item.images" />

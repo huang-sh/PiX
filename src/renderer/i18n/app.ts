@@ -31,6 +31,7 @@ export const en = {
   time: {
     now: "now",
     seconds: "{n}s",
+    milliseconds: "{n}ms",
     minutes: "{n}m",
     hours: "{n}h",
     days: "{n}d",
@@ -177,6 +178,7 @@ export const zhCN: typeof en = {
   time: {
     now: "刚刚",
     seconds: "{n} 秒",
+    milliseconds: "{n} 毫秒",
     minutes: "{n} 分钟",
     hours: "{n} 小时",
     days: "{n} 天",

@@ -15,7 +15,8 @@ it("shows localized context-status icons without changing history and clears the
   const entries: RawSessionEntry[] = [
     { id: "u", parentId: null, type: "message", timestamp: "1", message: { role: "user", content: "original prompt" } },
     { id: "a", parentId: "u", type: "message", timestamp: "2", message: { role: "assistant", content: "original answer" } },
-    { id: "t", parentId: "a", type: "message", timestamp: "3", message: { role: "toolResult", toolName: "read", content: "original tool output" } },
+    { id: "t", parentId: "a", type: "message", timestamp: "3", message: { role: "toolResult", toolName: "read", content: "original tool output", durationMs: 3100,
+      nestedCalls: { complete: true, calls: [{ id: "child", name: "write", status: "ok", durationMs: 456 }] } } },
     { id: "A", parentId: "t", type: "message", timestamp: "4", message: { role: "user", content: "branch A" } },
     { id: "omit", parentId: "A", type: "context_edit", timestamp: "5", targetId: "u", replacement: null },
     { id: "edit", parentId: "omit", type: "context_edit", timestamp: "6", targetId: "a", replacement: { content: "changed input" } },
@@ -40,6 +41,8 @@ it("shows localized context-status icons without changing history and clears the
     const process = wrapper.get('.agent-process');
     (process.element as HTMLDetailsElement).open = true; await process.trigger("toggle");
     expect(wrapper.get('.process-tool [data-context-status="excluded"]').attributes("title")).toBe("已从模型上下文排除");
+    expect(wrapper.get('.process-tool > summary .tool-duration').text()).toBe("3.1 秒");
+    expect(wrapper.get('.nested-tools .tool-duration').text()).toBe("456 毫秒");
     i18n.global.locale.value = "en"; await flushPromises();
     expect(excluded.attributes("title")).toBe("Excluded from model context");
     await session.selectNode("turn:B"); await flushPromises();
@@ -108,10 +111,11 @@ describe("BranchContextPanel streaming scroll", () => {
     const session = useSessionStore();
     session.onAgentEvent({ type: "agent_start" });
     session.onAgentEvent({ type: "tool_execution_start", toolCallId: "read", toolName: "read" });
-    session.onAgentEvent({ type: "tool_execution_end", toolCallId: "read", result: { content: [{ text: "tool".repeat(20000) }] } });
+    session.onAgentEvent({ type: "tool_execution_end", toolCallId: "read", durationMs: 1337, result: { content: [{ text: "tool".repeat(20000) }] } });
     session.onAgentEvent({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "a".repeat(100000) }] } });
     const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true } } });
     expect(wrapper.find('.process-tool pre').exists()).toBe(false);
+    expect(wrapper.get('.process-tool > summary .tool-duration').text()).toBe("1.3s");
     expect(wrapper.findComponent({ name: "MarkdownRenderer" }).props('content')).toHaveLength(32768);
     expect(session.activity!.items.at(-1)!.text).toHaveLength(100000);
     await wrapper.get('.agent-process.live .assistant .copy-button').trigger('click');
