@@ -302,21 +302,31 @@ test("OpenRouter login refreshes only its catalog after broker auth, while other
 test("failed OpenRouter catalog refreshes retain API key/OAuth saves and return a retry warning", async t => {
   const runtime = new PiRuntime(null, null, () => assert.fail("the caller owns the warning"), async () => undefined);
   let savedType: string | undefined;
-  let outcome = { aborted: false, errors: new Map([["openrouter", new Error("Network unavailable")]]) };
-  runtime.modelServices = { modelRuntime: {
-    login: async (_provider: string, type: string) => { savedType = type; },
-    checkAuth: async () => ({ type: savedType }),
-    refresh: async () => outcome,
-  } };
+  let savedDeviceId: string | undefined;
+  const outcome = { aborted: false, errors: new Map([["openrouter", new Error("Network unavailable")]]) };
+  runtime.modelServices = {
+    // ChatGPT sign-in reads its agent host ID from the settings manager.
+    settingsManager: { getOrCreateDeviceId: () => "01234567-89ab-cdef-0123-456789abcdef" },
+    modelRuntime: {
+      login: async (_provider: string, type: string, _interaction: unknown, options?: { getDeviceId?: () => string }) => {
+        savedType = type;
+        savedDeviceId = options?.getDeviceId?.();
+      },
+      checkAuth: async () => ({ type: savedType }),
+      refresh: async () => outcome,
+    },
+  };
   t.mock.method(runtime, "refreshBrokerAuth", async () => {});
   for (const action of ["loginApiKey", "loginOAuth"] as const) {
     savedType = undefined;
+    savedDeviceId = undefined;
     const result = await runtime.control({ action, provider: "openrouter", apiKey: "test-key", method: "browser" } as AgentControl) as any;
     assert.equal(result.ok, true);
     assert.equal(savedType, action === "loginApiKey" ? "api_key" : "oauth");
+    assert.equal(savedDeviceId, action === "loginOAuth" ? "01234567-89ab-cdef-0123-456789abcdef" : undefined);
     assert.match(result.catalogError, /openrouter: Network unavailable/);
   }
-  outcome = { aborted: true, errors: new Map() };
+  outcome.aborted = true; outcome.errors = new Map();
   const result = await runtime.control({ action: "loginApiKey", provider: "openrouter", apiKey: "test-key" }) as any;
   assert.equal(result.ok, true);
   assert.match(result.catalogError, /timed out/);

@@ -1147,6 +1147,9 @@ export class PiRuntime {
       }
       case "loginOAuth": {
         const modelRuntime = await this.modelRuntime();
+        // The settings manager backing the runtime owns this installation's
+        // stable device ID, which ChatGPT sign-in sends as its agent host ID.
+        const settingsManager = this.runtime?.session?.settingsManager ?? this.modelServices?.settingsManager;
         await modelRuntime.login(input.provider, "oauth", {
           prompt: async (prompt: any) => {
             if (prompt.type === "select") {
@@ -1177,7 +1180,7 @@ export class PiRuntime {
               : event.type === "progress" ? event.message : event.instructions;
             if (message) this.emit({ type: "notice", payload: { message } });
           },
-        });
+        }, { getDeviceId: () => settingsManager.getOrCreateDeviceId() });
         const status = await modelRuntime.checkAuth(input.provider);
         if (status?.type !== "oauth")
           throw new Error("OAuth completed without a usable credential");
