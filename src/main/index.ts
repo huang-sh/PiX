@@ -7,6 +7,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  net,
   shell,
   Tray,
 } from "electron";
@@ -21,6 +22,7 @@ import { UpdateChecker } from "./update-check.js";
 import { pixHome } from "./paths.js";
 import { bootstrapPixProfile } from "./services.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
+import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
 
@@ -34,6 +36,7 @@ applyLinuxImeWorkaround({
 
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: MainController;
+let closeHttpProxy: (() => Promise<void>) | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
@@ -357,6 +360,10 @@ app.whenReady().then(async () => {
     },
   });
   controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
+  closeHttpProxy = installHttpProxy(
+    () => controller.settings.bundle().piGlobal.httpProxy,
+    (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+  );
   // Release awareness runs only in the desktop main process — a remote host
   // serves sessions but must not announce desktop updates itself.
   new UpdateChecker({
@@ -412,7 +419,10 @@ app.on("before-quit", (event) => {
     event.preventDefault();
     if (!closingSessions) {
       closingSessions = true;
-      void controller.closeAll().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
+      void controller.closeAll().finally(() => closeHttpProxy?.()).finally(() => {
+        sessionsClosed = true;
+        app.quit();
+      }).catch(() => {});
     }
     return;
   }

@@ -8,6 +8,7 @@ import { setDebugLogEnabled } from "../main/debug-log.js";
 import { pixHome } from "../main/paths.js";
 import { bootstrapPixProfile } from "../main/services.js";
 import { enrichLoginPath } from "./login-env.js";
+import { installHttpProxy } from "../main/http-proxy.js";
 import {
   PIX_HOST_VERSION,
   PIX_REMOTE_PROTOCOL,
@@ -94,6 +95,7 @@ async function serve() {
   await enrichLoginPath();
   bootstrapPixProfile(pixHome());
   const controller = new MainController(cwd, platform);
+  const closeHttpProxy = installHttpProxy(() => controller.settings.bundle().piGlobal.httpProxy);
   const { VERSION: piVersion } = await controller.projectRuntime.pi();
   const token = randomBytes(32).toString("base64url");
   const wss = new WebSocketServer({
@@ -126,6 +128,7 @@ async function serve() {
       // An interrupted first turn may exist only in memory until its error
       // response is appended. Drain it before disposing or exiting.
       await controller.closeAll();
+      await closeHttpProxy();
     } catch (error) {
       process.stderr.write(`Remote shutdown failed: ${String(error)}\n`);
       process.exitCode = 1;
