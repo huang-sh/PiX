@@ -36,11 +36,9 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
     const pin = manual.get(node.id)!;
     return [node.id, { x: pin.x - node.x, y: pin.y - node.y }];
   }));
-  // A card is placed already when the user put it there, or when the nearest
-  // manual ancestor above it is dragging its branch along. The renderer's tree
-  // mixes projection and transient cards, so these upward walks stop on a repeat
-  // instead of assuming every parent chain reaches a root.
-  const fixed = new Set(manual.keys());
+  // Follow the nearest manual ancestor that carries its branch. A new card still
+  // needs collision checks after inheriting that offset. The renderer's tree mixes
+  // projection and transient cards, so stop upward walks on a repeated parent.
   for (const node of nodes) {
     const pin = manual.get(node.id);
     if (pin) { node.x = pin.x; node.y = pin.y; continue; }
@@ -52,15 +50,14 @@ export function reserveManualPositions(nodes: LayoutBox[], manual: Map<string, M
     }
     const offset = parent && manual.get(parent.id)?.branch ? offsets.get(parent.id) : undefined;
     if (!offset) continue;
-    fixed.add(node.id);
     node.x += offset.x; node.y += offset.y;
   }
   const blocks = new Map<string, LayoutBox[]>();
   for (const node of nodes) {
-    if (!fresh.has(node.id) || fixed.has(node.id)) continue;
+    if (!fresh.has(node.id) || manual.has(node.id)) continue;
     let root = node;
     const walked = new Set<string>();
-    while (root.parentId && fresh.has(root.parentId) && !fixed.has(root.parentId) && !walked.has(root.parentId)) {
+    while (root.parentId && fresh.has(root.parentId) && !manual.has(root.parentId) && !walked.has(root.parentId)) {
       walked.add(root.parentId);
       root = byId.get(root.parentId) ?? root;
     }

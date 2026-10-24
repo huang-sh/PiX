@@ -156,6 +156,40 @@ describe("draft placement", () => {
     expectClear(graph, "turn:done");
   });
 
+  it.each(["up", "down"])("clears a pinned child when branching %s from a manually positioned parent", async direction => {
+    const { graph, session } = setup();
+    for (const id of ["turn:b", "turn:c"]) {
+      const node = graph.nodes.find((item: any) => item.id === id);
+      graph.rememberDrag({ node: { id, position: { ...node.position } }, event: { shiftKey: true } });
+    }
+    const child = { ...graph.nodes.find((node: any) => node.id === "turn:c").position };
+    const parent = { ...graph.nodes.find((node: any) => node.id === "turn:b").position };
+    await graph.compose("turn:b", direction); await flushPromises();
+    expectClear(graph, "draft:turn:b");
+    expect(graph.nodes.find((node: any) => node.id === "turn:c").position).toEqual(child);
+    graph.rebuild();
+    expectClear(graph, "draft:turn:b");
+    const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
+      session.current!.graph!.runs = [{ branchId: "new", runId: "new", nodeId: null, status: "running",
+        pending: { text: "new", parentNodeId: "turn:b" } }];
+      return "pending:new";
+    });
+    try { await graph.submitDraft("new"); await flushPromises(); }
+    finally { promptAt.mockRestore(); }
+    expectClear(graph, "pending:new");
+    const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "b", timestamp: "9",
+      message: { role: "user", content: "new" } }];
+    session.current!.entries = entries;
+    session.current!.projection = projectSession(entries, "new");
+    session.current!.graph!.runs = [{ branchId: "new", runId: "new", nodeId: "turn:new", status: "idle" }];
+    await flushPromises();
+    expectClear(graph, "turn:new");
+    graph.rebuild();
+    expectClear(graph, "turn:new");
+    expect(graph.nodes.find((node: any) => node.id === "turn:c").position).toEqual(child);
+    expect(graph.nodes.find((node: any) => node.id === "turn:b").position).toEqual(parent);
+  });
+
   it.each([{ x: 1200, y: 900 }, { x: 800, y: 230 }])("retains manual positions without overlap when submitting another child (%j)", async (manual) => {
     const { graph, session } = setup();
     const entries = [...session.current!.entries, { type: "message", id: "a1", parentId: "a", timestamp: "4",
