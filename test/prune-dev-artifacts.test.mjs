@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pruneDevArtifacts } from "../scripts/strip-cross-platform-binaries.mjs";
+import { pruneDevArtifacts } from "../scripts/prune-packaged-files.mjs";
 
 test("pruneDevArtifacts removes declarations, maps, and docs but keeps runtime files", () => {
   const root = mkdtempSync(join(tmpdir(), "pix-prune-"));

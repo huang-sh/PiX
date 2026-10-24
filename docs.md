@@ -163,8 +163,8 @@ classifier models are called through Codemode.
 The broker carries `stream`, `streamSimple`, `generateImages` and `classify`.
 Its catalog includes chat, image and classifier models without credential
 fields, and each request is checked against the advertised catalog. Image and
-classifier calls return one result rather than chat stream events. The Pi 1.2
-integration uses remote protocol 17 and host version 0.0.27; host installers
+classifier calls return one result rather than chat stream events. The Pi 1.4
+integration uses remote protocol 17 and host version 0.0.28; host installers
 check both values so older hosts are updated before use.
 
 **Shutdown.** Quitting flushes pending background history writes, aborts

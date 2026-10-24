@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import type { ClassifierContext } from "@earendil-works/pi-ai";
 import { WslHostClient, RemoteHostUnreachable, HostStarted, launcherScript } from "../src/main/wsl-host-client.js";
 import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
@@ -121,6 +122,27 @@ test("remote transport returns image and classifier results and cancels either o
   }
 });
 
+test("remote classifier requests preserve image input", async t => {
+  const { client, socket } = transport(t);
+  const context: ClassifierContext = {
+    state: { task: "Inspect the image" },
+    images: [{ type: "image", data: "test-image", mimeType: "image/png" }],
+    questions: { visible: { type: "bool", instructions: "Is an object visible?", criteria: {
+      true: "An object is visible", false: "No object is visible",
+    } } },
+  };
+  const result = { api: "test", provider: "test", model: "vision", timestamp: 1,
+    stopReason: "stop" as const, answers: {} };
+  client.setModelBroker(async request => {
+    assert.equal(request.operation, "classify");
+    assert.deepEqual(request.context, context);
+    return result as any;
+  });
+  socket.emit("message", JSON.stringify({ type: "model.request", id: "vision", operation: "classify", context }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(socket.sent.at(-1), { type: "model.event", id: "vision", event: { type: "result", result } });
+});
+
 test("ordinary requests time out and late responses do not poison subsequent requests", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { client, socket } = transport(t);
@@ -180,13 +202,13 @@ test("a launcher exit does not end the link, but a reattach transport exit does"
   assert.match((await failure).message, /SSH transport exited with code 255/);
 });
 
-async function waitForLog(text: string) {
+async function waitForLog(...texts: string[]) {
   for (let i = 0; i < 400; i++) {
     const content = existsSync(logFile()) ? readFileSync(logFile(), "utf8") : "";
-    if (content.includes(text)) return content;
+    if (texts.every(text => content.includes(text))) return content;
     await new Promise(resolve => setTimeout(resolve, 5));
   }
-  assert.fail(`Missing log text: ${text}`);
+  assert.fail(`Missing log text: ${texts.join(", ")}`);
 }
 
 test("socket-first disconnection logs late stderr at child close without notifying twice", async t => {
@@ -204,7 +226,7 @@ test("socket-first disconnection logs late stderr at child close without notifyi
   child.stderr.write("\nlate stderr after exit: final diagnostic\n");
   child.stderr.end();
   child.emit("close", 23, null);
-  const log = await waitForLog("late stderr after exit: final diagnostic");
+  const log = await waitForLog("late stderr after exit: final diagnostic", "launcher closed] requested=false code=23 signal=none");
   assert.match(log, /launcher closed\] requested=false code=23 signal=none/);
   assert.equal(failures.length, 1);
   assert.equal(failures[0]!.message, "Remote host disconnected");

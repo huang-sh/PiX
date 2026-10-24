@@ -77,6 +77,8 @@ test("Codemode runs nested writes through PiX hooks and restores records and too
   const path = snapshot.session.path;
   await runtime.close();
   await runtime.open(path);
+  assert.ok(runtime.runtime.session.getActiveToolNames().includes("codemode"), "resuming keeps explicitly activated extension tools");
+  assert.ok(runtime.runtime.session.getActiveToolNames().includes("write"));
   assert.deepEqual(runtime.snapshot().projection.messages.find(message => message.toolName === "codemode")?.nestedCalls, call!.nestedCalls);
   assert.equal(runtime.snapshot().projection.messages.find(message => message.toolName === "codemode")?.durationMs, call.durationMs);
   assert.ok(events.some(event => event.payload?.parentToolCallId));

@@ -18,9 +18,8 @@ files:
   - "!node_modules/**/*.d.mts"
   - "!node_modules/**/*.d.cts"
 
-# Cross-platform binary pruning (esbuild ships ~230MB of other-platform
-# binaries via pi's chord dependency).
-afterPack: scripts/strip-cross-platform-binaries.mjs
+# Prune bundled extension dev artifacts and verify the finished package.
+afterPack: scripts/prune-packaged-files.mjs
 
 # node-pty ships NAPI prebuilds for every platform (node_modules/node-pty/
 # prebuilds), so skip the electron rebuild entirely.

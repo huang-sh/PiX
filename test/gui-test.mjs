@@ -804,6 +804,9 @@ try {
       })
     : { selected: true, embeddedComposer: false, addAction: true, centered: true, noOverlap: true };
   if (sessionState.current) {
+    // Keep the real pointer off the graph while dispatching synthetic hover
+    // events; the preceding resize can leave it over a node or its preview.
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
     await cdp.evaluate("document.querySelector('.prompt-node.selected').dispatchEvent(new MouseEvent('mouseenter'))");
     graphNode.hoverMarkdown = await retry(async () => {
       const value = await cdp.evaluate(`(() => {
