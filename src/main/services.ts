@@ -45,7 +45,7 @@ import type {
   ShellResult,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
-import { validateShortcutOverrides } from "../shared/shortcuts.js";
+import { migrateShortcutOverrides, validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 import { sessionModifiedAt } from "./graph-files.js";
@@ -243,7 +243,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
   expectNumber("canvasDotGridSpacing", 8, 96);
   expectNumber("canvasDotGridDotSize", 1, 6);
   try {
-    if (out.keyboardShortcuts !== undefined) validateShortcutOverrides(out.keyboardShortcuts);
+    if (out.keyboardShortcuts !== undefined) out.keyboardShortcuts = migrateShortcutOverrides(out.keyboardShortcuts);
   } catch {
     drop("keyboardShortcuts");
   }

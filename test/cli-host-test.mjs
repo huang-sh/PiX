@@ -311,8 +311,13 @@ try {
   await gui.evaluate(`document.querySelector('[data-action="node-label-save"]').click()`);
   await until(() => gui.evaluate(`!document.querySelector('[data-action="node-label-input"]')`));
   assert.equal((await cli(['tree', path, '--json'])).events[0].snapshot.projection.nodes.find(n => n.id === rootNode)?.label, 'GUI bookmark');
-  await gui.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
-  await gui.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+  // Saving a label changes the card height and may move it. Select from its
+  // current bounds rather than reusing the pre-edit context-menu coordinates.
+  await gui.evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+  const selectionPoint = await gui.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(card)}).getBoundingClientRect();return{x:r.x+25,y:r.y+15}})()`);
+  await gui.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...selectionPoint });
+  await gui.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...selectionPoint });
+  await until(() => gui.evaluate(`document.querySelector(${JSON.stringify(card)}).classList.contains('selected')`));
   const primary = await gui.evaluate(`/Mac/i.test(navigator.platform)`) ? 4 : 2;
   await gui.send('Input.dispatchKeyEvent', { type:'keyDown', key:'L', code:'KeyL', windowsVirtualKeyCode:76, modifiers:primary | 8 });
   await gui.send('Input.dispatchKeyEvent', { type:'keyUp', key:'L', code:'KeyL', windowsVirtualKeyCode:76, modifiers:primary | 8 });
@@ -339,6 +344,33 @@ try {
   writeFileSync(join(root, 'artifacts/graph-labels-gui.png'), Buffer.from(picture.data, 'base64'));
   await gui.evaluate(`(()=>{const e=document.querySelector('[data-action="graph-filter"]');e.value='all';e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
 
+  // Main history must regain its label menu as soon as its own run settles,
+  // even while a sibling keeps the graph's global delete guard active.
+  const mainMenu = start(['run', 'HOLD main menu', '--session', path, '--json']);
+  const otherMenu = start(['fork', rootNode, 'HOLD other menu', '--session', path, '--json']);
+  await until(() => held.has('HOLD main menu') && held.has('HOLD other menu'));
+  await until(() => gui.evaluate(`window.__pixTest.state().current?.graph.runs.filter(run=>run.status==='running').length===2`));
+  async function openLabelMenu() {
+    const menuPoint = await gui.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(card)}).getBoundingClientRect();return{x:r.x+25,y:r.y+15}})()`);
+    await gui.send('Input.dispatchMouseEvent', {type:'mousePressed',button:'right',clickCount:1,...menuPoint});
+    await gui.send('Input.dispatchMouseEvent', {type:'mouseReleased',button:'right',clickCount:1,...menuPoint});
+    await until(() => gui.evaluate(`Boolean(document.querySelector('[data-action="node-edit-label"]'))`));
+  }
+  async function dismissMenu() {
+    await gui.send('Input.dispatchKeyEvent', {type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await gui.send('Input.dispatchKeyEvent', {type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await until(() => gui.evaluate(`!document.querySelector('[data-action="node-edit-label"]')`));
+  }
+  await openLabelMenu();
+  assert.equal(await gui.evaluate(`document.querySelector('[data-action="node-edit-label"]').hasAttribute('data-disabled')`), true);
+  await dismissMenu();
+  held.get('HOLD main menu')(); await mainMenu.result;
+  assert.ok(held.has('HOLD other menu'));
+  await until(() => gui.evaluate(`window.__pixTest.state().current?.graph.runs.find(run=>run.branchId==='main')?.status==='idle'`));
+  await openLabelMenu();
+  await until(() => gui.evaluate(`!document.querySelector('[data-action="node-edit-label"]').hasAttribute('data-disabled')`));
+  await dismissMenu();
+  held.get('HOLD other menu')(); await otherMenu.result;
   const other = (await cli(['new', '--json'])).events[0].session.path;
   await cli(['run', 'other session', '--session', other, '--json']);
   assert.equal((await gui.evaluate(`window.pix.invoke('session.snapshot')`)).session.path, path, 'CLI selection does not move GUI');
@@ -395,7 +427,7 @@ try {
   await guiExit; desktop = undefined;
   await cli(['host', 'stop']);
   console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'],
-    tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'native GUI label shortcut and Enter to save', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
+    tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'native GUI label shortcut and Enter to save', 'label menu restores while sibling keeps running', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
       'cancel and continue', 'native input/select/confirm dialogs', 'confirmation defaults to cancel', 'CJK multiline paste',
       'native tool cards', 'exit preserves accepted work'], modelRequests: requests.length, home }));
 } finally {

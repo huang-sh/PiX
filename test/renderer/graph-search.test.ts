@@ -205,3 +205,29 @@ describe("graph label shortcut", () => {
     expect(press().defaultPrevented).toBe(true);
   });
 });
+
+
+it("restores the label menu when a branch settles while its sibling keeps running", async () => {
+  const { setupState } = mountGraph(); await flushPromises();
+  const current = useSessionStore().current!;
+  current.graph = { id: current.session.path, revision: 1, runs: [
+    { branchId: "main", runId: "main", status: "running", nodeId: "turn:u2" },
+    { branchId: "other", runId: "other", status: "running", nodeId: null },
+  ] };
+  current.projection = { ...current.projection, nodes: [...current.projection.nodes], activeNodeId: "turn:u2" };
+  await flushPromises();
+  const card = () => setupState.nodes.find((node: { id: string }) => node.id === "turn:u1").data;
+  expect(card().onEditLabel).toBeUndefined();
+  current.graph.runs[0]!.status = "idle";
+  current.projection = { ...current.projection, nodes: [...current.projection.nodes] };
+  await flushPromises();
+  expect(setupState.canEditLabel(current.projection.nodes[0])).toBe(true);
+  expect(card().onEditLabel).toBeTypeOf("function");
+  card().onEditLabel();
+  expect(setupState.labelTarget.entryId).toBe("u1");
+  setupState.labelTarget = undefined; await flushPromises();
+  current.graph.runs[0]!.status = "running";
+  current.projection = { ...current.projection, nodes: [...current.projection.nodes] };
+  await flushPromises();
+  expect(card().onEditLabel).toBeUndefined();
+});

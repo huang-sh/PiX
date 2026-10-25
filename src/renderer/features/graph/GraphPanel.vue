@@ -139,7 +139,7 @@ const promptCache = new Map<string, PromptNodeData>();
 function stablePrompt(data: PromptNodeData) {
   const previous = promptCache.get(data.node.id);
   if (previous && (Object.keys(data) as Array<keyof PromptNodeData>).every(key =>
-    typeof data[key] === "function" || data[key] === previous[key])) return previous;
+    data[key] === previous[key] || (typeof data[key] === "function" && typeof previous[key] === "function"))) return previous;
   const raw = markRaw(data);
   promptCache.set(data.node.id, raw);
   return raw;

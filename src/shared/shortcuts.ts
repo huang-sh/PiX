@@ -43,14 +43,32 @@ export function shortcutConflict(overrides: ShortcutOverrides): { binding: strin
   }
 }
 
-export function validateShortcutOverrides(value: unknown): asserts value is ShortcutOverrides {
+function validateShortcutShape(value: unknown): asserts value is ShortcutOverrides {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid keyboard shortcuts");
   for (const [id, bindings] of Object.entries(value)) {
     if (!SHORTCUTS.some((item) => item.id === id) || !Array.isArray(bindings) ||
       bindings.some((binding) => typeof binding !== "string" || !validShortcut(binding)))
       throw new Error("Invalid keyboard shortcuts");
   }
-  if (shortcutConflict(value as ShortcutOverrides)) throw new Error("Keyboard shortcuts conflict");
+}
+
+export function validateShortcutOverrides(value: unknown): asserts value is ShortcutOverrides {
+  validateShortcutShape(value);
+  if (shortcutConflict(value)) throw new Error("Keyboard shortcuts conflict");
+}
+
+/** Saved user bindings take priority over defaults added by newer versions. */
+export function migrateShortcutOverrides(value: unknown): ShortcutOverrides {
+  validateShortcutShape(value);
+  const restored = { ...value };
+  const claimed = new Set(Object.values(value).flat());
+  for (const { id, defaults } of SHORTCUTS) {
+    if (Object.hasOwn(value, id)) continue;
+    const available = defaults.filter(binding => !claimed.has(binding));
+    if (available.length !== defaults.length) restored[id] = available;
+  }
+  validateShortcutOverrides(restored);
+  return restored;
 }
 
 export function formatShortcut(binding: string, mac = false): string {
