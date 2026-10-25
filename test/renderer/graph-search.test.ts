@@ -110,3 +110,50 @@ describe("graph search panel", () => {
     expect(wrapper.find('[data-action="graph-search-input"]').exists()).toBe(false);
   });
 });
+
+
+describe("graph labels and task filters", () => {
+  beforeEach(() => { vi.mocked(window.pix!.invoke).mockReset().mockResolvedValue({}); });
+  it("shows matching tasks and ancestor context without changing the session projection", async () => {
+    const { wrapper, setupState } = mountGraph(); await flushPromises();
+    const session = useSessionStore();
+    session.current!.projection = { ...session.current!.projection, nodes: session.current!.projection.nodes.map((node, index) =>
+      index ? { ...node, label: "文档完成", parentId: "turn:u1" } : node) };
+    await wrapper.get('[data-action="graph-filter"]').setValue("labeled"); await flushPromises();
+    expect(setupState.filterCount).toBe(1);
+    expect(setupState.filteredGraph.nodes.map((node: { id: string }) => node.id)).toEqual(["turn:u1", "turn:u2"]);
+    expect(setupState.nodes.find((node: { id: string }) => node.id === "turn:u1").data.filterContext).toBe(true);
+    expect(session.current!.projection.nodes).toHaveLength(2);
+    await wrapper.get('[data-action="graph-filter"]').setValue("running"); await flushPromises();
+    expect(setupState.filteredGraph.nodes.filter((node: { type: string }) => node.type === "prompt")).toHaveLength(0);
+    expect(wrapper.get('[role="status"]').text()).toContain("No matching tasks");
+    await wrapper.get('[data-action="graph-filter"]').setValue("all"); await flushPromises();
+    expect(setupState.filteredGraph.nodes.filter((node: { type: string }) => node.type === "prompt")).toHaveLength(2);
+  });
+
+  it("saves a node label through the shared control and keeps failures editable", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    setupState.editLabel(useSessionStore().current!.projection.nodes[0]);
+    setupState.labelText = "登录测试通过";
+    vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error("storage unavailable"));
+    await setupState.saveLabel();
+    expect(setupState.labelError).toBe("storage unavailable");
+    expect(setupState.labelText).toBe("登录测试通过");
+    expect(setupState.labelTarget).toBeTruthy();
+    vi.mocked(window.pix!.invoke).mockResolvedValueOnce({});
+    await setupState.saveLabel();
+    expect(window.pix!.invoke).toHaveBeenLastCalledWith("agent.control", { action: "setLabel", entryId: "u1", label: "登录测试通过" });
+    expect(setupState.labelTarget).toBeUndefined();
+  });
+
+  it("searches bookmark names and closes label editing when sessions change", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    const current = useSessionStore().current!;
+    const marked = { ...current.projection, nodes: current.projection.nodes.map((node, index) => index ? { ...node, label: "文档书签" } : node) };
+    expect(searchGraphNodeIds(marked, entries, "文档书签")).toEqual(["turn:u2"]);
+    setupState.editLabel(current.projection.nodes[0]);
+    current.session = { ...current.session, path: "other-session" };
+    await flushPromises();
+    expect(setupState.labelTarget).toBeUndefined();
+  });
+});

@@ -1407,3 +1407,11 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 @keyframes welcome-float { from { transform: translateY(-1px); } to { transform: translateY(-7px); } }
 @keyframes welcome-rise { from { transform: translateY(10px); opacity: 0; } }
 @keyframes welcome-tracking { from { letter-spacing: .3em; opacity: 0; } }
+
+/* Task bookmarks and filters share the graph's existing presentation. */
+.graph-filter { max-width: 140px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); padding: 5px 7px; font: inherit; font-size: var(--font-size-small); }
+.graph-filter-empty { position: absolute; z-index: 10; top: 12px; left: 50%; transform: translateX(-50%); padding: 8px 12px; border-radius: 8px; background: var(--surface); color: var(--muted); pointer-events: none; }
+.prompt-node.filter-context { opacity: .5; }
+.node-label { display: flex; align-items: center; gap: 5px; width: fit-content; max-width: 100%; margin-top: 7px; padding: 2px 6px; border-radius: 5px; color: var(--accent-strong); background: var(--accent-soft); font-size: var(--font-size-caption); }
+.node-label svg { flex-shrink: 0; }
+.node-label span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, GitBranch, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, FolderOutput, GitBranch, Image, LoaderCircle, MessageSquare, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -27,6 +27,8 @@ export interface PromptNodeData {
   running?: boolean;
   /** True while the node matches the active graph search query. */
   searchHit?: boolean;
+  filterContext?: boolean;
+  onEditLabel?: () => void;
   content: () => NodeContent;
   onCompose: (direction?: BranchDirection) => void;
   /** Opens this node in a pinned chat column; graph sessions only. */
@@ -187,7 +189,7 @@ function relative(value: string) {
   <article
     ref="root"
     class="prompt-node"
-    :class="{ active: data.active, current: data.current, running: data.running, selected, 'search-hit': data.searchHit }"
+    :class="{ active: data.active, current: data.current, running: data.running, selected, 'search-hit': data.searchHit, 'filter-context': data.filterContext }"
     @mouseenter="showPreview"
     @mouseleave="hidePreview"
     @contextmenu.stop
@@ -216,6 +218,7 @@ function relative(value: string) {
         <template v-else>{{ data.node.preview || t("graph.waitingAssistant") }}</template>
       </p>
     </section>
+    <span v-if="data.node.label" class="node-label" :title="data.node.label"><Tag :size="12" /><span>{{ data.node.label }}</span></span>
     <footer
       class="node-footer nodrag nowheel"
       @click.stop
@@ -271,6 +274,7 @@ function relative(value: string) {
   </ContextMenuTrigger>
   <ContextMenuPortal>
     <ContextMenuContent class="menu-content nodrag nowheel" :side-offset="4" @close-auto-focus.prevent>
+      <ContextMenuItem class="menu-item" data-action="node-edit-label" :disabled="!data.onEditLabel" @select="data.onEditLabel?.()"><Tag :size="14" />{{ t("graph.editLabel") }}</ContextMenuItem>
       <ContextMenuItem
         v-if="data.onOpenPanel"
         class="menu-item"

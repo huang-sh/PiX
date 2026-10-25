@@ -14,7 +14,7 @@ async function until(check: () => boolean) {
   throw new Error("Timed out waiting for graph state");
 }
 
-test("an interrupted response can be followed by another prompt", { timeout: 20000 }, async () => {
+test("interrupted turns resume and retain native bookmarks across branches, restart, export and removal", { timeout: 20000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-abort-followup-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
@@ -64,6 +64,9 @@ test("an interrupted response can be followed by another prompt", { timeout: 200
     await until(() => branchStarted);
     const branch = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-interrupted")!;
     assert.equal(branch.status, "running");
+    const busyNode = runtime.snapshot().projection.nodes.find(node => node.title === "branch first");
+    if (busyNode) await assert.rejects(runtime.control({ action: "setLabel", entryId: busyNode.userEntryId, label: "busy" }), /finish/);
+
     await runtime.control({ action: "branchAbort", branchId: branch.branchId, runId: branch.runId });
     assert.equal(runtime.snapshot().graph!.runs.find(run => run.branchId === branch.branchId)?.status, "idle");
     const branchNode = runtime.snapshot().projection.nodes.find(node => node.title === "branch first")!;
@@ -72,6 +75,32 @@ test("an interrupted response can be followed by another prompt", { timeout: 200
     await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "branch second")
       && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
     assert.ok(JSON.stringify(runtime.snapshot().entries).includes("branch after interrupt"));
+    const tree = runtime.snapshot(), path = tree.session.path;
+    const main = tree.projection.nodes.find(node => node.title === "first")!;
+    const label = async (entryId: string, value?: string) => runtime.control({ action: "setLabel", entryId, label: value }) as Promise<SessionSnapshot>;
+    await label(main.userEntryId, "Main bookmark");
+    const marked = await label(branchNode.userEntryId, "分支测试通过");
+    assert.equal(marked.projection.nodes.find(node => node.id === main.id)?.label, "Main bookmark");
+    assert.equal(marked.projection.nodes.find(node => node.id === branchNode.id)?.label, "分支测试通过");
+    assert.equal(marked.projection.nodes.length, tree.projection.nodes.length);
+    faux.setResponses([fauxAssistantMessage("after bookmark")]);
+    await runtime.control({ action: "promptAt", requestId: "labeled-fork", nodeId: main.id, text: "fork after labels", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    await assert.rejects(label("unknown", "bad"), /not found/);
+    await assert.rejects(label(main.userEntryId, "bad\nlabel"), /single-line/);
+    await runtime.close(); await runtime.open(path);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === branchNode.id)?.label, "分支测试通过");
+    const exported = await runtime.control({ action: "exportJsonl" }) as { path: string };
+    const data = parseStrict(readFileSync(exported.path, "utf8"));
+    assert.ok(data.entries.some(entry => entry.type === "label" && entry.targetId === branchNode.userEntryId && entry.label === "分支测试通过"));
+    const exportedBranch = await runtime.control({ action: "exportBranchSession", graphId: path, nodeId: main.id }) as { path: string };
+    const exportedData = parseStrict(readFileSync(exportedBranch.path, "utf8"));
+    assert.ok(exportedData.entries.some(entry => entry.type === "label" && entry.targetId === main.userEntryId && entry.label === "Main bookmark"));
+    await label(branchNode.userEntryId);
+    await runtime.close(); await runtime.open(path);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === branchNode.id)?.label, undefined);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === main.id)?.label, "Main bookmark");
+
   } finally {
     await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;

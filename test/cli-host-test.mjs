@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,8 @@ import { electronBinary } from './lib/electron-binary.mjs';
 import { terminalScreen } from './lib/terminal-screen.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const home = mkdtempSync(join(tmpdir(), 'pix-cli-e2e-'));
+// Canonical short paths match the GUI's project normalization and Unix socket limits.
+const home = realpathSync(mkdtempSync(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'pix-cli-e2e-')));
 const cwd = join(home, 'workspace');
 const agent = join(home, '.pix', 'agent');
 mkdirSync(cwd); mkdirSync(agent, { recursive: true });
@@ -127,8 +128,13 @@ async function openGui() {
     });
     socket.send(JSON.stringify({ id: key, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } }));
   });
-  await until(() => evaluate('Boolean(window.pix)'));
-  return { evaluate, close: () => socket.close() };
+  await until(() => evaluate('Boolean(window.pix) && document.readyState === "complete" && Boolean(document.querySelector("#app")?.children.length)'));
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const key = ++id;
+    pending.set(key, message => message.error ? reject(new Error(JSON.stringify(message.error))) : resolve(message.result));
+    socket.send(JSON.stringify({ id: key, method, params }));
+  });
+  return { evaluate, send, close: () => socket.close() };
 }
 try {
   console.error('Concurrent cold starts');
@@ -199,7 +205,35 @@ try {
   await until(() => !screen.viewport.split('Session Tree')[1]?.includes('interactive first'));
   terminal.write('\x1b[1;3C');
   await until(() => screen.viewport.split('Session Tree')[1]?.includes('interactive first'));
+  terminal.write('L');
+  await until(() => screen.viewport.includes('Label (empty removes it)'));
+  terminal.write('TUI bookmark\r');
+  await until(() => screen.viewport.includes('TUI bookmark') && !screen.viewport.includes('Saving label'));
+  const labeledTui = (await cli(['tree', tuiPath, '--json', '--filter', 'labeled'])).events[0];
+  assert.equal(labeledTui.matchingNodeIds.length, 1);
+  assert.ok(labeledTui.snapshot.projection.nodes.some(node => node.label === 'TUI bookmark'));
+  terminal.write('\x0c');
+  await until(() => screen.viewport.includes('Session Tree · labeled'));
+  terminal.write('\x05');
+  await until(() => screen.viewport.includes('No matching tasks'));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.ok(screen.viewport.includes('Session Tree'), 'an empty filter does not close the tree');
+  terminal.write('\x01');
+  await until(() => screen.viewport.includes('Session Tree · all'));
+
   terminal.write('\x1b');
+  await until(() => !screen.viewport.includes('Session Tree'));
+  terminal.write('HOLD tree focus\r');
+  await until(() => held.has('HOLD tree focus'));
+  terminal.write('/tree\r');
+  await until(() => screen.viewport.includes('Session Tree'));
+  terminal.write('\x12');
+  await until(() => screen.viewport.includes('Session Tree · running'));
+  held.get('HOLD tree focus')();
+  await until(() => !held.has('HOLD tree focus') && screen.viewport.includes(' · ready'));
+  terminal.write('\x05');
+  await until(() => screen.viewport.includes('Session Tree · errors'));
+  terminal.write('\x01\x1b');
   await until(() => !screen.viewport.includes('Session Tree'));
   terminal.write('/model\r');
   await until(() => screen.viewport.includes('Select model'));
@@ -259,9 +293,36 @@ try {
   console.error('Actual Electron');
   // Actual Electron GUI uses the very same host and sees CLI-created branches.
   gui = await openGui();
-  const open = await gui.evaluate(`window.pix.invoke('session.open', {path:${JSON.stringify(path)}})`);
+  await until(() => gui.evaluate(`window.__pixTest?.state().project?.path === ${JSON.stringify(cwd)} && !window.__pixTest.state().loading`));
+  await gui.evaluate(`window.__pixTest.openSession(${JSON.stringify(path)})`);
+  const open = await gui.evaluate(`window.pix.invoke('session.snapshot')`);
   assert.ok(open.projection.nodes.some(node => node.id === nested.nodeId));
   await gui.evaluate(`window.hostEvents=[]; window.pix.onEvent(e=>window.hostEvents.push(e)); true`);
+  // Real GUI menu -> label dialog -> shared Host -> CLI, then reverse direction.
+  const card = `[data-id="${rootNode}"] .prompt-node`;
+  await until(() => gui.evaluate(`Boolean(document.querySelector(${JSON.stringify(card)})) && !document.querySelector('.booting')`));
+  const point = await gui.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(card)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+15}})()`);
+  await gui.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'right', clickCount: 1, ...point });
+  await gui.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'right', clickCount: 1, ...point });
+  await until(() => gui.evaluate(`Boolean(document.querySelector('[data-action="node-edit-label"]'))`));
+  await gui.evaluate(`document.querySelector('[data-action="node-edit-label"]').click()`);
+  await until(() => gui.evaluate(`Boolean(document.querySelector('[data-action="node-label-input"]'))`));
+  await gui.send('Input.insertText', { text: 'GUI bookmark' });
+  await gui.evaluate(`document.querySelector('[data-action="node-label-save"]').click()`);
+  await until(() => gui.evaluate(`!document.querySelector('[data-action="node-label-input"]')`));
+  assert.equal((await cli(['tree', path, '--json'])).events[0].snapshot.projection.nodes.find(n => n.id === rootNode)?.label, 'GUI bookmark');
+  await cli(['label', nested.nodeId, 'CLI branch bookmark', '--session', path]);
+  await until(() => gui.evaluate(`window.hostEvents.some(e=>e.type==='sessions' && e.payload.current?.projection.nodes.some(n=>n.label==='CLI branch bookmark'))`));
+  await gui.evaluate(`(()=>{const e=document.querySelector('[data-action="graph-filter"]');e.value='labeled';e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await until(() => gui.evaluate(`document.querySelector('[data-action="graph-filter"]').value==='labeled'`));
+  assert.equal((await cli(['tree', path, '--json', '--filter', 'labeled'])).events[0].matchingNodeIds.length, 2);
+  await gui.send('Input.dispatchMouseEvent', {type:'mouseMoved', x:20, y:90});
+  await new Promise(resolve => setTimeout(resolve, 600));
+  const picture = await gui.send('Page.captureScreenshot');
+  mkdirSync(join(root, 'artifacts'), { recursive: true });
+  writeFileSync(join(root, 'artifacts/graph-labels-gui.png'), Buffer.from(picture.data, 'base64'));
+  await gui.evaluate(`(()=>{const e=document.querySelector('[data-action="graph-filter"]');e.value='all';e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+
   const other = (await cli(['new', '--json'])).events[0].session.path;
   await cli(['run', 'other session', '--session', other, '--json']);
   assert.equal((await gui.evaluate(`window.pix.invoke('session.snapshot')`)).session.path, path, 'CLI selection does not move GUI');
@@ -299,11 +360,18 @@ try {
   await until(() => { try { process.kill(hostPid, 0); return false; } catch { return true; } });
   // Start the bundled Electron host first, then attach the standalone CLI.
   gui = await openGui();
-  await gui.evaluate(`window.pix.invoke('session.open', {path:${JSON.stringify(path)}})`);
+  const reopened = await gui.evaluate(`window.pix.invoke('session.open', {path:${JSON.stringify(path)}})`);
+  if (reopened.graph?.storageError || reopened.graph?.runs.some(run => run.error)) console.error(JSON.stringify({home, storageError:reopened.graph?.storageError, errors:reopened.graph?.runs.filter(run=>run.error).map(run=>run.error)}));
   const exported = await gui.evaluate(`window.pix.invoke('agent.control', {action:'exportJsonl'})`);
   assert.ok(readFileSync(exported.path, 'utf8').includes('GUI live branch'));
   const afterRestart = (await cli(['tree', path, '--json'])).events[0].snapshot.projection.nodes.map(n => n.id).sort();
   assert.deepEqual(afterRestart, beforeRestart);
+  const restoredLabels = (await cli(['tree', path, '--json', '--filter', 'labeled'])).events[0];
+  assert.equal(restoredLabels.matchingNodeIds.length, 2);
+  assert.ok(readFileSync(exported.path, 'utf8').includes('CLI branch bookmark'));
+  await cli(['label', nested.nodeId, '--session', path]);
+  assert.equal((await cli(['tree', path, '--json', '--filter', 'labeled'])).events[0].matchingNodeIds.length, 1);
+
   hostPid = (await cli(['host', 'status'])).events[0].pid;
   const guiExit = new Promise(resolve => desktop.once('exit', resolve));
   await gui.evaluate("void window.pix.invoke('app.quit'); true");
@@ -311,7 +379,7 @@ try {
   await guiExit; desktop = undefined;
   await cli(['host', 'stop']);
   console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'],
-    tuiChecks: ['native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
+    tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
       'cancel and continue', 'native input/select/confirm dialogs', 'confirmation defaults to cancel', 'CJK multiline paste',
       'native tool cards', 'exit preserves accepted work'], modelRequests: requests.length, home }));
 } finally {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import { Conversation, conversationEntries, graphTree } from "../src/cli/tui.js";
+import { Conversation, conversationEntries, graphTree, GraphSelector } from "../src/cli/tui.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 
 const entry = (id: string, message: Record<string, unknown>) => ({ id, type: "message", parentId: null, timestamp: new Date(0).toISOString(), message });
@@ -59,4 +59,31 @@ test("streaming assistant and tool updates keep one native component per message
   assert.match(text, /Complete/); assert.doesNotMatch(text, /Partial|Loading/);
   assert.match(text, /input.ts/); assert.match(text, /Read complete/);
   assert.equal(conversation.children.length, 2);
+});
+
+
+test("task tree uses native labels, searches bookmarks and keeps empty filters open", async () => {
+  initTheme("dark");
+  const data = structuredClone(snapshot);
+  data.runtime = { available: true } as SessionSnapshot["runtime"];
+  data.projection.nodes[1]!.label = "Bookmark";
+  data.projection.nodes[1]!.userEntryId = "a-user";
+  assert.equal(graphTree(data, "labeled")[0]!.children.length, 1);
+  assert.equal(graphTree(data, "labeled")[0]!.children[0]!.label, "Bookmark");
+  let cancelled = false, saved: unknown;
+  const component = new GraphSelector(data, "a", 30, () => {}, () => { cancelled = true; }, "all", () => {}, async (id, label) => {
+    saved = { id, label }; data.projection.nodes[1]!.label = label; return data;
+  });
+  component.focused = true;
+  component.handleInput("L");
+  component.handleInput("\x01"); component.handleInput("\x0b");
+  component.handleInput("New label"); component.handleInput("\r");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(saved, { id: "a-user", label: "New label" });
+  component.handleInput("\x05"); // Ctrl+E: errors, none in this session
+  assert.match(component.render(100).map(stripTerminalSequences).join("\n"), /No matching tasks/);
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(cancelled, false);
+  component.handleInput("\x01"); // Ctrl+A: all
+  assert.match(component.render(100).map(stripTerminalSequences).join("\n"), /New label/);
 });

@@ -52,6 +52,9 @@ pix run "解释这个项目" --model zai/glm-5.3
 pix resume <会话ID或JSONL完整路径>
 pix resume <会话ID或路径> "继续检查错误处理"
 pix tree --session <会话ID或路径>
+pix tree --session <会话ID或路径> --filter labeled
+pix label <节点ID> "测试通过" --session <会话ID或路径>
+pix label <节点ID> --session <会话ID或路径>  # 移除标签
 pix fork <节点ID> "尝试另一种方案" --session <会话ID或路径>
 pix run "新的独立上下文" --session <会话ID或路径> --root
 pix stop --session <会话ID或路径>
@@ -62,11 +65,16 @@ pix stop --session <会话ID或路径>
 无命令时进入基于 `@earendil-works/pi-tui` 的交互界面，复用 Pi 原生编辑器、Markdown/代码与思考内容渲染、工具执行卡片和树选择器。支持中文、多行输入、粘贴、历史记录、命令与文件路径补全；底部显示当前模型、思考等级、分支和运行状态。根据终端背景选择明暗主题，也可手动 `/theme` 切换。
 
 - `/tree`：打开可搜索、折叠的 Pi 树选择器；选择已完成的 PiX 节点，查看其祖先路径并从该处继续。
+- 树内 `Shift+L` 编辑选中任务的标签，`Enter` 保存、`Esc` 取消，留空保存移除标签。标签为单行，最多 200 字符，保存为原生 Pi `label` 记录，GUI 与 CLI 实时同步；目标分支运行时暂不能修改。
+- 树内 `Ctrl+A` 全部、`Ctrl+L` 有标签、`Ctrl+R` 运行中、`Ctrl+E` 失败，`Ctrl+O` 循环切换。过滤保留祖先路径（CLI 标为 `ancestor`，GUI 淡化显示），不删除记录、不改变上下文。树内可按标签文字搜索。筛选作用于本客户端，默认全部。
+- GUI 在任务卡片上右键 →“编辑标签”；右下角下拉菜单切换相同的任务筛选。搜索框也匹配标签文字。
 - `/sessions` 或 `/resume`：搜索并恢复当前项目的会话。
 - `/model`、`/thinking`：选择后续任务的模型和思考等级；`/new` 新建会话。
 - `/node <节点ID>` 或 `/node root`：指定后续输入的分叉点；`/help` 查看命令。
 - `Enter` 发送，`Shift+Enter` 换行，`Tab` 补全，`Ctrl+O` 展开工具输出，`Ctrl+T` 显示/隐藏思考内容。
 - `Esc` 或 `Ctrl+C` 停止本终端提交的任务；空闲时 `Ctrl+C` 清空草稿，草稿为空时退出。`/exit` 或空编辑器中的 `Ctrl+D` 退出客户端，已接受的任务继续在 Host 中执行。
+
+PiX 按任务组织树，因此这些是任务筛选；没有把一次任务拆成用户消息、回答和工具结果来套用 Pi 的原始条目筛选。
 
 标准扩展输入、选择和确认请求使用 Pi 原生组件显示；确认默认选中取消，不会自动批准。其他 slash 命令交给 Pi 扩展执行。扩展的任意自定义 TUI 组件目前不通过 Host 协议传递。
 

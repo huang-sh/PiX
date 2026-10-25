@@ -10,7 +10,7 @@ export function graphNodeBlobs(projection: SessionProjection, entries: RawSessio
   if (cached && cached.entries === entries) return cached.blobs;
   const index = sessionEntryIndex(entries);
   const blobs = projection.nodes.map(node =>
-    [node.title, ...node.rawEntryIds.flatMap(id => index.get(id) ?? []).map(entrySearchText)]
+    [node.title, node.label, ...node.rawEntryIds.flatMap(id => index.get(id) ?? []).map(entrySearchText)]
       .filter(Boolean)
       .join("\n"),
   );

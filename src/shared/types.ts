@@ -95,6 +95,8 @@ export interface NodeFooterState {
   thinkingLevel: string;
 }
 export interface GraphNode {
+  /** User bookmark stored as a native Pi label on this turn's user entry. */
+  label?: string;
   /** Git branch at turn start, recorded as the pix.git-branch entry the user message hangs off. */
   gitBranch?: string;
   fileChanges?: FileChange[];
@@ -115,6 +117,7 @@ export interface GraphNode {
   running?: boolean;
   forkable?: boolean;
 }
+export type GraphFilter = "all" | "labeled" | "running" | "errors";
 export interface GraphEdge {
   id: string;
   source: string;

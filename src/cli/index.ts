@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { connectLocalHost, type HostClient } from "../host/client.js";
 import { runTask } from "./run.js";
-import type { SessionSnapshot, SessionSummary } from "../shared/types.js";
+import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../shared/graph-filter.js";
+import type { GraphFilter, SessionSnapshot, SessionSummary } from "../shared/types.js";
 
 const help = `PiX — shared agent host for the desktop and terminal
 
@@ -16,6 +17,7 @@ Usage: pix [command] [arguments] [options]
   new                          Create a session
   sessions                     List this project's sessions
   tree [session]               Show the existing PiX session tree
+  label <node> [text]          Set a task label; omit text to remove it
   stop [session]               Stop a session, or one --branch / --run-id
   models                       List available chat models
   dialogs                      List pending extension input requests
@@ -29,6 +31,7 @@ Usage: pix [command] [arguments] [options]
   --root                       Start a new branch without inherited messages
   --model <provider/model>     Model for this turn
   --thinking <level>           Thinking level for this turn
+  --filter <mode>              Tree filter: all, labeled, running, errors
   --json                       Emit NDJSON events and a final result
   --detach                     Submit a task and exit; the host keeps running
   --timeout <seconds>          Stop waiting after this time; task keeps running
@@ -45,6 +48,7 @@ const parsed = parseArgs({ allowPositionals: true, options: {
   model: { type: "string" }, thinking: { type: "string" }, json: { type: "boolean" },
   detach: { type: "boolean" }, timeout: { type: "string" }, "request-id": { type: "string" },
   branch: { type: "string" }, "run-id": { type: "string" }, root: { type: "boolean" },
+  filter: { type: "string" },
   help: { type: "boolean", short: "h" },
 } });
 const options = parsed.values;
@@ -66,17 +70,21 @@ async function selectSession(client: HostClient, selector: string | undefined, c
 }
 
 function showTree(snapshot: SessionSnapshot) {
-  if (options.json) { print({ type: "tree", snapshot }); return; }
+  const filter = (options.filter ?? "all") as GraphFilter;
+  const visible = graphFilterIds(snapshot.projection.nodes, filter);
+  if (options.json) { print({ type: "tree", snapshot, filter, visibleNodeIds: [...visible],
+    matchingNodeIds: snapshot.projection.nodes.filter(node => matchesGraphFilter(node, filter)).map(node => node.id) }); return; }
   process.stdout.write(`Session: ${snapshot.session.path}\n`);
   const children = new Map<string | null, typeof snapshot.projection.nodes>();
   for (const node of snapshot.projection.nodes) {
+    if (!visible.has(node.id)) continue;
     const siblings = children.get(node.parentId) ?? [];
     siblings.push(node); children.set(node.parentId, siblings);
   }
   const stack = [...(children.get(null) ?? [])].reverse().map(node => ({ node, prefix: "" }));
   while (stack.length) {
     const { node, prefix } = stack.pop()!;
-    process.stdout.write(`${prefix}${node.running ? "●" : node.hasError ? "!" : "○"} ${node.title.replace(/[\r\n]/g, " ")}  [${node.id}] (${node.branchId ?? "main"})\n`);
+    process.stdout.write(`${prefix}${node.running ? "●" : node.hasError ? "!" : "○"} ${node.title.replace(/[\r\n]/g, " ")}${node.label ? `  #${node.label}` : ""}${matchesGraphFilter(node, filter) ? "" : " (ancestor)"}  [${node.id}] (${node.branchId ?? "main"})\n`);
     for (const child of [...(children.get(node.id) ?? [])].reverse()) stack.push({ node: child, prefix: prefix + "  " });
   }
 }
@@ -93,7 +101,7 @@ async function main() {
     else throw new Error("Use pix command install, uninstall or status");
     return;
   }
-  const known = ["chat", "run", "resume", "fork", "new", "sessions", "tree", "stop", "models", "dialogs", "respond", "host"];
+  const known = ["chat", "run", "resume", "fork", "new", "sessions", "tree", "label", "stop", "models", "dialogs", "respond", "host"];
   if (!known.includes(command)) throw new Error(`Unknown command: ${command}. See pix --help.`);
   if (options.timeout && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0))
     throw new Error("--timeout must be a positive number of seconds");
@@ -102,6 +110,9 @@ async function main() {
   if (options.model && !/^[^/]+\/.+/.test(options.model)) throw new Error("Use --model provider/model");
   if ((command === "chat" || (["resume", "fork"].includes(command) && args.length < 2)) && options["request-id"])
     throw new Error("Use --request-id with a single task, not an interactive conversation");
+  if (options.filter && !GRAPH_FILTERS.includes(options.filter as GraphFilter))
+    throw new Error("Use --filter all, labeled, running, or errors");
+  if (options.filter && command !== "tree") throw new Error("--filter is only supported by pix tree");
   const cwd = resolve(options.cwd ?? process.cwd());
   const client = await connectLocalHost(cwd, undefined, command !== "host");
   try {
@@ -128,6 +139,12 @@ async function main() {
     let snapshot = await selectSession(client, selector, canCreate);
     if (command === "new") { print({ type: "session", session: snapshot.session }); return; }
     if (command === "tree") { showTree(snapshot); return; }
+    if (command === "label") {
+      const node = snapshot.projection.nodes.find(node => node.id === args[0]);
+      if (!node) throw new Error("Use pix label <node-id> [text] --session <session>");
+      snapshot = await client.invoke<SessionSnapshot>("agent.control", { action: "setLabel", entryId: node.userEntryId, label: args.slice(1).join(" ") }, snapshot.session.path);
+      print({ type: "label", nodeId: node.id, label: snapshot.projection.nodes.find(item => item.id === node.id)?.label ?? null }); return;
+    }
     if (command === "stop") {
       if (options.branch || options["run-id"]) {
         if (!options.branch || !options["run-id"]) throw new Error("Specify both --branch and --run-id");

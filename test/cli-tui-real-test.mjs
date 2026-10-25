@@ -61,9 +61,34 @@ try {
   writeFileSync(join(root, 'artifacts/cli-tui-real-screen.txt'), screen.viewport);
   terminal.write('/tree\r');
   await until(() => screen.viewport.includes('Session Tree'), 10000);
+  terminal.write('L');
+  await until(() => screen.viewport.includes('Label (empty removes it)'), 10000);
+  terminal.write('Real agent passed\r');
+  await until(() => screen.viewport.includes('Real agent passed') && !screen.viewport.includes('Saving label'), 10000);
+  assert.ok(readFileSync(session, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.type === 'label' && entry.label === 'Real agent passed'));
+  terminal.write('\x0c');
+  await until(() => screen.viewport.includes('Session Tree · labeled'), 10000);
   writeFileSync(join(root, 'artifacts/cli-tui-real-tree.txt'), screen.viewport);
+  terminal.write('\x05');
+  await until(() => screen.viewport.includes('No matching tasks'), 10000);
+  terminal.write('\x01');
+  await until(() => screen.viewport.includes('Session Tree · all'), 10000);
   terminal.write('\x1b');
   await until(() => !screen.viewport.includes('Session Tree'), 10000);
+  terminal.write('Reply exactly BOOKMARK_MAIN_OK without using any tools.\r');
+  await until(() => screen.viewport.includes('Ready') && readFileSync(session, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).some(entry =>
+    entry.message?.role === 'assistant' && JSON.stringify(entry.message.content).includes('BOOKMARK_MAIN_OK')));
+  const firstUser = entries.find(entry => entry.message?.role === 'user');
+  terminal.write(`/node turn:${firstUser.id}\r`);
+  await until(() => screen.viewport.includes('Continue from:'), 10000);
+  terminal.write('Reply exactly BOOKMARK_BRANCH_OK without using any tools.\r');
+  await until(() => {
+    const dir = session + '.pix-tree';
+    if (!screen.viewport.includes('Ready') || !existsSync(dir)) return false;
+    return readdirSync(dir).filter(name => name.endsWith('.jsonl')).some(name =>
+      readFileSync(join(dir, name), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).some(entry =>
+        entry.message?.role === 'assistant' && JSON.stringify(entry.message.content).includes('BOOKMARK_BRANCH_OK')));
+  });
   terminal.write('/exit\r');
   const result = await exited;
   assert.equal(result.exitCode, 0);
@@ -71,7 +96,7 @@ try {
   const report = { passed: true, provider, model, timestamp: new Date().toISOString(),
     launcher: process.env.PIX_REAL_CLI ? 'packaged desktop runtime' : 'system Node.js',
     tools: [...new Set(tools)], checked: ['real interactive PTY', 'real external model inference',
-      'actual read/write tools', 'output nonce and sum', 'native Pi tool cards', 'native Pi tree selector', 'normal exit and terminal restoration'] };
+      'actual read/write tools', 'output nonce and sum', 'native Pi tool cards', 'native Pi tree selector', 'native label persistence', 'real model branch after labeling', 'task filters and empty results', 'normal exit and terminal restoration'] };
   writeFileSync(join(root, 'artifacts/cli-tui-real-agent.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report));
 } finally {

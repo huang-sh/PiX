@@ -232,6 +232,7 @@ export class GraphRuntime extends PiRuntime {
     if (this.deletionRecovery && input.action !== "newSession")
       return Promise.reject(new Error("Reopen this session to recover the failed node deletion"));
     if (input.action === "deleteNode") return this.exclusive(() => this.deleteNode(input));
+    if (input.action === "setLabel") return this.exclusive(() => this.setLabel(input));
     if (input.action === "newSession") return this.create();
     if (this.stopping && this.runtime && !["abort", "branchAbort"].includes(input.action))
       return Promise.reject(new Error("Session is closing"));
@@ -278,6 +279,37 @@ export class GraphRuntime extends PiRuntime {
       if (this.graph && this.runtime) this.persist(() => this.graph!.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
       return result;
     });
+  }
+  private async setLabel(input: Extract<AgentControl, { action: "setLabel" }>) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a writable graph first");
+    const node = this.snapshot().projection.nodes.find(node => node.rawEntryIds.includes(input.entryId));
+    if (!node) throw new Error("Label target was not found in this graph");
+    const label = input.label?.trim() || undefined;
+    if (label && (label.length > 200 || /[\r\n\x00-\x1f\x7f]/.test(label)))
+      throw new Error("Use a single-line label of at most 200 characters");
+    const branchId = node.branchId ?? "main";
+    const worker = this.workers.get(branchId);
+    if (branchId === "main" ? this.mainWork || this.state().isStreaming : worker?.work)
+      throw new Error("Wait for this branch to finish before editing labels");
+    if (branchId === "main") {
+      try { await super.control({ ...input, label }); }
+      catch (error) { this.failStorage(error); throw error; }
+      this.persist(() => graph.sealMain(this.data(this)));
+      this.persist(() => graph.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
+    } else {
+      const record = graph.records.get(branchId);
+      if (!record || !worker?.snapshot) throw new Error("Branch source is unavailable");
+      const pi = await this.pi();
+      const manager = pi.SessionManager.open(graph.path(branchId), this.dir, this.cwd);
+      const local = manager.getEntries().find((entry: RawSessionEntry) => graph.canonical(record, entry.id) === input.entryId);
+      if (!local || Object.hasOwn(record.inherited, local.id)) throw new Error("Label target is not owned by this branch");
+      this.persist(() => manager.appendLabelChange(local.id, label));
+      const data = this.persist(() => graph.seal(record, { header: manager.getHeader(), entries: manager.getEntries() }));
+      worker.snapshot = this.fileSnapshot(record, data);
+    }
+    this.notify();
+    return this.snapshot();
   }
   private acceptAt(input: PromptAt): Promise<SessionSnapshot> {
     try {
@@ -425,12 +457,18 @@ export class GraphRuntime extends PiRuntime {
     const manager = pi.SessionManager.inMemory(this.cwd, undefined, structuredClone([sourceData.header, ...sourceData.entries]));
     if (localLeaf) manager.createBranchedSession(localLeaf);
     else manager.newSession({ parentSession: graph.main });
-    const data: SessionData = { header: { ...manager.getHeader(), parentSession: parent.session.path }, entries: manager.getEntries() };
+    // Pi regenerates bookmark records when copying a path. They have no source
+    // identity: the graph already gets inherited labels from their owning source.
+    // The SDK places these records after the copied conversation, so omitting
+    // them leaves all conversation parents and canonical IDs intact.
+    const data: SessionData = { header: { ...manager.getHeader(), parentSession: parent.session.path },
+      entries: manager.getEntries().filter((entry: RawSessionEntry) => entry.type !== "label") };
     const inherited: Record<string, string> = {};
     const sourceIds = new Set(parent.entries.map(e => e.id));
-    for (const e of data.entries) inherited[e.id] = sourceIds.has(e.id)
-      ? parentRecord ? graph.canonical(parentRecord, e.id) : e.id
-      : node?.leafEntryId ?? "";
+    for (const entry of data.entries) {
+      if (!sourceIds.has(entry.id)) throw new Error("Copied history has no source identity");
+      inherited[entry.id] = parentRecord ? graph.canonical(parentRecord, entry.id) : entry.id;
+    }
     const record: BranchRecord = { id: randomUUID(), parentId, forkEntryId: node?.leafEntryId ?? "", requestId: input.requestId,
       request: input, inherited, header: data.header, baseline: structuredClone(data.entries), status: "prepared", runId: randomUUID() };
     this.persist(() => graph.create(record, data));

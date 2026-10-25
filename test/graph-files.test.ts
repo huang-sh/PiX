@@ -366,3 +366,19 @@ test("export rejects unresolved descendants instead of silently omitting them", 
     assert.throws(() => graph.candidate(initial), /Missing export/);
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test("deleting a later task retains bookmarks on surviving ancestors", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-label-prune-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire();
+    const data = { header: initial.header, entries: [user("root", null), user("later", "root"),
+      { type: "label", id: "bookmark", parentId: "later", timestamp: "2026-10-25", targetId: "root", label: "keep me" }] };
+    durableWrite(graph.main, encodeSession(data));
+    graph.deleteNode("later", "bookmark");
+    const kept = parseStrict(readFileSync(graph.main, "utf8"));
+    assert.equal(kept.entries.find(entry => entry.id === "bookmark")?.parentId, "root");
+    assert.equal(kept.entries.find(entry => entry.id === "bookmark")?.label, "keep me");
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});

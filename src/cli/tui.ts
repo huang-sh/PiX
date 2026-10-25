@@ -12,7 +12,8 @@ import {
   type Component, type Focusable, type SelectItem, type TerminalColors, type TUI,
 } from "@earendil-works/pi-tui";
 import type { HostClient } from "../host/client.js";
-import type { ExtensionDialog, RawSessionEntry, RuntimeCommand, RuntimeModel, SessionSnapshot, SessionSummary } from "../shared/types.js";
+import type { ExtensionDialog, GraphFilter, RawSessionEntry, RuntimeCommand, RuntimeModel, SessionSnapshot, SessionSummary } from "../shared/types.js";
+import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../shared/graph-filter.js";
 import { runTask, type Run, type RunOptions } from "./run.js";
 
 interface InteractiveOptions extends RunOptions { cwd?: string; node?: string; root?: boolean; }
@@ -48,10 +49,12 @@ export function conversationEntries(snapshot: SessionSnapshot, nodeId: string | 
 }
 
 /** Pi's tree selector presents PiX graph nodes; it never owns persistence. */
-export function graphTree(snapshot: SessionSnapshot): SessionTreeNode[] {
-  const nodes = new Map(snapshot.projection.nodes.map(node => [node.id, {
+export function graphTree(snapshot: SessionSnapshot, filter: GraphFilter = "all"): SessionTreeNode[] {
+  const visible = graphFilterIds(snapshot.projection.nodes, filter);
+  const nodes = new Map(snapshot.projection.nodes.filter(node => visible.has(node.id)).map(node => [node.id, {
+    label: node.label,
     entry: { id: node.id, parentId: node.parentId, timestamp: node.timestamp, type: "message" as const,
-      message: { role: "user" as const, content: `${node.running ? "● " : node.hasError ? "! " : ""}${node.title}  · ${branchName(node.branchId)}`, timestamp: Date.parse(node.timestamp) } },
+      message: { role: "user" as const, content: `${node.running ? "● " : node.hasError ? "! " : ""}${node.title}  · ${branchName(node.branchId)}${matchesGraphFilter(node, filter) ? "" : " (ancestor)"}`, timestamp: Date.parse(node.timestamp) } },
     children: [] as SessionTreeNode[],
   }]));
   const roots: SessionTreeNode[] = [];
@@ -98,24 +101,79 @@ class SearchSelector extends Container implements Focusable {
   }
 }
 
-// Pi's raw-entry tree includes label/export filters that don't apply to PiX
-// graph nodes. Keep its native navigation/search/folding with matching hints.
-class GraphSelector extends Container implements Focusable {
-  private selector: TreeSelectorComponent;
-  private search = new Text("Type to search:", 1);
-  get focused() { return this.selector.focused; }
-  set focused(value: boolean) { this.selector.focused = value; }
-  constructor(snapshot: SessionSnapshot, node: string | null, rows: number, select: (id: string) => void, cancel: () => void) {
+/** Pi navigation over task nodes, with PiX task filters and durable labels. */
+export class GraphSelector extends Container implements Focusable {
+  private selector!: TreeSelectorComponent;
+  private body = new Container();
+  private search = new Text("", 1);
+  private heading = new Text("", 1);
+  private error = new Text("", 1);
+  private input?: Input;
+  private saving = false;
+  private empty = false;
+  private _focused = false;
+  get focused() { return this._focused; }
+  set focused(value: boolean) { this._focused = value; if (this.input) this.input.focused = value; else this.selector.focused = value; }
+  constructor(private snapshot: SessionSnapshot, private node: string | null, private rows: number,
+    private select: (id: string) => void, private cancel: () => void, private filter: GraphFilter,
+    private onFilter: (filter: GraphFilter) => void,
+    private saveLabel: (id: string, label: string) => Promise<SessionSnapshot>, private requestRender: () => void = () => {}) {
     super();
-    this.selector = new TreeSelectorComponent(graphTree(snapshot), node, rows, select, cancel, undefined, node ?? undefined, "user-only");
-    this.addChild(new DynamicBorder());
-    this.addChild(new Text(getMarkdownTheme().bold("Session Tree"), 1));
+    this.addChild(new DynamicBorder()); this.addChild(this.heading);
     this.addChild(new Text(getMarkdownTheme().quote("↑↓ move · alt/ctrl+←→ fold · enter choose · esc back"), 1));
-    this.addChild(this.search); this.addChild(new Spacer(1));
-    this.addChild(this.selector.getTreeList());
-    this.addChild(new DynamicBorder());
+    this.addChild(new Text(getMarkdownTheme().quote("shift+l label · ctrl+a all · ctrl+l labeled · ctrl+r running · ctrl+e errors · ctrl+o cycle"), 1));
+    this.addChild(this.search); this.addChild(new Spacer(1)); this.addChild(this.body); this.addChild(this.error);
+    this.addChild(new DynamicBorder()); this.rebuild();
+  }
+  update(snapshot: SessionSnapshot) { this.snapshot = snapshot; if (!this.input && !this.saving) this.rebuild(); }
+  private rebuild(selected = this.selector?.getTreeList().getSelectedNode()?.entry.id) {
+    const query = this.selector?.getTreeList().getSearchQuery() ?? "";
+    const tree = graphTree(this.snapshot, this.filter);
+    this.empty = !tree.length;
+    const source = tree.length ? tree : graphTree(this.snapshot);
+    if (!source.length) { this.cancel(); return; }
+    this.selector = new TreeSelectorComponent(source, this.node, this.rows,
+      this.select, this.cancel, undefined, selected ?? this.node ?? undefined, "user-only");
+    if (query) this.selector.handleInput(query);
+    this.selector.focused = this.focused;
+    this.body.clear(); if (!this.empty) this.body.addChild(this.selector.getTreeList());
+    const count = this.snapshot.projection.nodes.filter(node => matchesGraphFilter(node, this.filter)).length;
+    this.heading.setText(getMarkdownTheme().bold(`Session Tree · ${this.filter} · ${count} matches`));
+    this.search.setText(getMarkdownTheme().quote(`Type to search: ${query}`));
+    if (!count) this.body.addChild(new Text(getMarkdownTheme().quote("No matching tasks. Ctrl+A shows all tasks."), 1));
+  }
+  private editLabel() {
+    const id = this.selector.getTreeList().getSelectedNode()?.entry.id;
+    const node = this.snapshot.projection.nodes.find(node => node.id === id);
+    if (!node || this.empty) return;
+    const running = this.snapshot.graph?.runs.some(run => run.branchId === (node.branchId ?? "main") && run.status === "running");
+    if (!this.snapshot.runtime.available || running || node.running) {
+      this.error.setText("Wait for this branch to finish; labels require a writable session."); return;
+    }
+    this.input = new Input(); this.input.setValue(node.label ?? ""); this.input.focused = this.focused;
+    this.body.clear(); this.body.addChild(new Text("Label (empty removes it) · enter save · esc cancel", 1)); this.body.addChild(this.input);
+    this.input.onEscape = () => { this.input = undefined; this.rebuild(id); };
+    this.input.onSubmit = label => {
+      this.saving = true; this.error.setText("Saving label…");
+      void this.saveLabel(node.userEntryId, label).then(snapshot => {
+        this.snapshot = snapshot; this.input = undefined; this.error.setText("");
+      }).catch(error => { this.error.setText(String(error.message ?? error)); }).finally(() => {
+        this.saving = false; if (!this.input) this.rebuild(id); this.requestRender();
+      });
+    };
   }
   handleInput(data: string) {
+    if (this.saving) return;
+    this.error.setText("");
+    if (this.input) { this.input.handleInput(data); return; }
+    if (matchesKey(data, "shift+l") || data === "L") { this.editLabel(); return; }
+    const keys = ["ctrl+a", "ctrl+l", "ctrl+r", "ctrl+e"] as const;
+    const index = keys.findIndex(key => matchesKey(data, key));
+    if (index >= 0 || matchesKey(data, "ctrl+o")) {
+      this.filter = GRAPH_FILTERS[index >= 0 ? index : (GRAPH_FILTERS.indexOf(this.filter) + 1) % GRAPH_FILTERS.length]!;
+      this.onFilter(this.filter); this.rebuild(); return;
+    }
+    if (this.empty) { if (matchesKey(data, "escape")) this.cancel(); return; }
     this.selector.handleInput(data);
     this.search.setText(getMarkdownTheme().quote(`Type to search: ${this.selector.getTreeList().getSearchQuery()}`));
   }
@@ -197,6 +255,8 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
   let dismissDialog: (() => void) | undefined;
   let dialogId: string | undefined;
   let panelCancel: (() => void) | undefined;
+  let treePanel: GraphSelector | undefined;
+  let treeFilter: GraphFilter = "all";
   let finish!: () => void;
   const finished = new Promise<void>(resolve => { finish = resolve; });
   const header = new Text("", 1, 1);
@@ -244,7 +304,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     renderStatus();
   }
   function restoreEditor() {
-    panelCancel = undefined;
+    panelCancel = undefined; treePanel = undefined;
     editorSlot.clear(); editorSlot.addChild(editor); ui.setFocus(editor); ui.requestRender();
   }
   function panel(component: Component, cancel: () => void) {
@@ -299,13 +359,17 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     if (command === "/tree") {
       await refresh();
       if (!snapshot.projection.nodes.length) { notice("The session tree is empty. Send a task to create its first node."); return; }
-      panel(new GraphSelector(snapshot, node, terminal.rows, id => {
+      treePanel = new GraphSelector(snapshot, node, terminal.rows, id => {
         restoreEditor();
         if (busy) { notice("This terminal has a task running. Stop it first, or use another terminal for a parallel branch."); return; }
         const target = snapshot.projection.nodes.find(item => item.id === id);
         if (!target?.forkable) { notice("Choose a completed node to continue from."); return; }
         node = id; loadHistory(); notice(`Continue from: ${target.title}`);
-      }, restoreEditor), restoreEditor);
+      }, restoreEditor, treeFilter, value => { treeFilter = value; }, async (entryId, label) => {
+        const current = await client.invoke<SessionSnapshot>("agent.control", { action: "setLabel", entryId, label }, snapshot.session.path);
+        snapshot = current; return current;
+      }, () => ui.requestRender());
+      panel(treePanel, restoreEditor);
       return;
     }
     if (busy) { notice("A task is running. Esc stops it; /exit detaches without stopping it."); return; }
@@ -380,7 +444,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     } finally {
       busy = false; abort = undefined;
       loader.stop(); status.clear();
-      if (!closed) { loadHistory(); ui.setFocus(editor); }
+      if (!closed) { loadHistory(); if (!panelCancel) ui.setFocus(editor); }
     }
   }
   editor.onSubmit = text => {
@@ -398,12 +462,12 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     if (event.type !== "sessions") return;
     const current = (event.payload as { current?: SessionSnapshot }).current;
     if (current?.session.path !== snapshot.session.path) return;
-    snapshot = current;
+    snapshot = current; treePanel?.update(current);
     if (!busy) loadHistory(); else renderStatus();
   });
   const disconnected = client.onDisconnect(error => { notice(error.message + " · /exit to detach and reconnect"); });
   ui.addInputListener(data => {
-    if (matchesKey(data, "ctrl+d") && !editor.getText()) { close(); return { consume: true }; }
+    if (matchesKey(data, "ctrl+d") && !panelCancel && !editor.getText()) { close(); return { consume: true }; }
     if (matchesKey(data, "ctrl+c")) {
       if (panelCancel) panelCancel();
       else if (busy) stop();
@@ -412,8 +476,8 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
       return { consume: true };
     }
     if (matchesKey(data, "escape") && busy && !panelCancel && !editor.isShowingAutocomplete()) { stop(); return { consume: true }; }
-    if (matchesKey(data, "ctrl+o")) { conversation.toggleTools(); ui.requestRender(); return { consume: true }; }
-    if (matchesKey(data, "ctrl+t")) { conversation.toggleThinking(); ui.requestRender(); return { consume: true }; }
+    if (!panelCancel && matchesKey(data, "ctrl+o")) { conversation.toggleTools(); ui.requestRender(); return { consume: true }; }
+    if (!panelCancel && matchesKey(data, "ctrl+t")) { conversation.toggleThinking(); ui.requestRender(); return { consume: true }; }
     return undefined;
   });
   const signal = () => close();

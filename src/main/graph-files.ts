@@ -322,6 +322,10 @@ export class GraphFiles {
       removed.add(id);
       for (const child of children.get(id) ?? []) pending.push(child);
     }
+    // Labels are session-wide bookmarks, even when appended on a later path.
+    // Retain labels targeting surviving entries; prune() reparents their records.
+    for (const entry of entries.values())
+      if (entry.type === "label" && typeof entry.targetId === "string" && !removed.has(entry.targetId)) removed.delete(entry.id);
     // Metadata elsewhere can refer to an abandoned branch. Remove that metadata,
     // retaining its children and their original message ancestry.
     for (const entry of entries.values()) {

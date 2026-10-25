@@ -11,6 +11,7 @@ import {
   type VueFlowStore,
   type ViewportTransform,
 } from "@vue-flow/core";
+import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import { MiniMap } from "@vue-flow/minimap";
 import GraphOverview from "./GraphOverview.vue";
 import { computed, markRaw, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
@@ -24,7 +25,8 @@ import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { searchGraphNodeIds } from "../../lib/graph-search";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
-import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
+import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../../../shared/graph-filter";
+import type { GraphFilter, GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import DraftNode, { type DraftNodeData } from "./DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "./PromptNode.vue";
 
@@ -79,6 +81,29 @@ const DRAFT_SIZE = { width: 440, height: 320 };
 const booted = ref(false);
 const deleteError = ref("");
 const reopenError = ref("");
+const graphFilter = ref<GraphFilter>("all");
+const filterIds = computed(() => graphFilterIds(projection.value?.nodes ?? [], graphFilter.value));
+const filterCount = computed(() => (projection.value?.nodes ?? []).filter(node => matchesGraphFilter(node, graphFilter.value)).length);
+const labelTarget = ref<{ entryId: string; path: string }>();
+const labelText = ref("");
+const labelError = ref("");
+const labelSaving = ref(false);
+function editLabel(node: GraphNode) {
+  if (!session.current) return;
+  labelTarget.value = { entryId: node.userEntryId, path: session.current.session.path };
+  labelText.value = node.label ?? ""; labelError.value = "";
+}
+async function saveLabel() {
+  const target = labelTarget.value;
+  if (!target || labelSaving.value || target.path !== session.current?.session.path) return;
+  labelSaving.value = true; labelError.value = "";
+  try {
+    await session.control({ action: "setLabel", entryId: target.entryId, label: labelText.value });
+    if (labelTarget.value === target) labelTarget.value = undefined;
+  } catch (error) { labelError.value = String(error instanceof Error ? error.message : error); }
+  finally { labelSaving.value = false; }
+}
+watch(sessionKey, () => { labelTarget.value = undefined; graphFilter.value = "all"; });
 const searchOpen = ref(false);
 const searchQuery = ref("");
 // A plain click highlights a card without rebinding the chat panel — only a
@@ -108,7 +133,8 @@ const projection = computed(() => session.current?.projection);
 const searchHits = computed<string[]>(() => {
   const value = projection.value;
   if (!searchOpen.value || !value || !session.current) return [];
-  return searchGraphNodeIds(value, session.current.entries, searchQuery.value);
+  const matched = new Set(value.nodes.filter(node => matchesGraphFilter(node, graphFilter.value)).map(node => node.id));
+  return searchGraphNodeIds(value, session.current.entries, searchQuery.value).filter(id => matched.has(id));
 });
 const searchHitIds = computed(() => new Set(searchHits.value));
 const searchCount = computed(() => {
@@ -124,12 +150,28 @@ function rememberBranchOrder(id: string, order: number, pendingId?: string) {
   (layout.layout.branchOrders ??= {})[sessionKey.value] = [...branchOrder];
   void layout.save().catch(error => layout.showNotice(String(error), "error"));
 }
+const filteredGraph = computed(() => {
+  if (graphFilter.value === "all") return { nodes: nodes.value, edges: edges.value };
+  const visible = new Set(filterIds.value);
+  const byId = new Map(nodes.value.map(node => [node.id, node]));
+  // Preserve an open draft and its path even when its parent doesn't match.
+  for (const node of nodes.value) if (node.type === "draft" || transientNodeIds.has(node.id)) {
+    visible.add(node.id);
+    let parent = node.type === "draft" ? draftParent.value : node.data?.node?.parentId;
+    while (parent && !visible.has(parent)) {
+      visible.add(parent); parent = byId.get(parent)?.data?.node?.parentId;
+    }
+  }
+  return { nodes: nodes.value.filter(node => visible.has(node.id)),
+    edges: edges.value.filter(edge => visible.has(edge.source) && visible.has(edge.target)) };
+});
 const renderGraph = computed(() => {
-  if (nodes.value.length < 500) return { nodes: nodes.value, edges: edges.value };
-  if (!flow.value) return { nodes: nodes.value.filter(node => node.id === defaultFocusId()), edges: [] };
+  const nodes = filteredGraph.value.nodes, edges = filteredGraph.value.edges;
+  if (nodes.length < 500) return { nodes, edges };
+  if (!flow.value) return { nodes: nodes.filter(node => node.id === defaultFocusId()), edges: [] };
   const viewport = flow.value.getViewport();
   const size = flow.value.dimensions.value;
-  const targets = new Set(nodes.value.filter(node => {
+  const targets = new Set(nodes.filter(node => {
     const x = node.position.x * viewport.zoom + viewport.x;
     const y = node.position.y * viewport.zoom + viewport.y;
     return x < size.width + 100 && x + 360 * viewport.zoom > -100
@@ -137,10 +179,10 @@ const renderGraph = computed(() => {
   }).map(node => node.id));
   // A wide fork can have thousands of curves starting at one visible parent.
   // Keep incoming connections to visible cards; the overview shows the full tree.
-  const visibleEdges = edges.value.filter(edge => targets.has(edge.target));
+  const visibleEdges = edges.filter(edge => targets.has(edge.target));
   const included = new Set(targets);
   for (const edge of visibleEdges) included.add(edge.source);
-  return { nodes: nodes.value.filter(node => included.has(node.id)), edges: visibleEdges };
+  return { nodes: nodes.filter(node => included.has(node.id)), edges: visibleEdges };
 });
 
 // Continue with the parent's level; saved preferences only fill missing settings.
@@ -261,6 +303,8 @@ function rebuild() {
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
       searchHit: searchHitIds.value.has(node.id),
+      filterContext: !matchesGraphFilter(node, graphFilter.value),
+      onEditLabel: session.current?.runtime.available && !busy ? () => editLabel(node) : undefined,
       onCompose: direction => compose(node.id, direction),
       onOpenPanel: session.current?.graph ? () => openChatColumn(node.id) : undefined,
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
@@ -661,6 +705,12 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
     document.querySelector<HTMLTextAreaElement>(".draft-node textarea")?.focus({ preventScroll: true });
 }
 
+watch(graphFilter, async mode => {
+  if (mode === "all") return;
+  const target = projection.value?.nodes.find(node => matchesGraphFilter(node, mode));
+  if (target) await center(target.id, true, false);
+}, { flush: "post" });
+
 // A session switch resumes that session's remembered viewport instead of
 // re-centering; sessions seen for the first time still focus their active node.
 async function restoreView() {
@@ -851,7 +901,7 @@ watch(
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
     () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns,
-    searchHitIds],
+    searchHitIds, graphFilter],
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
@@ -931,10 +981,14 @@ watch(
         :aria-label="t('graph.minimapLabel')"
         @click="navigateMinimap"
       />
-      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" :highlight="searchHitIds.size ? searchHitIds : undefined" />
+      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="filteredGraph.nodes" :highlight="searchHitIds.size ? searchHitIds : undefined" />
     </VueFlow>
 
+    <p v-if="graphFilter !== 'all' && !filterCount" class="graph-filter-empty" role="status">{{ t("graph.filterEmpty") }}</p>
     <nav class="graph-controls">
+      <select v-model="graphFilter" data-action="graph-filter" :aria-label="t('graph.filterLabel')" class="graph-filter">
+        <option v-for="mode in GRAPH_FILTERS" :key="mode" :value="mode">{{ t(`graph.filters.${mode}`) }}</option>
+      </select>
       <div v-if="searchOpen" class="graph-search nodrag nowheel" @mousedown.stop @wheel.stop>
         <input
           ref="searchInput"
@@ -968,9 +1022,27 @@ watch(
     </nav>
 
     <footer class="graph-footer">
+      <span v-if="graphFilter !== 'all'">{{ t("graph.filterCount", { n: filterCount }) }}</span>
       <span>{{ t("graph.turnsLinks", { turns: projection?.nodes.length ?? 0, links: projection?.edges.length ?? 0 }) }}</span>
       <span>{{ t("graph.activeBranch", { n: projection?.activeBranchNodeIds.length ?? 0 }) }}</span>
       <span v-if="session.current?.graph">{{ t("graph.parallelRuns", { n: session.current.graph.runs.filter(r => r.status === 'running').length }) }}</span>
     </footer>
+    <DialogRoot :open="!!labelTarget" @update:open="!$event && !labelSaving && (labelTarget = undefined)">
+      <DialogPortal>
+        <DialogOverlay class="dialog-overlay" />
+        <DialogContent class="rename-dialog" :aria-describedby="undefined" @escape-key-down="labelSaving && $event.preventDefault()" @interact-outside="labelSaving && $event.preventDefault()">
+          <DialogTitle>{{ t("graph.editLabel") }}</DialogTitle>
+          <form @submit.prevent="saveLabel">
+            <input v-model="labelText" data-action="node-label-input" :aria-label="t('graph.editLabel')" maxlength="200" :disabled="labelSaving" />
+            <p>{{ t("graph.labelHint") }}</p>
+            <p v-if="labelError" role="alert">{{ labelError }}</p>
+            <footer>
+              <Button type="button" variant="ghost" :disabled="labelSaving" @click="labelTarget = undefined">{{ t("common.cancel") }}</Button>
+              <Button type="submit" data-action="node-label-save" :disabled="labelSaving">{{ t("common.save") }}</Button>
+            </footer>
+          </form>
+        </DialogContent>
+      </DialogPortal>
+    </DialogRoot>
   </main>
 </template>

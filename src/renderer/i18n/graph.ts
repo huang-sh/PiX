@@ -2,6 +2,12 @@ import { acceptDomainUpdate } from "./registry";
 
 export const en = {
   graph: {
+    editLabel: "Edit label",
+    labelHint: "Mark a task for later. Leave empty to remove the label.",
+    filterLabel: "Filter tasks",
+    filters: { all: "All tasks", labeled: "Labeled", running: "Running", errors: "Failed" },
+    filterEmpty: "No matching tasks. Choose All tasks to return.",
+    filterCount: "{n} matching tasks (ancestors shown for context)",
     deleteNode: "Delete",
     openInPanel: "Open in chat panel",
     openInPanelHint: "Pin this branch to a side-by-side chat column (Ctrl+double-click)",
@@ -119,6 +125,12 @@ export const en = {
 
 export const zhCN: typeof en = {
   graph: {
+    editLabel: "编辑标签",
+    labelHint: "标记重要任务，留空保存可移除标签。",
+    filterLabel: "筛选任务",
+    filters: { all: "全部任务", labeled: "有标签", running: "运行中", errors: "失败" },
+    filterEmpty: "没有匹配任务，选择“全部任务”可返回。",
+    filterCount: "{n} 个匹配任务（保留祖先节点展示路径）",
     deleteNode: "删除",
     openInPanel: "在聊天面板中打开",
     openInPanelHint: "将该分支固定到并排的聊天列（Ctrl+双击）",

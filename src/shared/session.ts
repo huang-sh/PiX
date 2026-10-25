@@ -205,6 +205,11 @@ export function projectSession(
   leafId: string | null,
 ): SessionProjection {
   const byId = new Map(entries.map((e) => [e.id, e]));
+  const labels = new Map<string, string>();
+  for (const entry of entries) if (entry.type === "label" && typeof entry.targetId === "string") {
+    if (typeof entry.label === "string" && entry.label.trim()) labels.set(entry.targetId, entry.label.trim());
+    else labels.delete(entry.targetId);
+  }
   const toolInputs = new Map<string, string>();
   for (const entry of entries) {
     const content = msg(entry)?.content;
@@ -268,6 +273,7 @@ export function projectSession(
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
+      ...(labels.has(e.id) ? { label: labels.get(e.id) } : {}),
       ...(gitBranch ? { gitBranch } : {}),
       parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
       title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
