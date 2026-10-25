@@ -4,12 +4,13 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { electronBinary } from './lib/electron-binary.mjs';
+import { terminalScreen } from './lib/terminal-screen.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const home = mkdtempSync(join(tmpdir(), 'pix-cli-e2e-'));
@@ -17,17 +18,27 @@ const cwd = join(home, 'workspace');
 const agent = join(home, '.pix', 'agent');
 mkdirSync(cwd); mkdirSync(agent, { recursive: true });
 mkdirSync(join(agent, 'extensions'));
-writeFileSync(join(agent, 'extensions', 'cli-input.ts'), `export default function(pi) {
+writeFileSync(join(agent, 'extensions', 'cli-input.ts'), `import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+export default function(pi) {
   pi.registerCommand('cli-input', {handler: async (_args, ctx) => {
     const value = await ctx.ui.input('CLI input test');
     ctx.ui.notify('Answered: ' + value);
+  }});
+  pi.registerCommand('cli-confirm', {handler: async (_args, ctx) => {
+    const value = await ctx.ui.confirm('CLI confirm test', 'Explicit approval is required');
+    writeFileSync(join(ctx.cwd, 'confirmation.txt'), String(value));
+  }});
+  pi.registerCommand('cli-select', {handler: async (_args, ctx) => {
+    const value = await ctx.ui.select('CLI select test', ['first', 'second']);
+    writeFileSync(join(ctx.cwd, 'selection.txt'), String(value));
   }});
 }`);
 const env = { ...process.env, PIX_HOME: home, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PIX_HOST_LINGER_MS: '60000' };
 const held = new Map();
 const requests = [];
 const children = new Set();
-let desktop, gui, hostPid, terminal;
+let desktop, gui, hostPid, terminal, screen;
 const server = createServer(async (req, res) => {
   try {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -166,27 +177,84 @@ try {
   held.get('HOLD detached')();
   await until(async () => !(await cli(['host', 'status'])).events[0].running.length);
   console.error('Interactive PTY');
-  // A real terminal exercises readline, branch following and Ctrl+C.
+  // A real terminal and VT parser exercise the Pi TUI, not raw output strings.
+  // Keep extension-owned state in its own session: the later graph-export
+  // check deliberately uses a graph with no third-party export adapters.
+  const tuiInitial = final(await cli(['run', 'WRITE TUI root', '--json']));
+  const tuiPath = tuiInitial.session, tuiRoot = tuiInitial.nodeId;
+  await cli(['run', 'TUI main next', '--session', tuiPath, '--json']);
   const { spawn: spawnPty } = await import('node-pty');
-  terminal = spawnPty(process.execPath, [join(root, 'bin/pix.mjs'), '--cwd', cwd, 'chat', '--session', path], {
+  terminal = spawnPty(process.execPath, [join(root, 'bin/pix.mjs'), '--cwd', cwd, 'chat', '--session', tuiPath], {
     cwd: root, env, cols: 100, rows: 30, name: 'xterm-256color',
   });
-  let terminalText = '';
-  terminal.onData(chunk => terminalText += chunk);
+  screen = terminalScreen(terminal);
   const terminalExit = new Promise(resolve => terminal.onExit(resolve));
-  await until(() => terminalText.includes('pix>'));
+  await until(() => screen.viewport.includes('enter send'));
+  assert.ok(screen.text.includes('CLI Test Model') || screen.text.includes('cli-local/cli-model'));
   terminal.write('interactive first\r');
-  await until(() => terminalText.includes('DONE interactive first'));
-  terminal.write(`/node ${rootNode}\r`);
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await until(() => screen.text.includes('DONE interactive first') && screen.viewport.includes('Ready'));
+  terminal.write('/tree\r');
+  await until(() => screen.viewport.includes('Session Tree'));
+  terminal.write('\x1b[1;3D\x1b[1;3D');
+  await until(() => !screen.viewport.split('Session Tree')[1]?.includes('interactive first'));
+  terminal.write('\x1b[1;3C');
+  await until(() => screen.viewport.split('Session Tree')[1]?.includes('interactive first'));
+  terminal.write('\x1b');
+  await until(() => !screen.viewport.includes('Session Tree'));
+  terminal.write('/model\r');
+  await until(() => screen.viewport.includes('Select model'));
+  terminal.write('CLI Test\r');
+  await until(() => screen.viewport.includes('Model: cli-local/cli-model'));
+  // A terminal resize must reflow the editor, transcript and footer correctly.
+  screen.resize(44, 24);
+  await until(() => screen.viewport.includes('PiX') || screen.text.includes('DONE interactive first'));
+  terminal.write('/help\r');
+  await until(() => screen.text.includes('ctrl+o expand tools'));
+  screen.resize(100, 30);
+  terminal.write(`/node ${tuiRoot}\r`);
+  await until(() => screen.viewport.includes('Continue from: WRITE TUI root'));
   terminal.write('HOLD interactive\r');
   await until(() => held.has('HOLD interactive'));
-  const promptsBeforeAbort = (terminalText.match(/pix>/g) ?? []).length;
+  terminal.write('draft while busy\r');
+  await until(() => screen.viewport.includes('your draft stays in the editor') && screen.viewport.includes('draft while busy'));
+  assert.ok(!requests.some(request => request.text === 'draft while busy'));
   terminal.write('\x03');
   await until(() => !held.has('HOLD interactive'));
-  await until(() => (terminalText.match(/pix>/g) ?? []).length > promptsBeforeAbort);
+  await until(() => (screen.viewport.includes('interrupted') || screen.viewport.includes('aborted')) && screen.viewport.includes(' · ready'));
+  terminal.write('\x03');
+  await until(() => !screen.viewport.includes('draft while busy'));
+  console.error('TUI dialogs');
+  terminal.write('/cli-input\r');
+  await until(() => screen.viewport.includes('CLI input test'));
+  terminal.write('TUI accepted\r');
+  await until(() => screen.viewport.includes('Ready'));
+  assert.equal((await cli(['dialogs'])).events[0].length, 0);
+  terminal.write('/cli-confirm\r');
+  await until(() => screen.viewport.includes('CLI confirm test'));
+  terminal.write('\r');
+  await until(() => existsSync(join(cwd, 'confirmation.txt')) && screen.viewport.includes(' · ready'));
+  assert.equal(readFileSync(join(cwd, 'confirmation.txt'), 'utf8'), 'false', 'confirmation defaults to cancellation');
+  terminal.write('/cli-select\r');
+  await until(() => screen.viewport.includes('CLI select test'));
+  terminal.write('\x1b[B\r');
+  await until(() => existsSync(join(cwd, 'selection.txt')) && screen.viewport.includes(' · ready'));
+  assert.equal(readFileSync(join(cwd, 'selection.txt'), 'utf8'), 'second');
+  console.error('TUI input and tools');
+  terminal.write('\x1b[200~中文 input\nsecond line\x1b[201~\r');
+  await until(() => requests.some(request => request.text === '中文 input\nsecond line'));
+  await until(() => screen.text.includes('DONE 中文 input') && screen.viewport.includes(' · ready'));
+  terminal.write('WRITE TUI tools\r');
+  await until(() => screen.text.includes('DONE WRITE TUI tools') && screen.viewport.includes(' · ready'));
+  mkdirSync(join(root, 'artifacts'), { recursive: true });
+  writeFileSync(join(root, 'artifacts/cli-tui-screen.txt'), screen.viewport);
+  console.error('TUI detachment');
+  terminal.write('HOLD TUI detach\r');
+  await until(() => held.has('HOLD TUI detach'));
   terminal.write('/exit\r');
   assert.equal((await terminalExit).exitCode, 0);
+  assert.ok(held.has('HOLD TUI detach'), 'TUI exit detaches without cancelling its task');
+  held.get('HOLD TUI detach')();
+  screen.dispose(); screen = undefined;
   terminal = undefined;
   console.error('Actual Electron');
   // Actual Electron GUI uses the very same host and sees CLI-created branches.
@@ -242,9 +310,17 @@ try {
   gui.close(); gui = undefined;
   await guiExit; desktop = undefined;
   await cli(['host', 'stop']);
-  console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'], modelRequests: requests.length, home }));
+  console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'],
+    tuiChecks: ['native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
+      'cancel and continue', 'native input/select/confirm dialogs', 'confirmation defaults to cancel', 'CJK multiline paste',
+      'native tool cards', 'exit preserves accepted work'], modelRequests: requests.length, home }));
 } finally {
-  terminal?.kill(); gui?.close(); desktop?.kill('SIGTERM');
+  if (screen) {
+    mkdirSync(join(root, 'artifacts'), { recursive: true });
+    writeFileSync(join(root, 'artifacts/cli-tui-last-screen.txt'), screen.viewport);
+    writeFileSync(join(root, 'artifacts/cli-tui-last.raw'), screen.raw);
+  }
+  screen?.dispose(); terminal?.kill(); gui?.close(); desktop?.kill('SIGTERM');
   for (const child of children) child.kill('SIGTERM');
   for (const release of held.values()) release();
   if (hostPid) { try { process.kill(hostPid, 'SIGTERM'); } catch {} }

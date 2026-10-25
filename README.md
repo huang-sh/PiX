@@ -75,6 +75,8 @@ Desktop installers register the `pix` terminal command; macOS registers it on fi
 
 The GUI and CLI share an independent background host and the existing PiX session tree. Multiple terminals can run branches concurrently; accepted tasks keep running after a client exits.
 
+Interactive mode uses Pi's native terminal editor, Markdown and tool cards, model picker, and searchable tree selector. Type `/` for commands, `/tree` to choose a branch, or `/sessions` to resume.
+
 ```sh
 npm run build:cli
 node bin/pix.mjs run "Check the project tests"

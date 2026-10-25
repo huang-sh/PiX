@@ -8,14 +8,15 @@ const walk = (d: string): string[] =>
     const p = join(d, n);
     return statSync(p).isDirectory() ? walk(p) : [p];
   });
-test("Pi SDK is isolated to the main runtime adapter and its internal extensions", () => {
+test("Pi execution stays in runtime adapters; the terminal imports only Pi presentation components", () => {
   const hits = walk(root).filter((p) =>
     readFileSync(p, "utf8").includes("@earendil-works/pi-coding-agent"),
   );
   assert.deepEqual(
     hits.map((p) => p.replace(root, "").replaceAll("\\", "/")),
-    ["/main/extensions/file-changes.ts", "/main/extensions/git-branch.ts", "/main/pi-runtime.ts"],
+    ["/cli/tui.ts", "/main/extensions/file-changes.ts", "/main/extensions/git-branch.ts", "/main/pi-runtime.ts"],
   );
+  assert.doesNotMatch(readFileSync(join(root, "cli/tui.ts"), "utf8"), /\b(?:createAgentSession|AgentSessionRuntime|SessionManager|createCodingTools|InteractiveMode)\b/);
 });
 test("the standalone host declares PiX's YAML runtime dependency", () => {
   const server = JSON.parse(readFileSync(resolve(process.cwd(), "server/package.json"), "utf8"));

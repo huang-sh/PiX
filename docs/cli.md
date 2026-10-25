@@ -59,7 +59,16 @@ pix stop --session <会话ID或路径>
 
 `run` 不指定会话时创建新会话；指定会话后默认从主分支当前节点继续。操作其他分支时使用 `--node` 或 `fork`，交互模式在每次回复后跟随本次任务实际所在的分支。会话选择限定于 `--cwd` 指定的项目，支持完整会话 ID 或完整路径。
 
-无命令时进入逐行交互模式。`/tree` 显示树，`/node <节点ID>` 切换后续输入的分叉点，`/exit` 退出客户端。其他 slash 命令交给 Pi 扩展执行。不提供依赖 Pi 自定义 TUI 组件的扩展界面。
+无命令时进入基于 `@earendil-works/pi-tui` 的交互界面，复用 Pi 原生编辑器、Markdown/代码与思考内容渲染、工具执行卡片和树选择器。支持中文、多行输入、粘贴、历史记录、命令与文件路径补全；底部显示当前模型、思考等级、分支和运行状态。根据终端背景选择明暗主题，也可手动 `/theme` 切换。
+
+- `/tree`：打开可搜索、折叠的 Pi 树选择器；选择已完成的 PiX 节点，查看其祖先路径并从该处继续。
+- `/sessions` 或 `/resume`：搜索并恢复当前项目的会话。
+- `/model`、`/thinking`：选择后续任务的模型和思考等级；`/new` 新建会话。
+- `/node <节点ID>` 或 `/node root`：指定后续输入的分叉点；`/help` 查看命令。
+- `Enter` 发送，`Shift+Enter` 换行，`Tab` 补全，`Ctrl+O` 展开工具输出，`Ctrl+T` 显示/隐藏思考内容。
+- `Esc` 或 `Ctrl+C` 停止本终端提交的任务；空闲时 `Ctrl+C` 清空草稿，草稿为空时退出。`/exit` 或空编辑器中的 `Ctrl+D` 退出客户端，已接受的任务继续在 Host 中执行。
+
+标准扩展输入、选择和确认请求使用 Pi 原生组件显示；确认默认选中取消，不会自动批准。其他 slash 命令交给 Pi 扩展执行。扩展的任意自定义 TUI 组件目前不通过 Host 协议传递。
 
 树直接读取 PiX 的 `GraphRuntime` 快照，保留主干、嵌套分叉、继承关系与运行状态。主文件是 Pi v3 JSONL，子分支保存于相邻的 `<session>.pix-tree/`。备份时两者必须一起保存；CLI 不创建另一种会话格式。
 
@@ -111,6 +120,7 @@ npm run test:cli
 npm run test:cli:package
 npm run test:installation
 PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:real
+PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:tui:real
 ```
 
 `test:cli` 使用真实 Pi SDK、真实文件工具、本机可控 HTTP 模型、多个 CLI 进程和真实 Electron GUI，验证并发启动、分支并行、上下文隔离、独立停止、退出存活、GUI 实时同步和重启恢复。需要允许本机监听和桌面应用运行。
@@ -122,6 +132,8 @@ PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:real
 `test:cli:real` 是显式选择的外部模型测试，会产生模型费用。它把指定 provider 的凭据复制到私有临时 profile，在独立工作目录验证真实读写、两个并发分支及输出值，结束后删除临时凭据。报告写入 `artifacts/cli-real-agent.json`，不包含凭据。
 
 设置 `PIX_REAL_CLI=/path/to/PiX.app/Contents/Resources/cli/pix` 可通过桌面包的运行时执行同一真实 agent 测试。
+
+`test:cli:tui:real` 通过真实 PTY 操作交互界面，验证外部模型实际读写、输出值、Pi 工具卡片、树选择器和终端模式恢复。也支持 `PIX_REAL_CLI`；报告及终端画面保存在 `artifacts/cli-tui-real-*`。`test:cli` 使用 xterm 解析实际终端画面，覆盖模型搜索、中文多行粘贴、窗口缩放、取消、扩展对话框和退出存活。
 
 ## 代码边界
 

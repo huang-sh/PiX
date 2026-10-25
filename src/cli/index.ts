@@ -1,11 +1,9 @@
 import { commandStatus, installCommand, uninstallCommand } from "../main/cli-command.js";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { createInterface } from "node:readline/promises";
 import { connectLocalHost, type HostClient } from "../host/client.js";
-import { agentMessageContent } from "../shared/agent-stream.js";
-import type { ExtensionDialog, SessionSnapshot, SessionSummary } from "../shared/types.js";
+import { runTask } from "./run.js";
+import type { SessionSnapshot, SessionSummary } from "../shared/types.js";
 
 const help = `PiX — shared agent host for the desktop and terminal
 
@@ -53,8 +51,6 @@ const options = parsed.values;
 const args = [...parsed.positionals];
 const command = args.shift() ?? "chat";
 const print = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\n");
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Run = NonNullable<SessionSnapshot["graph"]>["runs"][number];
 
 async function selectSession(client: HostClient, selector: string | undefined, create: boolean) {
   if (!selector) {
@@ -85,144 +81,6 @@ function showTree(snapshot: SessionSnapshot) {
   }
 }
 
-async function runTask(client: HostClient, before: SessionSnapshot, text: string, node: string | null,
-  onDialog?: (dialog: ExtensionDialog) => Promise<string | undefined>) {
-  const path = before.session.path;
-  const requestId = options["request-id"] ?? randomUUID();
-  let run: Run | undefined;
-  let disconnected: Error | undefined;
-  let interrupted = false;
-  let wroteOutput = false;
-  let partialText = "";
-  const buffered: Record<string, any>[] = [];
-  const emitAgent = (payload: Record<string, any>) => {
-    if (payload.graphId !== path || payload.runId !== run?.runId) return;
-    if (options.json) print({ type: "agent", session: path, event: payload });
-    else if (["message_start", "message_update", "message_end"].includes(payload.type) && payload.message?.role === "assistant") {
-      if (payload.type === "message_start") partialText = "";
-      const output = agentMessageContent(payload.message, "text");
-      if (output.startsWith(partialText) && output.length > partialText.length) {
-        process.stdout.write(output.slice(partialText.length)); wroteOutput = true;
-      }
-      partialText = output;
-      if (payload.type === "message_end" && output) process.stdout.write("\n");
-    } else if (payload.type === "tool_execution_start") process.stderr.write(`[${payload.toolName}]\n`);
-  };
-  const unsubscribe = client.onEvent(event => {
-    if (event.type === "agent") {
-      const payload = event.payload as Record<string, any>;
-      if (!run) buffered.push(payload); else emitAgent(payload);
-    } else if (event.type === "notice") {
-      if (options.json) print({ type: "notice", notice: event.payload });
-      else process.stderr.write(`${(event.payload as { message?: string }).message ?? ""}\n`);
-    }
-  });
-  const removeDisconnect = client.onDisconnect(error => { disconnected = error; });
-  const abort = () => {
-    interrupted = true;
-    if (run) void client.invoke("agent.control", { action: "branchAbort", branchId: run.branchId, runId: run.runId }, path).catch(() => {});
-  };
-  process.once("SIGINT", abort);
-  try {
-    const model = options.model;
-    const slash = model?.indexOf("/") ?? -1;
-    if (model && (slash < 1 || slash === model.length - 1)) throw new Error("Use --model provider/model");
-    const snapshot = await client.invoke<SessionSnapshot>("agent.control", {
-      action: "promptAt", requestId, nodeId: node, text,
-      ...(model ? { provider: model.slice(0, slash), modelId: model.slice(slash + 1) } : {}),
-      ...(options.thinking ? { thinkingLevel: options.thinking } : {}),
-    }, path);
-    run = snapshot.graph?.runs.find(item => item.requestId === requestId);
-    if (!run) throw new Error("This request was already saved or handled without starting a run. Inspect pix tree before submitting new work.");
-    const submission = { type: "submitted", session: path, requestId, branchId: run.branchId, runId: run.runId };
-    if (options.json || options.detach) print(submission);
-    else process.stderr.write(`Session: ${path}\nRun: ${run.branchId}/${run.runId}\n`);
-    for (const event of buffered) emitAgent(event);
-    if (options.detach) return { snapshot, nodeId: run.nodeId };
-    if (interrupted) abort();
-    const deadline = options.timeout ? Date.now() + Number(options.timeout) * 1000 : Infinity;
-    if (options.timeout && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0)) throw new Error("--timeout must be a positive number of seconds");
-    const handledDialogs = new Set<string>();
-    let current = snapshot;
-    for (;;) {
-      if (disconnected) throw disconnected;
-      const latest = current.graph?.runs.find(item => item.runId === run!.runId);
-      if (!latest) throw new Error("The run changed; inspect the session before continuing");
-      if (latest.status !== "running") {
-        const target = current.projection.nodes.find(item => item.id === latest.nodeId);
-        const own = new Set(target?.rawEntryIds ?? []);
-        const messages = current.entries.filter(entry => own.has(entry.id) && entry.type === "message")
-          .map(entry => entry.message as Record<string, any>);
-        const failed = messages.find(message => message.role === "assistant" && ["error", "aborted"].includes(message.stopReason));
-        const error = latest.error ?? (failed ? failed.errorMessage || `Agent ${failed.stopReason}` : undefined);
-        if (error || current.graph?.storageError || latest.status === "interrupted")
-          throw new Error(error ?? current.graph?.storageError ?? "Agent execution was interrupted");
-        if (!wroteOutput && !options.json) {
-          const output = messages.filter(message => message.role === "assistant").map(message => agentMessageContent(message, "text")).filter(Boolean).join("\n");
-          if (output) process.stdout.write(output + "\n");
-        }
-        if (options.json) print({ type: "result", session: path, requestId, branchId: latest.branchId,
-          runId: latest.runId, nodeId: latest.nodeId, status: latest.status, snapshot: current });
-        if (interrupted) process.exitCode = 130;
-        return { snapshot: current, nodeId: latest.nodeId };
-      }
-      if (Date.now() >= deadline) throw new Error(`Stopped waiting; task is still running. Session: ${path}; run: ${run.runId}`);
-      const dialogs = await client.invoke<ExtensionDialog[]>("ui.pending");
-      const ownFile = run.branchId === "main" ? path : `${path}.pix-tree/${run.branchId}.jsonl`;
-      for (const dialog of dialogs.filter(dialog => dialog.sessionPath === ownFile && !handledDialogs.has(dialog.id))) {
-        if (!onDialog) throw new Error(`Agent needs input: ${dialog.title}. Task remains pending; use pix dialogs and pix respond ${dialog.id}, or answer in the GUI.`);
-        handledDialogs.add(dialog.id);
-        await client.invoke("ui.respond", { id: dialog.id, value: await onDialog(dialog) });
-      }
-      await delay(200);
-      current = await client.invoke<SessionSnapshot>("session.snapshot", undefined, path);
-    }
-  } catch (error) {
-    if (interrupted && error instanceof Error) Object.assign(error, { exitCode: 130 });
-    throw error;
-  } finally { unsubscribe(); removeDisconnect(); process.removeListener("SIGINT", abort); }
-}
-
-async function interactive(client: HostClient, snapshot: SessionSnapshot) {
-  if (!process.stdin.isTTY) throw new Error("Interactive mode needs a terminal. Use pix run with a prompt or stdin.");
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  let node = options.root ? null : options.node ?? snapshot.projection.activeNodeId;
-  let taskRunning = false;
-  let closed = false;
-  rl.on("close", () => { closed = true; });
-  rl.on("SIGINT", () => {
-    if (taskRunning) process.emit("SIGINT");
-    else rl.close();
-  });
-  process.stderr.write(`PiX · ${snapshot.session.path}\n/tree shows the graph; /exit detaches.\n`);
-  try {
-    while (!closed) {
-      const text = (await rl.question("pix> ")).trim();
-      if (!text) continue;
-      if (text === "/exit" || text === "/quit") break;
-      if (text === "/tree") { showTree(snapshot); continue; }
-      if (text.startsWith("/node ")) {
-        const id = text.slice(6).trim();
-        if (!snapshot.projection.nodes.some(item => item.id === id && item.forkable)) { process.stderr.write("Choose a completed node from /tree\n"); continue; }
-        node = id; continue;
-      }
-      taskRunning = true;
-      try {
-        const outcome = await runTask(client, snapshot, text, node, async dialog => {
-          const suffix = dialog.options?.length ? ` [${dialog.options.join(" / ")}]` : "";
-          return (await rl.question(`${dialog.title}${suffix}: `)).trim() || undefined;
-        });
-        snapshot = outcome.snapshot;
-        node = outcome.nodeId ?? node;
-      } catch (error) {
-        if (!client.connected) throw error;
-        process.stderr.write(`pix: ${error instanceof Error ? error.message : String(error)}\n`);
-        process.exitCode = undefined;
-        snapshot = await client.invoke<SessionSnapshot>("session.snapshot", undefined, snapshot.session.path);
-      } finally { taskRunning = false; }
-    }
-  } finally { rl.close(); }
-}
 
 async function main() {
   if (options.help || command === "help") { process.stdout.write(help); return; }
@@ -288,11 +146,14 @@ async function main() {
     const node = options.root ? null : forkNode ?? options.node ?? snapshot.projection.activeNodeId;
     if (node && !snapshot.projection.nodes.some(item => item.id === node && item.forkable))
       throw new Error("Choose a completed node from pix tree");
-    if (prompt) await runTask(client, snapshot, prompt, node);
+    if (prompt) await runTask(client, snapshot, prompt, node, { ...options, requestId: options["request-id"] });
     else if (command === "run") throw new Error("Provide a prompt or pipe it to pix run");
     else {
       if (forkNode) options.node = forkNode;
-      await interactive(client, snapshot);
+      if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Interactive mode needs a terminal. Use pix run with a prompt or stdin.");
+      if (options.json) throw new Error("Use pix run --json for structured output");
+      const { interactive } = await import("./tui.js");
+      await interactive(client, snapshot, options);
     }
   } finally { client.close(); }
 }

@@ -47,12 +47,14 @@
     "cli": "node bin/pix.mjs",
     "test:cli": "npm run build && node test/cli-host-test.mjs",
     "test:cli:real": "npm run build:cli && node test/cli-real-agent-test.mjs",
+    "test:cli:tui:real": "npm run build:cli && node test/cli-tui-real-test.mjs",
     "test:cli:package": "npm run build:cli && node test/cli-package-test.mjs",
     "test:installation": "node --test test/packaged-cli-test.mjs test/windows-cli-path.test.mjs test/prune-dev-artifacts.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@lucide/vue": "^1.39.0",
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",
@@ -82,6 +84,7 @@
     "@types/ws": "8.18.1",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.5.0",
+    "@xterm/headless": "^5.5.0",
     "electron": "^44.4.4",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
