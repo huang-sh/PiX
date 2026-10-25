@@ -1,5 +1,5 @@
 // Smoke test for a packaged PiX build (release/win-unpacked/PiX.exe, the
-// portable exe, release/linux-unpacked/pix, or release/mac*/PiX.app on macOS).
+// portable exe, release/linux-unpacked/pix-desktop, or release/mac*/PiX.app on macOS).
 // Drives the packaged app over the Chrome DevTools protocol like
 // test/gui-test.mjs, so the asar layout, preload, IPC, and the node-pty
 // native binary are all exercised in their packaged form.
@@ -16,7 +16,7 @@ const defaultTarget =
   process.platform === "darwin"
     ? join(root, "release", "mac", "PiX.app", "Contents", "MacOS", "PiX")
     : process.platform === "linux"
-      ? join(root, "release", "linux-unpacked", "pix")
+      ? join(root, "release", "linux-unpacked", "pix-desktop")
       : join(root, "release", "win-unpacked", "PiX.exe");
 const target = exe || defaultTarget;
 if (!existsSync(target))

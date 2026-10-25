@@ -71,6 +71,8 @@ PiX also loads internal extensions: `file-changes` snapshots files before and af
 
 ## CLI
 
+Desktop installers register the `pix` terminal command; macOS registers it on first launch after moving the app to Applications. The desktop CLI uses the bundled runtime and requires no separate Node.js installation. See [CLI documentation](docs/cli.md) for removal and portable-format behavior.
+
 The GUI and CLI share an independent background host and the existing PiX session tree. Multiple terminals can run branches concurrently; accepted tasks keep running after a client exits.
 
 ```sh

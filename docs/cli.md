@@ -24,6 +24,25 @@ pix --help
 
 这个包只包含编译后的 Node.js 代码、内置 skills 和服务器依赖，不包含 Electron 或 Vue。项目仍为 private，不会自动发布到 npm。桌面开发 `npm run dev` 会先构建共享 Host；修改核心代码后，需要在任务完成时执行 `pix host stop` 并重新连接才能加载新版后台；桌面发行包携带自己的同版本 Host 入口。
 
+## 桌面安装包的命令注册
+
+桌面版包含专用 CLI 启动器，使用应用自带运行时，不要求另装 Node.js。安装后打开新的终端运行 `pix --help`。
+
+- **Windows 安装版**：NSIS 将安装目录中的 `resources\cli` 加入 PATH；仅当前用户安装写用户 PATH，所有用户安装写系统 PATH。卸载时只移除该安装器实际添加的目录。重复安装不重复添加，搬迁安装会清理旧目录。已有相同 PATH 项会保留。
+- **macOS DMG/ZIP**：将 PiX.app 放到 Applications 并启动一次，自动创建 `~/.pix/bin/pix`，为 zsh 及已有 Bash/fish 配置添加带标记的 PATH 块。DMG 拖拽与移入废纸篓都没有可执行的安装/卸载钩子，因此删除应用前运行 `pix command uninstall`；会移除启动器和 PiX 添加的配置块，保留其他配置。
+- **Linux deb/rpm**：安装器自动注册 `/usr/bin/pix`，GUI 使用独立的 `pix-desktop` 命令；卸载清理 CLI 链接。保留 electron-builder 原有的 sandbox、MIME 与 AppArmor 安装行为。
+- **Linux tar.gz**：解压到固定目录并启动 GUI 一次后，按用户注册命令。
+- **Windows 便携版、AppImage**：不会自动修改 PATH；需要稳定的终端命令时可安装独立 npm CLI。macOS 直接从 `/Volumes/` 中运行也不会注册，避免指向稍后卸载的磁盘映像。
+
+```sh
+pix command status
+pix command uninstall
+# macOS 手动恢复注册（使用应用中的启动器）：
+/Applications/PiX.app/Contents/Resources/cli/pix command install
+```
+
+命令卸载后，GUI 不会在下次启动时自动装回；手动 `command install` 可恢复。重新打开终端后 PATH 变化生效。注册不会覆盖目标位置已有的其他命令；GUI 也不会主动遮蔽 PATH 中已有的 `pix`。直接删除 macOS 应用不能自动清理 shell 文件；如果已经删除，可删除 shell 配置中 `# >>> PiX CLI >>>` 到 `# <<< PiX CLI <<<` 的整块内容及 `~/.pix/bin/pix`。
+
 ## 常用操作
 
 ```sh
@@ -90,6 +109,7 @@ npm run typecheck
 npm test
 npm run test:cli
 npm run test:cli:package
+npm run test:installation
 PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:real
 ```
 
@@ -97,7 +117,11 @@ PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:real
 
 `test:cli:package` 在仓库外的临时目录完成 npm 安装，确认没有 Electron/Vue 依赖，再启动 Host 并创建、读取会话；需要下载依赖。
 
+`test:installation` 验证打包启动器的参数和退出码、Linux 安装/卸载/升级钩子，以及 Windows 原生 PATH 生命周期（Windows 测试在其他系统跳过）。macOS 打包后还可执行 `node test/desktop-command-test.mjs /path/to/PiX.app`，在隔离 HOME 中验证首次启动注册、新登录终端、无需系统 Node、共享 Host、卸载和重装；不会修改当前用户的 shell 配置。
+
 `test:cli:real` 是显式选择的外部模型测试，会产生模型费用。它把指定 provider 的凭据复制到私有临时 profile，在独立工作目录验证真实读写、两个并发分支及输出值，结束后删除临时凭据。报告写入 `artifacts/cli-real-agent.json`，不包含凭据。
+
+设置 `PIX_REAL_CLI=/path/to/PiX.app/Contents/Resources/cli/pix` 可通过桌面包的运行时执行同一真实 agent 测试。
 
 ## 代码边界
 

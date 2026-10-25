@@ -37,3 +37,6 @@ desktop.ini
 .vscode/
 .idea/
 .zcode/
+
+# Generated installer scripts extend the installed electron-builder templates.
+/build/generated/

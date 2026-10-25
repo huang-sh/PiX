@@ -1,3 +1,4 @@
+import { commandStatus, installCommand, uninstallCommand } from "../main/cli-command.js";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -22,6 +23,7 @@ Usage: pix [command] [arguments] [options]
   dialogs                      List pending extension input requests
   respond <id> [value]         Answer a pending input request
   host <status|stop>           Inspect or stop the shared background host
+  command <install|uninstall|status>  Manage the terminal command and PATH
 
   --cwd <path>                 Project directory (default: current directory)
   --session <id-or-path>       Select a session (required for tree/stop/fork)
@@ -225,6 +227,14 @@ async function interactive(client: HostClient, snapshot: SessionSnapshot) {
 async function main() {
   if (options.help || command === "help") { process.stdout.write(help); return; }
   if (options.node && options.root) throw new Error("Choose either --node or --root");
+  if (command === "command") {
+    const action = args[0] ?? "status";
+    if (action === "install") print(installCommand());
+    else if (action === "uninstall") print(uninstallCommand());
+    else if (action === "status") print(commandStatus());
+    else throw new Error("Use pix command install, uninstall or status");
+    return;
+  }
   const known = ["chat", "run", "resume", "fork", "new", "sessions", "tree", "stop", "models", "dialogs", "respond", "host"];
   if (!known.includes(command)) throw new Error(`Unknown command: ${command}. See pix --help.`);
   if (options.timeout && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0))

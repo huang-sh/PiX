@@ -2,6 +2,7 @@
 // verify that the app, skills, and native search dependencies are complete.
 import { readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { writePackagedCli } from "./package-cli.mjs";
 import { checkPackagedFiles, checkPackagedFff, checkPackagedSkills } from "./check-packaged-files.mjs";
 
 // electron-builder's context.arch is the numeric Arch enum (builder-util).
@@ -31,6 +32,7 @@ export function pruneDevArtifacts(dir) {
 
 export default async function afterPack(context) {
   const resources = context.packager.getResourcesDir(context.appOutDir);
+  writePackagedCli(resources, context.electronPlatformName, context.electronPlatformName === "linux" ? context.packager.executableName : context.packager.appInfo.productFilename);
   const pruned = pruneDevArtifacts(join(resources, "pi-builtin"));
   console.log(`  • pruned ${pruned} dev artifacts (declarations, maps, docs) from pi-builtin`);
   checkPackagedFiles(join(resources, "app.asar"), context.packager.info.appDir);

@@ -110,7 +110,7 @@ mac:
 linux:
   icon: build/icon.png
   category: Development
-  executableName: pix
+  executableName: pix-desktop
   syncDesktopName: true
   maintainer: PiX <pix@earendil.works>
   synopsis: Graph-first workbench for Pi Agent
@@ -158,3 +158,13 @@ nsis:
 
 portable:
   artifactName: PiX-Portable-${version}-${arch}.exe
+
+# Debian/RPM hooks extend the builder's installed templates at build time.
+deb:
+  afterInstall: build/generated/after-install.tpl
+  afterRemove: build/generated/after-remove.tpl
+rpm:
+  fpm:
+    - "--rpm-posttrans=build/generated/rpm-posttrans.sh"
+  afterInstall: build/generated/after-install.tpl
+  afterRemove: build/generated/after-remove.tpl

@@ -37,7 +37,7 @@ const env = { ...process.env, PIX_HOME: home, PI_CODING_AGENT_DIR: agent, PI_SKI
 let hostPid;
 function cli(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [join(root, 'bin/pix.mjs'), '--cwd', cwd, ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.env.PIX_REAL_CLI ?? process.execPath, [...(process.env.PIX_REAL_CLI ? [] : [join(root, 'bin/pix.mjs')]), '--cwd', cwd, ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', x => stdout += x); child.stderr.on('data', x => stderr += x);
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`Real agent test timed out: ${args[0]}`)); }, 180000);
@@ -71,6 +71,7 @@ try {
   assert.equal(tree.projection.nodes.length, 3);
   assert.equal(tree.projection.nodes.filter(node => node.parentId === initial.nodeId).length, 2);
   const report = { passed: true, provider, model, timestamp: new Date().toISOString(),
+    launcher: process.env.PIX_REAL_CLI ? 'packaged desktop runtime' : 'system Node.js',
     tasks: 3, treeNodes: tree.projection.nodes.length, treeBranches: tree.graph.runs.length,
     tools: [result, ...branches].map(events => [...new Set(tools(events))]),
     checked: ['real external model inference', 'actual read and write execution', 'output values and nonces', 'parallel CLI processes', 'shared PiX parent node', 'two child paths persisted'] };

@@ -7,6 +7,18 @@
 ; writes a fresh value.
 !macro customInstall
   WriteRegStr HKCU "Software\PiX" "installerLanguage" "$LANGUAGE"
+  StrCpy $2 "User"
+  ${If} $installMode == "all"
+    StrCpy $2 "Machine"
+  ${EndIf}
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\cli\path.ps1" -Action install -Directory "$INSTDIR\resources\cli" -Scope $2'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "PiX CLI PATH registration failed: $1"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "PiX CLI PATH registration failed: $1"
+    Abort
+  ${EndIf}
 !macroend
 
 ; electron-builder's finish page launches the app through the Start Menu
@@ -31,6 +43,18 @@
 !macroend
 
 !macro customUnInstall
+  StrCpy $2 "User"
+  ${If} $installMode == "all"
+    StrCpy $2 "Machine"
+  ${EndIf}
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\cli\path.ps1" -Action uninstall -Directory "$INSTDIR\resources\cli" -Scope $2'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "PiX CLI PATH cleanup failed: $1"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "PiX CLI PATH cleanup failed: $1"
+    Abort
+  ${EndIf}
   DeleteRegValue HKCU "Software\PiX" "installerLanguage"
   DeleteRegKey /ifempty HKCU "Software\PiX"
 !macroend

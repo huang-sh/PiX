@@ -15,6 +15,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { registerDesktopCommand } from "./cli-command.js";
 import { DesktopHostController } from "../host/desktop.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
@@ -224,6 +225,10 @@ async function create() {
   else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
+  if (app.isPackaged) {
+    try { registerDesktopCommand(join(process.resourcesPath, "cli", process.platform === "win32" ? "pix.cmd" : "pix")); }
+    catch (error) { debugLog("index: terminal command registration", error); }
+  }
   // No implicit project: without an explicit PIX_PROJECT override the app
   // starts project-less and the welcome screen asks for one.
   const initial = process.env.PIX_PROJECT
