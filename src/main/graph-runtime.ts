@@ -6,7 +6,7 @@ import { sessionModifiedAt } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
-import { GraphFiles, durableWrite, type BranchRecord, type SessionData } from "./graph-files.js";
+import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, SessionSnapshot } from "../shared/types.js";
 
@@ -39,6 +39,7 @@ export class GraphRuntime extends PiRuntime {
   private deletionRecovery?: { snapshot: SessionSnapshot; tools: string[] };
   private lastMain?: SessionSnapshot;
   private rootRunId = "";
+  private rootError?: string;
   private rootBefore = new Set<string>();
   private rootRequest?: PromptAt;
   private snapshotCache = new GraphSnapshotCache();
@@ -126,6 +127,30 @@ export class GraphRuntime extends PiRuntime {
       return this.openInternal(await this.createSessionFile());
     });
   }
+  /** SDK fork semantics without moving the runtime other clients are using. */
+  copySession(entryId?: string): Promise<string> {
+    return this.exclusive(async () => {
+      if (!this.graph || !this.runtime) throw new Error("Open a writable graph first");
+      if (this.mainWork || this.runtime.session.isStreaming) throw new Error("Wait for the main session to finish before copying it");
+      const pi = await this.pi();
+      const source = this.data(this);
+      const manager = pi.SessionManager.inMemory(this.cwd, undefined, [source.header, ...source.entries]);
+      let leaf = this.runtime.session.sessionManager.getLeafId();
+      if (entryId) {
+        const entry = source.entries.find(entry => entry.id === entryId);
+        if (!entry) throw new Error("Fork entry was not found in the main session");
+        leaf = entry.parentId;
+      } else if (!leaf) throw new Error("Empty session");
+      if (leaf) manager.createBranchedSession(leaf);
+      else manager.newSession();
+      const output = { header: { ...manager.getHeader(), parentSession: this.graph.main }, entries: manager.getEntries() };
+      const text = encodeSession(output);
+      parseStrict(text);
+      const path = join(this.dir ?? dirname(this.graph.main), `pix-fork-${randomUUID()}.jsonl`);
+      durableWrite(path, text);
+      return path;
+    });
+  }
   private child(record: BranchRecord) {
     const child = new PiRuntime(this.cwd, this.dir, event => {
       if (this.stopping) return;
@@ -168,7 +193,7 @@ export class GraphRuntime extends PiRuntime {
     const mainPending = Boolean(this.mainWork && (!mainNode || this.rootBefore.has(mainNode.userEntryId)));
     runs.push({ branchId: "main", runId: this.rootRunId, requestId: this.rootRequest?.requestId, nodeId: mainPending ? null : main.projection.activeNodeId,
       ...(mainPending && this.rootRequest ? { pending: { text: this.rootRequest.text, parentNodeId: this.rootRequest.nodeId, images: this.rootRequest.images } } : {}),
-      status: this.mainWork || main.runtime.isStreaming ? "running" : "idle", runtime: main.runtime });
+      status: this.mainWork || main.runtime.isStreaming ? "running" : "idle", error: this.rootError, runtime: main.runtime });
     const active = new Set<string>();
     if (this.mainWork || main.runtime.isStreaming) {
       const current = main.projection.nodes.find(n => n.id === main.projection.activeNodeId);
@@ -364,12 +389,14 @@ export class GraphRuntime extends PiRuntime {
       this.rootRequest = input;
       this.rootBefore = new Set(root.entries.map(e => e.id));
       this.eventScope = { graphId: graph.main, branchId: "main", runId: this.rootRunId };
-      await this.configurePrompt(this, input);
+      this.rootError = undefined;
+      try { await this.configurePrompt(this, input); }
+      catch (error) { this.rootError = String(error); throw error; }
       const work = super.control({ action: "prompt", text: input.text, images: input.images });
       const settled = work.then(() => {
         this.persist(() => graph.sealMain(this.data(this)));
         this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n"));
-      }, error => { if (!this.writeFailure) this.storageError = String(error); }).finally(() => {
+      }, error => { this.rootError = String(error); }).finally(() => {
         try {
           if (this.runtime) this.persist(() => graph.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
         } finally {
@@ -483,7 +510,8 @@ export class GraphRuntime extends PiRuntime {
   }
   private runExportWorker(workerData: Record<string, unknown>) {
     return new Promise<{ path: string }>((resolve, reject) => {
-      const worker = new ExportWorker(new URL("./graph-export-worker.js", import.meta.url), { workerData });
+      const adjacent = new URL("./graph-export-worker.js", import.meta.url);
+      const worker = new ExportWorker(existsSync(adjacent) ? adjacent : new URL("../graph-export-worker.js", import.meta.url), { workerData });
       let delivered = false;
       worker.once("message", message => {
         delivered = true;

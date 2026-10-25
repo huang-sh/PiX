@@ -585,6 +585,8 @@ export interface DesktopEvent {
   payload: unknown;
 }
 export interface ExtensionDialog {
+  /** Execution file, used to route terminal input to the correct run. */
+  sessionPath?: string;
   id: string;
   title: string;
   source: string;

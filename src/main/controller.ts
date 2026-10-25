@@ -53,13 +53,13 @@ export interface Platform {
   openWithApps(path: string): Promise<{ id: string; name: string }[]>;
   /** Launches one of the openWithApps entries on Linux. */
   openWithApp(path: string, appId: string): Promise<void>;
-  showItemInFolder(path: string): void;
-  quit(): void;
+  showItemInFolder(path: string): void | Promise<void>;
+  quit(): void | Promise<void>;
 }
 /** Model actions whose catalog or credential change must reach open sessions. */
 const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 export class MainController {
-  readonly dialogs = new ExtensionDialogs(event => this.emit(event));
+  readonly dialogs: ExtensionDialogs;
   project: ProjectInfo | null;
   settings: SettingsService;
   library: LibraryService;
@@ -79,6 +79,7 @@ export class MainController {
   private viewRequest = 0;
   private gitSwitches = new Set<string>();
   private pendingAgentControls = new Map<string, number>();
+  get hasPendingWork() { return this.pendingAgentControls.size > 0; }
   listeners = new Set<(e: DesktopEvent) => void>();
   /** Progress baselines of background runs, replayed when their session returns to view. */
   readonly progress = new ProgressLedger({
@@ -93,14 +94,19 @@ export class MainController {
     const slot = this.pool.active();
     return (slot && this.pool.brokerModelsFor(slot.client)) ?? new Set<string>();
   }
-  constructor(path: string | null, platform: Platform) {
+  constructor(path: string | null, platform: Platform, private readonly owner?: MainController) {
+    this.dialogs = owner?.dialogs ?? new ExtensionDialogs(event => this.emit(event));
+    if (owner) {
+      this.gitSwitches = owner.gitSwitches;
+      this.pendingAgentControls = owner.pendingAgentControls;
+    }
     path = path ? resolve(path) : null;
     this.localProjectPath = path;
     this.project = path ? { name: basename(path), path } : null;
     this.platform = platform;
     this.settings = new SettingsService(path);
     this.library = new LibraryService();
-    this.settings.applyInstallerLanguage();
+    if (!owner) this.settings.applyInstallerLanguage();
     this.workspace = new WorkspaceService(path);
     this.git = new GitService(path);
     this.shell = new ShellService(path, (e) => this.emit(e as DesktopEvent));
@@ -109,10 +115,11 @@ export class MainController {
       : null;
     this.files = new SessionFiles(path, dir);
     this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url), this.dialogs);
-    this.registry = new SessionRegistry({
-      createRuntime: entry => this.createSessionRuntime(entry),
-      onEvent: (entry, event) => this.routeSessionEvent(entry, event),
-    });
+    const registryHost = {
+      createRuntime: (entry: SessionEntry) => this.createSessionRuntime(entry),
+      onEvent: (entry: SessionEntry, event: unknown) => this.routeSessionEvent(entry, event),
+    };
+    this.registry = owner ? owner.registry.fork(registryHost) : new SessionRegistry(registryHost);
     this.pool = new RemoteWorkspacePool({
       emit: e => this.emit(e),
       platform,
@@ -298,13 +305,13 @@ export class MainController {
     return { stopped: false };
   }
   /** Routes a control action: model actions to the project runtime, everything else to the active session. */
-  private async controlAgent(input: AgentControl): Promise<{ result: unknown; entry?: SessionEntry }> {
+  private async controlAgent(input: AgentControl, sessionPath?: string): Promise<{ result: unknown; entry?: SessionEntry }> {
     if (input.action === "newSession") {
       const entry = this.activeEntry();
       // A failed node deletion recovers by reusing the old close-and-create
       // semantics on the same runtime; otherwise a new session is a new entry
       // and the previous one keeps running in the background.
-      if (entry?.runtime?.recovering) {
+      if (entry?.runtime?.recovering && !this.owner) {
         const result = await entry.runtime.control(input);
         this.followRuntimeFile(entry);
         return { result, entry };
@@ -329,8 +336,14 @@ export class MainController {
       else if ((CATALOG_MUTATIONS as readonly string[]).includes(input.action)) await this.pushCatalogs(input);
       return { result };
     }
-    const entry = this.activeEntry();
+    const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
     if (!entry?.runtime) throw new Error("Open a session first");
+    if (this.owner && (input.action === "fork" || input.action === "clone")) {
+      const runtime = entry.runtime;
+      const result = await this.registry.create(entry.project, entry.dir,
+        () => runtime.copySession(input.action === "fork" ? input.entryId : undefined));
+      return { result, entry: this.registry.entry(result.session.path) };
+    }
     const result = await entry.runtime.control(input);
     // Fork and clone move this runtime to the new session file they created;
     // the entry's key must follow it or the old row would serve the new file.
@@ -559,7 +572,7 @@ export class MainController {
     if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
     return { ...snapshot, ...cache.view(snapshot, new Set()) };
   }
-  async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
+  async invoke(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
     const v = validateRouteInput(route, raw);
     if (route === "ui.respond") {
       if (v.projectId) {
@@ -586,7 +599,7 @@ export class MainController {
       } else {
         path = resolve(path);
       }
-      this.platform.showItemInFolder(path);
+      await this.platform.showItemInFolder(path);
       return;
     }
     if (route === "app.openPath") {
@@ -649,7 +662,7 @@ export class MainController {
       mkdirSync(dirname(file), { recursive: true });
       // Revealing the file itself points a bug report at what to send; before
       // the first failure there is only the empty folder to show.
-      this.platform.showItemInFolder(existsSync(file) ? file : dirname(file));
+      await this.platform.showItemInFolder(existsSync(file) ? file : dirname(file));
       return;
     }
     if (route === "app.forgetProject") {
@@ -756,7 +769,7 @@ export class MainController {
         await this.platform.openExternal(String(v.url));
         return { ok: true };
       case "app.quit":
-        this.platform.quit();
+        await this.platform.quit();
         return { ok: true };
       case "session.list":
         return this.sessions().then((sessions) => {
@@ -764,9 +777,9 @@ export class MainController {
           return sessions;
         });
       case "session.snapshot": {
-        const entry = this.activeEntry();
-        const current = entry?.runtime ? entry.runtime.snapshot() : this.current;
-        if (current) {
+        const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
+        const current = entry?.runtime ? entry.runtime.snapshot() : sessionPath ? undefined : this.current;
+        if (current && (!sessionPath || (entry && this.registry.isActive(entry)))) {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
           // Replay only the session in view; other buckets wait for their turn.
@@ -912,12 +925,14 @@ export class MainController {
         };
       }
       case "agent.control": {
-        const owner = this.project ? projectId(this.project) : "";
+        const target = sessionPath ? this.entryFor(sessionPath)?.entry : undefined;
+        if (sessionPath && !target) throw new Error("Target session is not open");
+        const owner = target ? projectId(target.project) : this.project ? projectId(this.project) : "";
         const startsWork = ["prompt", "promptAt", "steer", "followUp", "bash", "compact"].includes(String(v.action));
         if (startsWork && this.gitSwitches.has(owner)) throw new Error("Wait for the Git branch switch to finish");
         if (startsWork) this.pendingAgentControls.set(owner, (this.pendingAgentControls.get(owner) ?? 0) + 1);
         try {
-          const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl);
+          const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl, sessionPath);
           if (request === this.viewRequest && r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
             this.current = r as SessionSnapshot;
             // Mutating actions append entries after the last agent event (e.g.
@@ -1054,6 +1069,14 @@ export class MainController {
   closeSessions(): Promise<void> {
     this.flushBackgroundRefresh();
     return this.registry.disposeAll();
+  }
+  /** Disconnecting a client releases its view, never the host's runs. */
+  detach() {
+    this.flushBackgroundRefresh();
+    this.registry.detach();
+    this.progress.clear();
+    this.listeners.clear();
+    this.shell.dispose();
   }
   /** Full shutdown: local sessions and every pooled host, awaited together. */
   closeAll(): Promise<void> {

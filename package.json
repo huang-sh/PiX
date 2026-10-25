@@ -12,7 +12,7 @@
   },
   "scripts": {
     "fixtures": "node scripts/install-fixtures.mjs",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build:server": "tsc -p tsconfig.server.json && node scripts/build-cli-assets.mjs",
     "install:server:wsl": "node scripts/install-wsl-server.mjs",
     "test:wsl": "node scripts/install-wsl-server.mjs && node scripts/clean-test-out.mjs && tsc -p tsconfig.test.json && node test/wsl-server-test.mjs",
     "test:wsl:upgrade": "npm run build:server && node test/wsl-upgrade-test.mjs",
@@ -41,8 +41,13 @@
     "test:packaged": "node test/packaged-smoke-test.mjs",
     "test:fff": "node test/builtin-fff-smoke-test.mjs",
     "test:web": "node --test test/prune-dev-artifacts.test.mjs && node test/web-extension-smoke-test.mjs",
-    "dev": "electron-vite dev -w",
-    "postinstall": "node node_modules/electron/install.js"
+    "dev": "npm run build:server && electron-vite dev -w",
+    "postinstall": "node node_modules/electron/install.js",
+    "build:cli": "npm run build:server",
+    "cli": "node bin/pix.mjs",
+    "test:cli": "npm run build && node test/cli-host-test.mjs",
+    "test:cli:real": "npm run build:cli && node test/cli-real-agent-test.mjs",
+    "test:cli:package": "npm run build:cli && node test/cli-package-test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.4.0",
@@ -89,5 +94,8 @@
   "allowScripts": {
     "electron@44.4.4": true,
     "node-pty@1.2.0-beta.15": true
+  },
+  "bin": {
+    "pix": "bin/pix.mjs"
   }
 }

@@ -5,6 +5,8 @@ node_modules/
 out/
 out-test/
 server/dist/
+server/skills/
+server/LICENSE
 release/
 /.pix-installed-*/
 /PiX-Setup-*.exe

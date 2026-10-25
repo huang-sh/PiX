@@ -69,6 +69,19 @@ PiX 还内置两个带原生二进制的扩展，扩展及运行依赖随安装�
 
 此外，PiX 还加载内部扩展：`file-changes` 在智能体编辑、写入文件前后拍快照，为"变更"面板提供数据；`git-branch` 为每轮用户输入记录当时所在的 Git 分支。
 
+## CLI
+
+GUI 与 CLI 共享同一个独立后台 Host 和现有 PiX 会话树，可在多个终端同时运行分支任务。关闭界面后，已接受的任务继续执行。
+
+```sh
+npm run build:cli
+node bin/pix.mjs run "检查项目中的测试"
+node bin/pix.mjs sessions
+node bin/pix.mjs tree --session <会话ID或路径>
+```
+
+完整命令、仅 Node.js 的安装包、并发语义和真实 Agent 测试见 [CLI 文档](docs/cli.md)。
+
 ## 下载
 
 从 [GitHub Releases](https://github.com/huang-sh/PiX/releases) 下载对应平台的安装包：

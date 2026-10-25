@@ -1395,3 +1395,48 @@ test("eviction never disposes an entry that became active while it was closing a
     for (const release of [...gates.values()]) release();
   }
 });
+
+test("host clients share runtimes while selection, explicit reads and detachment remain independent", { timeout: 30000 }, async () => {
+  const ws = workspace();
+  const owner = new MainController(null, platform);
+  const a = new MainController(ws, platform, owner);
+  const b = new MainController(ws, platform, owner);
+  const previousLimit = process.env.PIX_MAX_LIVE_SESSIONS;
+  process.env.PIX_MAX_LIVE_SESSIONS = "1";
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", contextWindow: 128000 }] });
+    injectFaux(owner, faux);
+    const run = await startGatedRun(a, faux, "survived client detach");
+    await b.invoke("session.open", { path: run.path });
+    assert.equal(a.registry.entry(run.path)?.runtime, b.registry.entry(run.path)?.runtime);
+    await b.invoke("agent.control", { action: "newSession" });
+    const bPath = b.current!.session.path;
+    assert.equal(a.current?.session.path, run.path);
+    const explicit = await b.invoke("session.snapshot", undefined, run.path) as SessionSnapshot;
+    assert.equal(explicit.session.path, run.path);
+    assert.equal(b.current?.session.path, bPath, "targeted reads do not select their target");
+    a.detach();
+    assert.equal(owner.registry.entry(run.path)?.runtime?.busy, true);
+    await run.finish();
+    await b.invoke("session.open", { path: run.path });
+    assert.ok(JSON.stringify(b.current).includes("survived client detach"));
+    const clone = await b.invoke("agent.control", { action: "clone" }) as SessionSnapshot;
+    assert.notEqual(clone.session.path, run.path);
+    assert.ok(owner.registry.entry(run.path)?.runtime, "cloning leaves the source runtime and lock intact");
+    assert.ok(JSON.stringify(clone).includes("survived client detach"));
+    // An idle session being viewed by another client must survive LRU eviction.
+    const c = new MainController(ws, platform, owner);
+    try {
+      await c.invoke("session.open", { path: run.path });
+      for (let i = 0; i < 4; i++) await b.invoke("agent.control", { action: "newSession" });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.ok(c.registry.entry(run.path)?.runtime);
+      assert.equal(c.current?.session.path, run.path);
+    } finally { c.detach(); }
+  } finally {
+    a.detach(); b.detach(); await owner.closeAll();
+    if (previousLimit === undefined) delete process.env.PIX_MAX_LIVE_SESSIONS;
+    else process.env.PIX_MAX_LIVE_SESSIONS = previousLimit;
+    rmSync(ws, { recursive: true, force: true });
+  }
+});

@@ -235,3 +235,13 @@ test("pi loads the bundled skills and a same-named user skill wins", async () =>
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("source CLI uses one skills tree when packaged assets also exist", () => {
+  const root = mkdtempSync(join(tmpdir(), "pix-cli-skills-"));
+  try {
+    const original = skillMarker(root, "skills");
+    skillMarker(root, "server", "skills");
+    assert.deepEqual(resolveBuiltinSkills(join(root, "server", "dist", "main")), [original]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

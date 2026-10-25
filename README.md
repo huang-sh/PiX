@@ -69,6 +69,19 @@ PiX also bundles two extensions with native binaries. They and their runtime dep
 
 PiX also loads internal extensions: `file-changes` snapshots files before and after the agent edits or writes them to power the "Changes" panel; `git-branch` records the working Git branch for each user turn.
 
+## CLI
+
+The GUI and CLI share an independent background host and the existing PiX session tree. Multiple terminals can run branches concurrently; accepted tasks keep running after a client exits.
+
+```sh
+npm run build:cli
+node bin/pix.mjs run "Check the project tests"
+node bin/pix.mjs sessions
+node bin/pix.mjs tree --session <session-id-or-path>
+```
+
+See [CLI documentation](docs/cli.md) for commands, the Node-only package, concurrency, and real agent verification.
+
 ## Download
 
 Grab the installer for your platform from [GitHub Releases](https://github.com/huang-sh/PiX/releases):

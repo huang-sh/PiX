@@ -7,6 +7,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@ff-labs/pi-fff": "0.10.6",
     "@injaneity/pi-computer-use": "0.5.1",
@@ -18,5 +19,15 @@
   },
   "allowScripts": {
     "node-pty@1.2.0-beta.15": true
-  }
+  },
+  "bin": {
+    "pix": "bin/pix.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "skills",
+    "LICENSE"
+  ],
+  "license": "MPL-2.0"
 }

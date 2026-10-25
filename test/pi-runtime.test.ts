@@ -681,7 +681,7 @@ test("factory loads bundled packages as additional extension paths", async () =>
 
   // The user's own install suppresses the bundled copy.
   await create();
-  assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
+  assert.ok(servicesOptions.resourceLoaderOptions.additionalExtensionPaths.every((path: string) => !path.endsWith("@injaneity/pi-computer-use")), "the user-installed package is not loaded twice; other bundled packages remain available");
   assert.deepEqual(servicesOptions.resourceLoaderOptions.extensionFactories.slice(0, 3).map((entry: any) => entry.name), ["codemode", "mcp", "tool-search"]);
   assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories.find((entry: any) => entry.name === "file-changes").factory, "function");
 

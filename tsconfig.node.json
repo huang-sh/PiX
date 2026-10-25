@@ -9,6 +9,8 @@
     "src/server/**/*.ts",
     "src/preload/**/*.ts",
     "src/shared/**/*.ts",
-    "types/**/*.d.ts"
+    "types/**/*.d.ts",
+    "src/host/**/*.ts",
+    "src/cli/**/*.ts"
   ]
 }

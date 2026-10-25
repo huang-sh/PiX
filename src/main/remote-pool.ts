@@ -107,6 +107,7 @@ export interface StoredHostHandle extends HostHandle {
 
 export class RemoteWorkspacePool {
   private readonly remotePool = new Map<string, RemoteSlot>();
+  get hasConnections() { return this.remotePool.size > 0; }
   private remoteRecycleTimer?: NodeJS.Timeout;
   private remoteAttempt?: AbortController;
   private pendingRemote?: PendingRemote;

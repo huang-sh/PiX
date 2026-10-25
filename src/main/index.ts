@@ -7,7 +7,6 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
-  net,
   shell,
   Tray,
 } from "electron";
@@ -16,13 +15,10 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { MainController } from "./controller.js";
+import { DesktopHostController } from "../host/desktop.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
-import { pixHome } from "./paths.js";
-import { bootstrapPixProfile } from "./services.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
-import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
 
@@ -35,8 +31,7 @@ applyLinuxImeWorkaround({
 });
 
 const dir = dirname(fileURLToPath(import.meta.url));
-let win: any, controller: MainController;
-let closeHttpProxy: (() => Promise<void>) | undefined;
+let win: any, controller: DesktopHostController;
 let tray: Tray | undefined;
 let isQuitting = false;
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
@@ -229,13 +224,12 @@ async function create() {
   else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
-  bootstrapPixProfile(pixHome());
   // No implicit project: without an explicit PIX_PROJECT override the app
   // starts project-less and the welcome screen asks for one.
   const initial = process.env.PIX_PROJECT
     ? resolve(process.env.PIX_PROJECT)
     : null;
-  controller = new MainController(initial, {
+  controller = await DesktopHostController.connect(initial, {
     async pickProject() {
       const r = await dialog.showOpenDialog(win, {
         properties: ["openDirectory"],
@@ -360,10 +354,6 @@ app.whenReady().then(async () => {
     },
   });
   controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
-  closeHttpProxy = installHttpProxy(
-    () => controller.settings.bundle().piGlobal.httpProxy,
-    (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
-  );
   // Release awareness runs only in the desktop main process — a remote host
   // serves sessions but must not announce desktop updates itself.
   new UpdateChecker({
@@ -411,16 +401,16 @@ app.whenReady().then(async () => {
   try { reportFailure("startup", "index: startup", e); }
   finally { if (!started) app.quit(); }
 });
-let sessionsClosed = false;
-let closingSessions = false;
+let clientDetached = false;
+let detachingClient = false;
 app.on("before-quit", (event) => {
   isQuitting = true;
-  if (!sessionsClosed && controller) {
+  if (!clientDetached && controller) {
     event.preventDefault();
-    if (!closingSessions) {
-      closingSessions = true;
-      void controller.closeAll().finally(() => closeHttpProxy?.()).finally(() => {
-        sessionsClosed = true;
+    if (!detachingClient) {
+      detachingClient = true;
+      void controller.detach().finally(() => {
+        clientDetached = true;
         app.quit();
       }).catch(() => {});
     }

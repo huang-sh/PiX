@@ -52,8 +52,30 @@ export class SessionRegistry {
   private activePath = "";
   private selection = 0;
   private readonly activeByProject = new Map<string, string>();
+  private readonly views: Set<SessionRegistry>;
+  private readonly createRuntime: SessionRegistryHost["createRuntime"];
 
-  constructor(private readonly host: SessionRegistryHost) {}
+  constructor(private readonly host: SessionRegistryHost, owner?: SessionRegistry) {
+    if (owner) {
+      this.settled = owner.settled;
+      this.pending = owner.pending;
+      this.pendingCreates = owner.pendingCreates;
+      this.blockedPaths = owner.blockedPaths;
+      this.blockedProjects = owner.blockedProjects;
+    }
+    this.views = owner?.views ?? new Set();
+    this.createRuntime = owner?.createRuntime ?? (entry => host.createRuntime(entry));
+    this.views.add(this);
+  }
+
+  /** Client-local selection over the host's single set of live runtimes. */
+  fork(host: SessionRegistryHost) { return new SessionRegistry(host, this); }
+
+  detach() {
+    this.views.delete(this);
+    this.activePath = "";
+    this.activeByProject.clear();
+  }
 
   entry(path: string): SessionEntry | undefined {
     return this.settled.get(path);
@@ -257,9 +279,11 @@ export class SessionRegistry {
     this.settled.delete(previous);
     (entry as { path: string }).path = path;
     this.settled.set(path, entry);
-    if (this.activePath === previous) this.activePath = path;
-    const remembered = this.activeByProject.get(projectId(entry.project));
-    if (remembered === previous) this.activeByProject.set(projectId(entry.project), path);
+    for (const view of this.views) {
+      if (view.activePath === previous) view.activePath = path;
+      const remembered = view.activeByProject.get(projectId(entry.project));
+      if (remembered === previous) view.activeByProject.set(projectId(entry.project), path);
+    }
   }
 
   async dispose(path: string, after?: () => void | Promise<void>): Promise<void> {
@@ -317,8 +341,13 @@ export class SessionRegistry {
     dead?: SessionEntry): Promise<SessionEntry> {
     if (dead) await this.disposeEntry(dead);
     const entry: SessionEntry = { path, project, dir, lastUsed: Date.now() };
-    const runtime = this.host.createRuntime(entry);
-    runtime.emit = event => this.host.onEvent(entry, event);
+    const runtime = this.createRuntime(entry);
+    runtime.emit = event => {
+      for (const view of this.views) {
+        try { view.host.onEvent(entry, event); }
+        catch (error) { debugLog("session-registry: client event", error); }
+      }
+    };
     entry.runtime = runtime;
     return runtime.open(path).then(
       () => {
@@ -347,21 +376,23 @@ export class SessionRegistry {
   /** Idle-only LRU: running, in-flight, and the active entry are never evicted. */
   private async evict(): Promise<void> {
     const idle = [...this.settled.values()]
-      .filter(entry => entry.path !== this.activePath && !this.busy(entry))
+      .filter(entry => ![...this.views].some(view => view.isActive(entry)) && !this.busy(entry))
       .sort((a, b) => a.lastUsed - b.lastUsed);
     for (const entry of idle.slice(0, Math.max(0, idle.length - this.maxIdle))) {
       // Closing an earlier victim takes time, and a project switch during that
       // window restores one of the entries still queued here.
-      if (entry.path === this.activePath || this.busy(entry)) continue;
+      if ([...this.views].some(view => view.isActive(entry)) || this.busy(entry)) continue;
       await this.disposeEntry(entry);
     }
   }
 
   private async disposeEntry(entry: SessionEntry): Promise<void> {
     this.settled.delete(entry.path);
-    if (this.activePath === entry.path) this.activePath = "";
-    const remembered = this.activeByProject.get(projectId(entry.project));
-    if (remembered === entry.path) this.activeByProject.delete(projectId(entry.project));
+    for (const view of this.views) {
+      if (view.activePath === entry.path) view.activePath = "";
+      const remembered = view.activeByProject.get(projectId(entry.project));
+      if (remembered === entry.path) view.activeByProject.delete(projectId(entry.project));
+    }
     const runtime = entry.runtime;
     entry.runtime = undefined;
     await runtime?.close();

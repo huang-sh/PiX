@@ -624,13 +624,13 @@ export class PiRuntime {
           ...created.session.extensionRunner.getUIContext(),
           notify,
           select: (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) =>
-            this.dialogs?.request(created.session, { kind: "select", title, options, source: cwd }, opts) ?? unsupported(),
+            this.dialogs?.request(created.session, { kind: "select", title, options, source: cwd, sessionPath: created.session.sessionFile }, opts) ?? unsupported(),
           confirm: async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
-            (await (this.dialogs?.request(created.session, { kind: "confirm", title, message, options: ["yes"], source: cwd }, opts) ?? unsupported())) === "yes",
+            (await (this.dialogs?.request(created.session, { kind: "confirm", title, message, options: ["yes"], source: cwd, sessionPath: created.session.sessionFile }, opts) ?? unsupported())) === "yes",
           input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
             const message = signInMessage;
             signInMessage = undefined;
-            return this.dialogs?.request(created.session, { kind: "input", title, placeholder, message, source: cwd }, opts) ?? unsupported();
+            return this.dialogs?.request(created.session, { kind: "input", title, placeholder, message, source: cwd, sessionPath: created.session.sessionFile }, opts) ?? unsupported();
           },
           editor: unsupported,
           custom: unsupported,
