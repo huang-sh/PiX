@@ -29,6 +29,7 @@ export interface PromptNodeData {
   searchHit?: boolean;
   filterContext?: boolean;
   onEditLabel?: () => void;
+  editLabelShortcut?: string;
   content: () => NodeContent;
   onCompose: (direction?: BranchDirection) => void;
   /** Opens this node in a pinned chat column; graph sessions only. */
@@ -274,7 +275,7 @@ function relative(value: string) {
   </ContextMenuTrigger>
   <ContextMenuPortal>
     <ContextMenuContent class="menu-content nodrag nowheel" :side-offset="4" @close-auto-focus.prevent>
-      <ContextMenuItem class="menu-item" data-action="node-edit-label" :disabled="!data.onEditLabel" @select="data.onEditLabel?.()"><Tag :size="14" />{{ t("graph.editLabel") }}</ContextMenuItem>
+      <ContextMenuItem class="menu-item" data-action="node-edit-label" :disabled="!data.onEditLabel" @select="data.onEditLabel?.()"><Tag :size="14" />{{ t("graph.editLabel") }}<kbd v-if="data.editLabelShortcut" class="menu-shortcut">{{ data.editLabelShortcut }}</kbd></ContextMenuItem>
       <ContextMenuItem
         v-if="data.onOpenPanel"
         class="menu-item"

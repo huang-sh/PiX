@@ -829,6 +829,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .menu-item[data-highlighted] { background: var(--muted-surface); }
 .menu-item.danger { color: var(--danger); }
 .menu-item[data-disabled] { opacity: 0.45; cursor: not-allowed; }
+.menu-shortcut { margin-left: auto; padding-left: 14px; color: var(--faint); font-size: var(--font-size-caption); }
 .slash-menu { z-index: 140; display: flex; flex-direction: column; width: min(clamp(240px, var(--reka-popover-trigger-width), 460px), var(--reka-popover-content-available-width)); max-height: min(280px, var(--reka-popover-content-available-height)); padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); animation: menu-in 130ms ease-out; }
 .slash-menu-scroll { display: flex; flex-direction: column; min-height: 0; gap: 1px; overflow: auto; }
 .slash-item { flex-shrink: 0; justify-content: flex-start; gap: 8px; }

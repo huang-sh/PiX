@@ -311,6 +311,22 @@ try {
   await gui.evaluate(`document.querySelector('[data-action="node-label-save"]').click()`);
   await until(() => gui.evaluate(`!document.querySelector('[data-action="node-label-input"]')`));
   assert.equal((await cli(['tree', path, '--json'])).events[0].snapshot.projection.nodes.find(n => n.id === rootNode)?.label, 'GUI bookmark');
+  await gui.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+  await gui.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+  const primary = await gui.evaluate(`/Mac/i.test(navigator.platform)`) ? 4 : 2;
+  await gui.send('Input.dispatchKeyEvent', { type:'keyDown', key:'L', code:'KeyL', windowsVirtualKeyCode:76, modifiers:primary | 8 });
+  await gui.send('Input.dispatchKeyEvent', { type:'keyUp', key:'L', code:'KeyL', windowsVirtualKeyCode:76, modifiers:primary | 8 });
+  await until(() => gui.evaluate(`document.querySelector('[data-action="node-label-input"]')?.value==='GUI bookmark'`));
+  const shortcutPicture = await gui.send('Page.captureScreenshot');
+  writeFileSync(join(root, 'artifacts/graph-label-shortcut-gui.png'), Buffer.from(shortcutPicture.data, 'base64'));
+  await gui.send('Input.dispatchKeyEvent', { type:'keyDown', key:'a', code:'KeyA', windowsVirtualKeyCode:65, modifiers:primary });
+  await gui.send('Input.dispatchKeyEvent', { type:'keyUp', key:'a', code:'KeyA', windowsVirtualKeyCode:65, modifiers:primary });
+  await gui.send('Input.insertText', { text:'GUI shortcut bookmark' });
+  await gui.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Enter', code:'Enter', windowsVirtualKeyCode:13, text:'\r', unmodifiedText:'\r' });
+  await gui.send('Input.dispatchKeyEvent', { type:'keyUp', key:'Enter', code:'Enter', windowsVirtualKeyCode:13 });
+  await until(() => gui.evaluate(`!document.querySelector('[data-action="node-label-input"]')`));
+  assert.equal((await cli(['tree', path, '--json'])).events[0].snapshot.projection.nodes.find(n => n.id === rootNode)?.label, 'GUI shortcut bookmark');
+
   await cli(['label', nested.nodeId, 'CLI branch bookmark', '--session', path]);
   await until(() => gui.evaluate(`window.hostEvents.some(e=>e.type==='sessions' && e.payload.current?.projection.nodes.some(n=>n.label==='CLI branch bookmark'))`));
   await gui.evaluate(`(()=>{const e=document.querySelector('[data-action="graph-filter"]');e.value='labeled';e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
@@ -379,7 +395,7 @@ try {
   await guiExit; desktop = undefined;
   await cli(['host', 'stop']);
   console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'],
-    tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
+    tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'native GUI label shortcut and Enter to save', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
       'cancel and continue', 'native input/select/confirm dialogs', 'confirmation defaults to cancel', 'CJK multiline paste',
       'native tool cards', 'exit preserves accepted work'], modelRequests: requests.length, home }));
 } finally {

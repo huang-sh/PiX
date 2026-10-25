@@ -8,7 +8,7 @@ import { useSessionStore } from "../../src/renderer/stores/session";
 import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
 import { graphNodeBlobs, searchGraphNodeIds } from "../../src/renderer/lib/graph-search";
-import type { RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
+import type { RawSessionEntry, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
 
 vi.mock("../../src/renderer/lib/frame", () => ({
   nextFrame: vi.fn(async () => {}), whenVisible: async () => {}, whenTransitionsSettle: async () => {},
@@ -155,5 +155,53 @@ describe("graph labels and task filters", () => {
     current.session = { ...current.session, path: "other-session" };
     await flushPromises();
     expect(setupState.labelTarget).toBeUndefined();
+  });
+});
+
+
+describe("graph label shortcut", () => {
+  const press = (modifiers: KeyboardEventInit = {}, target: EventTarget = window) => {
+    const event = new KeyboardEvent("keydown", { key: "L", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true, ...modifiers });
+    target.dispatchEvent(event); return event;
+  };
+  it("edits the highlighted task rather than the viewed task and cleans up on unmount", async () => {
+    const { wrapper, setupState } = mountGraph(); await flushPromises();
+    useSessionStore().highlightedNode = "turn:u2";
+    expect(press().defaultPrevented).toBe(true);
+    expect(setupState.labelTarget.entryId).toBe("u2");
+    setupState.labelTarget = undefined; await flushPromises();
+    wrapper.unmount();
+    expect(press().defaultPrevented).toBe(false);
+  });
+  it("honors custom bindings, disabling, settings and protected input", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    const layout = useLayoutStore();
+    layout.settings = { app: { keyboardShortcuts: { editLabel: ["Mod+Shift+m"] } } } as SettingsBundle;
+    expect(press().defaultPrevented).toBe(false);
+    expect(press({ key: "M" }).defaultPrevented).toBe(true);
+    setupState.labelTarget = undefined; await flushPromises();
+    layout.settings.app.keyboardShortcuts = { editLabel: [] };
+    expect(press({ key: "M" }).defaultPrevented).toBe(false);
+    layout.settings.app.keyboardShortcuts = {};
+    layout.screen = "settings";
+    expect(press().defaultPrevented).toBe(false);
+    layout.screen = "workbench";
+    expect(press({ isComposing: true }).defaultPrevented).toBe(false);
+    expect(press({ repeat: true }).defaultPrevented).toBe(false);
+    const terminal = document.createElement("div"); terminal.className = "xterm"; document.body.append(terminal);
+    expect(press({}, terminal).defaultPrevented).toBe(false); terminal.remove();
+    expect(setupState.labelTarget).toBeUndefined();
+  });
+  it("does not consume the key for a readonly or running branch", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    const current = useSessionStore().current!;
+    current.runtime.available = false;
+    expect(press().defaultPrevented).toBe(false);
+    current.runtime.available = true;
+    current.graph = { id: current.session.path, revision: 1, runs: [{ branchId: "main", status: "running", runId: "test", nodeId: "turn:u2" }] };
+    expect(press().defaultPrevented).toBe(false);
+    expect(setupState.labelTarget).toBeUndefined();
+    current.graph.runs[0]!.status = "idle";
+    expect(press().defaultPrevented).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ export const SHORTCUTS = [
   { id: "tools", defaults: ["Mod+Alt+b"] },
   { id: "settings", defaults: ["Mod+,"] },
   { id: "history", defaults: ["Mod+Shift+h"] },
+  { id: "editLabel", defaults: ["Mod+Shift+l"] },
 ] as const;
 
 export type ShortcutId = typeof SHORTCUTS[number]["id"];

@@ -541,6 +541,8 @@ function keydown(event: KeyboardEvent) {
   if (shortcutsBlocked(event)) return;
   if (handleHistoryKeys(event)) return;
   const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
+  // The graph owns label editing and its selected-node / writable-branch guards.
+  if (action === "editLabel") return;
   // A disabled experimental module's shortcut must fall through untouched, not
   // be preventDefault-ed into silence.
   if (action === "history" && !historyEnabled.value) return;

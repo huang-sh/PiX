@@ -14,7 +14,7 @@ import {
 import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import { MiniMap } from "@vue-flow/minimap";
 import GraphOverview from "./GraphOverview.vue";
-import { computed, markRaw, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
@@ -23,6 +23,8 @@ import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualP
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { searchGraphNodeIds } from "../../lib/graph-search";
+import { isMac, shortcutForEvent } from "../../keyboard-shortcuts";
+import { formatShortcut, shortcutBindings } from "../../../shared/shortcuts";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../../../shared/graph-filter";
@@ -88,8 +90,25 @@ const labelTarget = ref<{ entryId: string; path: string }>();
 const labelText = ref("");
 const labelError = ref("");
 const labelSaving = ref(false);
+const labelShortcut = computed(() => shortcutBindings("editLabel", layout.settings?.app.keyboardShortcuts)
+  .map(binding => formatShortcut(binding, isMac())).join(" / "));
+function labelKeydown(event: KeyboardEvent) {
+  if (layout.screen !== "workbench" || shortcutForEvent(event, layout.settings?.app.keyboardShortcuts) !== "editLabel") return;
+  const node = session.selectedNode;
+  if (!node || !canEditLabel(node)) return;
+  event.preventDefault();
+  editLabel(node);
+}
+onMounted(() => window.addEventListener("keydown", labelKeydown));
+onBeforeUnmount(() => window.removeEventListener("keydown", labelKeydown));
+function canEditLabel(node: GraphNode) {
+  const current = session.current;
+  return Boolean(current?.runtime.available && !node.running && !(current.graph
+    ? current.graph.runs.some(run => run.branchId === (node.branchId ?? "main") && run.status === "running")
+    : current.runtime.isStreaming || session.pendingPrompt));
+}
 function editLabel(node: GraphNode) {
-  if (!session.current) return;
+  if (!session.current || !canEditLabel(node)) return;
   labelTarget.value = { entryId: node.userEntryId, path: session.current.session.path };
   labelText.value = node.label ?? ""; labelError.value = "";
 }
@@ -304,7 +323,8 @@ function rebuild() {
       content: () => nodeContent(node.id),
       searchHit: searchHitIds.value.has(node.id),
       filterContext: !matchesGraphFilter(node, graphFilter.value),
-      onEditLabel: session.current?.runtime.available && !busy ? () => editLabel(node) : undefined,
+      onEditLabel: canEditLabel(node) ? () => editLabel(node) : undefined,
+      editLabelShortcut: labelShortcut.value,
       onCompose: direction => compose(node.id, direction),
       onOpenPanel: session.current?.graph ? () => openChatColumn(node.id) : undefined,
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
@@ -901,7 +921,7 @@ watch(
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
     () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns,
-    searchHitIds, graphFilter],
+    searchHitIds, graphFilter, labelShortcut],
   () => {
     if (!session.current) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
