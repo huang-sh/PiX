@@ -11,6 +11,25 @@ function snapshot(entries: RawSessionEntry[]): SessionSnapshot {
   return { session: { path: "main" }, entries, projection: projectSession(entries, entries.at(-1)?.id ?? null), runtime: {} } as SessionSnapshot;
 }
 
+test("interrupted turns remain forkable while live turns are blocked", () => {
+  const graph = new GraphFiles("main");
+  for (const toolCall of [false, true]) {
+    const entries = [entry("prompt", null)];
+    if (toolCall) entries.push({ ...entry("call", "prompt", "assistant"), message: {
+      role: "assistant", content: [{ type: "toolCall", id: "unfinished", name: "bash", arguments: { command: "echo test" } }],
+    } });
+    const main = snapshot(entries);
+    const cache = new GraphSnapshotCache();
+    cache.update(graph, main, new Map());
+    const idle = cache.view(main, new Set()).projection.nodes[0]!;
+    assert.equal(idle.forkable, true, "a crash must not permanently disable an incomplete turn");
+    const running = cache.view(main, new Set([idle.id])).projection.nodes[0]!;
+    assert.equal(running.running, true);
+    assert.equal(running.forkable, false, "a live turn cannot be used as a branch point");
+    assert.equal(cache.view(main, new Set()).projection.nodes[0], idle);
+  }
+});
+
 test("merged snapshots match full projection while unchanged branches never re-read their contents", () => {
   const graph = new GraphFiles("main");
   const main = snapshot([entry("root", null), entry("answer", "root", "assistant")]);

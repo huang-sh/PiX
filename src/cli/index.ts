@@ -27,7 +27,7 @@ Usage: pix [command] [arguments] [options]
 
   --cwd <path>                 Project directory (default: current directory)
   --session <id-or-path>       Select a session (required for tree/stop/fork)
-  --node <node-id>             Start from this completed node
+  --node <node-id>             Start from this non-running node
   --root                       Start a new branch without inherited messages
   --model <provider/model>     Model for this turn
   --thinking <level>           Thinking level for this turn
@@ -162,7 +162,7 @@ async function main() {
     }
     const node = options.root ? null : forkNode ?? options.node ?? snapshot.projection.activeNodeId;
     if (node && !snapshot.projection.nodes.some(item => item.id === node && item.forkable))
-      throw new Error("Choose a completed node from pix tree");
+      throw new Error("Choose a node that is not running from pix tree");
     if (prompt) await runTask(client, snapshot, prompt, node, { ...options, requestId: options["request-id"] });
     else if (command === "run") throw new Error("Provide a prompt or pipe it to pix run");
     else {

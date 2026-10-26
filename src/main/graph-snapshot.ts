@@ -39,20 +39,12 @@ export class GraphSnapshotCache {
         const canonical = (entryId: string) => record ? graph.canonical(record, entryId) : entryId;
         nodes = snapshot.projection.nodes.filter(node => !record || !Object.hasOwn(record.inherited, node.userEntryId)).map(source => {
           const rawEntryIds = source.rawEntryIds.map(canonical).filter(entryId => index.has(entryId));
-          const calls = new Set<string>(), results = new Set<string>();
-          let hasAssistant = false;
-          for (const entryId of rawEntryIds) {
-            const message = index.get(entryId)?.message as { role?: string; toolCallId?: string; content?: Array<{ type?: string; id?: string }> } | undefined;
-            if (message?.role === "assistant") {
-              hasAssistant = true;
-              if (Array.isArray(message.content)) for (const item of message.content) if (item.type === "toolCall" && item.id) calls.add(item.id);
-            }
-            if (message?.role === "toolResult" && message.toolCallId) results.add(message.toolCallId);
-          }
+          // A crash can leave only a prompt or an unanswered tool call. The SDK
+          // handles that history on the next prompt; only live runs block forks.
           const node: GraphNode = { ...source, id: `turn:${canonical(source.userEntryId)}`, userEntryId: canonical(source.userEntryId),
             parentId: source.parentId ? `turn:${canonical(source.parentId.slice(5))}` : null,
             rawEntryIds, leafEntryId: rawEntryIds.at(-1) ?? canonical(source.userEntryId), branchId: id, running: false,
-            forkable: hasAssistant && [...calls].every(call => results.has(call)) };
+            forkable: true };
           const prior = previous.get(node.id);
           return prior && isDeepStrictEqual(prior, node) ? prior : node;
         });

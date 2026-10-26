@@ -363,7 +363,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
         restoreEditor();
         if (busy) { notice("This terminal has a task running. Stop it first, or use another terminal for a parallel branch."); return; }
         const target = snapshot.projection.nodes.find(item => item.id === id);
-        if (!target?.forkable) { notice("Choose a completed node to continue from."); return; }
+        if (!target?.forkable) { notice("Choose a node that is not running to continue from."); return; }
         node = id; loadHistory(); notice(`Continue from: ${target.title}`);
       }, restoreEditor, treeFilter, value => { treeFilter = value; }, async (entryId, label) => {
         const current = await client.invoke<SessionSnapshot>("agent.control", { action: "setLabel", entryId, label }, snapshot.session.path);
@@ -400,7 +400,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
       await refresh();
       if (argument === "root") node = null;
       else if (snapshot.projection.nodes.some(item => item.id === argument && item.forkable)) node = argument;
-      else { notice("Choose a completed node from /tree, or use /node root."); return; }
+      else { notice("Choose a node that is not running from /tree, or use /node root."); return; }
       loadHistory(); notice(node ? `Continue from: ${snapshot.projection.nodes.find(item => item.id === node)?.title}` : "Continue from session root"); return;
     }
     if (command === "/model" || command === "/thinking") {

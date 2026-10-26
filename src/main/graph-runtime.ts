@@ -409,7 +409,7 @@ export class GraphRuntime extends PiRuntime {
     if (duplicate) return this.snapshot();
     const snapshot = this.snapshot();
     const node = input.nodeId ? snapshot.projection.nodes.find(n => n.id === input.nodeId) : undefined;
-    if (input.nodeId && (!node || !node.forkable)) throw new Error("Choose a completed node to branch from");
+    if (input.nodeId && (!node || !node.forkable)) throw new Error("Choose a node that is not running to branch from");
     const limit = Math.min(64, Math.max(1, Number.parseInt(process.env.PIX_MAX_PARALLEL_RUNS ?? "8", 10) || 8));
     if ([...this.workers.values()].filter(w => w.work).length + (this.mainWork ? 1 : 0) >= limit)
       throw new Error(`${limit} branches are running. Stop one before starting another.`);

@@ -6,13 +6,81 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
-import { durableWrite, parseStrict } from "../src/main/graph-files.js";
+import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord } from "../src/main/graph-files.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(r => setTimeout(r, 20)); }
   throw new Error("Timed out waiting for graph state");
 }
+
+test("restart can continue main and branch turns left without a reply or tool result", { timeout: 30000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pix-crash-followup-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  try {
+    for (const branch of [false, true]) for (const toolCall of [false, true]) {
+      await t.test(`${branch ? "branch" : "main"}: ${toolCall ? "missing tool result" : "user message only"}`, async () => {
+        const path = join(home, `${branch}-${toolCall}.jsonl`);
+        const manager = SessionManager.inMemory(cwd);
+        manager.appendModelChange("faux", "test");
+        const baselineCount = manager.getEntries().length;
+        const userId = manager.appendMessage({ role: "user", content: [{ type: "text", text: "interrupted prompt" }], timestamp: 1 });
+        if (toolCall) manager.appendMessage(fauxAssistantMessage([
+          { type: "toolCall", id: "unfinished", name: "bash", arguments: { command: "echo must-not-replay" } },
+        ], { stopReason: "toolUse" }));
+        const data = parseStrict([manager.getHeader(), ...manager.getEntries()].map(entry => JSON.stringify(entry)).join("\n"));
+        const baseline = data.entries.slice(0, baselineCount);
+        const files = new GraphFiles(path);
+        files.acquire();
+        if (branch) {
+          durableWrite(path, encodeSession({ header: data.header, entries: baseline }));
+          const record: BranchRecord = { id: "crashed", parentId: "main", forkEntryId: "", requestId: "crashed",
+            request: { text: "interrupted prompt" }, inherited: Object.fromEntries(baseline.map(entry => [entry.id, entry.id])),
+            header: data.header, baseline, status: "running", runId: "crashed-run" };
+          files.create(record, data);
+        } else durableWrite(path, encodeSession(data));
+        files.release();
+
+        const events: unknown[] = [];
+        const runtime = new GraphRuntime(cwd, home, event => { events.push(event); }, async () => {});
+        const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+        const factory = runtime.factory.bind(runtime);
+        runtime.factory = pi => async args => {
+          const result = await factory(pi)(args);
+          result.services.modelRuntime.registerNativeProvider(faux.provider);
+          return result;
+        };
+        try {
+          const restored = await runtime.open(path);
+          const nodeId = `turn:${branch ? "crashed:" : ""}${userId}`;
+          const node = restored.projection.nodes.find(node => node.id === nodeId)!;
+          assert.equal(restored.runtime.available, true);
+          assert.equal(runtime.busy, false);
+          assert.equal(node.running, false);
+          assert.equal(node.forkable, true, "the restored turn must unlock the composer and pass promptAt admission");
+          if (branch) assert.equal(restored.graph!.runs.find(run => run.branchId === "crashed")?.status, "interrupted");
+          const retained = structuredClone(restored.entries);
+          faux.setResponses([fauxAssistantMessage("continued after restart")]);
+          await runtime.control({ action: "promptAt", requestId: "followup", nodeId, text: "continue", provider: "faux", modelId: "test" });
+          await until(() => !runtime.busy);
+          const continued = runtime.snapshot();
+          assert.match(JSON.stringify(continued.entries), /continued after restart/);
+          for (const entry of retained) assert.deepEqual(continued.entries.find(value => value.id === entry.id), entry);
+          assert.ok(continued.projection.nodes.some(node => node.title === "continue" && node.parentId === nodeId));
+          assert.ok(!JSON.stringify(events).includes('"tool_execution_start"'), "old tool calls must not be replayed");
+          await runtime.close();
+          assert.equal((await runtime.open(path)).projection.nodes.find(node => node.id === nodeId)?.forkable, true);
+        } finally { await runtime.close(); }
+      });
+    }
+  } finally {
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("interrupted turns resume and retain native bookmarks across branches, restart, export and removal", { timeout: 20000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-abort-followup-"));
