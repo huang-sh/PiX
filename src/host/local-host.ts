@@ -18,6 +18,7 @@ export const headlessPlatform: Platform = {
   async pickSession() { throw new Error("Specify a session path"); },
   async confirm() { return false; },
   async openExternal() { throw new Error("This operation needs a desktop client"); },
+  async resolveProxy() { return "DIRECT"; },
   async openPath() { throw new Error("This operation needs a desktop client"); },
   async openWith() { throw new Error("This operation needs a desktop client"); },
   async openWithApps() { return []; },
@@ -28,8 +29,26 @@ export const headlessPlatform: Platform = {
 
 export async function serveLocalHost() {
   bootstrapPixProfile(pixHome());
-  const owner = new MainController(null, headlessPlatform);
-  const closeProxy = installHttpProxy(() => owner.settings.bundle().piGlobal.httpProxy);
+  const platforms = new Map<WebSocket, Platform>();
+  const desktopViews = new Map<string, { controller: MainController; socket: WebSocket }>();
+  const desktopPlatform = () => [...platforms].find(([socket]) => socket.readyState === WebSocket.OPEN)?.[1];
+  const proxyRoutes = new Map<string, string>();
+  const owner = new MainController(null, {
+    ...headlessPlatform,
+    async openExternal(url) {
+      return (desktopPlatform() ?? headlessPlatform).openExternal(url);
+    },
+  });
+  const closeProxy = installHttpProxy(() => owner.settings.bundle().piGlobal.httpProxy, undefined, process.env, async url => {
+    const origin = new URL(url).origin;
+    const platform = desktopPlatform();
+    if (!platform?.resolveProxy) return proxyRoutes.get(origin) ?? "DIRECT";
+    const route = await platform.resolveProxy(url);
+    proxyRoutes.delete(origin);
+    proxyRoutes.set(origin, route);
+    if (proxyRoutes.size > 64) proxyRoutes.delete(proxyRoutes.keys().next().value!);
+    return route;
+  });
   const token = randomBytes(32).toString("base64url");
   const wss = new WebSocketServer({
     host: "127.0.0.1", port: 0, maxPayload: MAX_REMOTE_PAYLOAD,
@@ -57,6 +76,8 @@ export async function serveLocalHost() {
     if (stopping) return;
     stopping = true;
     clearInterval(idle);
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
     stopOwnerEvents();
     for (const controller of controllers) {
       controller.detach();
@@ -75,6 +96,7 @@ export async function serveLocalHost() {
   wss.on("connection", socket => {
     lastLive = Date.now();
     let controller: MainController | undefined;
+    let clientId: string | undefined;
     let stopEvents: (() => void) | undefined;
     const pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
     const callPlatform = (method: string, args: unknown[]) => new Promise<any>((resolve, reject) => {
@@ -87,10 +109,16 @@ export async function serveLocalHost() {
     socket.on("error", () => {});
     socket.on("close", () => {
       stopEvents?.();
-      controller?.detach();
-      // Remote connections belong to the host too; retain their controller
-      // until host shutdown so disconnecting a GUI cannot abort remote work.
-      if (controller && !controller.pool.hasConnections) controllers.delete(controller);
+      platforms.delete(socket);
+      if (clientId && desktopViews.get(clientId)?.socket === socket) {
+        // Keep the desktop's selection and remote pool so its next connection
+        // takes over the same view, including tasks still running remotely.
+        controller?.suspend();
+      } else if (controller && (!clientId || desktopViews.get(clientId)?.controller !== controller)) {
+        controller.detach();
+        void controller.pool.closeAllRemote().catch(error => console.error("PiX host client cleanup", error))
+          .finally(() => controllers.delete(controller!));
+      }
       for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error("Desktop client disconnected")); }
       pending.clear();
       lastLive = Date.now();
@@ -120,7 +148,17 @@ export async function serveLocalHost() {
             }
             const cwd = request.cwd ? canonicalPath(request.cwd) : null;
             if (cwd && !statSync(cwd).isDirectory()) throw new Error("Project path is not a directory");
-            controller = new MainController(cwd, platform, owner);
+            if (request.clientId !== undefined && (!request.platform || typeof request.clientId !== "string" || !/^[\w-]{1,100}$/.test(request.clientId)))
+              throw new Error("Invalid desktop client identity");
+            clientId = request.clientId;
+            const previous = clientId ? desktopViews.get(clientId) : undefined;
+            controller = previous?.controller ?? new MainController(cwd, platform, owner);
+            // Platform callbacks already captured by remote pools must follow
+            // the live socket, too; preserve the object and replace its methods.
+            Object.assign(controller.platform, platform);
+            if (clientId) desktopViews.set(clientId, { controller, socket });
+            if (request.platform) platforms.set(socket, controller.platform);
+            previous?.socket.close();
             controllers.add(controller);
             stopEvents = controller.onEvent(event => send(socket, { type: "event", sequence: ++sequence, event }), true);
             result = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION, pid: process.pid };
@@ -157,11 +195,22 @@ export async function serveLocalHost() {
     pid: process.pid, port: (wss.address() as { port: number }).port, token };
   mkdirSync(hostRunDir(), { recursive: true, mode: 0o700 });
   writeFileSync(hostAddressFile(), JSON.stringify(address), { mode: 0o600 });
-  const idle = setInterval(() => {
-    if (wss.clients.size || owner.hasPendingWork || owner.registry.runningPaths().size || [...controllers].some(c => c.pool.hasConnections)) lastLive = Date.now();
-    else if (Date.now() - lastLive >= Math.max(1000, Number(process.env.PIX_HOST_LINGER_MS) || 600_000)) void shutdown();
+  let maintaining = false;
+  const idle = setInterval(async () => {
+    if (maintaining || stopping) return;
+    maintaining = true;
+    try {
+      for (const [id, view] of desktopViews) {
+        if (view.socket.readyState !== WebSocket.OPEN && view.controller.pool.hasConnections)
+          await view.controller.pool.closeIdleRemote(() => desktopViews.get(id)?.socket.readyState === WebSocket.OPEN);
+      }
+      if (wss.clients.size || owner.hasPendingWork || owner.registry.runningPaths().size || [...controllers].some(c => c.pool.hasConnections)) lastLive = Date.now();
+      else if (Date.now() - lastLive >= Math.max(1000, Number(process.env.PIX_HOST_LINGER_MS) || 600_000)) void shutdown();
+    } catch (error) { console.error("PiX host idle maintenance", error); }
+    finally { maintaining = false; }
   }, 1000);
-  process.once("SIGTERM", () => void shutdown());
-  process.once("SIGINT", () => void shutdown());
+  const stop = () => void shutdown();
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
   return { address, shutdown, owner };
 }

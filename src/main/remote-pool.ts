@@ -512,6 +512,15 @@ export class RemoteWorkspacePool {
     const slot = this.active();
     if (slot) await this.dropSlot(slot, true);
   }
+  /** Release finished remote work while a desktop is absent, preserving its live model broker. */
+  async closeIdleRemote(keepOpen = () => false): Promise<void> {
+    for (const slot of [...this.remotePool.values()]) {
+      if (keepOpen()) return;
+      if (slot.client.connected && await this.slotBusy(slot)) continue;
+      if (keepOpen()) return;
+      if (this.remotePool.get(projectId(slot.project)) === slot) await this.dropSlot(slot, true);
+    }
+  }
   /** Quit-time teardown: idle hosts are stopped; hosts mid-run linger for a reattach. */
   async closeAllRemote(): Promise<void> {
     if (this.remoteRecycleTimer) {

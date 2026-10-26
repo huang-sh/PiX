@@ -115,6 +115,67 @@ test("background fetch uses live proxy settings, environment or desktop system n
   });
 });
 
+test("an independent host follows live desktop PAC decisions while preserving explicit proxy precedence", async t => {
+  const sockets = new Set<Socket>();
+  let tunnels = 0, resolutions = 0;
+  const origin = createServer(async (request, response) => {
+    let body = ""; for await (const chunk of request) body += chunk;
+    response.end(body || "direct");
+  });
+  const proxy = createServer();
+  proxy.on("connect", (request, client, head) => {
+    tunnels++;
+    const target = new URL(`http://${request.url}`);
+    const upstream = connect(Number(target.port), target.hostname, () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head); client.pipe(upstream).pipe(client);
+    });
+    sockets.add(upstream);
+    upstream.on("error", () => client.destroy());
+    client.on("error", () => upstream.destroy());
+    client.on("close", () => upstream.destroy());
+  });
+  for (const server of [origin, proxy]) server.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
+  const url = await listen(origin), proxyUrl = await listen(proxy);
+  let decision = `PROXY ${new URL(proxyUrl).host}`;
+  let configured: string | undefined;
+  const env: NodeJS.ProcessEnv = { NO_PROXY: "" };
+  const originalFetch = globalThis.fetch;
+  const close = installHttpProxy(() => configured, undefined, env, async target => {
+    resolutions++; assert.equal(new URL(target).origin, url); return decision;
+  });
+  t.after(async () => {
+    await close(); globalThis.fetch = originalFetch;
+    for (const socket of sockets) socket.destroy();
+    await Promise.all([origin, proxy].map(server => new Promise<void>(resolve => server.close(() => resolve()))));
+  });
+  const form = new FormData(); form.append("message", "through PAC");
+  assert.match(await (await fetch(new Request(url, { method: "POST", body: form }))).text(), /through PAC/);
+  assert.equal(tunnels, 1);
+  decision = "DIRECT";
+  assert.equal(await (await fetch(url)).text(), "direct");
+  assert.equal(tunnels, 1);
+  configured = proxyUrl;
+  assert.equal(await (await fetch(url)).text(), "direct");
+  assert.equal(resolutions, 2, "explicit settings do not ask the desktop to resolve PAC");
+  assert.equal(tunnels, 2);
+  configured = undefined;
+  env.HTTPS_PROXY = proxyUrl;
+  await fetch(url);
+  assert.equal(resolutions, 2, "environment proxies retain their precedence, too");
+});
+
+test("aborting a host request does not wait for a stalled system PAC lookup", { timeout: 2000 }, async t => {
+  const originalFetch = globalThis.fetch;
+  let finish!: (route: string) => void;
+  const close = installHttpProxy(() => undefined, undefined, {}, () => new Promise(resolve => { finish = resolve; }));
+  t.after(async () => { finish?.("DIRECT"); await close(); globalThis.fetch = originalFetch; });
+  const controller = new AbortController();
+  const pending = fetch(new Request("http://127.0.0.1:1", { signal: controller.signal }));
+  controller.abort();
+  await assert.rejects(pending, { name: "AbortError" });
+});
+
 test("a server without a desktop system stack can connect directly", async t => {
   const origin = createServer((_req, res) => res.end("direct"));
   const url = await listen(origin);

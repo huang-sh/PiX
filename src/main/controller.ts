@@ -46,6 +46,8 @@ export interface Platform {
   pickSession(): Promise<string | undefined>;
   confirm(message: string, detail?: string): Promise<boolean>;
   openExternal(url: string): Promise<void>;
+  /** Chromium's system proxy/PAC decision for the independent execution host. */
+  resolveProxy?(url: string): Promise<string>;
   openPath(path: string): Promise<void>;
   /** Windows opens the system Open With dialog; macOS a native app picker. */
   openWith(path: string): Promise<void>;
@@ -731,6 +733,10 @@ export class MainController {
       throw new Error("Open a project first");
     switch (route) {
       case "app.bootstrap": {
+        if (this.project?.remote && !this.wsl) {
+          const { path, remote } = this.project;
+          return remote.kind === "ssh" ? this.pool.connectSsh(remote.host, path) : this.pool.connectWsl(remote.distro, path);
+        }
         if (this.wsl) return this.pool.wslBootstrap();
         const last = this.settings.bundle().app.lastProject;
         if (last && existsSync(last) && resolve(last) !== this.project?.path)
@@ -783,7 +789,8 @@ export class MainController {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
           // Replay only the session in view; other buckets wait for their turn.
-          for (const progress of this.progress.replay(current.graph?.id)) this.emit(progress);
+          const ledger = this.owner && this.registry.entry(current.graph?.id ?? "") ? this.owner.progress : this.progress;
+          for (const progress of ledger.replay(current.graph?.id)) this.emit(progress);
         }
         return current;
       }
@@ -1070,13 +1077,17 @@ export class MainController {
     this.flushBackgroundRefresh();
     return this.registry.disposeAll();
   }
-  /** Disconnecting a client releases its view, never the host's runs. */
-  detach() {
+  /** Release desktop UI resources while preserving its selection and ongoing work. */
+  suspend() {
     this.flushBackgroundRefresh();
-    this.registry.detach();
-    this.progress.clear();
     this.listeners.clear();
     this.shell.dispose();
+  }
+  /** Permanently removes a client view from the shared registry. */
+  detach() {
+    this.suspend();
+    this.registry.detach();
+    this.progress.clear();
   }
   /** Full shutdown: local sessions and every pooled host, awaited together. */
   closeAll(): Promise<void> {

@@ -1396,6 +1396,34 @@ test("eviction never disposes an entry that became active while it was closing a
   }
 });
 
+test("a newly attached client replays the owner's live progress without waiting for another token", async () => {
+  const ws = workspace();
+  const owner = new MainController(null, platform);
+  const first = new MainController(ws, platform, owner);
+  let second: MainController | undefined;
+  const path = join(first.files.dir!, "live.jsonl");
+  const snapshot = { session: { path }, entries: [], projection: { nodes: [], messages: [], edges: [] },
+    runtime: { isStreaming: true }, graph: { id: path, epoch: "live", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  owner.createSessionRuntime = () => ({ open: async () => snapshot, snapshot: () => snapshot,
+    state: () => ({ sessionFile: path, isStreaming: true }), close: async () => {} }) as never;
+  try {
+    await first.registry.open(first.project!, first.files.dir, path);
+    const progress = { type: "agent", payload: { type: "message_update", graphId: path, branchId: "main", runId: "run",
+      message: { role: "assistant", content: [{ type: "text", text: "Already streamed" }] } } };
+    owner.registry.entry(path)!.runtime!.emit(progress);
+    first.detach();
+    second = new MainController(ws, platform, owner);
+    await second.registry.open(second.project!, second.files.dir, path);
+    const received: unknown[] = [];
+    second.onEvent(event => { if (event.type === "agent") received.push(event); });
+    await second.invoke("session.snapshot");
+    assert.deepEqual(received, [progress]);
+  } finally {
+    first.detach(); second?.detach(); await owner.closeAll();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("host clients share runtimes while selection, explicit reads and detachment remain independent", { timeout: 30000 }, async () => {
   const ws = workspace();
   const owner = new MainController(null, platform);

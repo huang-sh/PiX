@@ -1,4 +1,5 @@
 import { SettingsService } from "../main/services.js";
+import { randomUUID } from "node:crypto";
 import type { Platform } from "../main/controller.js";
 import type { DesktopEvent, DesktopRoute, SessionSnapshot } from "../shared/types.js";
 import { connectLocalHost, type HostClient } from "./client.js";
@@ -10,12 +11,12 @@ export class DesktopHostController {
   private sessionPath?: string;
   private disposed = false;
   private reconnecting?: Promise<void>;
-  private constructor(private client: HostClient, path: string | null, private platform: Platform) {
+  private constructor(private client: HostClient, path: string | null, private platform: Platform, private readonly clientId: string) {
     this.settings = new SettingsService(path);
     this.bind(client);
   }
-  static async connect(path: string | null, platform: Platform) {
-    return new DesktopHostController(await connectLocalHost(path, platform), path, platform);
+  static async connect(path: string | null, platform: Platform, clientId: string = randomUUID()) {
+    return new DesktopHostController(await connectLocalHost(path, platform, true, clientId), path, platform, clientId);
   }
   private bind(client: HostClient) {
     client.onEvent(event => {
@@ -32,17 +33,26 @@ export class DesktopHostController {
   private reconnect() {
     return this.reconnecting ??= (async () => {
       // Restore subscriptions and snapshots; never replay an execution command.
-      const client = await connectLocalHost(this.settings.project, this.platform);
+      const client = await connectLocalHost(this.settings.project, this.platform, true, this.clientId);
       if (this.disposed) { client.close(); return; }
       this.client = client;
       this.bind(client);
-      if (this.sessionPath) {
-        const current = await client.invoke<SessionSnapshot>("session.open", { path: this.sessionPath });
+      const path = this.sessionPath;
+      const restored = await client.invoke<any>("app.bootstrap");
+      this.settings.setProject(restored.project?.remote ? null : restored.project?.path ?? null);
+      if (restored.current || path) {
+        const current = restored.current ?? await client.invoke<SessionSnapshot>("session.open", { path });
+        this.sessionPath = current.session.path;
         this.emit({ type: "sessions", payload: { current, resync: true } });
+        await client.invoke("session.snapshot");
       }
     })().finally(() => { this.reconnecting = undefined; });
   }
   async invoke(route: DesktopRoute, input?: unknown) {
+    if (route === "app.quit") {
+      await this.platform.quit();
+      return { ok: true };
+    }
     if (!this.client.connected) await this.reconnect();
     const result = await this.client.invoke<any>(route, input);
     if (result && "project" in Object(result)) {

@@ -921,6 +921,28 @@ test("automatic recovery reattaches to the lingering host", async (t) => {
   assert.equal(controller.wsl, fresh);
 });
 
+test("an absent desktop releases finished remote connections and preserves live brokers", async t => {
+  const { controller, old } = controllerFixture(t);
+  let running = true;
+  old.request = async route => route === "session.list" ? [{ running }] : [];
+  await controller.pool.closeIdleRemote();
+  assert.equal(old.disposed, false);
+  assert.equal(old.abandoned, false, "a live broker must stay connected while its GUI is absent");
+  running = false;
+  await controller.pool.closeIdleRemote();
+  assert.equal(old.disposed, true);
+  assert.equal(controller.pool.hasConnections, false);
+});
+
+test("idle remote cleanup does not dispose a desktop that reconnected during the liveness probe", async t => {
+  const { controller, old } = controllerFixture(t);
+  let connected = false;
+  old.request = async () => { connected = true; return []; };
+  await controller.pool.closeIdleRemote(() => connected);
+  assert.equal(old.disposed, false);
+  assert.equal(controller.pool.hasConnections, true);
+});
+
 test("quitting stops idle hosts but parks hosts mid-run for a reattach", async (t) => {
   const { controller, old } = controllerFixture(t);
   old.connected = false;  // drop the pooled fast path so a fresh host commits

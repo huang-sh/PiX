@@ -7,12 +7,15 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  net,
+  session,
   shell,
   Tray,
 } from "electron";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { registerDesktopCommand } from "./cli-command.js";
@@ -20,6 +23,7 @@ import { DesktopHostController } from "../host/desktop.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
+import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
 
@@ -33,6 +37,7 @@ applyLinuxImeWorkaround({
 
 const dir = dirname(fileURLToPath(import.meta.url));
 let win: any, controller: DesktopHostController;
+let closeHttpProxy: (() => Promise<void>) | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
@@ -259,6 +264,9 @@ app.whenReady().then(async () => {
       });
       return result.response === 1;
     },
+    async resolveProxy(url) {
+      return session.defaultSession.resolveProxy(url);
+    },
     async openExternal(url) {
       await openExternal(url);
     },
@@ -357,8 +365,12 @@ app.whenReady().then(async () => {
     quit() {
       app.quit();
     },
-  });
+  }, `desktop-${createHash("sha256").update(app.getPath("userData")).digest("hex")}`);
   controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
+  closeHttpProxy = installHttpProxy(
+    () => controller.settings.bundle().piGlobal.httpProxy,
+    (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+  );
   // Release awareness runs only in the desktop main process — a remote host
   // serves sessions but must not announce desktop updates itself.
   new UpdateChecker({
@@ -414,7 +426,7 @@ app.on("before-quit", (event) => {
     event.preventDefault();
     if (!detachingClient) {
       detachingClient = true;
-      void controller.detach().finally(() => {
+      void controller.detach().finally(() => closeHttpProxy?.()).finally(() => {
         clientDetached = true;
         app.quit();
       }).catch(() => {});
