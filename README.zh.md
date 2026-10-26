@@ -91,7 +91,10 @@ node bin/pix.mjs tree --session <会话ID或路径>
 从 [GitHub Releases](https://github.com/huang-sh/PiX/releases) 下载对应平台的安装包：
 
 - **Windows**：`PiX-Setup-x.y.z.exe`（安装版）或 `PiX-Portable-x.y.z.exe`（免安装便携版），x64。
-- **macOS**：`PiX-x.y.z-arm64.dmg` 或 `PiX-x.y.z-x64.dmg`，另提供 zip 包。
+- **macOS**：根据 Mac 的芯片选择安装包（点击 ** → 关于本机** 查看）：
+  - **Apple 芯片**（M1、M2、M3、M4 等）：`PiX-x.y.z-arm64.dmg`。
+  - **Intel 处理器**：`PiX-x.y.z-x64.dmg`。
+  - 另提供 zip 包，同样按芯片选择：Apple 芯片选 `arm64`，Intel 选 `x64`。
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（免安装）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`，另提供 tar.gz，x64。
 
 安装包未签名：Windows SmartScreen 提示时选择"仍要运行"；macOS 首次打开需在 系统设置 → 隐私与安全性 中允许。

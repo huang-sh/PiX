@@ -91,7 +91,10 @@ See [CLI documentation](docs/cli.md) for commands, the Node-only package, concur
 Grab the installer for your platform from [GitHub Releases](https://github.com/huang-sh/PiX/releases):
 
 - **Windows**: `PiX-Setup-x.y.z.exe` (installer) or `PiX-Portable-x.y.z.exe` (portable), x64.
-- **macOS**: `PiX-x.y.z-arm64.dmg` or `PiX-x.y.z-x64.dmg`, zip archives also available.
+- **macOS**: choose the installer that matches your Mac's chip (check ** → About This Mac**):
+  - **Apple silicon** (M1, M2, M3, M4, etc.): `PiX-x.y.z-arm64.dmg`.
+  - **Intel processor**: `PiX-x.y.z-x64.dmg`.
+  - Zip archives are also available; choose `arm64` for Apple silicon or `x64` for Intel.
 - **Linux**: `PiX-x.y.z-x86_64.AppImage` (portable), `PiX-x.y.z-amd64.deb`, `PiX-x.y.z-x86_64.rpm`, plus tar.gz. x64.
 
 Installers are unsigned: if Windows SmartScreen warns, choose "Run anyway"; on macOS, allow the app in System Settings → Privacy & Security on first launch.

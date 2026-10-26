@@ -74,7 +74,10 @@ PiX は内部拡張機能も読み込みます。`file-changes` はエージェ�
 お使いのプラットフォーム向けのインストーラーを [GitHub Releases](https://github.com/huang-sh/PiX/releases) から入手してください。
 
 - **Windows**：`PiX-Setup-x.y.z.exe`（インストーラー）または `PiX-Portable-x.y.z.exe`（ポータブル版）、x64。
-- **macOS**：`PiX-x.y.z-arm64.dmg` または `PiX-x.y.z-x64.dmg`。zip アーカイブもあります。
+- **macOS**：Mac のチップに合ったインストーラーを選んでください（** → この Mac について** で確認できます）：
+  - **Apple シリコン**（M1、M2、M3、M4 など）：`PiX-x.y.z-arm64.dmg`。
+  - **Intel プロセッサ**：`PiX-x.y.z-x64.dmg`。
+  - zip アーカイブもあります。Apple シリコンは `arm64`、Intel は `x64` を選んでください。
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（ポータブル版）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`、および tar.gz。x64。
 
 インストーラーには署名がありません。Windows SmartScreen の警告が表示された場合は「実行」を選択してください。macOS では初回起動時に、システム設定 → プライバシーとセキュリティ でアプリを許可してください。
