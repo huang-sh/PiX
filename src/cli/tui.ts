@@ -227,7 +227,7 @@ export class Conversation extends Container {
       tool.markExecutionStarted(); tool.setArgsComplete();
     } else if (event.type === "tool_execution_update" || event.type === "tool_execution_end") {
       const result = event.type === "tool_execution_end" ? event.result : event.partialResult;
-      this.tool(event.toolName ?? "tool", event.toolCallId, undefined).updateResult({ content: result?.content ?? [],
+      this.tool(event.toolName ?? "tool", event.toolCallId, undefined).updateResult({ content: typeof result === "string" ? [{ type: "text", text: result }] : result?.content ?? [],
         details: result?.details, isError: Boolean(event.isError), durationMs: event.durationMs }, event.type !== "tool_execution_end");
     }
   }

@@ -14,6 +14,7 @@ import type { DesktopEvent, DesktopRoute } from "../shared/types.js";
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const runDir = () => join(pixHome(), ".pix", "run");
 const addressFile = () => join(runDir(), "host.json");
+class StaleHostAddress extends Error {}
 function alive(pid: number) {
   try { process.kill(pid, 0); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
@@ -89,14 +90,29 @@ export class HostClient {
     this.pending.clear();
   }
   static async connect(address: HostAddress, cwd: string | null, platform?: Platform) {
-    if (address.protocol !== LOCAL_HOST_PROTOCOL || address.version !== PIX_HOST_VERSION)
-      throw new Error("The running PiX host has a different version. Stop it after its tasks finish, then reconnect.");
     const socket = new WebSocket(`ws://127.0.0.1:${address.port}/?token=${encodeURIComponent(address.token)}`, { maxPayload: MAX_REMOTE_PAYLOAD });
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { socket.terminate(); reject(new Error("PiX host connection timed out")); }, 5000);
       socket.once("open", () => { clearTimeout(timer); resolve(); });
-      socket.once("error", error => { clearTimeout(timer); reject(error); });
+      socket.once("error", error => {
+        clearTimeout(timer);
+        const code = (error as NodeJS.ErrnoException).code;
+        reject(code === "ECONNREFUSED" || code === "ECONNRESET" ? new StaleHostAddress(error.message, { cause: error }) : error);
+      });
+      socket.once("unexpected-response", (_request, response) => {
+        clearTimeout(timer);
+        response.resume();
+        const message = `Unexpected server response: ${response.statusCode}`;
+        // PiX rejects failed authentication with 401. A normal HTTP page or
+        // missing endpoint means this port has been reused by another service.
+        reject(response.statusCode === 200 || response.statusCode === 404 ? new StaleHostAddress(message) : new Error(message));
+        socket.terminate();
+      });
     });
+    if (address.protocol !== LOCAL_HOST_PROTOCOL || address.version !== PIX_HOST_VERSION) {
+      socket.close();
+      throw new Error("The running PiX host has a different version. Stop it after its tasks finish, then reconnect.");
+    }
     const client = new HostClient(socket, address, platform);
     try { await client.request({ method: "attach", cwd, platform: Boolean(platform) }); }
     catch (error) { client.close(); throw error; }
@@ -121,15 +137,32 @@ export class HostClient {
 
 /** All entry points discover the same per-profile host; startup is serialized. */
 export async function connectLocalHost(cwd: string | null, platform?: Platform, start = true): Promise<HostClient> {
-  let address = readAddress();
-  if (address) return HostClient.connect(address, cwd, platform);
+  let staleAddress: string | undefined;
+  const connect = async () => {
+    const address = readAddress();
+    if (!address || JSON.stringify(address) === staleAddress) return;
+    for (let attempt = 0; ; attempt++) {
+      try { return await HostClient.connect(address, cwd, platform); }
+      catch (error) {
+        if (!(error instanceof StaleHostAddress)) throw error;
+        // Retry a transient handshake reset before replacing the host address.
+        if (attempt === 0 && (error.cause as NodeJS.ErrnoException | undefined)?.code === "ECONNRESET") {
+          await delay(50); continue;
+        }
+        staleAddress = JSON.stringify(address);
+        return;
+      }
+    }
+  };
+  let client = await connect();
+  if (client) return client;
   if (!start) throw new Error("PiX host is not running");
   mkdirSync(runDir(), { recursive: true, mode: 0o700 });
   const lock = join(runDir(), "starting");
   const deadline = Date.now() + 35_000;
   while (Date.now() < deadline) {
-    address = readAddress();
-    if (address) return HostClient.connect(address, cwd, platform);
+    client = await connect();
+    if (client) return client;
     try { mkdirSync(lock); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -144,8 +177,8 @@ export async function connectLocalHost(cwd: string | null, platform?: Platform, 
     try {
       writeFileSync(join(lock, "pid"), String(process.pid));
       // Another starter may have published its address just before our mkdir.
-      address = readAddress();
-      if (address) return HostClient.connect(address, cwd, platform);
+      client = await connect();
+      if (client) return client;
       const log = openSync(join(runDir(), "host.log"), "a", 0o600);
       const child = spawn(process.execPath, [localHostEntry()], {
         detached: true, windowsHide: true, stdio: ["ignore", log, log],
@@ -157,8 +190,8 @@ export async function connectLocalHost(cwd: string | null, platform?: Platform, 
       child.unref();
       while (Date.now() < deadline) {
         if (spawnError) throw spawnError;
-        address = readAddress();
-        if (address) return HostClient.connect(address, cwd, platform);
+        client = await connect();
+        if (client) return client;
         if (child.exitCode !== null) throw new Error(`PiX host failed to start. See ${join(runDir(), "host.log")}`);
         await delay(50);
       }

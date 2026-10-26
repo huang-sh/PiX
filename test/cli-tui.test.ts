@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { Conversation, conversationEntries, graphTree, GraphSelector } from "../src/cli/tui.js";
+import { agentEventForwarder } from "../src/main/agent-event-forwarder.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 
 const entry = (id: string, message: Record<string, unknown>) => ({ id, type: "message", parentId: null, timestamp: new Date(0).toISOString(), message });
@@ -59,6 +60,24 @@ test("streaming assistant and tool updates keep one native component per message
   assert.match(text, /Complete/); assert.doesNotMatch(text, /Partial|Loading/);
   assert.match(text, /input.ts/); assert.match(text, /Read complete/);
   assert.equal(conversation.children.length, 2);
+});
+
+test("native tool cards show partial output received through the host event forwarder", async () => {
+  initTheme("dark");
+  const conversation = new Conversation({ requestRender() {} } as TUI, "/tmp");
+  conversation.toggleTools();
+  const forwarder = agentEventForwarder(event => conversation.event(event as Record<string, unknown>));
+  try {
+    forwarder.push({ type: "tool_execution_start", toolName: "bash", toolCallId: "live", args: { command: "long-running" } });
+    forwarder.push({ type: "tool_execution_update", toolName: "bash", toolCallId: "live", partialResult: { content: [{ type: "text", text: "Live progress" }] } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(conversation.render(100).map(stripTerminalSequences).join("\n"), /Live progress/);
+    forwarder.push({ type: "tool_execution_end", toolName: "bash", toolCallId: "live", result: { content: [{ type: "text", text: "Final output" }] } });
+    await new Promise(resolve => setImmediate(resolve));
+    const text = conversation.render(100).map(stripTerminalSequences).join("\n");
+    assert.match(text, /Final output/); assert.doesNotMatch(text, /Live progress/);
+    assert.equal(conversation.children.length, 1);
+  } finally { forwarder.dispose(); }
 });
 
 

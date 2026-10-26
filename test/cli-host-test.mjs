@@ -63,6 +63,10 @@ const server = createServer(async (req, res) => {
       emit({}, 'tool_calls'); res.end('data: [DONE]\n\n');
     } else if (text === 'FAIL') {
       res.destroy();
+    } else if (text === 'RETRY' && requests.filter(request => request.text === text).length === 1) {
+      emit({ role: 'assistant', content: '' });
+      res.write('data: {"error":{"message":"503 service unavailable","type":"server_error","code":"503"}}\n\n');
+      res.end();
     } else finish();
   } catch (error) { res.writeHead(500); res.end(String(error)); }
 });
@@ -142,12 +146,32 @@ try {
   await Promise.all([cli(['sessions', '--json']), cli(['sessions', '--json']), cli(['sessions', '--json'])]);
   const status = (await cli(['host', 'status'])).events[0]; hostPid = status.pid;
   assert.equal(status.sessions, 0);
+  console.error('Automatic retry completion');
+  const settings = readFileSync(join(agent, 'settings.json'), 'utf8');
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify({ ...JSON.parse(settings), retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } }));
+  const recovered = final(await cli(['run', 'RETRY', '--json']));
+  assert.equal(requests.filter(request => request.text === 'RETRY').length, 2);
+  assert.equal(recovered.snapshot.projection.nodes.find(node => node.id === recovered.nodeId).hasError, false);
+  assert.ok(recovered.snapshot.entries.some(entry => entry.message?.stopReason === 'error'), 'failed attempt remains in raw history');
+  assert.ok(recovered.snapshot.entries.some(entry => entry.message?.stopReason === 'stop'), 'the final successful response determines the CLI result');
+  writeFileSync(join(agent, 'settings.json'), settings);
   const initial = final(await cli(['run', 'WRITE root', '--json']));
   assert.ok(initial, 'run returns a settled result');
   const path = initial.session, rootNode = initial.nodeId;
   assert.equal(readFileSync(join(cwd, 'agent-output.txt'), 'utf8'), 'written by the real Pi write tool\n');
   assert.ok(initial.snapshot.entries.some(entry => entry.message?.role === 'toolResult'));
   assert.equal((await cli(['host', 'status'])).events[0].pid, hostPid);
+  console.error('Running main request deduplication');
+  const mainPath = (await cli(['new'])).events[0].session.path;
+  const main = (await cli(['run', 'HOLD main retry', '--session', mainPath, '--json', '--detach', '--request-id', 'main-retry'])).events[0];
+  await until(() => held.has('HOLD main retry'));
+  const mainRetry = (await cli(['run', 'HOLD main retry', '--session', mainPath, '--json', '--detach', '--request-id', 'main-retry'])).events[0];
+  assert.equal(mainRetry.runId, main.runId);
+  assert.equal(requests.filter(request => request.text === 'HOLD main retry').length, 1);
+  const blocked = await cli(['run', 'must not branch from a live node', '--session', mainPath, '--json'], undefined, 1);
+  assert.match(blocked.events.find(event => event.type === 'error').message, /not running/);
+  held.get('HOLD main retry')();
+  await until(async () => !(await cli(['host', 'status'])).events[0].running.length);
   console.error('This becomes');
   // This becomes a historical node, so subsequent work forks from it.
   await cli(['run', 'main next', '--session', path, '--json']);
@@ -426,7 +450,7 @@ try {
   gui.close(); gui = undefined;
   await guiExit; desktop = undefined;
   await cli(['host', 'stop']);
-  console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'],
+  console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'automatic retry success', 'running main request deduplication', 'live node admission', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'restart persistence'],
     tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'native GUI label shortcut and Enter to save', 'label menu restores while sibling keeps running', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
       'cancel and continue', 'native input/select/confirm dialogs', 'confirmation defaults to cancel', 'CJK multiline paste',
       'native tool cards', 'exit preserves accepted work'], modelRequests: requests.length, home }));
@@ -439,7 +463,10 @@ try {
   screen?.dispose(); terminal?.kill(); gui?.close(); desktop?.kill('SIGTERM');
   for (const child of children) child.kill('SIGTERM');
   for (const release of held.values()) release();
-  if (hostPid) { try { process.kill(hostPid, 'SIGTERM'); } catch {} }
+  if (hostPid) {
+    try { process.kill(hostPid, 'SIGTERM'); } catch {}
+    await until(() => !existsSync(join(home, '.pix', 'run', 'host.json')), 5000).catch(error => console.error(`Host cleanup: ${error.message}`));
+  }
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
   if (!process.env.PIX_KEEP_TEST_HOME) rmSync(home, { recursive: true, force: true });

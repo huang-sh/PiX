@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { HostClient } from "../host/client.js";
 import { agentMessageContent } from "../shared/agent-stream.js";
 import type { ExtensionDialog, SessionSnapshot } from "../shared/types.js";
@@ -98,7 +99,8 @@ export async function runTask(client: HostClient, before: SessionSnapshot, text:
         const own = new Set(target?.rawEntryIds ?? []);
         const messages = current.entries.filter(entry => own.has(entry.id) && !previousEntries.has(entry.id) && entry.type === "message")
           .map(entry => entry.message as Record<string, any>);
-        const failed = messages.find(message => message.role === "assistant" && ["error", "aborted"].includes(message.stopReason));
+        const lastAssistant = messages.filter(message => message.role === "assistant").at(-1);
+        const failed = lastAssistant && ["error", "aborted"].includes(lastAssistant.stopReason) ? lastAssistant : undefined;
         const error = latest.error ?? (failed ? failed.errorMessage || `Agent ${failed.stopReason}` : undefined);
         if (error || current.graph?.storageError || latest.status === "interrupted")
           throw new Error(error ?? current.graph?.storageError ?? "Agent execution was interrupted");
@@ -113,7 +115,7 @@ export async function runTask(client: HostClient, before: SessionSnapshot, text:
       }
       if (Date.now() >= deadline) throw new Error(`Stopped waiting; task is still running. Session: ${path}; run: ${run.runId}`);
       const dialogs = await client.invoke<ExtensionDialog[]>("ui.pending");
-      const ownFile = run.branchId === "main" ? path : `${path}.pix-tree/${run.branchId}.jsonl`;
+      const ownFile = run.branchId === "main" ? path : join(`${path}.pix-tree`, `${run.branchId}.jsonl`);
       for (const dialog of dialogs.filter(dialog => dialog.sessionPath === ownFile && !handledDialogs.has(dialog.id))) {
         if (!view?.dialog) throw new Error(`Agent needs input: ${dialog.title}. Task remains pending; use pix dialogs and pix respond ${dialog.id}, or answer in the GUI.`);
         handledDialogs.add(dialog.id);

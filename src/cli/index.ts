@@ -161,11 +161,12 @@ async function main() {
       prompt = prompt.trim();
     }
     const node = options.root ? null : forkNode ?? options.node ?? snapshot.projection.activeNodeId;
-    if (node && !snapshot.projection.nodes.some(item => item.id === node && item.forkable))
-      throw new Error("Choose a node that is not running from pix tree");
+    // Task admission checks the node after resolving durable request retries.
     if (prompt) await runTask(client, snapshot, prompt, node, { ...options, requestId: options["request-id"] });
     else if (command === "run") throw new Error("Provide a prompt or pipe it to pix run");
     else {
+      if (node && !snapshot.projection.nodes.some(item => item.id === node && item.forkable))
+        throw new Error("Choose a node that is not running from pix tree");
       if (forkNode) options.node = forkNode;
       if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Interactive mode needs a terminal. Use pix run with a prompt or stdin.");
       if (options.json) throw new Error("Use pix run --json for structured output");
