@@ -142,20 +142,14 @@ async function create() {
     show: false,
     frame: darwin,
     titleBarStyle: "hidden",
-    // Windows/Linux draw overlay window controls into the page; the renderer
-    // reserves their space via env(titlebar-area-*). macOS has no overlay, so
-    // the native traffic lights sit over the hidden title bar — position them
-    // inside the 40px custom titlebar and let the renderer pad around them
-    // (env(titlebar-area-*) stays 0 there).
-    ...(darwin
-      ? { trafficLightPosition: { x: 14, y: 14 } }
-      : {
-          titleBarOverlay: {
-            color: colors.background,
-            symbolColor: colors.text,
-            height: 40,
-          },
-        }),
+    // Expose native control bounds through env(titlebar-area-*) on every
+    // platform, including when macOS hides its traffic lights in fullscreen.
+    titleBarOverlay: {
+      color: colors.background,
+      symbolColor: colors.text,
+      height: 40,
+    },
+    ...(darwin ? { trafficLightPosition: { x: 14, y: 14 } } : {}),
     webPreferences: {
       preload: join(dir, "../preload/index.cjs"),
       contextIsolation: true,

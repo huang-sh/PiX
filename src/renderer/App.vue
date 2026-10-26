@@ -89,9 +89,8 @@ const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
 const updateNotice = ref<{ version: string; url: string } | null>(null);
 
-// The custom titlebar needs platform knowledge only for the macOS traffic
-// lights (see .platform-darwin in app.css); the sandboxed renderer gets it
-// from the user agent instead of a preload addition.
+// macOS keeps a small titlebar inset when fullscreen hides the traffic lights
+// and has no right-side window controls (see .platform-darwin in app.css).
 const isDarwin = /Macintosh/i.test(navigator.userAgent);
 
 function applyLanguage(settings: SettingsBundle) {
