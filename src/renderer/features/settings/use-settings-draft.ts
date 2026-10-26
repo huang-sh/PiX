@@ -1,7 +1,6 @@
 import { computed, ref, toRaw, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { normalizeTheme } from "../../../shared/theme";
-import { DEFAULT_OUTPUT_STYLE } from "../../../shared/skills";
 import type { SettingsBundle } from "../../../shared/types";
 import { desktop } from "../../api";
 import { applyDiff, settingsDiff } from "../../lib/settings-diff";
@@ -127,7 +126,9 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         ];
       case "agent":
         return [
-          { path: "outputStyle", label: "settings.rows.outputStyle", scope: "global", type: "select", options: outputStyleSkills?.value ?? [], fallback: DEFAULT_OUTPUT_STYLE, description: "settings.rows.outputStyleDesc" },
+          // The leading "" option is the model's own style: choosing it clears
+          // the setting below, so nothing is written to settings.json.
+          { path: "outputStyle", label: "settings.rows.outputStyle", scope: "global", type: "select", options: ["", ...(outputStyleSkills?.value ?? [])], fallback: "", description: "settings.rows.outputStyleDesc" },
           { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
           { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
           { path: "transport", label: "settings.rows.transport", scope: "global", type: "select", options: ["auto", "sse", "websocket", "websocket-cached"], fallback: "auto" },
@@ -162,6 +163,7 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
   });
 
   function optionLabel(option: string) {
+    if (option === "") return t("options.modelDefault");
     const key = `options.${option}`;
     return te(key) ? t(key) : option;
   }
@@ -211,6 +213,9 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     if (row.type === "select" && typeof row.fallback === "number") next = Number(next);
     if (["enabledModels", "defaultTools", "npmCommand"].includes(row.path))
       next = String(next).split(",").map((item) => item.trim()).filter(Boolean);
+    // Clearing outputStyle means "unset" — the model's own style, no
+    // <output_style> pointer — not a pointer at a skill named "".
+    if (row.path === "outputStyle" && next === "") next = undefined;
     // Clearing defaultTools means "unset" — Pi's defaults plus PiX's powershell
     // append — not a no-tools list; the settings diff encodes the removed key.
     if (row.path === "defaultTools" && (next as string[]).length === 0)

@@ -8,11 +8,6 @@
 export const MAX_SKILL_NAME_LENGTH = 64;
 export const MAX_SKILL_DESCRIPTION_LENGTH = 1024;
 
-/**
- * The default output style skill, when the outputStyle setting is unset.
- * A user copy of the same name wins by pi's ranking.
- */
-export const DEFAULT_OUTPUT_STYLE = "i-have-adhd";
 /** PiX refuses to write a skill document larger than this. */
 export const MAX_SKILL_BYTES = 128 * 1024;
 

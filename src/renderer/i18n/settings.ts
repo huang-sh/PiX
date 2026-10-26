@@ -312,7 +312,7 @@ export const en = {
       branchSummaryReserve: "Branch summary reserve",
       skipBranchSummary: "Skip branch summary prompt",
       outputStyle: "Output style",
-      outputStyleDesc: "Writes the selected skill into the system prompt as the output style pointer; applies to new or reloaded sessions.",
+      outputStyleDesc: "Adds the selected skill to the system prompt as the output style pointer; Model default adds nothing, leaving the model's own style in charge. Applies to new or reloaded sessions.",
       steeringDelivery: "Steering delivery",
       followUpDelivery: "Follow-up delivery",
       transport: "Transport",
@@ -348,6 +348,7 @@ export const en = {
   },
   options: {
     system: "System",
+    modelDefault: "Model default",
     "eli5": "5-year-old boy",
     "i-have-adhd": "ADHD patient",
     light: "Light",
@@ -698,7 +699,7 @@ export const zhCN: typeof en = {
       branchSummaryReserve: "分支摘要预留",
       skipBranchSummary: "跳过分支摘要提示",
       outputStyle: "输出风格",
-      outputStyleDesc: "将所选技能作为输出风格指针写入系统提示词；新会话或保存重载后生效。",
+      outputStyleDesc: "将所选技能作为输出风格指针写入系统提示词；“模型默认”不写入任何内容，由模型自带风格决定；新会话或保存重载后生效。",
       steeringDelivery: "转向消息投递",
       followUpDelivery: "跟进消息投递",
       transport: "传输方式",
@@ -734,6 +735,7 @@ export const zhCN: typeof en = {
   },
   options: {
     system: "跟随系统",
+    modelDefault: "模型默认",
     "eli5": "5岁男孩",
     "i-have-adhd": "ADHD患者",
     light: "浅色",

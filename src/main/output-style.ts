@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { parseSkillDocument, type SkillDocument } from "./skill-files.js";
-import { DEFAULT_OUTPUT_STYLE } from "../shared/skills.js";
 
 /**
  * Output style is one pi setting, `outputStyle`, that names a skill whose
@@ -8,12 +7,13 @@ import { DEFAULT_OUTPUT_STYLE } from "../shared/skills.js";
  * append-system prompt sections as a bare pointer
  * (`<output_style>name</output_style>`); the model resolves it against
  * <available_skills> exactly like any other skill, so manual-only skills are
- * excluded — they never appear there, and a pointer at one would dangle. The
- * setting lives in pi's settings.json on whatever host runs the session, so
- * it reaches remote sessions through the settings sync PiX already performs.
- * The loader resolves skills (user copies shadow built-ins) before the
- * append-system override runs in the same pass, so checking the final list is
- * all the wiring the runtime needs.
+ * excluded — they never appear there, and a pointer at one would dangle. An
+ * unset or blank setting adds no pointer, leaving the model's own style in
+ * charge. The setting lives in pi's settings.json on whatever host runs the
+ * session, so it reaches remote sessions through the settings sync PiX
+ * already performs. The loader resolves skills (user copies shadow built-ins)
+ * before the append-system override runs in the same pass, so checking the
+ * final list is all the wiring the runtime needs.
  */
 
 /** The loaded skills that opted in (`output-style: true`); the configured name is resolved against this list. */
@@ -46,8 +46,7 @@ export function isOutputStyleFile(path: string): boolean {
 function configuredName(settings: OutputStyleSettings): string {
   const value = settings.getProjectSettings().outputStyle
     ?? settings.getGlobalSettings().outputStyle;
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  return trimmed || DEFAULT_OUTPUT_STYLE;
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /**
@@ -62,6 +61,8 @@ export function appendOutputStyle(
   settings: OutputStyleSettings,
 ): string[] {
   const name = configuredName(settings);
+  // Unset means the model's own style: no pointer at all.
+  if (!name) return base;
   const skill = skills.find((item) => item.name === name);
   if (!skill || skill.disableModelInvocation) return base;
   return [...base, `<output_style>${name}</output_style>`];

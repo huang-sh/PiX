@@ -9,7 +9,6 @@ import {
   type OutputStyleSettings,
   type OutputStyleSkill,
 } from "../src/main/output-style.js";
-import { DEFAULT_OUTPUT_STYLE } from "../src/shared/skills.js";
 
 function settings(project: Record<string, unknown> = {}, global: Record<string, unknown> = {}): OutputStyleSettings {
   return {
@@ -46,14 +45,15 @@ test("appends the selected skill's name as the pointer", () => {
   assert.deepEqual(out, ["user append", "<output_style>sample-style</output_style>"]);
 });
 
-test(`defaults to ${DEFAULT_OUTPUT_STYLE} when the setting is unset or blank`, () => {
+test("an unset or blank setting adds no pointer, leaving the model's own style in charge", () => {
+  const skills = [{ name: "i-have-adhd", disableModelInvocation: false }];
   for (const configured of [undefined, "", "   "]) {
     const out = appendOutputStyle(
       ["base"],
-      [{ name: DEFAULT_OUTPUT_STYLE, disableModelInvocation: false }],
+      skills,
       settings({}, { outputStyle: configured ?? "" }),
     );
-    assert.deepEqual(out, ["base", `<output_style>${DEFAULT_OUTPUT_STYLE}</output_style>`]);
+    assert.deepEqual(out, ["base"]);
   }
 });
 
@@ -67,19 +67,20 @@ test("leaves the base untouched when the skill is not in the opted-in list", () 
 });
 
 test("leaves the base untouched for a manual-only skill the prompt cannot resolve", () => {
-  const manualOnly = [{ name: DEFAULT_OUTPUT_STYLE, disableModelInvocation: true }];
-  assert.deepEqual(appendOutputStyle(["base"], manualOnly, settings()), ["base"]);
+  const manualOnly = [{ name: "sample-style", disableModelInvocation: true }];
+  assert.deepEqual(appendOutputStyle(["base"], manualOnly, settings({}, { outputStyle: "sample-style" })), ["base"]);
 });
 
 test("project settings override the global value", () => {
   const styled = appendOutputStyle(
     ["base"],
     [{ name: "sample-style", disableModelInvocation: false }],
-    settings({ outputStyle: "sample-style" }, { outputStyle: DEFAULT_OUTPUT_STYLE }),
+    settings({ outputStyle: "sample-style" }, { outputStyle: "i-have-adhd" }),
   );
   assert.deepEqual(styled, ["base", "<output_style>sample-style</output_style>"]);
+  // A blank project value also wins: unset means unset, not a fallback to global.
   assert.deepEqual(
-    appendOutputStyle(["base"], [{ name: DEFAULT_OUTPUT_STYLE, disableModelInvocation: false }], settings({ outputStyle: "" }, {})),
-    ["base", `<output_style>${DEFAULT_OUTPUT_STYLE}</output_style>`],
+    appendOutputStyle(["base"], [{ name: "i-have-adhd", disableModelInvocation: false }], settings({ outputStyle: "" }, { outputStyle: "i-have-adhd" })),
+    ["base"],
   );
 });
