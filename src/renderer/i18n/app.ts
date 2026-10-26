@@ -28,6 +28,15 @@ export const en = {
     empty: "(empty)",
     noOutput: "(no output)",
   },
+  oauth: {
+    waiting: "Waiting for browser sign-in",
+    browserHint: "Complete sign-in in your browser. This notice will close automatically.",
+    manualFallback: "Sign-in not completing? Copy the browser address",
+    manualHint: "Complete OpenAI sign-in and authorization in your browser, then copy the full address from the address bar at the top of that browser window and paste it here.",
+    manualAddressHint: "The address should start with {url}. Keep all parameters after the question mark (?). You can copy the address even if the browser says the page cannot be reached.",
+    redirectUrl: "Full browser address after authorization",
+    cancel: "Cancel sign-in",
+  },
   time: {
     now: "now",
     seconds: "{n}s",
@@ -174,6 +183,15 @@ export const zhCN: typeof en = {
     continue: "继续",
     empty: "（空）",
     noOutput: "（无输出）",
+  },
+  oauth: {
+    waiting: "等待浏览器完成登录",
+    browserHint: "请在浏览器中完成授权，完成后此提示会自动关闭。",
+    manualFallback: "未自动完成？从浏览器复制地址",
+    manualHint: "在浏览器中完成 OpenAI 登录并授权后，复制浏览器顶部地址栏中的完整地址，再回到这里粘贴。",
+    manualAddressHint: "地址应以 {url} 开头，请保留问号（?）后的全部参数。即使浏览器显示“无法访问此网站”，也可以复制地址栏中的地址。",
+    redirectUrl: "浏览器授权后的完整地址",
+    cancel: "取消登录",
   },
   time: {
     now: "刚刚",

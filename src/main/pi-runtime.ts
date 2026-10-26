@@ -1147,25 +1147,37 @@ export class PiRuntime {
       }
       case "loginOAuth": {
         const modelRuntime = await this.modelRuntime();
+        const loginAbort = new AbortController();
+        const cancelLogin = (promptSignal?: AbortSignal): never => {
+          const error = new Error("Sign-in cancelled");
+          // The provider also dismisses a manual prompt after a successful callback.
+          // Only user cancellation should abort the whole login and token exchange.
+          if (!promptSignal?.aborted) loginAbort.abort(error);
+          throw error;
+        };
         // The settings manager backing the runtime owns this installation's
         // stable device ID, which ChatGPT sign-in sends as its agent host ID.
         const settingsManager = this.runtime?.session?.settingsManager ?? this.modelServices?.settingsManager;
         await modelRuntime.login(input.provider, "oauth", {
+          signal: loginAbort.signal,
           prompt: async (prompt: any) => {
+            const signal = prompt.signal ? AbortSignal.any([prompt.signal, loginAbort.signal]) : loginAbort.signal;
             if (prompt.type === "select") {
               const selected = prompt.options.find((option: any) => option.id === input.method);
               if (selected) return selected.id;
               const choice = await this.dialogs?.request(this, { kind: "select", title: prompt.message,
-                options: prompt.options.map((option: any) => option.label), source: input.provider }, { signal: prompt.signal });
+                options: prompt.options.map((option: any) => option.label), source: input.provider }, { signal });
               const method = prompt.options.find((option: any) => option.label === choice);
               if (method) return method.id;
-              throw new Error("Sign-in cancelled");
+              return cancelLogin(prompt.signal);
             }
             if (prompt.type === "manual_code" || prompt.type === "text") {
-              const value = await this.dialogs?.request(this, { kind: "input", title: prompt.message,
-                placeholder: prompt.placeholder, source: input.provider }, { signal: prompt.signal });
+              // OpenAI's manual prompt races the browser callback; it is a fallback, not a required step.
+              const kind = input.provider === "openai" && prompt.type === "manual_code" ? "oauth" : "input";
+              const value = await this.dialogs?.request(this, { kind, title: prompt.message,
+                placeholder: prompt.placeholder, source: input.provider }, { signal });
               if (value !== undefined) return value;
-              throw new Error("Sign-in cancelled");
+              return cancelLogin(prompt.signal);
             }
             throw new Error("This OAuth provider requires interactive Pi /login setup.");
           },

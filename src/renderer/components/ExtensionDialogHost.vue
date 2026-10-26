@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { LoaderCircle } from "@lucide/vue";
 import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import { useI18n } from "vue-i18n";
 import type { DesktopEvent, ExtensionDialog } from "../../shared/types";
@@ -10,8 +11,10 @@ import MarkdownRenderer from "./MarkdownRenderer.vue";
 
 const { t } = useI18n();
 const queue = ref<ExtensionDialog[]>([]);
-const current = computed(() => queue.value[0]);
+const current = computed(() => queue.value.find(request => request.kind !== "oauth"));
+const oauth = computed(() => queue.value.find(request => request.kind === "oauth"));
 const answer = ref("");
+const oauthAnswer = ref("");
 const busy = ref(false);
 let unsubscribe: (() => void) | undefined;
 let mounted = false;
@@ -19,6 +22,7 @@ let replaying = 0;
 const dismissed = new Set<string>();
 const disconnected = new Set<string>();
 watch(() => current.value?.id, () => { answer.value = current.value?.options?.[0] ?? ""; });
+watch(() => oauth.value?.id, () => { oauthAnswer.value = ""; });
 function add(request: ExtensionDialog) {
   if (request.projectId && disconnected.has(request.projectId)) return;
   if (!dismissed.has(request.id) && !queue.value.some(item => item.id === request.id)) queue.value.push(request);
@@ -44,13 +48,12 @@ function onEvent(event: DesktopEvent) {
     else { disconnected.add(projectId); queue.value = queue.value.filter(item => item.projectId !== projectId); }
   }
 }
-async function respond(cancel = false) {
-  const request = current.value;
+async function respond(cancel = false, request = current.value, value = answer.value) {
   if (!request || busy.value) return;
   busy.value = true;
   try {
     await desktop.invoke("ui.respond", { id: request.id, projectId: request.projectId,
-      value: cancel ? undefined : request.kind === "confirm" ? "yes" : answer.value });
+      value: cancel ? undefined : request.kind === "confirm" ? "yes" : value });
     queue.value = queue.value.filter(item => item.id !== request.id);
   } catch (error) {
     useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -81,10 +84,38 @@ onBeforeUnmount(() => { mounted = false; unsubscribe?.(); });
       </DialogContent>
     </DialogPortal>
   </DialogRoot>
+  <section v-if="oauth" :key="oauth.id" class="oauth-notice" data-oauth-notice :aria-label="t('oauth.waiting')">
+    <div class="oauth-status" role="status">
+      <LoaderCircle class="spin" :size="18" aria-hidden="true" />
+      <div><strong>{{ t('oauth.waiting') }}</strong><span>{{ oauth.source }}</span></div>
+    </div>
+    <p>{{ t('oauth.browserHint') }}</p>
+    <details>
+      <summary>{{ t('oauth.manualFallback') }}</summary>
+      <form @submit.prevent="oauthAnswer.trim() && respond(false, oauth, oauthAnswer.trim())">
+        <p>{{ t('oauth.manualHint') }}</p>
+        <p v-if="oauth.placeholder">{{ t('oauth.manualAddressHint', { url: oauth.placeholder }) }}</p>
+        <label :for="`oauth-answer-${oauth.id}`">{{ t('oauth.redirectUrl') }}</label>
+        <input :id="`oauth-answer-${oauth.id}`" v-model="oauthAnswer" :placeholder="oauth.placeholder ? `${oauth.placeholder}?code=…&state=…&client_id=…` : undefined" autocomplete="off" :disabled="busy" />
+        <footer><Button type="submit" size="sm" :disabled="busy || !oauthAnswer.trim()">{{ t('common.continue') }}</Button></footer>
+      </form>
+    </details>
+    <footer><Button type="button" variant="ghost" size="sm" :disabled="busy" @click="respond(true, oauth)">{{ t('oauth.cancel') }}</Button></footer>
+  </section>
 </template>
 
 <style scoped>
 .extension-dialog { max-height: 80vh; overflow: auto; }
 .dialog-source { margin: 0 0 12px; overflow-wrap: anywhere; color: var(--muted); font-size: var(--font-size-caption); }
 select { width: 100%; height: 39px; padding: 0 11px; }
+.oauth-notice { position: fixed; right: 16px; bottom: 16px; z-index: 140; width: min(380px, calc(100vw - 32px)); max-height: calc(100vh - 80px); overflow: auto; padding: 16px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.oauth-status { display: flex; align-items: center; gap: 10px; }
+.oauth-status > svg { flex-shrink: 0; color: var(--accent); }
+.oauth-status > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.oauth-status span { color: var(--muted); font-size: var(--font-size-caption); overflow-wrap: anywhere; }
+.oauth-notice p { margin: 12px 0; color: var(--muted); font-size: var(--font-size-small); line-height: 1.6; }
+.oauth-notice summary { cursor: pointer; color: var(--text); font-size: var(--font-size-small); }
+.oauth-notice label { display: block; margin-bottom: 6px; font-size: var(--font-size-small); }
+.oauth-notice input { width: 100%; height: 39px; padding: 0 11px; }
+.oauth-notice footer { display: flex; justify-content: flex-end; margin-top: 12px; }
 </style>

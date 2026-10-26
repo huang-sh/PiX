@@ -593,7 +593,7 @@ export interface ExtensionDialog {
   id: string;
   title: string;
   source: string;
-  kind: "select" | "input" | "confirm";
+  kind: "select" | "input" | "confirm" | "oauth";
   options?: string[];
   placeholder?: string;
   message?: string;
