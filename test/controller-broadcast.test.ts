@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MainController, type Platform } from "../src/main/controller.js";
-import type { SessionSnapshot } from "../src/shared/types.js";
+import type { ExtensionDialog, SessionSnapshot } from "../src/shared/types.js";
 import type { SessionUpdate } from "../src/shared/session-updates.js";
 import { projectSession } from "../src/shared/session.js";
 import { sessionEventDecoder } from "../src/shared/session-updates.js";
@@ -308,6 +308,10 @@ test("a page attached mid-run receives the settled node footer via broadcast", a
   const dir = mkdtempSync(join(tmpdir(), "pix-broadcast-"));
   mkdirSync(join(dir, "ws"), { recursive: true });
   const controller = new MainController(join(dir, "ws"), platform);
+  // Headless tests cannot answer optional native-extension permission dialogs.
+  controller.onEvent(event => {
+    if (event.type === "ui.request") controller.dialogs.respond((event.payload as ExtensionDialog).id);
+  });
   try {
     const original = controller.createSessionRuntime.bind(controller);
     controller.createSessionRuntime = entry => {
@@ -343,6 +347,7 @@ test("a page attached mid-run receives the settled node footer via broadcast", a
       `final broadcast must carry the node footer usage, got ${JSON.stringify(node?.footer)}`,
     );
   } finally {
+    await controller.closeAll();
     controller.dispose();
     rmSync(dir, { recursive: true, force: true });
   }

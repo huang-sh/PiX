@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MainController } from "../src/main/controller.js";
-import type { DesktopEvent } from "../src/shared/types.js";
+import type { DesktopEvent, ExtensionDialog } from "../src/shared/types.js";
 
 for (const streaming of [false, true]) {
   test(`deleting the ${streaming ? "streaming" : "idle"} current session is refused while running and unlinks after a stop`, { timeout: 30_000 }, async () => {
@@ -31,6 +31,10 @@ for (const streaming of [false, true]) {
 
       showItemInFolder() {},
       quit() {},
+    });
+    // Headless tests cannot answer optional native-extension permission dialogs.
+    controller.onEvent(event => {
+      if (event.type === "ui.request") controller.dialogs.respond((event.payload as ExtensionDialog).id);
     });
     try {
       const faux = fauxProvider({ models: [{ id: "faux-1", contextWindow: 128_000 }] });
@@ -94,6 +98,7 @@ for (const streaming of [false, true]) {
       await controller.invoke("agent.control", { action: "newSession" });
       assert.ok(controller.registry.entry(controller.current!.session.path)!.runtime, "a new session can be created after deletion");
     } finally {
+      await controller.closeAll();
       controller.dispose();
       if (previousHome === undefined) delete process.env.PIX_HOME;
       else process.env.PIX_HOME = previousHome;
