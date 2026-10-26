@@ -149,7 +149,7 @@ async function create() {
       symbolColor: colors.text,
       height: 40,
     },
-    ...(darwin ? { trafficLightPosition: { x: 14, y: 14 } } : {}),
+    ...(darwin ? { trafficLightPosition: { x: 4, y: 14 } } : {}),
     webPreferences: {
       preload: join(dir, "../preload/index.cjs"),
       contextIsolation: true,
