@@ -18,7 +18,7 @@ node bin/pix.mjs run "检查项目中失败的测试"
 ```sh
 npm run build:cli
 npm pack ./server --pack-destination /tmp
-npm install --global /tmp/pix-server-0.0.28.tgz
+npm install --global /tmp/pix-server-0.0.29.tgz
 pix --help
 ```
 
