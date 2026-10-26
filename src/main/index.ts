@@ -435,5 +435,9 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
+  // Skip until the startup chain finished: it creates the window itself, and a
+  // dock-click activate racing it would run before the controller exists. A
+  // failed startup quits the app, so there is nothing else to wait for.
+  if (!started) return;
   if (BrowserWindow.getAllWindows().length === 0) void create().catch(e => reportFailure("window", "index: create from activate", e));
 });
