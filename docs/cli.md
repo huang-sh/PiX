@@ -2,27 +2,7 @@
 
 GUI 与 CLI 都连接到独立的 PiX Host。Host 在同一台机器、同一 `PIX_HOME` 下只启动一份，管理多个项目和会话。CLI 不依赖 Electron，使用与 GUI 相同的 Agent、工具、配置和会话树。本版 CLI 命令针对本地项目；SSH/WSL 项目继续通过 GUI 连接远程 Host。
 
-需要 Node.js 22.19 或更高版本。从仓库构建：
-
-```sh
-npm install
-npm run build:cli
-node bin/pix.mjs --help
-node bin/pix.mjs run "检查项目中失败的测试"
-```
-
-`npm run cli -- <参数>` 也是源码入口。`npm link` 后可以直接使用 `pix`；该仓库的桌面开发依赖包括 Electron。
-
-需要仅含 Node.js 依赖的安装包时：
-
-```sh
-npm run build:cli
-npm pack ./server --pack-destination /tmp
-npm install --global /tmp/pix-server-0.0.29.tgz
-pix --help
-```
-
-这个包只包含编译后的 Node.js 代码、内置 skills 和服务器依赖，不包含 Electron 或 Vue。项目仍为 private，不会自动发布到 npm。桌面开发 `npm run dev` 会先构建共享 Host；修改核心代码后，需要在任务完成时执行 `pix host stop` 并重新连接才能加载新版后台；桌面发行包携带自己的同版本 Host 入口。
+桌面安装版使用应用自带运行时，无需另装 Node.js。安装后在项目目录打开新的终端，直接运行 `pix` 进入 TUI，或使用 `pix run`、`pix sessions` 等命令。各平台的注册方式见下文「桌面安装包的命令注册」。
 
 ## 桌面安装包的命令注册
 
@@ -32,7 +12,7 @@ pix --help
 - **macOS DMG/ZIP**：将 PiX.app 放到 Applications 并启动一次，自动创建 `~/.pix/bin/pix`，为 zsh 及已有 Bash/fish 配置添加带标记的 PATH 块。DMG 拖拽与移入废纸篓都没有可执行的安装/卸载钩子，因此删除应用前运行 `pix command uninstall`；会移除启动器和 PiX 添加的配置块，保留其他配置。
 - **Linux deb/rpm**：安装器自动注册 `/usr/bin/pix`，GUI 使用独立的 `pix-desktop` 命令；卸载清理 CLI 链接。保留 electron-builder 原有的 sandbox、MIME 与 AppArmor 安装行为。
 - **Linux tar.gz**：解压到固定目录并启动 GUI 一次后，按用户注册命令。
-- **Windows 便携版、AppImage**：不会自动修改 PATH；需要稳定的终端命令时可安装独立 npm CLI。macOS 直接从 `/Volumes/` 中运行也不会注册，避免指向稍后卸载的磁盘映像。
+- **Windows 便携版、AppImage**：不会自动修改 PATH；需要 `pix` 终端命令时，请使用支持命令注册的安装格式。macOS 直接从 `/Volumes/` 中运行也不会注册，避免指向稍后卸载的磁盘映像。
 
 ```sh
 pix command status

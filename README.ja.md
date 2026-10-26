@@ -69,6 +69,25 @@ PiX にはネイティブバイナリを含む次の 2 つの拡張機能も同�
 
 PiX は内部拡張機能も読み込みます。`file-changes` はエージェントがファイルを編集・書き込みする前後のスナップショットを取得して「Changes」パネルに表示し、`git-branch` はユーザーの各ターンで作業中の Git ブランチを記録します。
 
+## CLI
+
+デスクトップ版のインストーラーは `pix` ターミナルコマンドを登録します。macOS ではアプリを Applications に移動して初めて起動したときに登録します。同梱のランタイムを使うため、Node.js を別途インストールする必要はありません。登録の解除やポータブル形式での動作は [CLI ドキュメント](docs/cli.md) を参照してください。
+
+GUI と CLI は独立したバックグラウンド Host と既存の PiX セッションツリーを共有します。複数のターミナルからブランチを並行実行でき、クライアントを閉じても受け付け済みのタスクは実行を続けます。
+
+対話モードは Pi のネイティブなターミナルエディター、Markdown とツールカード、モデル選択、検索可能なツリー選択を利用します。`/` でコマンドを補完し、`/tree` でブランチを選択、`/sessions` でセッションを再開できます。
+
+インストール後、プロジェクトのディレクトリで新しいターミナルを開き、直接実行してください：
+
+```sh
+pix
+pix run "プロジェクトのテストを確認"
+pix sessions
+pix tree --session <セッションIDまたはパス>
+```
+
+コマンド一覧、並行実行、実際の Agent による検証は [CLI ドキュメント](docs/cli.md) を参照してください。
+
 ## ダウンロード
 
 お使いのプラットフォーム向けのインストーラーを [GitHub Releases](https://github.com/huang-sh/PiX/releases) から入手してください。
@@ -81,22 +100,6 @@ PiX は内部拡張機能も読み込みます。`file-changes` はエージェ�
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（ポータブル版）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`、および tar.gz。x64。
 
 インストーラーには署名がありません。Windows SmartScreen の警告が表示された場合は「実行」を選択してください。macOS では初回起動時に、システム設定 → プライバシーとセキュリティ でアプリを許可してください。
-
-<details>
-<summary>ソースから実行</summary>
-
-Node.js 22.19 以降が必要です。
-
-```bash
-npm install
-npm run dev
-```
-
-`npm run verify` は型チェック、テスト、起動スモークテストの一式を実行します。
-
-`npm run test:fff` は同梱のファイル検索と Codemode を、`npm run test:web` は Web 拡張機能のインストール構成（実際に npm install を行うためネットワークが必要）とページ取得をチェックします。どちらも分離された設定で実行されます。macOS では `npm run dist:mac` で現在のマシンのアーキテクチャ向けにパッケージ化し、Linux では `npm run dist:linux` で AppImage、deb、rpm、tar.gz をパッケージ化します。CI は対応するネイティブライブラリを含めるため、Apple Silicon、Intel、Ubuntu の各ランナーで個別にビルドします。
-
-</details>
 
 ## コミュニティ
 

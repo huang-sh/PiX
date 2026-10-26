@@ -77,14 +77,16 @@ GUI 与 CLI 共享同一个独立后台 Host 和现有 PiX 会话树，可在多
 
 交互模式复用 Pi 原生终端编辑器、Markdown 与工具卡片、模型选择器和可搜索的会话树。输入 `/` 补全命令、`/tree` 选择分支、`/sessions` 恢复会话。
 
+安装后，在项目目录打开新的终端，直接运行：
+
 ```sh
-npm run build:cli
-node bin/pix.mjs run "检查项目中的测试"
-node bin/pix.mjs sessions
-node bin/pix.mjs tree --session <会话ID或路径>
+pix
+pix run "检查项目中的测试"
+pix sessions
+pix tree --session <会话ID或路径>
 ```
 
-完整命令、仅 Node.js 的安装包、并发语义和真实 Agent 测试见 [CLI 文档](docs/cli.md)。
+完整命令、并发语义和真实 Agent 测试见 [CLI 文档](docs/cli.md)。
 
 ## 下载
 
@@ -98,22 +100,6 @@ node bin/pix.mjs tree --session <会话ID或路径>
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（免安装）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`，另提供 tar.gz，x64。
 
 安装包未签名：Windows SmartScreen 提示时选择"仍要运行"；macOS 首次打开需在 系统设置 → 隐私与安全性 中允许。
-
-<details>
-<summary>从源码运行</summary>
-
-需要 Node.js 22.19 或更高版本。
-
-```bash
-npm install
-npm run dev
-```
-
-`npm run verify` 可执行完整的类型检查、测试与启动冒烟验证。
-
-`npm run test:fff` 验证内置文件搜索与 Codemode；`npm run test:web` 通过真实 npm 安装验证网页扩展的安装布局与网页抓取（需要网络），均使用独立测试配置。macOS 使用 `npm run dist:mac` 打包当前机器架构；Linux 使用 `npm run dist:linux` 打包 AppImage、deb、rpm 和 tar.gz。CI 分别在 Apple Silicon、Intel 和 Ubuntu runner 上构建对应安装包，以包含正确的本机运行库。
-
-</details>
 
 ## 交流群
 
