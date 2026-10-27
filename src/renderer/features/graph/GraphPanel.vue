@@ -23,8 +23,7 @@ import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualP
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { searchGraphNodeIds } from "../../lib/graph-search";
-import { isMac, shortcutForEvent } from "../../keyboard-shortcuts";
-import { formatShortcut, shortcutBindings } from "../../../shared/shortcuts";
+import { shortcutForEvent } from "../../keyboard-shortcuts";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../../../shared/graph-filter";
@@ -94,8 +93,6 @@ const labelTarget = ref<{ entryId: string; path: string }>();
 const labelText = ref("");
 const labelError = ref("");
 const labelSaving = ref(false);
-const labelShortcut = computed(() => shortcutBindings("editLabel", layout.settings?.app.keyboardShortcuts)
-  .map(binding => formatShortcut(binding, isMac())).join(" / "));
 function labelKeydown(event: KeyboardEvent) {
   if (layout.screen !== "workbench" || shortcutForEvent(event, layout.settings?.app.keyboardShortcuts) !== "editLabel") return;
   const node = session.selectedNode;
@@ -344,7 +341,6 @@ function rebuild() {
       searchHit: searchHitIds.value.has(node.id),
       filterContext: !matchesGraphFilter(node, graphFilter.value),
       onEditLabel: canEditLabel(node) ? () => editLabel(node) : undefined,
-      editLabelShortcut: labelShortcut.value,
       onCompose: direction => compose(node.id, direction),
       onOpenPanel: session.current?.graph ? () => openChatColumn(node.id) : undefined,
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
@@ -975,7 +971,7 @@ watch(
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
     () => session.models, () => draftParent.value, () => draftState.value.busy,
     () => session.currentPendingPrompts, () => session.deleteBlockedReason, pendingRuns,
-    searchHitIds, graphFilter, labelShortcut],
+    searchHitIds, graphFilter],
   () => {
     if (!session.current && !preparingSession.value) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
