@@ -591,10 +591,16 @@ async function select(id: string, openChat = false) {
 
 async function deleteNode(id: string) {
   deleteError.value = "";
+  const request = ++centerRequest;
+  const view = session.viewRequest;
+  const key = sessionKey.value;
   try {
     await session.deleteNode(id);
-    rebuild();
-    await center(defaultFocusId());
+    // The projection watcher rebuilds the graph. Keep the viewport stable unless
+    // the surviving focus moved out of view, and yield to navigation during IO.
+    await nextTick();
+    if (request === centerRequest && view === session.viewRequest && key === sessionKey.value && !focusNodeVisible())
+      await center(defaultFocusId(), false, false);
   } catch (error) { deleteError.value = String(error); }
 }
 

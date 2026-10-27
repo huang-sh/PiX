@@ -1,4 +1,5 @@
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
+import { VueFlow } from "@vue-flow/core";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import GraphPanel from "../../src/renderer/features/graph/GraphPanel.vue";
@@ -112,12 +113,60 @@ describe("graph node context menu deletion", () => {
     await flushPromises();
     document.querySelector<HTMLElement>('[data-action="node-delete"]')!.click();
     await flushPromises();
-    // The reflow settles once the post-delete recenter animation finishes;
-    // Vue Flow unmounts off-viewport nodes while it pans.
+    // Vue Flow applies the rebuilt layout on its next render.
     await vi.waitFor(() => expect(nodeTransform(wrapper, "turn:d")).toEqual({ x: 460, y: 222 }), { timeout: 2000 });
     // turn:b's auto slot is untouched by the deletion, so its manual pick stays.
     expect(nodeTransform(wrapper, "turn:b")).toEqual({ x: 840, y: 48 });
     wrapper.unmount();
+  });
+
+  it.each([true, false])("keeps a visible surviving focus still, or brings it into view without animation (visible: %s)", async visible => {
+    const pinia = createPinia(); setActivePinia(pinia);
+    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
+    const next = snapshot(); next.entries = next.entries.slice(0, 1); next.projection = projectSession(next.entries, "a"); next.graph!.revision++;
+    vi.mocked(window.pix!.invoke).mockResolvedValueOnce(next);
+    const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    const flow = (wrapper.findComponent(VueFlow).vm as unknown as { $: { exposed: Record<string, any> } }).$.exposed;
+    const graph = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
+    const setCenter = vi.spyOn(flow, "setCenter").mockResolvedValue(true);
+    flow.dimensions.value = { width: 2400, height: 900 };
+    wrapper.findComponent(VueFlow).vm.$emit("paneReady", flow);
+    await graph.center("turn:c", false, false);
+    setCenter.mockClear();
+    vi.spyOn(flow, "getViewport").mockReturnValue({ x: visible ? 0 : -4000, y: 0, zoom: 1 });
+    expect(graph.focusNodeVisible("turn:a")).toBe(visible);
+    await graph.deleteNode("turn:b");
+    expect(session.focusedNode).toBe("turn:a");
+    expect(wrapper.find('[data-id="turn:b"]').exists()).toBe(false);
+    if (visible) expect(setCenter).not.toHaveBeenCalled();
+    else {
+      expect(setCenter).toHaveBeenCalledTimes(1);
+      expect(setCenter).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), { zoom: 1, duration: 0 });
+    }
+  });
+
+  it("does not recenter a different session when a pending deletion completes", async () => {
+    const pinia = createPinia(); setActivePinia(pinia);
+    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
+    let resolve!: (value: SessionSnapshot) => void;
+    vi.mocked(window.pix!.invoke).mockImplementationOnce(() => new Promise<SessionSnapshot>(done => { resolve = done; }));
+    const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    const flow = (wrapper.findComponent(VueFlow).vm as unknown as { $: { exposed: Record<string, any> } }).$.exposed;
+    const graph = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
+    const setCenter = vi.spyOn(flow, "setCenter").mockResolvedValue(true);
+    wrapper.findComponent(VueFlow).vm.$emit("paneReady", flow);
+    const deletion = graph.deleteNode("turn:b");
+    session.viewRequest++;
+    session.applySnapshot(forkedSnapshot());
+    await graph.center("turn:d", false, false);
+    setCenter.mockClear();
+    vi.spyOn(flow, "getViewport").mockReturnValue({ x: -4000, y: 0, zoom: 1 });
+    resolve(snapshot());
+    await deletion;
+    expect(session.current?.session.id).toBe("s2");
+    expect(setCenter).not.toHaveBeenCalled();
   });
 
   it("disables deletion during a run and shows backend failures without removing cards", async () => {

@@ -392,8 +392,9 @@ export class GraphRuntime extends PiRuntime {
     try {
       // Dispose writers before rewriting their files. Shutdown extensions may append
       // entries, so GraphFiles reads the final disk state after disposal.
-      await super.close();
-      for (const worker of this.workers.values()) await worker.pi.close();
+      const closed = await Promise.allSettled([super.close(), ...[...this.workers.values()].map(worker => worker.pi.close())]);
+      const failed = closed.find(result => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
       try { graph.deleteNode(node.userEntryId, manager.getLeafId()); }
       catch (error) {
         if (existsSync(join(graph.dir, "delete-pending.json"))) graph.finishDeletion();

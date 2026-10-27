@@ -744,7 +744,26 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     const sibling = await prompt("sibling", root, "sibling");
     await assert.rejects(runtime.control({ action: "deleteNode", graphId: "another-session", nodeId: a2 }), /same writable graph/);
     await runtime.control({ action: "setTools", names: ["read"] });
-    await runtime.control({ action: "deleteNode", graphId, nodeId: a2 });
+    let closing = 0;
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>(resolve => { releaseClose = resolve; });
+    const workers = [...runtime["workers"].values()];
+    assert.ok(workers.length > 1);
+    const closes = workers.map(worker => {
+      const close = worker.pi.close.bind(worker.pi);
+      return t.mock.method(worker.pi, "close", async () => { closing++; await closeGate; await close(); });
+    });
+    const remove = t.mock.method(runtime.graph!, "deleteNode");
+    const deletion = runtime.control({ action: "deleteNode", graphId, nodeId: a2 });
+    try {
+      await until(() => closing === workers.length);
+      assert.equal(remove.mock.callCount(), 0, "all writers must stop before any deletion is committed");
+    } finally {
+      releaseClose();
+      await deletion;
+      closes.forEach(close => close.mock.restore());
+      remove.mock.restore();
+    }
     assert.deepEqual(runtime.runtime.session.getActiveToolNames(), ["read"]);
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === a));
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === b));
