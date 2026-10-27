@@ -2,6 +2,7 @@ import { SettingsService } from "../main/services.js";
 import { randomUUID } from "node:crypto";
 import type { Platform } from "../main/controller.js";
 import type { DesktopEvent, DesktopRoute, SessionSnapshot } from "../shared/types.js";
+import { sessionEventEncoder } from "../shared/session-updates.js";
 import { connectLocalHost, type HostClient } from "./client.js";
 
 /** Electron retains OS integration while the independent host owns execution. */
@@ -61,7 +62,13 @@ export class DesktopHostController {
     } else if (result?.session?.path) this.sessionPath = result.session.path;
     return result;
   }
-  onEvent(listener: (event: DesktopEvent) => void, _patches = false) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  onEvent(listener: (event: DesktopEvent) => void, patches = false) {
+    // HostClient decodes the host's deltas; each IPC subscriber needs its own encoding.
+    const encode = patches ? sessionEventEncoder() : undefined;
+    const subscribed = encode ? (event: DesktopEvent) => listener(encode(event)) : listener;
+    this.listeners.add(subscribed);
+    return () => this.listeners.delete(subscribed);
+  }
   emit(event: DesktopEvent) { for (const listener of this.listeners) listener(event); }
   detach() { this.disposed = true; this.client.close(); return Promise.resolve(); }
   dispose() { this.disposed = true; this.client.close(); this.listeners.clear(); }

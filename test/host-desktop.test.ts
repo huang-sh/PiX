@@ -10,8 +10,10 @@ import { HostClient } from "../src/host/client.js";
 import { DesktopHostController } from "../src/host/desktop.js";
 import { headlessPlatform, serveLocalHost } from "../src/host/local-host.js";
 import { MainController, type Platform } from "../src/main/controller.js";
-import { projectId, type ProjectInfo, type SessionSnapshot } from "../src/shared/types.js";
+import { projectId, type DesktopEvent, type ProjectInfo, type RawSessionEntry, type SessionSnapshot } from "../src/shared/types.js";
 import { projectSession } from "../src/shared/session.js";
+import { sessionEventDecoder, type SessionUpdate } from "../src/shared/session-updates.js";
+import { agentMessageContent } from "../src/shared/agent-stream.js";
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 500; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
@@ -46,6 +48,95 @@ async function fixture(t: TestContext) {
   };
   return { host, cwd, connect, connectDesktop };
 }
+
+async function desktopView(t: TestContext) {
+  const { cwd, connectDesktop } = await fixture(t);
+  let controller!: MainController;
+  const invoke = MainController.prototype.invoke;
+  t.mock.method(MainController.prototype, "invoke", function(this: MainController, ...args: Parameters<MainController["invoke"]>) {
+    controller = this;
+    return invoke.apply(this, args);
+  });
+  const desktop = await connectDesktop();
+  await desktop.invoke("app.bootstrap");
+  return { cwd, desktop, controller };
+}
+
+test("desktop IPC sends image history once, keeps subscriber baselines independent and supports resync", async t => {
+  const { cwd, desktop, controller } = await desktopView(t);
+  const events: DesktopEvent[] = [], fullEvents: DesktopEvent[] = [];
+  const stop = desktop.onEvent(event => events.push(structuredClone(event)), true);
+  desktop.onEvent(event => fullEvents.push(event));
+  const decode = sessionEventDecoder(async () => assert.fail("unexpected renderer resync"));
+  const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+  const entries: RawSessionEntry[] = [{ type: "message", id: "prompt", parentId: null, timestamp: "2026-10-27", message: {
+    role: "user", content: [{ type: "text", text: "inspect image" }, { type: "image", mimeType: "image/png", data: "aGVsbG8=".repeat(250_000) }],
+  } }];
+  const snapshot = (revision: number): SessionSnapshot => ({
+    session: { id: "s", path: join(cwd, "session.jsonl"), cwd, created: "", modified: "", messageCount: entries.length, firstMessage: "inspect image" },
+    entries: [...entries], projection: projectSession(entries, entries.at(-1)!.id),
+    runtime: { available: true } as SessionSnapshot["runtime"], graph: { id: "s", epoch: "e", revision, runs: [] },
+  });
+  const publish = async (revision: number, resync = false) => {
+    const current = snapshot(revision), count = events.length;
+    controller.emit({ type: "sessions", payload: { current, resync } });
+    await until(() => events.length > count);
+    assert.deepEqual(wire((fullEvents.at(-1)!.payload as SessionUpdate).current), wire(current), "non-IPC consumers retain full snapshots");
+    assert.deepEqual(wire((decode(events.at(-1)!)!.payload as SessionUpdate).current), wire(current));
+    return events.at(-1)!;
+  };
+  await publish(1);
+  assert.ok((events[0]!.payload as SessionUpdate).current, "a new subscriber starts with a checkpoint");
+  for (let revision = 2; revision <= 10; revision++) {
+    entries.push({ type: "message", id: `answer-${revision}`, parentId: entries.at(-1)!.id, timestamp: "2026-10-27",
+      message: { role: "assistant", content: [{ type: "text", text: `answer ${revision}` }] } });
+    const event = await publish(revision);
+    assert.ok((event.payload as SessionUpdate).patch, "desktop must re-encode the host's decoded snapshot before IPC");
+    assert.ok(JSON.stringify(event).length < 5000, "incremental IPC must not retransmit unchanged images");
+  }
+  const lateEvents: DesktopEvent[] = [];
+  const stopLate = desktop.onEvent(event => lateEvents.push(event), true);
+  await publish(11);
+  assert.ok((lateEvents[0]!.payload as SessionUpdate).current, "late subscribers cannot use another subscriber's baseline");
+  assert.ok((events.at(-1)!.payload as SessionUpdate).patch);
+  const checkpoint = await publish(12, true);
+  assert.ok((checkpoint.payload as SessionUpdate).current, "resync forces a checkpoint");
+  const incremental = await publish(13);
+  assert.ok((incremental.payload as SessionUpdate).patch);
+  stop(); stopLate();
+  const count = events.length, lateCount = lateEvents.length, fullCount = fullEvents.length;
+  controller.emit({ type: "notice", payload: { message: "after unsubscribe" } });
+  await until(() => fullEvents.length > fullCount);
+  assert.equal(events.length, count);
+  assert.equal(lateEvents.length, lateCount);
+});
+
+test("desktop IPC streams appended text and tool output instead of repeating their growing prefixes", async t => {
+  const { desktop, controller } = await desktopView(t);
+  const events: DesktopEvent[] = [];
+  desktop.onEvent(event => events.push(structuredClone(event)), true);
+  const decode = sessionEventDecoder(async () => assert.fail("unexpected renderer resync"));
+  const prefix = "中文🙂 long output ".repeat(10_000);
+  for (let i = 0; i < 4; i++) {
+    for (const original of [
+      { type: "agent", payload: { type: "message_update", graphId: "g", branchId: "b", runId: "r",
+        message: { role: "assistant", content: [{ type: "text", text: prefix + "a".repeat(i) }, { type: "thinking", thinking: "think" + "b".repeat(i) }] } } },
+      { type: "agent", payload: { type: "tool_execution_update", graphId: "g", branchId: "b", runId: "r", toolCallId: "t", partialResult: prefix + "c".repeat(i) } },
+    ] satisfies DesktopEvent[]) {
+      const count = events.length;
+      controller.emit(original);
+      await until(() => events.length > count);
+      const event = events.at(-1)!;
+      assert.ok((event.payload as any).progress, "desktop IPC must retain progress encoding across the host hop");
+      if (i) assert.ok(JSON.stringify(event).length < 1000, "streaming payload size must not grow with accumulated output");
+      const payload = decode(event)!.payload as any;
+      if (original.payload.type === "message_update") {
+        assert.equal(agentMessageContent(payload.message, "text"), agentMessageContent(original.payload.message, "text"));
+        assert.equal(agentMessageContent(payload.message, "thinking"), agentMessageContent(original.payload.message, "thinking"));
+      } else assert.equal(payload.partialResult, prefix + "c".repeat(i));
+    }
+  }
+});
 
 test("shared session browser callbacks follow the connected desktop and its replacement", async t => {
   const { host, cwd, connect } = await fixture(t);
