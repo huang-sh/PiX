@@ -1,4 +1,4 @@
-import type { PromptImage } from "./types.js";
+import type { PromptImage, SessionImage } from "./types.js";
 
 export const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -32,4 +32,13 @@ export function validatePromptImages(value: unknown): PromptImage[] {
 
 export function imageDataUrl(image: PromptImage) {
   return `data:${image.mimeType};base64,${image.data}`;
+}
+
+/** Display references are never accepted as prompt attachments. */
+export function isSessionImage(value: unknown): value is SessionImage {
+  if (isPromptImage(value)) return true;
+  const image = value as Exclude<SessionImage, PromptImage> | null;
+  return !!image && image.type === "image" && IMAGE_MIME_TYPES.includes(image.mimeType)
+    && typeof image.reference?.session === "string" && typeof image.reference.entryId === "string"
+    && Number.isInteger(image.reference.index) && image.reference.index >= 0;
 }

@@ -27,6 +27,7 @@ import { shortcutForEvent } from "../../keyboard-shortcuts";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../../../shared/graph-filter";
+import { sessionImageData } from "../../lib/session-images";
 import type { GraphFilter, GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import DraftNode, { type DraftNodeData } from "./DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "./PromptNode.vue";
@@ -74,6 +75,7 @@ let draftOrder = 0;
 const emptyDraft = (): ComposerDraft => ({ text: "", images: [], busy: false, readingImages: false, error: "" });
 // Survives viewport unmounts, including attachment reads and failed submissions.
 const draftState = ref(emptyDraft());
+let retryRequest = 0;
 const draftModel = ref<RuntimeModel | null>();
 // Local picks and model-driven clamps override the inherited level for this draft.
 const draftThinking = ref<string>();
@@ -571,7 +573,7 @@ function layoutBranches(items: RenderNode[]) {
 
 let selectionRequest = 0;
 let centerRequest = 0;
-onBeforeUnmount(() => { selectionRequest++; centerRequest++; flow.value = undefined; });
+onBeforeUnmount(() => { selectionRequest++; centerRequest++; retryRequest++; flow.value = undefined; });
 
 async function select(id: string, openChat = false) {
   if (id.startsWith("draft:") || (id.startsWith("pending:") && !session.current?.graph)) return;
@@ -625,6 +627,7 @@ async function reopenSession() {
 }
 
 async function compose(id: string, direction?: BranchDirection) {
+  ++retryRequest;
   if (draftParent.value !== id) draftState.value = emptyDraft();
   draftOrder = direction === "up" ? -++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
@@ -644,13 +647,28 @@ async function retryTurn(id: string) {
   if (!node) return;
   const content = nodeContent(id);
   if (!content.user.trim() && !content.images?.length) return;
+  const graph = session.current?.graph;
+  const request = ++retryRequest, view = session.viewRequest, key = sessionKey.value;
+  const draft = draftState.value, text = draft.text, attached = [...draft.images];
+  const model = draftModel.value, thinking = draftThinking.value;
+  const focus = session.focusedNode;
+  const isCurrent = () => request === retryRequest && view === session.viewRequest && key === sessionKey.value
+    && graph?.epoch === session.current?.graph?.epoch && focus === session.focusedNode
+    && draftState.value === draft && draft.text === text
+    && !draft.busy && !draft.readingImages && draftModel.value === model && draftThinking.value === thinking
+    && draft.images.length === attached.length && draft.images.every((image, index) => image === attached[index])
+    && session.current?.runtime.available && projection.value?.nodes.some(node => node.id === id);
+  let images: PromptImage[];
+  try { images = await Promise.all((content.images ?? []).map(sessionImageData)); }
+  catch (error) { if (isCurrent()) layout.showNotice(error instanceof Error ? error.message : String(error), "error"); return; }
+  if (!isCurrent()) return;
   const parent = node.parentId ?? node.id;
   const parentNode = projection.value?.nodes.find((item) => item.id === parent);
   resetDraft();
   draftParent.value = parent;
   draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
   draftThinking.value = undefined;
-  draftState.value = { ...emptyDraft(), text: content.user, images: [...(content.images ?? [])] };
+  draftState.value = { ...emptyDraft(), text: content.user, images };
   rebuild();
   await center(`draft:${parent}`, true);
 }
@@ -681,6 +699,7 @@ function cancelDraft() {
 }
 
 function resetDraft() {
+  ++retryRequest;
   draftState.value = emptyDraft();
   draftParent.value = undefined;
   draftModel.value = undefined;

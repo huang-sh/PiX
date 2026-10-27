@@ -10,6 +10,7 @@ export type LocalRequest = {
   input?: unknown;
   sessionPath?: string;
   platform?: boolean;
+  imageReferences?: boolean;
   clientId?: string;
 };
 export type LocalReply = { type: "reply"; id: string; result?: unknown; error?: string };

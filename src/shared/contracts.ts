@@ -229,6 +229,12 @@ export function validateRouteInput(
       return { path: str(v.path, "path", true), staged: v.staged === true };
     case "git.switch":
       return { branch: str(v.branch, "branch"), cwd: str(v.cwd, "cwd") };
+    case "session.image": {
+      const digest = str(v.digest, "digest", true);
+      if (digest !== undefined && !/^[a-f0-9]{64}$/.test(digest)) throw new Error("Invalid image digest");
+      return { session: str(v.session, "session"), entryId: str(v.entryId, "entryId"),
+        index: integer(v.index, "index", 0, Number.MAX_SAFE_INTEGER), epoch: str(v.epoch, "epoch", true), digest, thumbnail: v.thumbnail === true };
+    }
     case "changes.read":
       return { session: str(v.session, "session"), ref: str(v.ref, "ref") };
     case "shell.run":

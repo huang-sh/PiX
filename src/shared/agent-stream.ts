@@ -1,6 +1,6 @@
 import type { AgentActivity, AgentActivityItem } from "./types.js";
 import { withoutToolLabels } from "./session.js";
-import { isPromptImage } from "./images.js";
+import { isSessionImage } from "./images.js";
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -159,7 +159,7 @@ export function reduceAgentActivity(
     const durationMs = event.durationMs;
     return updateItem(activity, id, {
       text: agentResultText(event.result),
-      ...(Array.isArray(content) ? { images: content.filter(isPromptImage) } : {}),
+      ...(Array.isArray(content) ? { images: content.filter(isSessionImage) } : {}),
       ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0 ? { durationMs } : {}),
       status: event.isError === true ? "error" : "complete",
     });

@@ -89,7 +89,7 @@ export class HostClient {
     for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(error); }
     this.pending.clear();
   }
-  static async connect(address: HostAddress, cwd: string | null, platform?: Platform, clientId?: string) {
+  static async connect(address: HostAddress, cwd: string | null, platform?: Platform, clientId?: string, imageReferences = false) {
     const socket = new WebSocket(`ws://127.0.0.1:${address.port}/?token=${encodeURIComponent(address.token)}`, { maxPayload: MAX_REMOTE_PAYLOAD });
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { socket.terminate(); reject(new Error("PiX host connection timed out")); }, 5000);
@@ -114,7 +114,7 @@ export class HostClient {
       throw new Error("The running PiX host has a different version. Stop it after its tasks finish, then reconnect.");
     }
     const client = new HostClient(socket, address, platform);
-    try { await client.request({ method: "attach", cwd, platform: Boolean(platform), clientId }); }
+    try { await client.request({ method: "attach", cwd, platform: Boolean(platform), clientId, imageReferences }); }
     catch (error) { client.close(); throw error; }
     return client;
   }
@@ -136,13 +136,13 @@ export class HostClient {
 }
 
 /** All entry points discover the same per-profile host; startup is serialized. */
-export async function connectLocalHost(cwd: string | null, platform?: Platform, start = true, clientId?: string): Promise<HostClient> {
+export async function connectLocalHost(cwd: string | null, platform?: Platform, start = true, clientId?: string, imageReferences = false): Promise<HostClient> {
   let staleAddress: string | undefined;
   const connect = async () => {
     const address = readAddress();
     if (!address || JSON.stringify(address) === staleAddress) return;
     for (let attempt = 0; ; attempt++) {
-      try { return await HostClient.connect(address, cwd, platform, clientId); }
+      try { return await HostClient.connect(address, cwd, platform, clientId, imageReferences); }
       catch (error) {
         if (!(error instanceof StaleHostAddress)) throw error;
         // Retry a transient handshake reset before replacing the host address.

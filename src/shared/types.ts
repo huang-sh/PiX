@@ -7,6 +7,14 @@ import type { UsageAmount } from "./usage.js";
 import type { CompactionRecord, RunTiming } from "./run-timing.js";
 
 export type PromptImage = ImageContent;
+export interface ImageReference {
+  session: string;
+  entryId: string;
+  index: number;
+  epoch?: string;
+  digest?: string;
+}
+export type SessionImage = PromptImage | { type: "image"; mimeType: string; reference: ImageReference };
 
 export const CUSTOM_MODEL_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
 export interface CustomModelInput {
@@ -141,7 +149,7 @@ export interface BranchMessage {
   turnId: string;
   role: "user" | "assistant" | "tool" | "system";
   text: string;
-  images?: PromptImage[];
+  images?: SessionImage[];
   thinking?: string;
   timestamp: string;
   toolName?: string;
@@ -161,7 +169,7 @@ export interface AgentActivityItem {
   title?: string;
   input?: string;
   parentToolCallId?: string;
-  images?: PromptImage[];
+  images?: SessionImage[];
   timestamp?: string;
   durationMs?: number;
   status: "running" | "complete" | "error";
@@ -572,6 +580,7 @@ export type DesktopRoute =
   | "remote.deployed"
   | "remote.revoke"
   | "session.list"
+  | "session.image"
   | "session.snapshot"
   | "session.open"
   | "session.stop"

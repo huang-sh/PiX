@@ -10,7 +10,7 @@ import type {
 } from "./types.js";
 import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
-import { isPromptImage } from "./images.js";
+import { isSessionImage } from "./images.js";
 import { emptyAmount, sumAmount, usageRecordsOf } from "./usage.js";
 import { readRunTiming, runDurations } from "./run-timing.js";
 
@@ -68,7 +68,7 @@ function msg(e: RawSessionEntry) {
 }
 function images(e: RawSessionEntry) {
   const content = msg(e)?.content;
-  return Array.isArray(content) ? content.filter(isPromptImage) : [];
+  return Array.isArray(content) ? content.filter(isSessionImage) : [];
 }
 function role(e: RawSessionEntry) {
   return String(msg(e)?.role ?? e.role ?? "");

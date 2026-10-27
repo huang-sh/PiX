@@ -13,6 +13,7 @@ import { MainController, type Platform } from "../src/main/controller.js";
 import { projectId, type DesktopEvent, type ProjectInfo, type RawSessionEntry, type SessionSnapshot } from "../src/shared/types.js";
 import { projectSession } from "../src/shared/session.js";
 import { sessionEventDecoder, type SessionUpdate } from "../src/shared/session-updates.js";
+import { sessionImageEncoder } from "../src/shared/session-images.js";
 import { agentMessageContent } from "../src/shared/agent-stream.js";
 
 async function until(check: () => boolean) {
@@ -62,7 +63,7 @@ async function desktopView(t: TestContext) {
   return { cwd, desktop, controller };
 }
 
-test("desktop IPC sends image history once, keeps subscriber baselines independent and supports resync", async t => {
+test("desktop IPC sends image references, keeps subscriber baselines independent and supports resync", async t => {
   const { cwd, desktop, controller } = await desktopView(t);
   const events: DesktopEvent[] = [], fullEvents: DesktopEvent[] = [];
   const stop = desktop.onEvent(event => events.push(structuredClone(event)), true);
@@ -81,8 +82,9 @@ test("desktop IPC sends image history once, keeps subscriber baselines independe
     const current = snapshot(revision), count = events.length;
     controller.emit({ type: "sessions", payload: { current, resync } });
     await until(() => events.length > count);
-    assert.deepEqual(wire((fullEvents.at(-1)!.payload as SessionUpdate).current), wire(current), "non-IPC consumers retain full snapshots");
-    assert.deepEqual(wire((decode(events.at(-1)!)!.payload as SessionUpdate).current), wire(current));
+    assert.deepEqual(wire((fullEvents.at(-1)!.payload as SessionUpdate).current), wire(sessionImageEncoder()(current)), "desktop consumers receive history references");
+    assert.deepEqual(wire((decode(events.at(-1)!)!.payload as SessionUpdate).current), wire(sessionImageEncoder()(current)));
+    assert.ok(JSON.stringify(events.at(-1)).length < 5000, "checkpoints must not retransmit historical image bytes");
     return events.at(-1)!;
   };
   await publish(1);
@@ -109,6 +111,33 @@ test("desktop IPC sends image history once, keeps subscriber baselines independe
   await until(() => fullEvents.length > fullCount);
   assert.equal(events.length, count);
   assert.equal(lateEvents.length, lateCount);
+});
+
+test("CLI clients keep inline images in snapshots and events without opting into references", async t => {
+  const { cwd, connect } = await fixture(t);
+  let controller!: MainController;
+  const invoke = MainController.prototype.invoke;
+  t.mock.method(MainController.prototype, "invoke", function(this: MainController, ...args: Parameters<MainController["invoke"]>) {
+    controller = this;
+    return invoke.apply(this, args);
+  });
+  const client = await connect();
+  await client.invoke("app.bootstrap");
+  const image = { type: "image", mimeType: "image/png", data: "aGVsbG8=" };
+  const entries: RawSessionEntry[] = [{ type: "message", id: "prompt", parentId: null, timestamp: "2026-10-28",
+    message: { role: "user", content: [image] } }];
+  controller.current = { session: { path: join(cwd, "session.jsonl") }, entries,
+    projection: projectSession(entries, "prompt"), runtime: { available: true },
+    graph: { id: "s", epoch: "e", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  const events: DesktopEvent[] = [];
+  client.onEvent(event => events.push(event));
+  const current = await client.invoke<SessionSnapshot>("session.snapshot");
+  await until(() => events.some(event => event.type === "sessions" && (event.payload as SessionUpdate).current));
+  assert.deepEqual(current.projection.messages[0]!.images, [image]);
+  const event = events.find(event => event.type === "sessions" && (event.payload as SessionUpdate).current)!;
+  const delivered = (event.payload as SessionUpdate).current!;
+  assert.deepEqual(delivered.projection.messages[0]!.images, [image]);
+  assert.deepEqual(delivered.entries, entries, "CLI export/retry paths retain original bytes");
 });
 
 test("desktop IPC streams appended text and tool output instead of repeating their growing prefixes", async t => {
@@ -211,7 +240,7 @@ test("a second disconnect during desktop recovery does not leave recovery waitin
   assert.ok(await desktop.invoke("app.bootstrap"));
 });
 
-test("desktop reconnect retains its remote workspace and can stop its running session", async t => {
+for (const kind of ["ssh", "wsl"] as const) test(`desktop reconnect retains ${kind} images and can stop its running session`, async t => {
   const { host, connectDesktop } = await fixture(t);
   const controllers: MainController[] = [];
   const invoke = MainController.prototype.invoke;
@@ -221,15 +250,20 @@ test("desktop reconnect retains its remote workspace and can stop its running se
   const desktop = await connectDesktop();
   await desktop.invoke("app.bootstrap");
   const controller = controllers[0]!;
-  const project: ProjectInfo = { name: "remote", path: "/workspace", remote: { kind: "ssh", host: "test.invalid" } };
+  const project: ProjectInfo = { name: "remote", path: "/workspace", remote: kind === "ssh"
+    ? { kind, host: "test.invalid" } : { kind, distro: "Ubuntu" } };
   const path = "/workspace/session.jsonl";
-  const snapshot = { session: { path }, entries: [], projection: projectSession([], null), runtime: { isStreaming: true },
+  const image = { type: "image", mimeType: "image/png", data: "aGVsbG8=" };
+  const entries: RawSessionEntry[] = [{ type: "message", id: "prompt", parentId: null, timestamp: "2026-10-28",
+    message: { role: "user", content: [image] } }];
+  const snapshot = { session: { path }, entries, projection: projectSession(entries, "prompt"), runtime: { isStreaming: true },
     graph: { id: path, epoch: "remote", revision: 1, runs: [] } } as unknown as SessionSnapshot;
   let running = true, stops = 0, disposed = false;
   const events = new EventEmitter();
   const remote = {
     connected: true,
     async request(route: string) {
+      assert.notEqual(route, "session.image", "old remote hosts do not need to implement image reads");
       if (route === "session.list") return [{ path, running }];
       if (route === "settings.get") return controller.settings.bundle();
       if (route === "session.snapshot" || route === "session.open") return snapshot;
@@ -244,7 +278,13 @@ test("desktop reconnect retains its remote workspace and can stop its running se
   controller.current = snapshot;
   controller.settings.rememberProject(project, [{ path, running: true } as never]);
   controller.installSlot(remote as never, project, controller.settings.bundle()).activePath = path;
-  await desktop.invoke("app.bootstrap");
+  const initial = await desktop.invoke("app.bootstrap");
+  const reference = initial.current.projection.messages[0].images[0].reference;
+  assert.equal(reference.session, path);
+  assert.deepEqual(await desktop.invoke("session.image", reference), image);
+  remote.connected = false;
+  assert.deepEqual(await desktop.invoke("session.image", reference), image, "cached images survive remote transport loss");
+  remote.connected = true;
   const client = Reflect.get(desktop, "client") as HostClient;
   Reflect.get(client, "socket").terminate();
   await until(() => Reflect.get(desktop, "client") !== client && !Reflect.get(desktop, "reconnecting"));
@@ -252,6 +292,7 @@ test("desktop reconnect retains its remote workspace and can stop its running se
   assert.deepEqual(bootstrap.project, project);
   assert.equal(controllers.at(-1), controller, "reconnect takes over the original remote pool");
   assert.equal(controller.pool.slot(projectId(project))?.client, remote);
+  assert.deepEqual(await desktop.invoke("session.image", reference), image, "image references survive desktop reconnect");
   await desktop.invoke("session.stop", { path, projectId: projectId(project) });
   assert.equal(stops, 1);
   assert.equal(disposed, false);

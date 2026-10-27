@@ -321,7 +321,6 @@ try {
   await gui.evaluate(`window.__pixTest.openSession(${JSON.stringify(path)})`);
   const open = await gui.evaluate(`window.pix.invoke('session.snapshot')`);
   assert.ok(open.projection.nodes.some(node => node.id === nested.nodeId));
-  await gui.evaluate(`window.hostEvents=[]; window.pix.onEvent(e=>window.hostEvents.push(e)); true`);
   // Real GUI menu -> label dialog -> shared Host -> CLI, then reverse direction.
   const card = `[data-id="${rootNode}"] .prompt-node`;
   await until(() => gui.evaluate(`Boolean(document.querySelector(${JSON.stringify(card)})) && !document.querySelector('.booting')`));
@@ -357,7 +356,9 @@ try {
   assert.equal((await cli(['tree', path, '--json'])).events[0].snapshot.projection.nodes.find(n => n.id === rootNode)?.label, 'GUI shortcut bookmark');
 
   await cli(['label', nested.nodeId, 'CLI branch bookmark', '--session', path]);
-  await until(() => gui.evaluate(`window.hostEvents.some(e=>e.type==='sessions' && e.payload.current?.projection.nodes.some(n=>n.label==='CLI branch bookmark'))`));
+  // The preload delivers wire patches; assert the decoded GUI state rather
+  // than requiring a full checkpoint for every label change.
+  await until(() => gui.evaluate(`window.__pixTest.state().current?.projection.nodes.some(n=>n.label==='CLI branch bookmark')`));
   await gui.evaluate(`(()=>{const e=document.querySelector('[data-action="graph-filter"]');e.value='labeled';e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   await until(() => gui.evaluate(`document.querySelector('[data-action="graph-filter"]').value==='labeled'`));
   assert.equal((await cli(['tree', path, '--json', '--filter', 'labeled'])).events[0].matchingNodeIds.length, 2);
@@ -409,7 +410,7 @@ try {
   assert.equal((await cli(['respond', pending.id, 'accepted'])).events[0], false, 'input requests finish only once');
   await until(async () => !(await cli(['host', 'status'])).events[0].running.length);
   await cli(['fork', rootNode, 'GUI live branch', '--session', path, '--json']);
-  await until(() => gui.evaluate(`window.hostEvents.some(e=>e.type==='sessions' && e.payload.current?.projection.nodes.some(n=>n.title==='GUI live branch'))`));
+  await until(() => gui.evaluate(`window.__pixTest.state().current?.projection.nodes.some(n=>n.title==='GUI live branch')`));
   const guiPid = (await cli(['host', 'status'])).events[0].pid;
   assert.equal(guiPid, hostPid);
   console.error('A GUI-started');
@@ -426,9 +427,9 @@ try {
   // Reopen while the model is silent: saved progress must appear without a
   // new token, and reconnecting must never submit the prompt again.
   gui = await openGui();
-  await gui.evaluate(`window.hostEvents=[]; window.pix.onEvent(e=>window.hostEvents.push(e)); true`);
   await gui.evaluate(`window.__pixTest.openSession(${JSON.stringify(path)})`);
-  await until(() => gui.evaluate(`window.hostEvents.some(e=>e.type==='agent' && e.payload.type==='message_update' && JSON.stringify(e.payload.message).includes('Waiting.'))`));
+  await until(() => gui.evaluate(`Object.values(document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session').branchActivities)
+    .some(value=>value.activity?.items.some(item=>item.text.includes('Waiting.')))`));
   assert.equal(requests.filter(request => request.text === 'HOLD GUI quit').length, 1);
   const reopenedExit = new Promise(resolve => desktop.once('exit', resolve));
   await guiQuit(); await reopenedExit; desktop = undefined;

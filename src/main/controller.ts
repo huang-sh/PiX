@@ -14,9 +14,11 @@ import type {
   SettingsBundle,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
+import { isPromptImage } from "../shared/images.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
 import { canonicalPath } from "./paths.js";
+import { createHash } from "node:crypto";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import type { UsageRange } from "../shared/usage.js";
@@ -587,6 +589,21 @@ export class MainController {
       return this.dialogs.respond(String(v.id), v.value as string | undefined);
     }
     if (route === "ui.pending") return [...this.dialogs.list(), ...await this.pool.pendingDialogs()];
+    if (route === "session.image") {
+      // Read only already-opened snapshots, including cached remote images.
+      // Look up the entry by ID so deletion cannot make an old index show a different image.
+      const current = this.current?.session.path === v.session ? this.current : undefined;
+      const entry = current ? undefined : this.entryFor(String(v.session))?.entry;
+      const snapshot = current ?? (entry ? this.registry.snapshotOf(entry) : undefined);
+      if (!snapshot) throw new Error("Image unavailable; reopen the session and try again");
+      if (v.epoch && snapshot.graph?.epoch !== v.epoch) throw new Error("Session changed; reopen the image");
+      const message = snapshot.entries.find(entry => entry.id === v.entryId)?.message as { content?: unknown } | undefined;
+      const image = Array.isArray(message?.content) ? message.content[Number(v.index)] : undefined;
+      if (!isPromptImage(image)) throw new Error("Image unavailable; reopen the session and try again");
+      if (v.digest && v.digest !== createHash("sha256").update(image.mimeType).update("\0").update(image.data).digest("hex"))
+        throw new Error("Image changed; reopen the image");
+      return image;
+    }
     const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
       ? ++this.viewRequest : this.viewRequest;
     if (route === "app.revealSession") {

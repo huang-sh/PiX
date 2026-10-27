@@ -4,8 +4,8 @@ import type { ComposerDraft } from "../components/PromptComposer.vue";
 import type { LayoutState, PanelId, SessionSnapshot, SettingsBundle } from "../../shared/types";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
-import type { PromptImage } from "../../shared/types";
-import { imageDataUrl } from "../../shared/images";
+import type { SessionImage } from "../../shared/types";
+import { sessionImageUrl } from "../lib/session-images";
 import { applyAppearance, applyTheme } from "../theme";
 import type { ThemePreference } from "../../shared/theme";
 
@@ -57,7 +57,7 @@ export const useLayoutStore = defineStore("layout", {
     chatColumnComposers: {} as Record<string, { open: boolean; draft: ComposerDraft }>,
     commandOpen: false,
     commandQuery: "",
-    imagePreview: undefined as { src: string; alt: string } | undefined,
+    imagePreview: undefined as { src: string; alt: string; error?: string } | undefined,
     notice: undefined as { level: string; message: string } | undefined,
   }),
   actions: {
@@ -93,8 +93,15 @@ export const useLayoutStore = defineStore("layout", {
         this.themeSaving = false;
       }
     },
-    previewImage(image: PromptImage, alt: string) {
-      this.imagePreview = { src: imageDataUrl(image), alt };
+    async previewImage(image: SessionImage, alt: string) {
+      this.imagePreview = { src: "", alt };
+      const preview = this.imagePreview;
+      try {
+        const src = await sessionImageUrl(image);
+        if (this.imagePreview === preview) preview.src = src;
+      } catch {
+        if (this.imagePreview === preview) preview.error = i18n.global.t("draft.imageLoadError");
+      }
     },
     hydrate(settings: SettingsBundle, layout?: LayoutState) {
       this.applySettings(settings);

@@ -20,6 +20,8 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { registerDesktopCommand } from "./cli-command.js";
 import { DesktopHostController } from "../host/desktop.js";
+import { imageThumbnail } from "./image-thumbnail.js";
+import type { PromptImage } from "../shared/types.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
@@ -382,6 +384,8 @@ app.whenReady().then(async () => {
       let result: unknown;
       try {
         result = await controller.invoke(route, input);
+        if (route === "session.image" && (input as { thumbnail?: unknown })?.thumbnail === true)
+          result = imageThumbnail(result as PromptImage);
       } catch (error) {
         // Answering with the failure keeps Electron from re-wrapping the
         // message as "Error invoking remote method 'pix:invoke': ...". The

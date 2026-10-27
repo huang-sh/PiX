@@ -17,7 +17,7 @@ export class DesktopHostController {
     this.bind(client);
   }
   static async connect(path: string | null, platform: Platform, clientId: string = randomUUID()) {
-    return new DesktopHostController(await connectLocalHost(path, platform, true, clientId), path, platform, clientId);
+    return new DesktopHostController(await connectLocalHost(path, platform, true, clientId, true), path, platform, clientId);
   }
   private bind(client: HostClient) {
     client.onEvent(event => {
@@ -34,7 +34,7 @@ export class DesktopHostController {
   private reconnect() {
     return this.reconnecting ??= (async () => {
       // Restore subscriptions and snapshots; never replay an execution command.
-      const client = await connectLocalHost(this.settings.project, this.platform, true, this.clientId);
+      const client = await connectLocalHost(this.settings.project, this.platform, true, this.clientId, true);
       if (this.disposed) { client.close(); return; }
       this.client = client;
       this.bind(client);

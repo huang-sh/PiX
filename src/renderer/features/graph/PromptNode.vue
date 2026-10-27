@@ -5,7 +5,7 @@ import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CSSProperties } from "vue";
-import type { AgentActivity, GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
+import type { AgentActivity, GraphNode, SessionImage, RuntimeModel } from "../../../shared/types";
 import { clipText } from "../../../shared/session";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
@@ -18,7 +18,7 @@ import { runDurations } from "../../../shared/run-timing";
 
 interface NodeContent {
   user: string;
-  images?: PromptImage[];
+  images?: SessionImage[];
   assistant: string;
 }
 

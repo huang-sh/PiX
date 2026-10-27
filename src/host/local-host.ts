@@ -9,6 +9,8 @@ import { installHttpProxy } from "../main/http-proxy.js";
 import { PIX_HOST_VERSION, MAX_REMOTE_PAYLOAD } from "../shared/remote-protocol.js";
 import { LOCAL_HOST_PROTOCOL, type HostAddress, type LocalRequest } from "../shared/host-protocol.js";
 import type { DesktopEvent } from "../shared/types.js";
+import { sessionImageEncoder } from "../shared/session-images.js";
+import { sessionEventEncoder } from "../shared/session-updates.js";
 
 export const hostRunDir = () => join(pixHome(), ".pix", "run");
 export const hostAddressFile = () => join(hostRunDir(), "host.json");
@@ -97,6 +99,8 @@ export async function serveLocalHost() {
     lastLive = Date.now();
     let controller: MainController | undefined;
     let clientId: string | undefined;
+    let imageReferences = false;
+    const encodeImages = sessionImageEncoder();
     let stopEvents: (() => void) | undefined;
     const pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
     const callPlatform = (method: string, args: unknown[]) => new Promise<any>((resolve, reject) => {
@@ -160,7 +164,10 @@ export async function serveLocalHost() {
             if (request.platform) platforms.set(socket, controller.platform);
             previous?.socket.close();
             controllers.add(controller);
-            stopEvents = controller.onEvent(event => send(socket, { type: "event", sequence: ++sequence, event }), true);
+            imageReferences = request.imageReferences === true;
+            const encodeEvent = sessionEventEncoder();
+            stopEvents = controller.onEvent(event => send(socket, { type: "event", sequence: ++sequence,
+              event: encodeEvent(imageReferences ? encodeImages(event) : event) }));
             result = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION, pid: process.pid };
             break;
           }
@@ -184,7 +191,8 @@ export async function serveLocalHost() {
             return;
           default: throw new Error("Unknown host method");
         }
-        send(socket, { type: "reply", id: request.id, result });
+        send(socket, { type: "reply", id: request.id,
+          result: imageReferences && request.route !== "session.image" ? encodeImages(result) : result });
       } catch (error) {
         send(socket, { type: "reply", id: request?.id ?? "", error: error instanceof Error ? error.message : String(error) });
       }
