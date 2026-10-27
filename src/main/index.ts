@@ -265,7 +265,7 @@ app.whenReady().then(async () => {
       await openExternal(url);
     },
     async openPath(path) {
-      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
+      if (!existsSync(path)) throw new Error(`Path was not found or is inaccessible: ${path}`);
       // openPath resolves to the OS handler for the file type — associated
       // app for files, Explorer/Finder for folders — and reports failures as
       // a string rather than rejecting.

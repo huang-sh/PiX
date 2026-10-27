@@ -77,6 +77,12 @@ test("rejects unsafe external protocols", () =>
   assert.throws(() =>
     validateRouteInput("app.openExternal", { url: "file:///tmp/pix" }),
   ));
+test("file links retain the raw href so decoding cannot erase URL semantics", () => {
+  const href = "file:///Downloads/%E4%B8%AD%E6%96%87%20report%3A12.docx";
+  assert.deepEqual(validateRouteInput("app.openFileLink", { href }), { href });
+  assert.throws(() => validateRouteInput("app.openFileLink", { path: "/report.docx" }), /href/);
+  assert.deepEqual(validateRouteInput("app.openPath", { path: "report:12", lineSuffix: true }), { path: "report:12" });
+});
 test("validates WSL connection input", () => {
   assert.deepEqual(
     validateRouteInput("wsl.connect", {

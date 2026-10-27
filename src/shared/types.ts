@@ -553,6 +553,7 @@ export type DesktopRoute =
   | "app.forgetProject"
   | "app.openExternal"
   | "app.openPath"
+  | "app.openFileLink"
   | "app.openWith"
   | "app.openWithApps"
   | "app.openWithApp"

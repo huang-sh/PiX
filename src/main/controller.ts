@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, dirname, posix, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, parse, posix, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { debugLog, logFile } from "./debug-log.js";
 import type {
   AgentControl,
@@ -605,12 +606,51 @@ export class MainController {
       await this.platform.showItemInFolder(path);
       return;
     }
-    if (route === "app.openPath") {
+    if (route === "app.openPath" || route === "app.openFileLink") {
       // Local-side only: remote workspace files have no local filesystem path.
       if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
-      // safe() confines the path to the open project, so the renderer cannot
-      // ask the OS to open arbitrary files outside the workspace.
-      await this.platform.openPath(this.workspace.safe(String(v.path ?? "")));
+      if (route === "app.openPath") {
+        await this.platform.openPath(this.workspace.safe(String(v.path)));
+        return;
+      }
+      const href = String(v.href);
+      let decoded: string;
+      try { decoded = decodeURIComponent(href); } catch { decoded = href; }
+      let url: URL | undefined;
+      if (!/^[a-zA-Z]:[\\/]/.test(decoded)) {
+        try { url = new URL(href); } catch { /* A relative or absolute filesystem path. */ }
+      }
+      if (url && url.protocol !== "file:") throw new Error("Expected a file link or filesystem path");
+      let path = url ? fileURLToPath(url) : decoded;
+      const resolvePath = (input: string) => {
+        if (!isAbsolute(input)) return this.workspace.safe(input);
+        const path = resolve(input);
+        // file: URLs are explicitly absolute, including when their file is
+        // missing. Never substitute a project file with the same name.
+        if (url || existsSync(path) || (dirname(path) !== parse(path).root && existsSync(dirname(path)))) return path;
+        // Preserve chat's /README.md project shorthand when no absolute target
+        // exists; a real absolute target always takes precedence.
+        try {
+          const relative = this.workspace.safe(input.replace(/^[/\\]+/, ""));
+          if (existsSync(relative)) return relative;
+        } catch { /* No project-relative alternative; keep the absolute path. */ }
+        return path;
+      };
+      // Parse before decoding so an encoded colon remains a filename character.
+      const suffix = /:([1-9]\d*)$/.exec(url?.pathname ?? href);
+      if (suffix && Number.isSafeInteger(Number(suffix[1]))) {
+        // Markdown line references are not OS paths. POSIX also allows literal
+        // :digits filenames; Windows must never probe alternate data streams.
+        if (process.platform === "win32") path = path.slice(0, -suffix[0].length);
+        else {
+          try { statSync(resolvePath(path)); }
+          catch (error) {
+            if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+            path = path.slice(0, -suffix[0].length);
+          }
+        }
+      }
+      await this.platform.openPath(resolvePath(path));
       return;
     }
     if (route === "app.openWith") {

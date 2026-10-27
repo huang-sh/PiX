@@ -5,8 +5,8 @@
 // file mtime, so dropping a session there would hijack gui-test.mjs).
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, parse } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { electronBinary } from "./lib/electron-binary.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -30,6 +30,8 @@ mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
 writeFileSync(join(project, "README.md"), "# gui-link-project\n\nFixture project for the chat-link GUI test.\n");
+const missingAbsolute = join(parse(project).root, `pix-missing-link-${process.pid}.txt`);
+writeFileSync(join(project, `pix-missing-link-${process.pid}.txt`), "This must not replace the missing absolute target.");
 writeFileSync(
   join(project, "My Notes.md"),
   Array.from({ length: 100 }, (_, index) => `Notes line ${index + 1}`).join("\n"),
@@ -280,6 +282,27 @@ class Cdp {
 
 let cdp;
 const result = {};
+async function checkDefaultAppMenu(point) {
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "right", clickCount: 1 });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "right", clickCount: 1 });
+  await retry(async () => {
+    const menu = await cdp.evaluate(`(() => {
+      const item = document.querySelector('[data-action="markdown-open-external"]');
+      const rect = item?.getBoundingClientRect();
+      return { text: item?.textContent, disabled: item?.hasAttribute('data-disabled'),
+        visible: Boolean(rect && rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.y >= 0
+          && rect.right <= innerWidth && rect.bottom <= innerHeight) };
+    })()`);
+    if (menu.text !== "Open with default app" || menu.disabled || !menu.visible)
+      throw new Error(`Default app menu is unavailable: ${JSON.stringify(menu)}`);
+  });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await retry(async () => {
+    if (await cdp.evaluate("Boolean(document.querySelector('[data-action=\"markdown-open-external\"]'))"))
+      throw new Error("Link menu did not close with Escape");
+  });
+}
 try {
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -363,6 +386,8 @@ try {
 
   // Trusted OS-level click through CDP input: exercises the real event path
   // (hit-testing, modifiers, default action) rather than a synthetic .click().
+  await checkDefaultAppMenu({ x: link.x, y: link.y });
+  result.webLinkContextMenu = true;
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed",
     x: link.x,
@@ -492,6 +517,8 @@ try {
       throw new Error(`Click coordinates miss the absolute-path link (covered by <${value.hitTag}>)`);
     return value;
   });
+  await checkDefaultAppMenu({ x: absoluteLink.x, y: absoluteLink.y });
+  result.fileLinkContextMenu = true;
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed",
     x: absoluteLink.x,
@@ -532,6 +559,14 @@ try {
     return value;
   });
   result.absolutePathOpenedInTool = true;
+  const missingError = await cdp.evaluate(`(async () => {
+    try { await window.pix.invoke('app.openFileLink', { href: ${JSON.stringify(pathToFileURL(missingAbsolute).href)} }); }
+    catch (error) { return error.message; }
+    return '';
+  })()`);
+  if (!missingError.includes(missingAbsolute))
+    throw new Error(`Missing file URL did not report its actual absolute target: ${missingError}`);
+  result.missingFileUrlPreserved = true;
   const absoluteShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(
     join(artifacts, "gui-link-absolute-path.png"),

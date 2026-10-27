@@ -167,6 +167,8 @@ export function validateRouteInput(
       return { url: externalUrl(v.url) };
     case "app.openPath":
       return { path: str(v.path, "path") };
+    case "app.openFileLink":
+      return { href: str(v.href, "href") };
     case "app.openWith":
       return { path: str(v.path, "path") };
     case "app.openWithApps":

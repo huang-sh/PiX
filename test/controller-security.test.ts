@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { MainController, type Platform } from "../src/main/controller.js";
 import type { ProjectGroup, ProjectInfo, SettingsBundle } from "../src/shared/types.js";
 
@@ -35,6 +36,91 @@ const denied: Platform = {
   showItemInFolder() {},
   quit() {},
 };
+
+test("file links resolve line suffixes without changing file-tree paths or literal filenames", async () => {
+  const project = mkdtempSync(join(home, "open-links-"));
+  writeFileSync(join(project, "My Report.md"), "report");
+  const opened: string[] = [];
+  const controller = new MainController(project, { ...denied, openPath: async path => { opened.push(path); } });
+  await controller.invoke("app.openFileLink", { href: "./My%20Report.md:12" });
+  assert.deepEqual(opened, [join(project, "My Report.md")]);
+  await controller.invoke("app.openPath", { path: "My Report.md" });
+  assert.equal(opened.at(-1), join(project, "My Report.md"));
+  if (process.platform !== "win32") {
+    writeFileSync(join(project, "My Report.md:12"), "literal filename");
+    await controller.invoke("app.openFileLink", { href: "./My%20Report.md:12" });
+    assert.equal(opened.at(-1), join(project, "My Report.md:12"));
+    await controller.invoke("app.openFileLink", { href: "./My%20Report.md%3A12" });
+    assert.equal(opened.at(-1), join(project, "My Report.md:12"));
+  }
+  await controller.invoke("app.openPath", { path: "My Report.md:12" });
+  assert.equal(opened.at(-1), join(project, "My Report.md:12"), "file-tree actions never interpret line suffixes");
+  const count = opened.length;
+  await assert.rejects(controller.invoke("app.openFileLink", { href: "../outside.md:12" }), /escapes project/);
+  assert.equal(opened.length, count);
+  controller.project!.remote = { kind: "ssh", host: "server" };
+  await assert.rejects(controller.invoke("app.openPath", { path: "My Report.md" }), /Remote files/);
+  assert.equal(opened.length, count);
+});
+
+test("explicit file links preserve outside absolute paths while workspace actions remain confined", async () => {
+  const project = mkdtempSync(join(home, "file-links-"));
+  const downloads = mkdtempSync(join(home, "下载 文档-"));
+  const document = join(downloads, "技术白皮书.docx");
+  writeFileSync(document, "fixture");
+  const shorthand = `${project.split(/[\\/]/).at(-1)}.md`;
+  writeFileSync(join(project, shorthand), "project readme");
+  // A same-named project path must never shadow the actual absolute document.
+  if (process.platform !== "win32") {
+    const shadow = join(project, document.replace(/^[/\\]+/, ""));
+    mkdirSync(resolve(shadow, ".."), { recursive: true });
+    writeFileSync(shadow, "different file");
+    writeFileSync(`${shadow}:12`, "different literal file");
+  }
+  const opened: string[] = [];
+  const controller = new MainController(project, { ...denied, openPath: async path => { opened.push(path); } });
+  const initial = controller.project;
+  await controller.invoke("app.openFileLink", { href: document });
+  assert.equal(opened.at(-1), document);
+  await controller.invoke("app.openFileLink", { href: `${document}:12` });
+  assert.equal(opened.at(-1), document);
+  await controller.invoke("app.openFileLink", { href: `${pathToFileURL(document).href}:12?view=full#section` });
+  assert.equal(opened.at(-1), document);
+  if (process.platform !== "win32") {
+    writeFileSync(`${document}:12`, "literal filename");
+    await controller.invoke("app.openFileLink", { href: `${document}:12` });
+    assert.equal(opened.at(-1), `${document}:12`);
+    await controller.invoke("app.openFileLink", { href: `/${shorthand}` });
+    assert.equal(opened.at(-1), join(project, shorthand));
+  }
+  assert.equal(controller.project, initial);
+  const count = opened.length;
+  await assert.rejects(controller.invoke("app.openPath", { path: document }), /escapes project/);
+  await assert.rejects(controller.invoke("app.openFileLink", { href: "../outside.docx" }), /escapes project/);
+  await assert.rejects(controller.invoke("app.openFileLink", { href: "https://example.com/report.docx" }), /Expected a file link/);
+  controller.project!.remote = { kind: "ssh", host: "server" };
+  await assert.rejects(controller.invoke("app.openFileLink", { href: document }), /Remote files/);
+  assert.equal(opened.length, count);
+});
+
+test("a missing explicit file URL never opens a project file with the same name", async () => {
+  const project = mkdtempSync(join(home, "file-url-"));
+  const name = `${project.split(/[\\/]/).at(-1)}.docx`;
+  writeFileSync(join(project, name), "a different project document");
+  const absolute = resolve(project, "/", name);
+  assert.equal(existsSync(absolute), false);
+  const opened: string[] = [];
+  const controller = new MainController(project, { ...denied, openPath: async path => {
+    if (!existsSync(path)) throw new Error(`Missing file: ${path}`);
+    opened.push(path);
+  } });
+  await controller.invoke("app.openFileLink", { href: `/${name}` });
+  assert.deepEqual(opened, [join(project, name)]);
+  for (const suffix of ["", ":12", ":12#section"]) {
+    await assert.rejects(controller.invoke("app.openFileLink", { href: `${pathToFileURL(absolute).href}${suffix}` }), /Missing file/);
+  }
+  assert.deepEqual(opened, [join(project, name)]);
+});
 
 /** Installs a mock remote workspace as the pooled, active connection. */
 function attachRemote(

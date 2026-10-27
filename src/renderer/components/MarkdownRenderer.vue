@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import NodeRenderer, { enableKatex } from "markstream-vue";
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { DropdownMenuRoot, DropdownMenuPortal, DropdownMenuContent, DropdownMenuItem } from "reka-ui";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import type { ProjectInfo } from "../../shared/types";
+import { desktop } from "../api";
 import { colorScheme } from "../theme";
 import { useI18n } from "vue-i18n";
 import { useLayoutStore } from "../stores/layout";
@@ -25,6 +28,76 @@ const workspace = useWorkspaceStore();
 const { t } = useI18n();
 const markdown = ref<HTMLElement | null>(null);
 let listObserver: MutationObserver | undefined;
+const linkMenuOpen = ref(false);
+const contextLink = shallowRef<{ href: string; url?: string; project: ProjectInfo | undefined; x: number; y: number }>();
+const linkMenuAnchor = computed(() => ({
+  getBoundingClientRect: () => new DOMRect(contextLink.value?.x ?? 0, contextLink.value?.y ?? 0, 0, 0),
+}));
+const externalFileBlocked = computed(() => {
+  const link = contextLink.value;
+  return !link || (!link.url && (!link.project || link.project !== workspace.project
+    || Boolean(link.project.remote) || (!absoluteFilePath(fileLinkPath(link.href)) && !resolveProjectPath(link.href, link.project.path))));
+});
+
+function linkUrl(href: string) {
+  // Drive-letter paths are files even though URL parses their drive as a scheme.
+  if (/^[a-zA-Z]:[\\/]/.test(decodePath(href))) return;
+  try { return new URL(href); } catch { return; }
+}
+
+function fileLinkPath(href: string) {
+  const url = linkUrl(href);
+  if (url?.protocol === "file:") {
+    const path = decodePath(url.pathname).replace(/^\/([a-zA-Z]:[\\/])/, "$1");
+    return url.hostname ? `//${url.hostname}${path}` : path;
+  }
+  return decodePath(href);
+}
+
+function absoluteFilePath(path: string) {
+  return path.startsWith("/") || /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(path);
+}
+
+function onContentContextMenu(event: MouseEvent) {
+  if (!(event.target instanceof Element)) return;
+  const href = event.target.closest("a[href]")?.getAttribute("href");
+  if (!href || href.startsWith("#")) return;
+  const url = linkUrl(href);
+  if (url && !["http:", "https:", "mailto:", "file:"].includes(url.protocol)) return;
+  contextLink.value = { href, url: url && url.protocol !== "file:" ? url.href : undefined,
+    project: workspace.project, x: event.clientX, y: event.clientY };
+  event.preventDefault();
+  event.stopPropagation();
+  linkMenuOpen.value = true;
+}
+
+async function openContextLink() {
+  const link = contextLink.value;
+  if (!link || externalFileBlocked.value) return;
+  try {
+    if (link.url) await desktop.invoke("app.openExternal", { url: link.url });
+    else {
+      await desktop.invoke("app.openFileLink", { href: link.href });
+    }
+  } catch (error) {
+    if (link.url || workspace.project === link.project)
+      layout.showNotice(t("links.openFailed", { error: error instanceof Error ? error.message : String(error) }), "error");
+  }
+}
+
+async function copyContextLink() {
+  const link = contextLink.value;
+  if (!link) return;
+  // Files copy as readable paths; web URLs retain encoded query separators.
+  const address = link.url ? link.href : fileLinkPath(link.href);
+  try {
+    if (desktop.copy) await desktop.copy(address);
+    else await navigator.clipboard.writeText(address);
+    layout.showNotice(t("common.copied"));
+  } catch {
+    layout.showNotice(t("common.copyFailed"), "error");
+  }
+}
 
 function updateListIndents() {
   for (const list of markdown.value?.querySelectorAll("ol.list-node") ?? []) {
@@ -77,17 +150,7 @@ async function onContentClick(event: MouseEvent) {
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
-  let url: URL | undefined;
-  // A Windows drive path like "D:/a.png" parses as a URL with scheme "d:"
-  // (and backslash forms may arrive percent-encoded), which is never a real
-  // scheme in chat — keep it on the project-path route.
-  if (!/^[a-zA-Z]:[\\/]/.test(decodePath(href))) {
-    try {
-      url = new URL(href);
-    } catch {
-      // Not an absolute URL — fall through to project-path handling.
-    }
-  }
+  const url = linkUrl(href);
   if (url) {
     // Only web links and file: URLs are ours; mailto: and other schemes keep
     // the default path (the main process allowlists them anyway).
@@ -207,7 +270,7 @@ function decodePath(value: string): string {
 </script>
 
 <template>
-  <div ref="markdown" class="agent-markdown" :data-streaming="streaming" @click="onContentClick">
+  <div ref="markdown" class="agent-markdown" :data-streaming="streaming" @click="onContentClick" @contextmenu="onContentContextMenu">
     <NodeRenderer
       :is-dark="colorScheme === 'dark'"
       :content="content"
@@ -221,5 +284,19 @@ function decodePath(value: string): string {
       :render-code-blocks-as-pre="true"
       :code-block-options="codeBlockOptions"
     />
+    <DropdownMenuRoot v-model:open="linkMenuOpen" :modal="false">
+      <DropdownMenuPortal>
+        <DropdownMenuContent class="menu-content" :reference="linkMenuAnchor" side="bottom" align="start" @close-auto-focus.prevent>
+          <DropdownMenuItem class="menu-item" data-action="markdown-open-external"
+            :disabled="externalFileBlocked"
+            :title="!contextLink?.url && contextLink?.project?.remote ? t('tools.openExternallyRemote') : undefined"
+            @select="openContextLink"
+          >{{ t("tools.openExternally") }}</DropdownMenuItem>
+          <DropdownMenuItem class="menu-item" data-action="markdown-copy-address" @select="copyContextLink">
+            {{ t("links.copyAddress") }}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenuPortal>
+    </DropdownMenuRoot>
   </div>
 </template>

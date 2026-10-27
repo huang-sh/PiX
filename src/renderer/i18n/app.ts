@@ -117,7 +117,9 @@ export const en = {
     openProjectFirst: "Open a project to start a session.",
   },
   links: {
+    copyAddress: "Copy address",
     fileNotFound: "File not found in this project: {path}",
+    openFailed: "Could not open the link: {error}",
   },
   shortcuts: {
     description: "Customize the keyboard shortcuts you use in PiX.",
@@ -272,7 +274,9 @@ export const zhCN: typeof en = {
     openProjectFirst: "请先打开一个项目再创建会话。",
   },
   links: {
+    copyAddress: "复制地址",
     fileNotFound: "项目中找不到该文件：{path}",
+    openFailed: "无法打开链接：{error}",
   },
   shortcuts: {
     description: "自定义你在 PiX 中使用的键盘快捷键。",
