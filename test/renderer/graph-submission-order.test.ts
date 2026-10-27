@@ -128,23 +128,25 @@ it("keeps concurrent upward submissions in their own lanes before either reply a
   } finally { requests.forEach(request => request.finish(session.current!)); await Promise.all([first, second]); }
 });
 
-it.each([false, true])("removes a rejected submission's temporary order without changing the open draft (initialized: %s)", async initialized => {
+it.each(["queued", "prepared", "main"])("removes a rejected submission's temporary order without changing the open draft (%s)", async stage => {
   const { graph, session, requests } = setup();
-  await graph.compose("turn:root", "up");
+  const target = stage === "main" ? "turn:c" : "turn:root";
+  await graph.compose(target, "up");
   const send = graph.submitDraft("rejected question");
   await graph.compose("turn:b", "up");
   const draft = graph.draftState;
   draft.text = "keep editing here";
   try {
-    if (initialized) {
+    if (stage !== "queued") {
       const preparing = snapshot();
       preparing.graph!.revision = 2;
-      preparing.graph!.runs = [{ branchId: "new", runId: "run", requestId: requests[0]!.requestId,
-        nodeId: null, status: "running", pending: { text: "rejected question", parentNodeId: "turn:root" } }];
+      preparing.graph!.runs = [{ branchId: stage === "main" ? "main" : "new", runId: "run", requestId: requests[0]!.requestId,
+        nodeId: null, status: "running", pending: { text: "rejected question", parentNodeId: target } }];
       session.applySnapshot(preparing);
       await flushPromises();
       session.applySnapshot({ ...preparing, graph: { ...preparing.graph!, revision: 3,
-        runs: [{ ...preparing.graph!.runs[0]!, pending: undefined, status: "interrupted" }] } });
+        runs: [{ ...preparing.graph!.runs[0]!, pending: undefined, error: "model setup failed",
+          nodeId: stage === "main" ? target : null, status: stage === "main" ? "idle" : "interrupted" }] } });
       await flushPromises();
     }
     requests[0]!.fail(new Error("admission failed"));
@@ -153,5 +155,74 @@ it.each([false, true])("removes a rejected submission's temporary order without 
     expect(Object.values(useLayoutStore().layout.branchOrders!).flat()).toEqual([]);
     expect(graph.draftState).toBe(draft);
     expect(draft.text).toBe("keep editing here");
+  } finally { requests.forEach(request => request.finish(session.current!)); await send; }
+});
+
+it.each([false, true])("keeps the submitted turn's order when generation fails (turn already visible: %s)", async visible => {
+  const { graph, session, requests, y } = setup();
+  await graph.compose("turn:root", "up");
+  const send = graph.submitDraft("new question");
+  try {
+    const preparing = snapshot();
+    preparing.graph!.revision = 2;
+    preparing.graph!.runs = [{ branchId: "new", runId: "run", requestId: requests[0]!.requestId,
+      nodeId: null, status: "running", pending: { text: "new question", parentNodeId: "turn:root" } }];
+    session.applySnapshot(preparing);
+    await flushPromises();
+    const admitted = snapshot();
+    admitted.entries = [...admitted.entries, { type: "message", id: "new", parentId: "root", timestamp: "9",
+      message: { role: "user", content: "new question" } }];
+    admitted.projection = projectSession(admitted.entries, "new");
+    admitted.graph!.revision = 3;
+    admitted.graph!.runs = [{ branchId: "new", runId: "run", requestId: requests[0]!.requestId,
+      nodeId: "turn:new", status: "running" }];
+    if (visible) {
+      session.applySnapshot(admitted);
+      await flushPromises();
+    }
+    session.applySnapshot({ ...admitted, graph: { ...admitted.graph!, revision: 4,
+      runs: [{ ...admitted.graph!.runs[0]!, status: "interrupted", error: "generation failed" }] } });
+    await flushPromises();
+    expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    requests[0]!.finish(preparing); await send;
+    await flushPromises();
+    expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    expect(Object.values(useLayoutStore().layout.branchOrders!).flat()).toEqual([["turn:new", -1]]);
+  } finally { requests.forEach(request => request.finish(session.current!)); await send; }
+});
+
+it.each([false, true])("restores the submission's order after switching sessions (reply while away: %s)", async replyWhileAway => {
+  const { graph, session, requests, y } = setup();
+  await graph.compose("turn:root", "up");
+  const send = graph.submitDraft("new question");
+  try {
+    await flushPromises();
+    const other = snapshot();
+    other.session = { ...other.session, id: "other", path: "other.jsonl" };
+    other.graph = { ...other.graph!, id: "other.jsonl", epoch: "other" };
+    session.viewRequest++;
+    session.applySnapshot(other);
+    await flushPromises();
+    const before = graph.nodes.map((node: any) => ({ id: node.id, position: { ...node.position } }));
+    const admitted = snapshot();
+    admitted.entries = [...admitted.entries, { type: "message", id: "new", parentId: "root", timestamp: "9",
+      message: { role: "user", content: "new question" } }];
+    admitted.projection = projectSession(admitted.entries, "new");
+    admitted.graph!.revision = 2;
+    admitted.graph!.runs = [{ branchId: "new", runId: "run", requestId: requests[0]!.requestId,
+      nodeId: "turn:new", status: "running" }];
+    if (replyWhileAway) {
+      requests[0]!.finish(admitted); await send;
+      await flushPromises();
+      expect(session.current?.session.path).toBe("other.jsonl");
+      expect(graph.nodes.map((node: any) => ({ id: node.id, position: { ...node.position } }))).toEqual(before);
+    }
+    session.viewRequest++;
+    session.applySnapshot(admitted);
+    await flushPromises();
+    expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    requests[0]!.finish(admitted); await send;
+    await flushPromises();
+    expect(Object.values(useLayoutStore().layout.branchOrders!).flat()).toEqual([["turn:new", -1]]);
   } finally { requests.forEach(request => request.finish(session.current!)); await send; }
 });

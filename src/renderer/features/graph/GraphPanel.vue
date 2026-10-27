@@ -282,7 +282,9 @@ function rebuild() {
     const order = branchOrder.get(from);
     const to = run.nodeId ?? pendingId;
     if (order !== undefined) {
-      if (!run.nodeId && run.status !== "running") rememberBranchOrder(from, undefined);
+      // A failed preflight can still report the existing source node.
+      const failedBeforeTurn = run.error && run.nodeId && nodes.value.some(node => node.id === run.nodeId);
+      if (failedBeforeTurn || (!run.nodeId && run.status !== "running")) rememberBranchOrder(from, undefined);
       else if (to !== from) rememberBranchOrder(to, order, from);
     }
   }
