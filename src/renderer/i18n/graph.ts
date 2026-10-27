@@ -2,11 +2,15 @@ import { acceptDomainUpdate } from "./registry";
 
 export const en = {
   graph: {
+    compacting: "Compacting context…",
+    compaction: { running: "Compacting context…", complete: "Context compacted", aborted: "Context compaction cancelled", error: "Context compaction failed",
+      before: "Tokens before", after: "Tokens after (estimated)", summary: "Context summary", preparing: "Preparing context for the next response. The agent will continue when compaction finishes." },
     nodeInfo: {
       details: "Node details", model: "Model", duration: "Duration", cost: "Cost", tokens: "Tokens", context: "Context usage", thinking: "Thinking level", branch: "Git branch",
       input: "Input tokens", output: "Output tokens", cacheRead: "Cache read tokens", cacheWrite: "Cache write tokens", started: "Started",
+      compactionDuration: "Compaction time", agentDuration: "Agent execution time",
       seconds: "{n}s", minutesSeconds: "{m}m {s}s", hoursMinutes: "{h}h {m}m",
-      note: "Totals cover this node only, including tool and summary usage. Costs are reference amounts and may include model pricing estimates; subscription billing follows Usage settings. Duration runs from submission to completion, including tools and retries. Missing records show —.",
+      note: "Totals cover this node only, including tool and summary usage. Costs are reference amounts and may include model pricing estimates; subscription billing follows Usage settings. Total duration includes preparation, compaction and agent execution. Agent execution includes tools and retries, excluding compaction. Missing records show —.",
     },
 
     editLabel: "Edit label",
@@ -135,11 +139,15 @@ export const en = {
 
 export const zhCN: typeof en = {
   graph: {
+    compacting: "正在压缩上下文…",
+    compaction: { running: "正在压缩上下文…", complete: "上下文已压缩", aborted: "上下文压缩已取消", error: "上下文压缩失败",
+      before: "压缩前词元", after: "压缩后词元（估算）", summary: "上下文摘要", preparing: "正在为后续回复整理上下文，压缩完成后 Agent 将继续执行。" },
     nodeInfo: {
       details: "节点明细", model: "模型", duration: "耗时", cost: "费用", tokens: "词元", context: "上下文占用", thinking: "思考等级", branch: "Git 分支",
       input: "输入词元", output: "输出词元", cacheRead: "缓存读取词元", cacheWrite: "缓存写入词元", started: "开始时间",
+      compactionDuration: "压缩耗时", agentDuration: "Agent 执行耗时",
       seconds: "{n}秒", minutesSeconds: "{m}分{s}秒", hoursMinutes: "{h}小时{m}分",
-      note: "统计仅包含本节点，含工具及摘要用量。费用为参考值，可能包含按模型价格计算的估算；订阅计费遵循用量设置。耗时从提交至本轮结束，包含工具执行与重试；缺失记录显示 —。",
+      note: "统计仅包含本节点，含工具及摘要用量。费用为参考值，可能包含按模型价格计算的估算；订阅计费遵循用量设置。总耗时包含启动准备、压缩及 Agent 执行；Agent 执行耗时包含工具与重试，扣除压缩时间。缺失记录显示 —。",
     },
 
     editLabel: "编辑标签",

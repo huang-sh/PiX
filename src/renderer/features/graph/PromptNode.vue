@@ -14,6 +14,7 @@ import { relativeTimeUnit } from "../../lib/relative-time";
 import { FIXED_NODE_CARD_FIELDS, NODE_CARD_FIELDS, normalizeNodeCardFields } from "../../../shared/node-card";
 import { usageTokens } from "../../../shared/usage";
 import { useLayoutStore } from "../../stores/layout";
+import { runDurations } from "../../../shared/run-timing";
 
 interface NodeContent {
   user: string;
@@ -29,6 +30,7 @@ export interface PromptNodeData {
   blockedReason: string;
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
+  compacting?: () => boolean;
   activity?: () => AgentActivity | undefined;
   /** True while the node matches the active graph search query. */
   searchHit?: boolean;
@@ -73,8 +75,12 @@ let elapsedTimer: number | undefined;
 const now = ref(Date.now());
 const displayModel = computed(() => props.data.node.footer?.model);
 const usage = computed(() => props.data.node.footer?.contextUsage);
+const runningText = computed(() => t(props.data.compacting?.() ? "graph.compacting" : "graph.agentRunning"));
+const startedAt = computed(() => props.data.node.metrics?.startedAt ?? props.data.node.timestamp);
+const durations = computed(() => props.data.running ? runDurations({ startedAt: startedAt.value,
+  agentStartedAt: props.data.node.metrics?.agentStartedAt, compactions: props.data.node.metrics?.compactions ?? [] }, now.value) : props.data.node.metrics);
 const elapsed = computed(() => props.data.running
-  ? Math.max(0, now.value - Date.parse(props.data.node.timestamp))
+  ? durations.value?.durationMs
   : props.data.node.metrics?.durationMs);
 const cost = computed(() => {
   const costs = props.data.node.metrics?.costs;
@@ -310,6 +316,7 @@ onBeforeUnmount(() => {
 });
 
 function relative(value: string) {
+  if (!Number.isFinite(Date.parse(value))) return "—";
   const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
   return t(`time.${unit}`, { n });
 }
@@ -332,7 +339,7 @@ function relative(value: string) {
       <span class="turn-role" :title="t('graph.you')" :aria-label="t('graph.you')"><UserRound :size="13" /></span>
       <strong>{{ data.node.title }}</strong>
       <aside class="node-meta">
-        <span v-if="data.running" class="node-run-state" role="status" :title="t('graph.agentRunning')" :aria-label="t('graph.agentRunning')"><LoaderCircle :size="12" class="spin" /></span>
+        <span v-if="data.running" class="node-run-state" role="status" :title="runningText" :aria-label="runningText"><LoaderCircle :size="12" class="spin" /></span>
         <span v-if="data.node.imageCount" :title="t('draft.attachedImages', { n: data.node.imageCount })"><Image :size="11" />{{ data.node.imageCount }}</span>
         <span v-if="data.current" :title="t('graph.currentTurn')" :aria-label="t('graph.currentTurn')"><Check :size="11" /></span>
         <span v-if="data.node.hasError" class="node-error" :title="t('graph.responseError')" :aria-label="t('graph.responseError')"><AlertCircle :size="12" /></span>
@@ -342,11 +349,11 @@ function relative(value: string) {
           @focus="suppressPreview"
           @click.stop="data.onRetry()"
         ><RotateCcw :size="12" /></button>
-        <time>{{ relative(data.node.timestamp) }}</time>
+        <time>{{ relative(startedAt) }}</time>
       </aside>
       <span class="turn-role pi" title="Pi" aria-label="Pi"><Sparkles :size="13" /></span>
       <p :class="{ 'node-running': data.running }">
-        <template v-if="data.running && !responsePreview">{{ t("graph.agentRunning") }}</template>
+        <template v-if="data.running && (!responsePreview || data.compacting?.())">{{ runningText }}</template>
         <template v-else>{{ responsePreview || t("graph.waitingAssistant") }}</template>
       </p>
     </section>
@@ -474,7 +481,11 @@ function relative(value: string) {
             <dt>{{ t('graph.nodeInfo.cacheRead') }}</dt><dd>{{ data.node.metrics.usage.cacheRead.toLocaleString() }}</dd>
             <dt>{{ t('graph.nodeInfo.cacheWrite') }}</dt><dd>{{ data.node.metrics.usage.cacheWrite.toLocaleString() }}</dd>
           </template>
-          <dt>{{ t('graph.nodeInfo.started') }}</dt><dd>{{ new Date(data.node.timestamp).toLocaleString() }}</dd>
+          <template v-if="data.node.metrics?.compactions?.length">
+            <dt>{{ t('graph.nodeInfo.compactionDuration') }}</dt><dd>{{ formatDuration(durations?.compactionDurationMs) }}</dd>
+            <dt>{{ t('graph.nodeInfo.agentDuration') }}</dt><dd>{{ formatDuration(durations?.agentDurationMs) }}</dd>
+          </template>
+          <dt>{{ t('graph.nodeInfo.started') }}</dt><dd>{{ Number.isFinite(Date.parse(startedAt)) ? new Date(startedAt).toLocaleString() : "—" }}</dd>
         </dl>
         <p class="node-info-note">{{ t('graph.nodeInfo.note') }}</p>
       </template>

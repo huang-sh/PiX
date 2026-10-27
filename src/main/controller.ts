@@ -204,6 +204,7 @@ export class MainController {
       !childEvent &&
       entry.runtime &&
       [
+        "agent_start",
         "message_end",
         "agent_settled",
         "entry_appended",

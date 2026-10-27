@@ -14,7 +14,7 @@ export interface BranchRecord {
   parentId: string;
   forkEntryId: string;
   requestId: string;
-  request: { text: string; nodeId?: string | null; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string };
+  request: { text: string; nodeId?: string | null; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; timestamp?: string };
   inherited: Record<string, string>;
   baseline: RawSessionEntry[];
   header: Record<string, unknown>;

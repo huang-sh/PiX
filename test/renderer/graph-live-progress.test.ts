@@ -10,6 +10,7 @@ import { i18n } from "../../src/renderer/i18n";
 import { useSessionStore } from "../../src/renderer/stores/session";
 import { projectSession } from "../../src/shared/session";
 import type { SessionSnapshot } from "../../src/shared/types";
+import { NODE_FOOTER_CUSTOM_TYPE } from "../../src/shared/types";
 vi.mock("../../src/renderer/lib/frame", () => ({
   nextFrame: async () => {}, whenVisible: async () => {}, whenTransitionsSettle: async () => {},
 }));
@@ -29,6 +30,111 @@ function setup(current = snapshot()) {
   const graph = (wrapper.vm as any).$.setupState;
   return { pinia, session, wrapper, graph };
 }
+it("keeps the selected model and submission time visible while a new run compacts history", async () => {
+  const current = snapshot();
+  current.runtime.model = { provider: "deepseek", id: "old", name: "Old model" };
+  current.runtime.thinkingLevel = "off";
+  const model = { provider: "openai", id: "new", name: "New model", reasoning: true };
+  const timestamp = new Date().toISOString();
+  const { pinia, session, wrapper, graph } = setup(current);
+  let finish!: (value: SessionSnapshot) => void;
+  const response = new Promise<SessionSnapshot>(resolve => { finish = resolve; });
+  vi.spyOn(desktop, "invoke").mockReturnValue(response);
+  const send = session.promptAt(null, "remote question", model, "high");
+  const requestId = session.pendingPrompt!.requestId;
+  const accepted = snapshot();
+  accepted.graph!.revision = 2;
+  accepted.graph!.runs = [{ branchId: "main", runId: "run", requestId, nodeId: null, status: "running",
+    pending: { text: "remote question", parentNodeId: null, timestamp, model, thinkingLevel: "high" },
+    runtime: { ...current.runtime, model, thinkingLevel: "high", isCompacting: true } }];
+  let card: ReturnType<typeof mount> | undefined, chat: ReturnType<typeof mount> | undefined;
+  try {
+    session.applySnapshot(accepted);
+    finish(accepted);
+    await send;
+    await nextTick();
+    expect(session.pendingPrompt).toBeUndefined();
+    const pending = graph.nodes.find((node: any) => node.id === "pending:run");
+    expect(pending.data.node.timestamp).toBe(timestamp);
+    expect(pending.data.node.footer).toMatchObject({ model, thinkingLevel: "high" });
+    card = mount(PromptNode, { props: { id: pending.id, data: pending.data }, global: { plugins: [pinia, i18n], stubs: { VueFlow: true, Handle: true } } });
+    chat = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { VueFlow: true, Handle: true } } });
+    expect(card.get('.node-model-value').text()).toContain("New model");
+    expect(card.get('.node-thinking-value').text()).toContain("high");
+    expect(card.get('time').text()).not.toContain("NaN");
+    expect(card.get('.node-running').text()).toBe("Compacting context…");
+    expect(chat.get('.compaction-bubble').text()).toContain("Compacting context…");
+    expect(chat.find('.process-item.waiting').exists()).toBe(false);
+
+    // Progress changes without replacing the card's data object.
+    session.current!.graph!.runs[0]!.runtime!.isCompacting = false;
+    await nextTick();
+    expect(card.get('.node-running').text()).toBe("Pi is working…");
+    expect(chat.get('.process-item.waiting').text()).toBe("Running…");
+  } finally { finish(accepted); await send; card?.unmount(); chat?.unmount(); wrapper.unmount(); }
+});
+
+it("keeps one separate compaction bubble through admission, execution and restored history", async () => {
+  const startedAt = new Date(Date.now() - 146000).toISOString();
+  const compactStarted = new Date(Date.now() - 138000).toISOString();
+  const compactEnded = new Date(Date.now() - 6000).toISOString();
+  const { pinia, session, wrapper } = setup();
+  const timing = { startedAt, compactions: [{ status: "running" as const, startedAt: compactStarted }] };
+  const accepted = snapshot();
+  accepted.graph!.revision = 2;
+  accepted.graph!.runs = [{ branchId: "main", runId: "run", nodeId: null, status: "running",
+    pending: { text: "hello", parentNodeId: null, timestamp: startedAt },
+    runtime: { available: true, isCompacting: true, timing } }];
+  session.applySnapshot(accepted);
+  session.focusedNode = "pending:run";
+  const chat = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { VueFlow: true } } });
+  try {
+    expect(chat.findAll('.compaction-bubble')).toHaveLength(1);
+    expect(chat.get('.compaction-bubble').attributes('data-status')).toBe('running');
+    expect(chat.find('.process-item.waiting').exists()).toBe(false);
+    const savedTiming = { startedAt, agentStartedAt: compactEnded, compactions: [
+      { status: "complete" as const, startedAt: compactStarted, endedAt: compactEnded, durationMs: 132000,
+        entryTimestamp: compactEnded, tokensBefore: 275761, tokensAfter: 4000 },
+    ] };
+    const saved = snapshot(true);
+    saved.entries = [
+      ...saved.entries,
+      { type: "compaction", id: "compact", parentId: "user", timestamp: compactEnded,
+        summary: "Earlier history summary.", firstKeptEntryId: "user", tokensBefore: 275761 },
+      { type: "message", id: "hello", parentId: "compact", timestamp: compactEnded, message: { role: "user", content: "hello" } },
+      { type: "message", id: "reply", parentId: "hello", timestamp: new Date().toISOString(),
+        message: { role: "assistant", content: [{ type: "text", text: "Hello back" }] } },
+      { type: "custom", id: "footer", parentId: "reply", timestamp: new Date().toISOString(), customType: NODE_FOOTER_CUSTOM_TYPE, data: { timing: savedTiming } },
+    ];
+    saved.projection = projectSession(saved.entries, "footer");
+    saved.graph!.revision = 3;
+    saved.graph!.runs = [{ branchId: "main", runId: "run", nodeId: "turn:hello", status: "running",
+      runtime: { available: true, isCompacting: false, timing: savedTiming } }];
+    session.applySnapshot(saved);
+    session.focusedNode = "turn:hello";
+    await nextTick();
+    expect(chat.findAll('.compaction-bubble')).toHaveLength(1);
+    expect(chat.get('.compaction-bubble').attributes('data-status')).toBe('complete');
+    expect(chat.get('.compaction-bubble summary').text()).toContain('2m 12s');
+    expect(chat.find('.compaction-details').exists()).toBe(false);
+    expect(chat.get('.process-item.waiting').text()).toBe('Running…');
+    saved.graph!.revision = 4;
+    saved.graph!.runs[0]!.status = "idle";
+    delete saved.graph!.runs[0]!.runtime;
+    session.applySnapshot(structuredClone(saved));
+    await nextTick();
+    expect(chat.findAll('.compaction-bubble')).toHaveLength(1);
+    expect(chat.find('.process-item.waiting').exists()).toBe(false);
+    const bubble = chat.get('.compaction-bubble');
+    (bubble.element as HTMLDetailsElement).open = true;
+    await bubble.trigger('toggle');
+    expect(chat.get('.compaction-details').text()).toContain('275,761');
+    expect(chat.get('.compaction-details').text()).toContain('≈4,000');
+    expect(chat.get('.compaction-details').text()).toContain('Earlier history summary.');
+    expect(chat.text()).toContain('Hello back');
+  } finally { chat.unmount(); wrapper.unmount(); }
+});
+
 it("shows the sent question before remote admission and replaces it without duplication", async () => {
   const { pinia, session, wrapper, graph } = setup();
   const chat = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { VueFlow: true } } });

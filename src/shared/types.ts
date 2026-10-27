@@ -4,6 +4,7 @@ import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
 import type { NodeCardField } from "./node-card.js";
 import type { UsageAmount } from "./usage.js";
+import type { CompactionRecord, RunTiming } from "./run-timing.js";
 
 export type PromptImage = ImageContent;
 
@@ -115,12 +116,14 @@ export interface GraphNode {
   depth: number;
   imageCount?: number;
   footer?: NodeFooterState;
-  metrics?: {
+  metrics?: Partial<RunTiming> & {
     usage?: UsageAmount;
     /** Saved SDK costs by provider; null means that some costs are missing. */
     costs?: Record<string, number | null>;
-    /** User entry to its saved completion footer; absent for unfinished history. */
+    /** Submission to completion, including preparation and compaction. */
     durationMs?: number;
+    compactionDurationMs?: number;
+    agentDurationMs?: number;
   };
   branchId?: string;
   running?: boolean;
@@ -133,6 +136,7 @@ export interface GraphEdge {
   target: string;
 }
 export interface BranchMessage {
+  compaction?: CompactionRecord;
   entryId: string;
   turnId: string;
   role: "user" | "assistant" | "tool" | "system";
@@ -202,6 +206,7 @@ export interface RuntimeProvider {
   status?: { type: "api_key" | "oauth"; source?: string };
 }
 export interface RuntimeState {
+  timing?: RunTiming;
   available: boolean;
   model: RuntimeModel | null;
   thinkingLevel: string;
@@ -232,7 +237,10 @@ export interface SessionSnapshot {
       runId: string;
       requestId?: string;
       nodeId: string | null;
-      pending?: { text: string; parentNodeId: string | null; images?: PromptImage[] };
+      pending?: {
+        text: string; parentNodeId: string | null; images?: PromptImage[];
+        timestamp?: string; model?: RuntimeModel | null; thinkingLevel?: string;
+      };
       status: "running" | "idle" | "interrupted";
       error?: string;
       runtime?: RuntimeState;
@@ -462,7 +470,7 @@ export type AgentControl =
   | { action: "exportBranchSession"; nodeId: string; graphId: string }
   | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
   | { action: "branchAbort"; branchId: string; runId: string }
-  | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[] }
+  | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[]; submittedAt?: string }
   | {
       action:
         | "abort"

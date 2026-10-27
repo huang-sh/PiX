@@ -335,6 +335,7 @@ function rebuild() {
       current: value.activeNodeId === node.id,
       runnable: Boolean(session.current?.runtime.available && !busy && node.forkable !== false),
       running: node.running,
+      compacting: () => Boolean(session.current?.graph ? session.runFor(node.id)?.runtime?.isCompacting : session.current?.runtime.isCompacting),
       blockedReason: busy
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
@@ -476,11 +477,19 @@ function rebuild() {
     pendingRows.set(parentId, offset + 1);
     const siblings = parentId ? children.get(parentId) ?? [] : placed.nodes;
     const id = `pending:${run.runId}`;
+    const submitted = session.currentPendingPrompts.find(prompt => prompt.requestId && prompt.requestId === run.requestId);
+    const pendingModel = run.pending.model ?? submitted?.model ?? run.runtime?.model ?? anchor?.footer?.model ?? session.current?.runtime.model ?? null;
+    const model = session.models.find(model => model.provider === pendingModel?.provider && model.id === pendingModel.id) ?? pendingModel;
     const node: GraphNode = { id, userEntryId: id, parentId, title: clipText(run.pending.text, 58), preview: "",
-      timestamp: "", rawEntryIds: [], leafEntryId: id, toolCallCount: 0, hasError: false, depth: (anchor?.depth ?? -1) + 1 };
+      imageCount: run.pending.images?.length,
+      timestamp: run.pending.timestamp ?? submitted?.message.timestamp ?? "",
+      metrics: run.runtime?.timing && run.runtime.timing.startedAt === run.pending.timestamp ? run.runtime.timing : undefined,
+      footer: { model, thinkingLevel: run.pending.thinkingLevel ?? submitted?.thinkingLevel ?? run.runtime?.thinkingLevel ?? anchor?.footer?.thinkingLevel ?? "off" },
+      rawEntryIds: [], leafEntryId: id, toolCallCount: 0, hasError: false, depth: (anchor?.depth ?? -1) + 1 };
     nextNodes.push({ id, type: "prompt", position: { x: anchor ? anchor.x + anchor.width + 92 : 48,
       y: (siblings.length ? Math.max(...siblings.map(n => n.y)) + 178 : anchor?.y ?? 48) + offset * 178 },
       data: { node, active: true, current: false, running: true, runnable: false,
+        compacting: () => Boolean(session.runFor(id)?.runtime?.isCompacting),
         activity: () => session.activityFor(id),
         blockedReason: "graph.blockedStreaming", content: () => ({ user: run.pending!.text, assistant: t("graph.agentRunning"), images: run.pending!.images }), onCompose: () => {} } });
     if (parentId) nextEdges.push({ id: `edge:${id}`, source: parentId, target: id, animated: true });

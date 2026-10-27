@@ -153,10 +153,12 @@ test("records SDK context usage once after a prompt finishes", async () => {
   };
   runtime.snapshot = (() => ({ saved: true })) as unknown as typeof runtime.snapshot;
 
-  await runtime.control({ action: "prompt", text: "hello" });
+  const submittedAt = "2026-10-27T00:00:00Z";
+  await runtime.control({ action: "prompt", text: "hello", submittedAt });
 
   assert.equal(usageCalls, 1);
   assert.deepEqual(appended, [["pix.node-footer", {
+    timing: { startedAt: submittedAt, compactions: [] },
     contextUsage: { tokens: 41_000, contextWindow: 128_000, percent: 32.03125 },
     model: { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", contextWindow: 128_000, reasoning: true },
     thinkingLevel: "high",

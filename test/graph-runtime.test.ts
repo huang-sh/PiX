@@ -76,13 +76,19 @@ test("admitted prompts stay pending and busy throughout startup and model config
         const rejected = cancelled || stage === "model failure" ? assert.rejects(submitted, failure) : undefined;
         assert.equal(runtime.busy, true, "queued admission must prevent session eviction");
         await until(() => entered && Boolean(runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")));
+        const submittedAt = runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")!.pending!.timestamp;
+        assert.ok(Number.isFinite(Date.parse(submittedAt!)));
         for (let refresh = 0; refresh < 2; refresh++) {
           const snapshot = runtime.snapshot();
           const run = snapshot.graph!.runs.find(run => run.requestId === "pending-request")!;
           assert.equal(runtime.busy, true);
           assert.equal(run.status, "running");
           assert.equal(run.nodeId, null, "an old parent must never be acknowledged as the new turn");
-          assert.deepEqual(run.pending, { text: "pending question", parentNodeId: parentId, images: undefined });
+          assert.equal(run.pending!.timestamp, submittedAt, "refresh must preserve the original submission time");
+          assert.equal(run.pending!.text, "pending question");
+          assert.equal(run.pending!.parentNodeId, parentId);
+          assert.equal(run.pending!.model?.provider, "faux");
+          assert.equal(run.pending!.model?.id, "test");
           assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
         }
         if (cancelled) {
@@ -132,6 +138,209 @@ test("admitted prompts stay pending and busy throughout startup and model config
       }
     });
   }
+});
+
+test("model changes expose context compaction before the new user entry and resume afterwards", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-model-compaction-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "large", contextWindow: 200000 }, { id: "small", contextWindow: 16384 }] });
+  let entered = false, release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1024, keepRecentTokens: 128 } }),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    for (const [index, text] of ["history ".repeat(20000), "recent ".repeat(256)].entries()) {
+      faux.setResponses([fauxAssistantMessage("parent reply")]);
+      await runtime.control({ action: "promptAt", requestId: `parent-${index}`, nodeId: runtime.snapshot().projection.activeNodeId,
+        text, provider: "faux", modelId: "large" });
+      await until(() => !runtime.busy);
+    }
+    faux.setResponses([async () => { entered = true; await blocked; return fauxAssistantMessage("Earlier history summary."); }, fauxAssistantMessage("Hello back")]);
+    await runtime.control({ action: "promptAt", requestId: "smaller-model", nodeId: runtime.snapshot().projection.activeNodeId,
+      text: "hello", provider: "faux", modelId: "small" });
+    await until(() => entered);
+    const during = runtime.snapshot();
+    const run = during.graph!.runs.find(run => run.requestId === "smaller-model")!;
+    assert.equal(run.runtime!.isCompacting, true);
+    assert.equal(run.status, "running");
+    assert.equal(run.nodeId, null);
+    assert.equal(run.pending!.model!.id, "small");
+    assert.ok(Number.isFinite(Date.parse(run.pending!.timestamp!)));
+    assert.equal(run.runtime!.timing!.startedAt, run.pending!.timestamp);
+    assert.equal(run.runtime!.timing!.agentStartedAt, undefined);
+    assert.equal(run.runtime!.timing!.compactions[0]!.status, "running");
+    assert.ok(!during.projection.nodes.some(node => node.title === "hello"));
+    release();
+    await until(() => !runtime.busy);
+    const after = runtime.snapshot();
+    assert.ok(after.entries.some(entry => entry.type === "compaction"));
+    assert.ok(after.projection.nodes.some(node => node.title === "hello" && node.preview.includes("Hello back")));
+    const metrics = after.projection.nodes.find(node => node.title === "hello")!.metrics!;
+    assert.equal(metrics.startedAt, run.pending!.timestamp);
+    assert.ok(metrics.agentStartedAt);
+    assert.equal(metrics.compactions![0]!.status, "complete");
+    assert.ok(metrics.compactions![0]!.tokensBefore! > 0);
+    assert.ok(metrics.compactions![0]!.tokensAfter! > 0);
+    assert.ok(after.entries.some(entry => entry.type === "compaction" && entry.timestamp === metrics.compactions![0]!.entryTimestamp));
+    assert.ok(metrics.durationMs! >= metrics.compactionDurationMs! + metrics.agentDurationMs!);
+    assert.equal(after.graph!.runs.find(run => run.requestId === "smaller-model")!.pending, undefined);
+    const path = after.session.path;
+    await runtime.close();
+    const reopened = await runtime.open(path);
+    assert.deepEqual(reopened.projection.nodes.find(node => node.title === "hello")!.metrics, metrics);
+  } finally {
+    release(); await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("manual compaction cannot change a completed turn's timing or block later prompts", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-manual-compaction-timing-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 128 } }),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: runtime.snapshot().projection.activeNodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("history", "history ".repeat(2048));
+    await prompt("recent", "recent ".repeat(256));
+    const before = runtime.snapshot();
+    const footer = runtime.runtime.session.sessionManager.getEntries().filter((entry: any) => entry.customType === "pix.node-footer").at(-1);
+    const savedTiming = structuredClone(footer.data.timing);
+    faux.setResponses([fauxAssistantMessage("Earlier history summary.")]);
+    await runtime.control({ action: "compact" });
+    assert.ok(runtime.snapshot().entries.some(entry => entry.type === "compaction"));
+    assert.deepEqual(footer.data.timing, savedTiming, "manual compaction must not mutate an earlier completion footer");
+    await prompt("after-compaction", "Continue after compaction");
+    const after = runtime.snapshot();
+    assert.equal(runtime.needsReopen, false);
+    assert.equal(after.graph!.storageError, undefined);
+    assert.equal(after.runtime.available, true);
+    assert.ok(after.projection.nodes.some(node => node.preview.includes("Reply to after-compaction")));
+    await runtime.close();
+    const reopened = await runtime.open(before.session.path);
+    assert.deepEqual((reopened.entries.find(entry => entry.id === footer.id)!.data as { timing: unknown }).timing, savedTiming);
+    await prompt("after-reopen", "Continue after reopening");
+    assert.equal(runtime.needsReopen, false);
+    assert.ok(runtime.snapshot().projection.nodes.some(node => node.preview.includes("Reply to after-reopen")));
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stopping automatic compaction saves a cancelled record across close and reopen", { timeout: 20000 }, async t => {
+  for (const target of ["main", "branch"] as const) for (const action of ["abort", "close"] as const) await t.test(`${target}: ${action}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), "pix-close-compaction-"));
+    const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+    process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+    let entered = false, shuttingDown = false;
+    const lateEvents: unknown[] = [];
+    const runtime = new GraphRuntime(home, join(home, "sessions"), event => {
+      if (shuttingDown && (event as { type?: string }).type === "agent") lateEvents.push(event);
+    }, async () => {});
+    const faux = fauxProvider({ models: [{ id: "test", contextWindow: 16384 }], tokenSize: { min: 4096, max: 4096 } });
+    runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+      settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1024, keepRecentTokens: 128 } }),
+      resourceLoaderOptions: { noExtensions: true },
+    });
+    const factory = runtime.factory.bind(runtime);
+    runtime.factory = pi => async args => {
+      const result = await factory(pi)(args);
+      result.services.modelRuntime.registerNativeProvider(faux.provider);
+      return result;
+    };
+    try {
+      await runtime.create();
+      faux.setResponses([fauxAssistantMessage("First reply")]);
+      await runtime.control({ action: "promptAt", requestId: "first", nodeId: null,
+        text: "history ".repeat(2048), provider: "faux", modelId: "test" });
+      await until(() => !runtime.busy);
+      const parentId = runtime.snapshot().projection.activeNodeId;
+      if (target === "branch") {
+        faux.setResponses([fauxAssistantMessage("Main reply")]);
+        await runtime.control({ action: "promptAt", requestId: "main-tail", nodeId: parentId,
+          text: "Other main turn", provider: "faux", modelId: "test" });
+        await until(() => !runtime.busy);
+      }
+      faux.setResponses([fauxAssistantMessage("Long reply ".repeat(6000)), async (_context, options) => {
+        entered = true;
+        const signal = options?.signal;
+        assert.ok(signal);
+        await new Promise<void>(resolve => {
+          if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fauxAssistantMessage("unused summary");
+      }]);
+      await runtime.control({ action: "promptAt", requestId: "compacting", nodeId: parentId,
+        text: "recent ".repeat(256), provider: "faux", modelId: "test" });
+      await until(() => entered);
+      const during = runtime.snapshot(), path = during.session.path;
+      const run = during.graph!.runs.find(run => run.requestId === "compacting")!;
+      assert.ok(run.nodeId, "compaction starts after this turn's reply was saved");
+      assert.equal(run.runtime!.isCompacting, true);
+      assert.equal(run.branchId === "main", target === "main");
+      if (action === "close") {
+        shuttingDown = true;
+        await runtime.close();
+        assert.equal(lateEvents.length, 0, "closing must retain internal timing events without forwarding agent progress");
+        shuttingDown = false;
+      } else {
+        await runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId });
+        await until(() => !runtime.busy);
+        await runtime.close();
+      }
+      const reopened = await runtime.open(path);
+      const node = reopened.projection.nodes.find(node => node.id === run.nodeId)!;
+      assert.equal(node.running, false);
+      assert.ok(reopened.graph!.runs.every(run => run.status !== "running"));
+      const compaction = node.metrics!.compactions!.at(-1)!;
+      assert.equal(compaction.status, "aborted");
+      assert.ok(Number.isFinite(Date.parse(compaction.endedAt!)));
+      assert.ok(Number.isFinite(compaction.durationMs) && compaction.durationMs! >= 0);
+      const metrics = JSON.stringify(node.metrics);
+      await runtime.close();
+      const again = await runtime.open(path);
+      assert.equal(JSON.stringify(again.projection.nodes.find(node => node.id === run.nodeId)!.metrics), metrics);
+      assert.equal(runtime.needsReopen, false);
+    } finally {
+      await runtime.close();
+      if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+      if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 test("broker model preflight respects cancellation before a prompt starts", { timeout: 15000 }, async t => {

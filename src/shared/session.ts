@@ -12,6 +12,7 @@ import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
 import { emptyAmount, sumAmount, usageRecordsOf } from "./usage.js";
+import { readRunTiming, runDurations } from "./run-timing.js";
 
 export function isSessionRunning(snapshot: SessionSnapshot): boolean {
   const runtime = snapshot.runtime;
@@ -198,10 +199,12 @@ function turnMetrics(entries: RawSessionEntry[], user: RawSessionEntry): GraphNo
       ? null : (costs[provider] ?? 0) + record.usage.cost;
   }
   const footer = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === NODE_FOOTER_CUSTOM_TYPE);
+  const timing = readRunTiming(rec(footer?.data)?.timing);
   const elapsed = footer ? Date.parse(footer.timestamp) - Date.parse(user.timestamp) : NaN;
   return {
     ...(records.length ? { usage, costs } : {}),
     ...(Number.isFinite(elapsed) && elapsed >= 0 ? { durationMs: elapsed } : {}),
+    ...(timing ? { ...timing, ...runDurations(timing, Date.parse(footer!.timestamp)) } : {}),
   };
 }
 function branchEntries(byId: Map<string, RawSessionEntry>, leaf: string | null) {
@@ -378,6 +381,8 @@ export function projectSession(
         role: "system",
         text: text(e),
         timestamp: e.timestamp,
+        ...(e.type === "compaction" ? { compaction: { status: "complete" as const, entryTimestamp: e.timestamp,
+          ...(typeof e.tokensBefore === "number" ? { tokensBefore: e.tokensBefore } : {}) } } : {}),
       });
   }
   // Context edits are branch-local and last-write-wins. Compaction drops the

@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowR
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
+import type { CompactionRecord } from "../../../shared/run-timing";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
@@ -29,6 +30,13 @@ const panelNodeId = computed(() => {
 });
 const panelNode = computed(() => session.nodeFor(panelNodeId.value));
 const selectedRun = computed(() => session.runFor(panelNodeId.value));
+const liveCompactions = computed<CompactionRecord[] | undefined>(() => {
+  const run = selectedRun.value;
+  if (run?.status !== "running") return undefined;
+  const timing = run.runtime?.timing;
+  if (timing && (!run.pending?.timestamp || run.pending.timestamp === timing.startedAt)) return timing.compactions;
+  return run.runtime?.isCompacting ? [{ status: "running" }] : undefined;
+});
 // Every branch's store updates immediately; only the visible view is frame-paced.
 const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.activityFor(panelNodeId.value));
 const activity = shallowRef<AgentActivity>();
@@ -189,6 +197,17 @@ const turns = computed(() => {
   return grouped;
 });
 
+const compactionEntries = computed(() => new Map((session.current?.entries ?? [])
+  .filter(entry => entry.type === "compaction").map(entry => [entry.timestamp, entry])));
+function compactionDetails(record: CompactionRecord): CompactionRecord {
+  const entry = record.entryTimestamp ? compactionEntries.value.get(record.entryTimestamp) : undefined;
+  return { ...record, ...(typeof entry?.summary === "string" ? { summary: entry.summary } : {}) };
+}
+const claimedCompactions = computed(() => new Set([
+  ...(session.current?.projection.nodes.flatMap(node => node.metrics?.compactions ?? []) ?? []),
+  ...(liveCompactions.value ?? []),
+].map(record => record.entryTimestamp).filter(Boolean)));
+
 const visibleTurns = computed<Turn[]>(() =>
   turns.value.slice(-visibleTurnCount.value).map(({ id, user, body }) => {
     // A turn ends at its last assistant message, whatever it carries — the same
@@ -196,14 +215,19 @@ const visibleTurns = computed<Turn[]>(() =>
     // failure, never the earlier text that happened to precede it.
     const terminal = [...body].reverse().find((message) => message.role === "assistant");
     const node = session.nodeFor(id);
+    const selected = id === (selectedRun.value?.nodeId ?? `pending:${selectedRun.value?.runId}`);
+    const compactions = selected && liveCompactions.value !== undefined ? liveCompactions.value : node?.metrics?.compactions;
     return {
       id,
       gitBranch: node?.gitBranch,
       fileChanges: node?.fileChanges,
       user,
       terminal,
-      running: selectedRun.value?.status === "running" && id === selectedRun.value.nodeId,
-      process: body.filter((message) => message !== terminal),
+      running: selectedRun.value?.status === "running" && selected,
+      compactions: compactions?.map(compactionDetails),
+      trailingCompactions: body.filter(message => message.compaction && !claimedCompactions.value.has(message.compaction.entryTimestamp))
+        .map(message => ({ ...message.compaction!, summary: message.text })),
+      process: body.filter((message) => message !== terminal && !message.compaction),
     };
   }),
 );
@@ -231,10 +255,12 @@ async function showEarlierTurns() {
 }
 
 function duration(turn: Turn) {
+  const execution = session.nodeFor(turn.id)?.metrics?.agentDurationMs;
   const start = new Date(turn.user?.timestamp ?? "").getTime();
   const end = new Date(turn.terminal?.timestamp ?? turn.process.at(-1)?.timestamp ?? "").getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return t("time.aMoment");
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  const elapsed = execution ?? end - start;
+  if (!Number.isFinite(elapsed)) return t("time.aMoment");
+  const seconds = Math.max(0, Math.round(elapsed / 1000));
   return seconds >= 60
     ? `${t("time.minutes", { n: Math.floor(seconds / 60) })} ${t("time.seconds", { n: seconds % 60 })}`
     : t("time.seconds", { n: seconds });
@@ -410,7 +436,7 @@ onBeforeUnmount(() => {
           :duration="duration" :error-text="errorText" @toggle="toggleProcess" />
       </KeepAlive>
 
-      <div v-if="selectedRun?.status === 'running' && !showingActivity" class="process-item waiting" role="status">
+      <div v-if="selectedRun?.status === 'running' && !showingActivity && !liveCompactions?.some(item => item.status === 'running')" class="process-item waiting" role="status">
         <LoaderCircle :size="14" class="spin" /> {{ t('branch.running') }}
       </div>
 

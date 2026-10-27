@@ -40,6 +40,7 @@ import type {
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
+import type { RunTiming } from "../shared/run-timing.js";
 import {
   aggregateUsage,
   dedupeUsageRecords,
@@ -240,6 +241,7 @@ export class PiRuntime {
   private controlEpoch = 0;
   private closeTask?: Promise<void>;
   private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
+  private promptTiming?: RunTiming;
   eventScope?: { graphId: string; branchId: string; runId: string };
   /** The settings page's skill management; every SDK touch stays behind live accessors. */
   readonly skillControls = new SkillControls({
@@ -636,20 +638,43 @@ export class PiRuntime {
   }
   bind() {
     this.unsubscribe?.();
-    const forwarder = agentEventForwarder(payload => this.emit({ type: "agent", payload }));
+    const forwarder = agentEventForwarder(payload => {
+      if (!this.closing) this.emit({ type: "agent", payload });
+    });
     const unsubscribe = this.runtime.session.subscribe((payload: unknown) => {
       // SDK emits message_end BEFORE persisting it. A UI listener must never
       // throw into that call stack, or the message would not be saved.
       try {
+        this.recordTiming(payload);
         forwarder.push({ ...(payload as object), ...this.eventScope });
       } catch (e) { debugLog("pi-runtime: event push", e); }
     });
     this.unsubscribe = () => { unsubscribe(); forwarder.dispose(); };
     const session = this.runtime.session;
     if (this.extensionSession !== session) {
+      this.promptTiming = undefined;
       this.extensionSession = session;
       this.startExtensions(session, this.cwd!);
     }
+  }
+  private recordTiming(payload: unknown) {
+    if (!this.promptTiming) return;
+    const event = payload as { type?: string; aborted?: boolean; errorMessage?: string;
+      result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
+    const now = new Date().toISOString();
+    if (event.type === "agent_start") this.promptTiming.agentStartedAt ??= now;
+    if (event.type === "compaction_start") this.promptTiming.compactions.push({ status: "running", startedAt: now });
+    if (event.type !== "compaction_end") return;
+    const current = this.promptTiming.compactions.at(-1);
+    if (!current || current.status !== "running") return;
+    const entry = event.result && [...this.runtime.session.sessionManager.getEntries()].reverse().find(entry => entry.type === "compaction");
+    this.promptTiming.compactions[this.promptTiming.compactions.length - 1] = {
+      ...current, endedAt: now, durationMs: Math.max(0, Date.parse(now) - Date.parse(current.startedAt!)),
+      status: event.aborted ? "aborted" : event.errorMessage ? "error" : "complete",
+      ...(entry ? { entryTimestamp: entry.timestamp } : {}),
+      tokensBefore: event.result?.tokensBefore, tokensAfter: event.result?.estimatedTokensAfter,
+      ...(event.errorMessage ? { error: event.errorMessage } : {}),
+    };
   }
   async waitForWrites() {
     await this.runtime?.session.waitForIdle?.();
@@ -801,6 +826,7 @@ export class PiRuntime {
         pendingMessageCount: 0,
       };
     return {
+      ...(this.promptTiming ? { timing: structuredClone(this.promptTiming) } : {}),
       available: true,
       model: s.model
         ? {
@@ -863,6 +889,7 @@ export class PiRuntime {
   }
   control(input: AgentControl): Promise<unknown> {
     if (this.closing) return Promise.reject(new Error("Session is closing"));
+    if (input.action === "prompt") input = { ...input, submittedAt: input.submittedAt ?? new Date().toISOString() };
     const pending = this.runControl(input);
     this.pendingControls.add(pending);
     return pending.finally(() => this.pendingControls.delete(pending));
@@ -899,9 +926,13 @@ export class PiRuntime {
         // commands and throws before appending anything (busy, no model, no
         // auth) — the footer may only be recorded when this call created one.
         const before = s.sessionManager.getEntries().length;
+        const timing: RunTiming = { startedAt: input.submittedAt ?? new Date().toISOString(), compactions: [] };
+        if (!s.isStreaming && !s.isCompacting) this.promptTiming = timing;
         try {
           await s.prompt(input.text, { source: "interactive", ...(input.images?.length ? { images: input.images } : {}) });
         } finally {
+          // The SDK retains footer data by reference; stop recording before saving it.
+          if (this.promptTiming === timing) this.promptTiming = undefined;
           const createdTurn = s.sessionManager
             .getEntries()
             .slice(before)
@@ -912,6 +943,7 @@ export class PiRuntime {
             );
           if (createdTurn)
             s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
+              timing,
               contextUsage: s.getContextUsage() ?? null,
               model: s.model
                 ? {
@@ -1249,9 +1281,9 @@ export class PiRuntime {
     this.closing = true;
     this.stopStartupDialogs?.();
     ++this.controlEpoch;
-    this.unsubscribe?.();
     try {
       runtime.session.abortBash();
+      // Keep internal timing subscribed until abort and footer persistence finish.
       await runtime.session.abort();
       // A prompt can still be in preflight, or writing its footer after abort.
       // Drain controller calls before unlinking the session file.
@@ -1259,6 +1291,7 @@ export class PiRuntime {
       await runtime.dispose();
       if (this.runtime === runtime) this.runtime = undefined;
     } finally {
+      this.unsubscribe?.();
       this.extensionSession = undefined;
       this.extensionStartup = Promise.resolve();
       this.closing = false;

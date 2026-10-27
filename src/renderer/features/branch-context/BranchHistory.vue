@@ -8,6 +8,8 @@ import CopyButton from "../../components/CopyButton.vue";
 import ContextStatus from "./ContextStatus.vue";
 import ToolDuration from "./ToolDuration.vue";
 import FileChanges from "./FileChanges.vue";
+import CompactionBubble from "./CompactionBubble.vue";
+import type { CompactionRecord } from "../../../shared/run-timing";
 import type { FileChange } from "../../../shared/file-changes";
 
 export interface HistoryTurn {
@@ -19,6 +21,8 @@ export interface HistoryTurn {
   running?: boolean;
   gitBranch?: string;
   fileChanges?: FileChange[];
+  compactions?: CompactionRecord[];
+  trailingCompactions?: CompactionRecord[];
 }
 
 defineProps<{
@@ -45,6 +49,7 @@ const { t } = useI18n();
             <CopyButton :text="turn.user.text" />
           </div>
         </article>
+        <CompactionBubble v-for="(compaction, index) in turn.compactions" :key="`pre:${index}`" :compaction="compaction" />
         <div v-if="turn.gitBranch" class="chat-git-branch"
           :title="t('graph.gitBranchAtStart', { branch: turn.gitBranch })"
           :aria-label="t('graph.gitBranchAtStart', { branch: turn.gitBranch })">
@@ -122,6 +127,7 @@ const { t } = useI18n();
           </div>
         </article>
         <FileChanges v-if="!turn.running && turn.fileChanges?.length && sessionPath" :changes="turn.fileChanges" :session-path="sessionPath" />
+        <CompactionBubble v-for="(compaction, index) in turn.trailingCompactions" :key="`post:${index}`" :compaction="compaction" />
       </section>
   </div>
 </template>

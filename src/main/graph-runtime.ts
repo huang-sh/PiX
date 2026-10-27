@@ -8,10 +8,18 @@ import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
-import type { AgentControl, RawSessionEntry, RuntimeModel, SessionSnapshot } from "../shared/types.js";
+import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
 
-type PromptAt = Extract<AgentControl, { action: "promptAt" }>;
+type PromptAt = Extract<AgentControl, { action: "promptAt" }> & { timestamp?: string };
 type Worker = { pi: PiRuntime; work?: Promise<void>; snapshot?: SessionSnapshot; before?: Set<string> };
+function pendingPrompt(request: BranchRecord["request"], parentNodeId: string | null, runtime: RuntimeState) {
+  const model = request.provider && request.modelId
+    ? runtime.model?.provider === request.provider && runtime.model.id === request.modelId
+      ? runtime.model : { provider: request.provider, id: request.modelId }
+    : runtime.model;
+  return { text: request.text, parentNodeId, images: request.images, timestamp: request.timestamp,
+    model, thinkingLevel: request.thinkingLevel ?? runtime.thinkingLevel };
+}
 function snapshotParent(id: string, entries: Map<string, RawSessionEntry>): string | null {
   const seen = new Set<string>();
   let entry = entries.get(id);
@@ -167,7 +175,7 @@ export class GraphRuntime extends PiRuntime {
         return;
       }
       try { this.emit(event); } catch (e) { debugLog("graph-runtime: worker event emit", e); }
-      if (["message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
+      if (["agent_start", "message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
         const worker = this.workers.get(record.id);
         if (worker?.pi.runtime) {
           try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch (e) { debugLog("graph-runtime: worker snapshot refresh", e); }
@@ -203,7 +211,7 @@ export class GraphRuntime extends PiRuntime {
     const mainNode = main.projection.nodes.find(n => n.id === main.projection.activeNodeId);
     const mainPending = Boolean(this.mainWork && (!mainNode || this.rootBefore.has(mainNode.userEntryId)));
     runs.push({ branchId: "main", runId: this.rootRunId, requestId: this.rootRequest?.requestId, nodeId: mainPending ? null : main.projection.activeNodeId,
-      ...(mainPending && this.rootRequest ? { pending: { text: this.rootRequest.text, parentNodeId: this.rootRequest.nodeId, images: this.rootRequest.images } } : {}),
+      ...(mainPending && this.rootRequest ? { pending: pendingPrompt(this.rootRequest, this.rootRequest.nodeId, main.runtime) } : {}),
       status: this.mainWork || main.runtime.isStreaming ? "running" : "idle", error: this.rootError, runtime: main.runtime });
     const active = new Set<string>();
     if (this.mainWork || main.runtime.isStreaming) {
@@ -226,13 +234,24 @@ export class GraphRuntime extends PiRuntime {
       const running = Boolean(worker?.work || record.status === "prepared");
       if (running && nodeId) active.add(nodeId);
       runs.push({ branchId: record.id, runId: record.runId, requestId: record.requestId, nodeId,
-        ...(!nodeId && running ? { pending: { text: record.request.text, parentNodeId: record.request.nodeId ?? (record.forkEntryId ? snapshotParent(record.forkEntryId, entries) : null), images: record.request.images } } : {}),
+        ...(!nodeId && running ? { pending: pendingPrompt(record.request, record.request.nodeId ?? (record.forkEntryId ? snapshotParent(record.forkEntryId, entries) : null), snap.runtime) } : {}),
         status: running ? "running" : record.status === "interrupted" ? "interrupted" : "idle",
         error: record.error, runtime: snap.runtime });
     }
     const { entries: values, projection } = this.snapshotCache.view(main, active);
+    // The SDK appends the user entry after pre-prompt compaction. Keep the
+    // admission clock through that handoff until the completion footer saves it.
+    const timings = new Map(runs.filter(run => run.status === "running" && run.nodeId).map(run => {
+      const startedAt = run.branchId === "main" ? this.rootRequest?.timestamp : this.graph!.records.get(run.branchId)?.request.timestamp;
+      const timing = run.runtime?.timing;
+      return [run.nodeId, startedAt ? timing?.startedAt === startedAt ? timing : { startedAt, compactions: [] } : undefined] as const;
+    }));
+    const timedProjection = timings.size ? { ...projection, nodes: projection.nodes.map(node => {
+      const timing = timings.get(node.id);
+      return timing ? { ...node, metrics: { ...node.metrics, ...timing } } : node;
+    }) } : projection;
     return { ...main, runtime: this.writeFailure ? { ...main.runtime, available: false } : main.runtime,
-      entries: values, projection,
+      entries: values, projection: timedProjection,
       graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, runs, storageError: this.storageError,
         recoveredInputs: this.graph.recoveredInputs } };
   }
@@ -335,11 +354,12 @@ export class GraphRuntime extends PiRuntime {
       const file = join(graph.dir, `request-${input.requestId}.json`);
       const pending = this.accepted.get(file);
       if (pending) return pending;
+      input = { ...input, timestamp: new Date().toISOString() };
       if (existsSync(file)) {
         const saved = JSON.parse(readFileSync(file, "utf8"));
         if (saved.state !== "queued") return Promise.resolve(this.snapshot());
         // A retry must preserve the input already acknowledged on disk.
-        input = { ...saved, action: "promptAt" };
+        input = { ...saved, action: "promptAt", timestamp: saved.timestamp ?? input.timestamp };
       } else {
         this.persist(() => durableWrite(file, JSON.stringify({ ...input, state: "queued" }) + "\n"));
       }
@@ -450,7 +470,7 @@ export class GraphRuntime extends PiRuntime {
         this.notify();
         throw error;
       } finally { this.preparations.delete(this.rootRunId); }
-      const work = super.control({ action: "prompt", text: input.text, images: input.images });
+      const work = super.control({ action: "prompt", text: input.text, images: input.images, submittedAt: input.timestamp });
       const settled = work.then(() => {
         this.persist(() => graph.sealMain(this.data(this)));
         this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n"));
@@ -551,7 +571,7 @@ export class GraphRuntime extends PiRuntime {
   private async executeBranch(worker: Worker, record: BranchRecord) {
     const graph = this.graph!;
     try {
-      await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images });
+      await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images, submittedAt: record.request.timestamp });
       await worker.pi.waitForWrites();
       const manager = worker.pi.runtime.session.sessionManager;
       this.persist(() => graph.seal(record, this.data(worker.pi)));
