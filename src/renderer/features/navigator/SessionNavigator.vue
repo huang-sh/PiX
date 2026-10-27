@@ -138,10 +138,10 @@ async function revealSession(record: ProjectGroup, path: string) {
       <Button class="grow justify-start" variant="ghost" @click="session.create()">
         <Plus :size="16" />{{ t("nav.newSession") }}
       </Button>
-      <Button variant="ghost" size="icon" :title="t('nav.importSession')" @click="session.importSession()">
+      <Button variant="ghost" size="icon" :title="t('nav.importSession')" :disabled="!session.activeProjectId" @click="session.importSession()">
         <Upload :size="16" />
       </Button>
-      <Button variant="ghost" size="icon" :title="t('nav.refreshSessions')" @click="session.refresh()">
+      <Button variant="ghost" size="icon" :title="t('nav.refreshSessions')" :disabled="!session.activeProjectId" @click="session.refresh()">
         <RefreshCw :size="16" />
       </Button>
     </div>

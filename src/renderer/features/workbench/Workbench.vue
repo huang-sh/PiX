@@ -12,9 +12,11 @@ import BranchContextPanel from "../branch-context/BranchContextPanel.vue";
 import GraphPanel from "../graph/GraphPanel.vue";
 import SessionNavigator from "../navigator/SessionNavigator.vue";
 import ToolPanel from "../tools/ToolPanel.vue";
+import WelcomeScreen from "./WelcomeScreen.vue";
 import { whenMeasured, whenPanelsSettle, whenVisible, type PanelSettleTarget } from "../../lib/frame";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
+import { useWorkspaceStore } from "../../stores/workspace";
 
 const emit = defineEmits<{
   settings: [];
@@ -31,6 +33,7 @@ const emit = defineEmits<{
 type PanelHandle = { collapse: () => void; expand: () => void; resize: (size: number) => void };
 const layout = useLayoutStore();
 const session = useSessionStore();
+const workspace = useWorkspaceStore();
 const { t } = useI18n();
 const shell = ref<HTMLElement>();
 const navigatorElement = ref<HTMLElement>();
@@ -286,7 +289,8 @@ watch(() => layout.hydrated, async (hydrated) => {
       <SplitterPanel id="primary-panels" :order="1">
         <SplitterGroup id="pix-primary" direction="horizontal" class="workbench-splitter">
           <SplitterPanel id="graph-panel" :order="2" :min-size="24">
-            <GraphPanel class="graph" @new-session="$emit('newSession')" />
+            <WelcomeScreen v-if="!workspace.project" @open-project="$emit('pickProject')" />
+            <GraphPanel v-show="workspace.project" class="graph" @new-session="$emit('newSession')" />
           </SplitterPanel>
           <SplitterResizeHandle class="resize-handle" :class="{ hidden: layout.layout.collapsed.chat }" />
 

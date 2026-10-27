@@ -628,7 +628,7 @@ onBeforeUnmount(() => {
         />
       </KeepAlive>
       <WelcomeScreen
-        v-if="layout.screen === 'workbench' && !workspace.project"
+        v-if="!layout.hydrated && layout.screen === 'workbench' && !workspace.project"
         @open-project="pickProject"
       />
     </div>
