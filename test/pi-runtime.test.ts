@@ -10,6 +10,69 @@ import { pixAgentDir } from "../src/main/paths.js";
 import { validateRouteInput } from "../src/shared/contracts.js";
 import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
 
+for (const action of ["run", "abort", "close"] as const) {
+  test(`a session opens before slow startup hooks finish: ${action}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), "pix-startup-"));
+    let entered!: () => void, release!: () => void;
+    const starting = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let ready = false, invoked = false, opened = false, shutdown = false;
+    const runtime = new PiRuntime(home, join(home, "sessions"), () => {}, async () => {});
+    runtime["sessionServicesOptions"] = (pi, cwd) => ({
+      cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+      resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+        (pi: any) => {
+          pi.on("session_start", async () => {
+            entered();
+            await blocked;
+            ready = true;
+          });
+          pi.on("session_shutdown", () => { assert.equal(ready, true); shutdown = true; });
+          pi.registerCommand("startup-test", { handler: () => { assert.equal(ready, true); invoked = true; } });
+        },
+      ] },
+    });
+    const creating = runtime.create().then(snapshot => { opened = true; return snapshot; });
+    try {
+      await starting;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(opened, true, "the session snapshot must not wait for extension indexing");
+      const snapshot = await creating;
+      assert.ok(snapshot.session.path);
+      assert.equal(snapshot.runtime.available, true);
+      const commands = runtime.control({ action: "commands" });
+      if (action === "close") {
+        const closing = runtime.close();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(shutdown, false, "shutdown must not race extension startup");
+        release();
+        await closing;
+        await commands.catch(() => {});
+        assert.equal(shutdown, true);
+        return;
+      }
+      const command = runtime.control({ action: "prompt", text: "/startup-test" });
+      const cancelled = action === "abort" ? assert.rejects(command, /cancelled/) : undefined;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(invoked, false, "a prompt must not race session-start hooks");
+      if (action === "abort") await runtime.control({ action: "abort" });
+      release();
+      if (action === "abort") await cancelled;
+      else await command;
+      assert.ok((await commands as Array<{ name: string }>).some(command => command.name === "startup-test"),
+        "aborting a prompt must not cancel the command catalog read");
+      assert.equal(invoked, action === "run");
+      await runtime.close();
+      assert.equal(shutdown, true);
+    } finally {
+      release();
+      await creating.catch(() => {});
+      await runtime.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
+
 test("extension commands deliver notifications and errors before and after reload", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-slash-"));
   assert.equal(dirname(home), tmpdir());
@@ -55,7 +118,10 @@ test("a failing event consumer cannot throw into SDK message persistence", async
   let listener!: (event: unknown) => void;
   let delivered = false;
   const runtime = new PiRuntime(null, null, () => { delivered = true; throw new Error("UI failed"); }, async () => {});
-  runtime.runtime = { session: { subscribe: (handler: typeof listener) => { listener = handler; return () => {}; } } };
+  runtime.runtime = { session: {
+    subscribe: (handler: typeof listener) => { listener = handler; return () => {}; },
+    bindExtensions: async () => {}, extensionRunner: { getUIContext: () => ({}) },
+  } };
   runtime.bind();
   assert.doesNotThrow(() => listener({ type: "message_end", message: { role: "user", content: "saved" } }));
   assert.equal(delivered, false, "listener is deferred until after SDK can persist");
@@ -182,6 +248,8 @@ test("every mutating control action returns the refreshed snapshot", async () =>
     setActiveToolsByName: track("setTools"),
     navigateTree: track("navigateTree"),
     reload: track("reload"),
+    bindExtensions: async () => {},
+    extensionRunner: { getUIContext: () => ({}) },
     subscribe: () => () => undefined,
     getContextUsage: () => undefined,
     model: null,

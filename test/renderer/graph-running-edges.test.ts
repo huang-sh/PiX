@@ -56,12 +56,13 @@ it.each(["local", "graph"])("highlights %s pending paths while keeping unsent dr
     next.graph!.runs = [{ branchId: "new", runId: "new", nodeId: null, status: "running", pending: { text: "new", parentNodeId: "turn:trunk" } }];
     session.applySnapshot(next);
   } else {
-    session.pendingPrompt = { message: { entryId: "pending:new", turnId: "pending:new", role: "user", text: "new", timestamp: "" },
+    session.pendingPrompts["pending:new"] = { projectId: session.activeProjectId, sessionPath: session.current!.session.path,
+      message: { entryId: "pending:new", turnId: "pending:new", role: "user", text: "new", timestamp: "" },
       knownEntryIds: [], targetNodeId: "turn:trunk" };
   }
   await flushPromises();
   expect(highlighted()).toEqual(["pending:new", "turn:trunk"]);
-  session.pendingPrompt = undefined;
+  delete session.pendingPrompts["pending:new"];
   session.applySnapshot(snapshot([], 3)); await flushPromises();
   expect(highlighted()).toEqual([]);
   expect((graph.edges as Edge[]).find(edge => edge.target === "draft:turn:old")?.class).toBe("draft-edge");

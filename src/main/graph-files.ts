@@ -186,7 +186,10 @@ export class GraphFiles {
       if (!owner || typeof owner.pid !== "number" || !Number.isInteger(owner.pid)) {
         rmSync(file, { force: true });
       } else if (owner.host !== hostname()) {
-        throw new Error("Session graph is owned by another host");
+        throw new Error(`Session graph is owned by another host (${String(owner.host)}); this computer is ${hostname()}. `
+          + "If this session is shared, close it in PiX on the owning computer, then reopen it here. "
+          + `If this is an independent copy, remove only the copied lock file "${file}", then reopen the session. `
+          + "Keep the session file and all other branch files.");
       } else {
         let alive = true;
         try { process.kill(owner.pid, 0); } catch (e) { alive = (e as NodeJS.ErrnoException).code !== "ESRCH"; }

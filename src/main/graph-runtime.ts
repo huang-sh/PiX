@@ -29,6 +29,7 @@ export class GraphRuntime extends PiRuntime {
   private workers = new Map<string, Worker>();
   private admission: Promise<unknown> = Promise.resolve();
   private mainWork?: Promise<void>;
+  private preparations = new Map<string, AbortController>();
   private accepted = new Map<string, Promise<SessionSnapshot>>();
   private storageError?: string;
   private writeFailure?: string;
@@ -68,7 +69,7 @@ export class GraphRuntime extends PiRuntime {
   get busy() {
     const state = this.state();
     return Boolean(state.isStreaming || state.isCompacting || state.isRetrying || state.pendingMessageCount
-      || this.mainWork || [...this.workers.values()].some(worker => worker.work));
+      || this.accepted.size || this.mainWork || [...this.workers.values()].some(worker => worker.work));
   }
   private notify() {
     if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
@@ -155,6 +156,16 @@ export class GraphRuntime extends PiRuntime {
     const child = new PiRuntime(this.cwd, this.dir, event => {
       if (this.stopping) return;
       const value = event as { type: string; payload: { type?: string } };
+      // A worker finishing initialization updates its branch inside this graph;
+      // its private session file must never become the client's current view.
+      if (value.type === "sessions") {
+        const worker = this.workers.get(record.id);
+        if (worker?.pi.runtime) {
+          worker.snapshot = worker.pi.snapshot();
+          this.notify();
+        }
+        return;
+      }
       try { this.emit(event); } catch (e) { debugLog("graph-runtime: worker event emit", e); }
       if (["message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
         const worker = this.workers.get(record.id);
@@ -209,10 +220,10 @@ export class GraphRuntime extends PiRuntime {
         continue;
       }
       const node = snap.projection.activeNodeId;
-      const ownNode = node && !Object.hasOwn(record.inherited, node.slice(5))
+      const ownNode = record.status !== "prepared" && node && !Object.hasOwn(record.inherited, node.slice(5))
         && (!worker.work || !worker.before?.has(node.slice(5)));
       const nodeId = ownNode ? `turn:${this.graph.canonical(record, node!.slice(5))}` : null;
-      const running = Boolean(worker?.work);
+      const running = Boolean(worker?.work || record.status === "prepared");
       if (running && nodeId) active.add(nodeId);
       runs.push({ branchId: record.id, runId: record.runId, requestId: record.requestId, nodeId,
         ...(!nodeId && running ? { pending: { text: record.request.text, parentNodeId: record.request.nodeId ?? (record.forkEntryId ? snapshotParent(record.forkEntryId, entries) : null), images: record.request.images } } : {}),
@@ -239,9 +250,10 @@ export class GraphRuntime extends PiRuntime {
     if (input.action === "branchAbort") {
       if (input.branchId === "main") {
         if (input.runId !== this.rootRunId) return Promise.reject(new Error("This run has already ended"));
+        this.preparations.get(input.runId)?.abort(new Error("Session operation cancelled"));
         const settled = this.mainWork;
         return super.control({ action: "abort" }).then(async () => {
-          await settled;
+          await settled?.catch(() => {});
           if (this.writeFailure) throw new Error(this.writeFailure);
           return this.snapshot();
         });
@@ -250,9 +262,11 @@ export class GraphRuntime extends PiRuntime {
       if (!record || record.runId !== input.runId) return Promise.reject(new Error("Unknown or stale run"));
       const worker = this.workers.get(record.id);
       if (!worker) return Promise.resolve(this.snapshot());
-      const settled = worker.work;
-      return worker.pi.control({ action: "abort" }).then(async () => {
-        await settled;
+      this.preparations.get(input.runId)?.abort(new Error("Session operation cancelled"));
+      const settled = worker.work ?? this.accepted.get(join(this.graph!.dir, `request-${record.requestId}.json`));
+      const abort = worker.pi.runtime ? worker.pi.control({ action: "abort" }) : Promise.resolve();
+      return abort.then(async () => {
+        await settled?.catch(() => {});
         if (this.writeFailure) throw new Error(this.writeFailure);
         return this.snapshot();
       });
@@ -262,6 +276,7 @@ export class GraphRuntime extends PiRuntime {
       return this.exclusive(async () => ({ work: this.exportTree(input.action === "exportHtml" ? input : { action: "exportJsonl" }) })).then(({ work }) => work);
     if (input.action === "exportBranchSession")
       return this.exclusive(async () => ({ work: this.exportBranch(input) })).then(({ work }) => work);
+    if (input.action === "abort") this.preparations.get(this.rootRunId)?.abort(new Error("Session operation cancelled"));
     if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands"].includes(input.action))
       return super.control(input);
     // Prompt lifetime stays outside admission, so creating a sibling never waits for it.
@@ -422,8 +437,19 @@ export class GraphRuntime extends PiRuntime {
       this.rootBefore = new Set(root.entries.map(e => e.id));
       this.eventScope = { graphId: graph.main, branchId: "main", runId: this.rootRunId };
       this.rootError = undefined;
-      try { await this.configurePrompt(this, input); }
-      catch (error) { this.rootError = String(error); throw error; }
+      const abort = new AbortController();
+      this.preparations.set(this.rootRunId, abort);
+      this.mainWork = this.preparePrompt(this, input, abort.signal);
+      try {
+        await this.mainWork;
+        abort.signal.throwIfAborted();
+      }
+      catch (error) {
+        this.mainWork = undefined;
+        this.rootError = String(error);
+        this.notify();
+        throw error;
+      } finally { this.preparations.delete(this.rootRunId); }
       const work = super.control({ action: "prompt", text: input.text, images: input.images });
       const settled = work.then(() => {
         this.persist(() => graph.sealMain(this.data(this)));
@@ -485,14 +511,16 @@ export class GraphRuntime extends PiRuntime {
     this.persist(() => graph.save(record));
     const intentFile = join(graph.dir, `request-${input.requestId}.json`);
     this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, branchId: record.id, runId: record.runId, state: "prepared" }) + "\n"));
+    const abort = new AbortController();
+    this.preparations.set(record.runId, abort);
     try {
       child.eventScope = { graphId: graph.main, branchId: record.id, runId: record.runId };
-      await child.open(graph.path(record.id));
-      await this.configurePrompt(child, { ...input,
+      await this.preparePrompt(child, { ...input,
         provider: input.provider ?? model?.provider,
         modelId: input.modelId ?? model?.id,
         thinkingLevel: input.thinkingLevel ?? thinkingLevel,
-      });
+      }, abort.signal, graph.path(record.id));
+      abort.signal.throwIfAborted();
       worker.before = new Set(child.runtime.session.sessionManager.getEntries().map((e: RawSessionEntry) => e.id));
       record.status = "running"; this.persist(() => graph.save(record));
       worker.work = this.executeBranch(worker, record);
@@ -501,15 +529,24 @@ export class GraphRuntime extends PiRuntime {
     } catch (error) {
       try { await child.close(); } catch (e) { debugLog("graph-runtime: worker close after start failure", e); }
       record.status = "interrupted"; record.error = String(error); this.persist(() => graph.save(record));
+      this.notify();
       throw error;
-    }
+    } finally { this.preparations.delete(record.runId); }
   }
-  private async configurePrompt(pi: PiRuntime, input: PromptAt) {
+  private async preparePrompt(pi: PiRuntime, input: PromptAt, signal: AbortSignal, path?: string) {
+    if (path) await pi.open(path);
+    signal.throwIfAborted();
     // Extension commands run before model validation in Pi; status/config
     // commands must also work when a restored model is unavailable.
     if (input.text.startsWith("/") && pi.runtime.session.extensionRunner.getCommand(input.text.slice(1).split(" ")[0])) return;
-    if (input.provider && input.modelId) await PiRuntime.prototype.control.call(pi, { action: "setModel", provider: input.provider, modelId: input.modelId });
-    if (input.thinkingLevel) await PiRuntime.prototype.control.call(pi, { action: "setThinking", level: input.thinkingLevel });
+    if (input.provider && input.modelId) {
+      await PiRuntime.prototype.control.call(pi, { action: "setModel", provider: input.provider, modelId: input.modelId });
+      signal.throwIfAborted();
+    }
+    if (input.thinkingLevel) {
+      await PiRuntime.prototype.control.call(pi, { action: "setThinking", level: input.thinkingLevel });
+      signal.throwIfAborted();
+    }
   }
   private async executeBranch(worker: Worker, record: BranchRecord) {
     const graph = this.graph!;
@@ -591,6 +628,7 @@ export class GraphRuntime extends PiRuntime {
   }
   override close(): Promise<void> {
     this.stopping = true;
+    for (const preparation of this.preparations.values()) preparation.abort(new Error("Session operation cancelled"));
     return this.exclusive(() => this.closeInternal());
   }
   private async closeInternal() {

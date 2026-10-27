@@ -144,9 +144,10 @@ async function bootstrap() {
 }
 
 async function pickProject() {
-  const request = ++session.viewRequest;
+  // A cancelled native picker does not navigate away from an in-flight creation.
+  const request = session.viewRequest;
   const data = await desktop.invoke<BootstrapData | null>("app.pickProject");
-  if (data) await hydrate(data, false, request);
+  if (data && request === session.viewRequest) await hydrate(data, false, ++session.viewRequest);
 }
 
 // wsl.exe can stall for its full timeout while the WSL service cold-starts,
@@ -364,8 +365,9 @@ async function reconnectRemote() {
   const record = session.projects.find((item) => item.id === session.activeProjectId);
   if (!record || session.loading) return;
   const path = session.current?.session.path;
+  const creationDraft = session.creating || session.creation?.status === "failed";
   if (await activateProject(record)) {
-    if (path) {
+    if (path && !creationDraft) {
       try { await session.open(path); }
       catch (error) { layout.showNotice(String(error), "error"); }
     }

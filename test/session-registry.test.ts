@@ -788,11 +788,11 @@ test("forgetting a project during an in-flight open disposes the late runtime", 
       return runtime;
     };
 
-    const opening = controller.invoke("session.open", { path });
+    const opening = assert.rejects(controller.invoke("session.open", { path }), /Session was closed while opening/);
     await new Promise(resolve => setTimeout(resolve, 20));   // the open is registered as pending
     controller.configure(second);
     await controller.invoke("app.forgetProject", { id: `local:${first}` });
-    await opening.catch(() => {});
+    await opening;
 
     assert.equal(Boolean(controller.registry.entry(path)), false, "the late open goes with the history row");
     assert.ok(!controller.projectGroups().some(record => record.id === `local:${first}`), "the project is gone from the list");

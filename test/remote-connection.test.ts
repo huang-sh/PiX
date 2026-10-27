@@ -155,16 +155,22 @@ test("ordinary requests time out and late responses do not poison subsequent req
   assert.deepEqual(await next, []);
 });
 
-test("long-running prompts and shell commands are not cut off by the RPC timeout", async (t) => {
+test("long-running prompts, stops and shell commands are not cut off by the RPC timeout", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { client, socket } = transport(t);
   const prompt = client.request("agent.control", { action: "prompt", text: "work" });
   const shell = client.request("shell.run", { command: "long job" });
   const newSession = client.request("agent.control", { action: "newSession" });
+  const promptAt = client.request("agent.control", { action: "promptAt", requestId: "slow-startup", nodeId: null, text: "work" });
+  const abort = client.request("agent.control", { action: "abort" });
+  const branchAbort = client.request("agent.control", { action: "branchAbort", branchId: "main", runId: "run" });
+  const sessionStop = client.request("session.stop", { path: "/project/session.jsonl" });
+  const admitted = assert.doesNotReject(Promise.all([promptAt, sessionStop]));
   t.mock.timers.tick(300_000);
-  for (const id of ["1", "2", "3"])
+  for (const id of ["1", "2", "3", "4", "5", "6", "7"])
     socket.emit("message", JSON.stringify({ type: "response", id, ok: true, result: "done" }));
-  assert.deepEqual(await Promise.all([prompt, shell, newSession]), ["done", "done", "done"]);
+  await admitted;
+  assert.deepEqual(await Promise.all([prompt, shell, newSession, promptAt, abort, branchAbort, sessionStop]), Array(7).fill("done"));
 });
 
 test("heartbeat detects a half-open connection and accepts healthy pong replies", async (t) => {
@@ -183,23 +189,25 @@ test("heartbeat detects a half-open connection and accepts healthy pong replies"
   assert.equal(client.connected, false);
 });
 
-test("a launcher exit does not end the link, but a reattach transport exit does", async (t) => {
-  // The launcher wrapper is expected to exit once the detached host runs;
-  // only a transport child (a reattach's ssh -N tunnel) carries the link.
+test("a WSL launcher exit does not end the link, but every SSH transport exit does", async (t) => {
+  // WSL reaches the host directly; both fresh and reattached SSH clients
+  // depend on their child process to carry the local forward.
   const launcher = transport(t);
   launcher.child.emit("exit", 0);
   assert.equal(launcher.client.connected, true, "the detached host outlives its launcher");
-  const child = new FakeChild();
-  const socket = new FakeSocket();
-  const transportClient = Reflect.construct(WslHostClient, [
-    child, socket, { cwd: "/project" },
-    { kind: "ssh", target: "h", port: 1, token: "t", pid: 1 }, true, true,
-  ]) as WslHostClient;
-  t.after(async () => { child.exitCode = 0; child.emit("exit", 0); await transportClient.dispose(); });
-  const failure = new Promise<Error>(resolve => transportClient.onDisconnect(resolve));
-  child.stderr.write("ssh: connect to host h port 22: Connection reset\n");
-  child.emit("exit", 255);
-  assert.match((await failure).message, /SSH transport exited with code 255/);
+  for (const reattached of [false, true]) {
+    const child = new FakeChild();
+    const socket = new FakeSocket();
+    const transportClient = Reflect.construct(WslHostClient, [
+      child, socket, { cwd: "/project" },
+      { kind: "ssh", target: "h", port: 1, token: "t", pid: 1 }, true, reattached,
+    ]) as WslHostClient;
+    t.after(async () => { child.exitCode = 0; child.emit("exit", 0); await transportClient.dispose(); });
+    const failure = new Promise<Error>(resolve => transportClient.onDisconnect(resolve));
+    child.stderr.write("ssh: connect to host h port 22: Connection reset\n");
+    child.emit("exit", 255);
+    assert.match((await failure).message, /SSH transport exited with code 255/);
+  }
 });
 
 async function waitForLog(...texts: string[]) {
@@ -725,6 +733,50 @@ test("the launcher script detaches the host and reports readiness via a file", (
   assert.match(deployed, /--allow-credential-deploy/);
 });
 
+test("the SSH launcher stays alive after READY until its input closes", {
+  skip: process.platform === "win32",
+  timeout: 30_000,
+}, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-ssh-launcher-")));
+  const port = await (WslHostClient as any).availableLocalPort();
+  const child = spawn("sh", ["-c", launcherScript({
+    exe: `${process.execPath} ${fileURLToPath(new URL("../src/server/index.js", import.meta.url))}`,
+    cwd: root,
+    base: root,
+    port,
+    keepAlive: true,
+  })], { env: { ...process.env, PIX_HOME: root, PI_CODING_AGENT_DIR: join(root, "agent") } });
+  let client: WslHostClient | undefined;
+  let ready: any;
+  t.after(async () => {
+    try {
+      if (!client?.connected && ready) {
+        await client?.dispose();
+        const { socket, hello } = await (WslHostClient as any).openSocket(ready, 2_000);
+        client = Reflect.construct(WslHostClient, [undefined, socket, hello]) as WslHostClient;
+      }
+      await client?.dispose();
+    } finally {
+      child.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  ready = await (WslHostClient as any).waitForReady(child, 15_000);
+  // Give a short-lived launcher time to exit before the desktop handshakes.
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(child.exitCode, null, "the SSH forward must survive READY");
+  const { socket, hello } = await (WslHostClient as any).openSocket(ready, 2_000);
+  client = Reflect.construct(WslHostClient, [child, socket, hello,
+    { kind: "ssh", target: "test", ...ready }, true]) as WslHostClient;
+  assert.equal(client.connected, true);
+  assert.equal(client.reattached, false);
+  const exited = new Promise(resolve => child.once("exit", resolve));
+  child.stdin.end();
+  await exited;
+  assert.equal(child.exitCode, 0, "closing desktop stdin releases the SSH session");
+  assert.equal(client.connected, false, "losing the fresh SSH transport ends the link");
+});
+
 test("dispose orders a lingering host to shut down; abandon leaves it running", async (t) => {
   const disposed = transport(t);
   disposed.child.exitCode = 0;
@@ -878,6 +930,43 @@ test("a stale remembered host is stopped and replaced by a fresh spawn", async (
   const key = projectId({ name: "", path: "/old", remote: { kind: "ssh", host: "old" } });
   assert.equal(stored[key].pid, 5252, "the stored handle follows the fresh host");
 });
+
+for (const cancel of ["explicit", "replacement"]) for (const lateSuccess of [false, true]) {
+  test(`cancelling a reattach handshake preserves its host (${cancel}, late success: ${lateSuccess})`, async t => {
+    const { controller, old, project } = controllerFixture(t, seedLingeringHost);
+    old.connected = false;
+    const pending = candidate(controller);
+    pending.reattached = true;
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    t.mock.method(WslHostClient, "reattach", async (...[_handle, options]: Parameters<typeof WslHostClient.reattach>) => {
+      entered();
+      if (lateSuccess) { await gate; return pending as any; }
+      return new Promise<never>((_resolve, reject) => options?.signal?.addEventListener("abort",
+        () => reject(new Error("Remote connection cancelled")), { once: true }));
+    });
+    const kill = t.mock.method(WslHostClient, "killHost", async () => {});
+    const next = candidate(controller);
+    const spawn = t.mock.method(WslHostClient, "connectSsh", async (...[_host, _cwd, options]: Parameters<typeof WslHostClient.connectSsh>) => {
+      options?.signal?.throwIfAborted();
+      return next as any;
+    });
+    const first = assert.rejects(controller.connectSsh("old", "/old"), /cancelled/i);
+    try {
+      await started;
+      if (cancel === "explicit") await controller.pool.cancelRemote();
+      else await controller.connectSsh("new", "/new");
+    } finally { release(); }
+    await first;
+    assert.equal(kill.mock.callCount(), 0, "cancellation must not stop a previously running host");
+    assert.equal(spawn.mock.callCount(), cancel === "explicit" ? 0 : 1);
+    assert.equal(pending.disposed, false);
+    assert.equal(pending.abandoned, lateSuccess, "a late successful attachment only releases its transport");
+    const stored = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+    assert.equal(stored[projectId(project)].pid, seededHandle.pid, "the original handle must survive for retry");
+  });
+}
 
 test("a cancelled attempt abandons a reattached host instead of stopping it", async (t) => {
   const { controller, old } = controllerFixture(t, seedLingeringHost);

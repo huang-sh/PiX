@@ -4,16 +4,14 @@ import type { PromptImage, RuntimeModel } from "../../shared/types";
 import { useLayoutStore } from "../stores/layout";
 import { useSessionStore } from "../stores/session";
 
-// One shared registry of in-flight submitted drafts: whichever surface collected the
-// prompt (graph draft node or chat composer), the graph watches it to detect and
-// center the freshly created node — identical behavior for both input paths.
+// Legacy sessions identify a submitted turn from the next projection. Graph
+// submissions return their own node id, independently of concurrent sends.
 const submitted = ref<{ parentId: string | null; knownNodeIds: Set<string> }>();
 
 export function useDraftSubmit() {
   const session = useSessionStore();
   const layout = useLayoutStore();
   const { t } = useI18n();
-  const submittedNodeId = ref<string>();
 
   async function submitDraft(
     parentId: string | null,
@@ -21,17 +19,16 @@ export function useDraftSubmit() {
     model?: RuntimeModel | null,
     thinkingLevel?: string,
     images?: PromptImage[],
-    options?: { follow?: boolean },
-  ): Promise<boolean> {
-    submittedNodeId.value = undefined;
+    options?: { follow?: boolean; columnId?: string; requestId?: string },
+  ): Promise<{ nodeId?: string } | false> {
     submitted.value = session.current?.graph ? undefined : {
       parentId,
       knownNodeIds: new Set(session.current?.projection.nodes.map((node) => node.id)),
     };
     if (layout.layout.collapsed.chat) void layout.setCollapsed("chat", false);
     try {
-      submittedNodeId.value = await session.promptAt(parentId, text, model, thinkingLevel, images, options);
-      return true;
+      const nodeId = await session.promptAt(parentId, text, model, thinkingLevel, images, options);
+      return { nodeId };
     } catch (error) {
       submitted.value = undefined;
       const message = error instanceof Error ? error.message : String(error);
@@ -60,5 +57,5 @@ export function useDraftSubmit() {
     submitted.value = undefined;
   }
 
-  return { submitDraft, acceptSubmittedNode, clearSubmittedDraft, submittedNodeId };
+  return { submitDraft, acceptSubmittedNode, clearSubmittedDraft };
 }

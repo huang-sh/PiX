@@ -158,6 +158,8 @@ describe("BranchContextPanel streaming scroll", () => {
     const pinia = createPinia();
     setActivePinia(pinia); useLayoutStore().layout.collapsed.chat = false;
     const session = useSessionStore();
+    session.applySnapshot({ session: { path: "scroll.jsonl" }, entries: [], projection: projectSession([], null),
+      runtime: { available: true } } as SessionSnapshot);
     const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n] } });
     const messages = wrapper.get(".branch-messages").element as HTMLElement;
     Object.defineProperties(messages, {
@@ -167,7 +169,8 @@ describe("BranchContextPanel streaming scroll", () => {
 
     messages.scrollTop = 100;
     await wrapper.get(".branch-messages").trigger("scroll");
-    session.pendingPrompt = {
+    session.pendingPrompts["pending:1"] = {
+      projectId: session.activeProjectId, sessionPath: session.current!.session.path,
       message: {
         entryId: "pending:1",
         turnId: "pending:1",

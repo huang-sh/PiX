@@ -5,7 +5,8 @@ import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CSSProperties } from "vue";
-import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
+import type { AgentActivity, GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
+import { clipText } from "../../../shared/session";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import type { BranchDirection } from "../../graph-layout";
@@ -25,6 +26,7 @@ export interface PromptNodeData {
   blockedReason: string;
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
+  activity?: () => AgentActivity | undefined;
   /** True while the node matches the active graph search query. */
   searchHit?: boolean;
   filterContext?: boolean;
@@ -59,6 +61,13 @@ const CLOSE_DELAY_MS = 500;
 let previewObserver: ResizeObserver | undefined;
 const displayModel = computed(() => props.data.node.footer?.model);
 const usage = computed(() => props.data.node.footer?.contextUsage);
+const liveResponse = computed(() => {
+  const items = props.data.activity?.()?.items ?? [];
+  for (let index = items.length - 1; index >= 0; index--)
+    if (items[index]!.kind === "assistant" && items[index]!.text) return items[index]!.text;
+  return undefined;
+});
+const responsePreview = computed(() => liveResponse.value ? clipText(liveResponse.value, 240) : props.data.node.preview);
 // Focus moves never rebuild the cards, so the viewed-node check stays live here.
 const exportBlocked = computed(() => {
   if (props.data.viewedNodeId && props.data.viewedNodeId() !== props.data.node.id)
@@ -215,8 +224,8 @@ function relative(value: string) {
       </aside>
       <span class="turn-role pi" title="Pi" aria-label="Pi"><Sparkles :size="13" /></span>
       <p :class="{ 'node-running': data.running }">
-        <template v-if="data.running && !data.node.preview">{{ t("graph.agentRunning") }}</template>
-        <template v-else>{{ data.node.preview || t("graph.waitingAssistant") }}</template>
+        <template v-if="data.running && !responsePreview">{{ t("graph.agentRunning") }}</template>
+        <template v-else>{{ responsePreview || t("graph.waitingAssistant") }}</template>
       </p>
     </section>
     <span v-if="data.node.label" class="node-label" :title="data.node.label"><Tag :size="12" /><span>{{ data.node.label }}</span></span>

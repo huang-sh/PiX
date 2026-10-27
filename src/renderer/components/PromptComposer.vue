@@ -37,6 +37,7 @@ export interface ComposerDraft {
 const props = defineProps<{
   draftState?: ComposerDraft;
   runnable: boolean;
+  editable?: boolean;
   model: RuntimeModel | null;
   thinkingLevel: string;
   models: RuntimeModel[];
@@ -126,6 +127,7 @@ async function submit() {
     await selectSlash(command);
     return;
   }
+  const target = state.value;
   const attachments = images.value.map((image) => ({ ...image }));
   const documents = files.value;
   const prompt = [text, ...documents.map(file => `Attached file: ${file.path}`)].filter(Boolean).join("\n\n");
@@ -138,19 +140,19 @@ async function submit() {
       ? await props.onSubmit(prompt, attachments)
       : await props.onSubmit(prompt);
     if (delivered) {
-      imageError.value = "";
+      target.error = "";
     } else {
-      draft.value = text;
-      images.value = attachments;
-      files.value = documents;
+      target.text = text;
+      target.images = attachments;
+      target.files = documents;
     }
   } catch (error) {
-    draft.value = text;
-    images.value = attachments;
-    files.value = documents;
-    imageError.value = error instanceof Error ? error.message : String(error);
+    target.text = text;
+    target.images = attachments;
+    target.files = documents;
+    target.error = error instanceof Error ? error.message : String(error);
   } finally {
-    busy.value = false;
+    target.busy = false;
   }
 }
 
@@ -366,7 +368,7 @@ defineExpose({ focus: focusEditor });
     <textarea
       ref="editor"
       v-model="draft"
-      :disabled="!runnable || busy"
+      :disabled="(!runnable && !editable) || busy"
       :placeholder="placeholder ?? t('draft.placeholder')"
       aria-haspopup="listbox"
       aria-controls="slash-menu-listbox"

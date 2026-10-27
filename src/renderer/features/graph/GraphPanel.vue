@@ -36,7 +36,7 @@ const emit = defineEmits<{ newSession: [] }>();
 const layout = useLayoutStore();
 const session = useSessionStore();
 const { t } = useI18n();
-const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft, submittedNodeId } = useDraftSubmit();
+const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft } = useDraftSubmit();
 type RenderNode = Node & { dimensions?: Dimensions; handleBounds?: FlowNode["handleBounds"] };
 const nodes = shallowRef<RenderNode[]>([]);
 const edges = shallowRef<Edge[]>([]);
@@ -65,7 +65,11 @@ let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
 const branchOrder = new Map<string, number>();
-const sessionKey = computed(() => JSON.stringify([session.activeProjectId, session.current?.session.path, session.current?.session.id]));
+const preparingSession = computed(() => session.creating || session.creation?.status === "failed");
+const sessionKey = computed(() => JSON.stringify([session.activeProjectId,
+  preparingSession.value ? "creating" : session.current?.session.path,
+  preparingSession.value ? undefined : session.current?.session.id]));
+let creatingDraft: string | undefined;
 let orderSequence = 0;
 let draftOrder = 0;
 const emptyDraft = (): ComposerDraft => ({ text: "", images: [], busy: false, readingImages: false, error: "" });
@@ -148,7 +152,7 @@ function stablePrompt(data: PromptNodeData) {
 // restricted to real nodes, so draft open/close never invalidates manual slots.
 let autoPositions: Map<string, { x: number; y: number; width: number; height: number }> | undefined;
 
-const projection = computed(() => session.current?.projection);
+const projection = computed(() => preparingSession.value ? projectSession([], null) : session.current?.projection);
 const searchHits = computed<string[]>(() => {
   const value = projection.value;
   if (!searchOpen.value || !value || !session.current) return [];
@@ -162,10 +166,11 @@ const searchCount = computed(() => {
   if (!n) return t("graph.searchNoHits");
   return n === 1 ? t("graph.searchHitOne") : t("graph.searchHits", { n });
 });
-function rememberBranchOrder(id: string, order: number, pendingId?: string) {
-  if (!pendingId && branchOrder.get(id) === order) return;
+function rememberBranchOrder(id: string, order: number | undefined, pendingId?: string) {
+  if (branchOrder.get(id) === order && (!pendingId || !branchOrder.has(pendingId))) return;
   if (pendingId) branchOrder.delete(pendingId);
-  branchOrder.set(id, order);
+  if (order === undefined) branchOrder.delete(id);
+  else branchOrder.set(id, order);
   (layout.layout.branchOrders ??= {})[sessionKey.value] = [...branchOrder];
   void layout.save().catch(error => layout.showNotice(String(error), "error"));
 }
@@ -232,6 +237,7 @@ function nodeContent(id: string) {
 function rebuild() {
   const value = projection.value;
   if (!value) {
+    creatingDraft = undefined;
     nodes.value = [];
     edges.value = [];
     return;
@@ -240,6 +246,9 @@ function rebuild() {
   let restoredLayout: Map<string, ManualPosition> | undefined;
   let restoredSizes: Map<string, Dimensions> | undefined;
   if (activeSession !== sessionKey.value) {
+    const adoptDraft = creatingDraft === session.activeProjectId && session.creation?.status === "ready"
+      && session.current?.session.path === session.creation.path;
+    creatingDraft = preparingSession.value ? session.activeProjectId : undefined;
     dragged.clear();
     restoredLayout = rememberedLayouts.get(sessionKey.value);
     restoredSizes = rememberedDimensions.get(sessionKey.value);
@@ -255,19 +264,26 @@ function rebuild() {
     draftOrder = 0;
     promptCache.clear();
     activeSession = sessionKey.value;
-    draftState.value = emptyDraft();
+    if (!adoptDraft) draftState.value = emptyDraft();
     draftParent.value = undefined;
-    draftModel.value = undefined;
-    draftThinking.value = undefined;
+    if (!adoptDraft) {
+      draftModel.value = undefined;
+      draftThinking.value = undefined;
+    }
     clearSubmittedDraft();
     deleteError.value = "";
   }
   if (draftParent.value && !value.nodes.some(node => node.id === draftParent.value)) resetDraft();
+  // The same submission changes ids as admission and the real turn arrive.
   for (const run of session.current?.graph?.runs ?? []) {
     const pendingId = `pending:${run.runId}`;
-    const order = branchOrder.get(pendingId);
-    if (run.nodeId && order !== undefined) {
-      rememberBranchOrder(run.nodeId, order, pendingId);
+    const submittedId = run.requestId ? `pending:${run.requestId}` : pendingId;
+    const from = branchOrder.has(pendingId) ? pendingId : submittedId;
+    const order = branchOrder.get(from);
+    const to = run.nodeId ?? pendingId;
+    if (order !== undefined) {
+      if (!run.nodeId && run.status !== "running") rememberBranchOrder(from, undefined);
+      else if (to !== from) rememberBranchOrder(to, order, from);
     }
   }
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
@@ -321,6 +337,7 @@ function rebuild() {
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
+      activity: () => session.activityFor(node.id),
       searchHit: searchHitIds.value.has(node.id),
       filterContext: !matchesGraphFilter(node, graphFilter.value),
       onEditLabel: canEditLabel(node) ? () => editLabel(node) : undefined,
@@ -349,47 +366,53 @@ function rebuild() {
   }));
   const rootDraft = !placed.nodes.length;
   if (rootDraft) draftParent.value = null;
+  // Graph branches own their submission state. Only the automatic root editor
+  // (or a single-runtime session) follows sends from other input surfaces.
+  const draftSending = Boolean(draftState.value.busy || (!preparingSession.value && (
+    ((rootDraft || !session.current?.graph) && session.pendingPrompt)
+    || (rootDraft && session.current?.graph?.runs.some(run => run.status === "running" && run.pending)))));
   // The submitted prompt renders as a result-shaped node showing the agent at
   // work until the real node arrives with the settled snapshot.
-  const pending = session.pendingPrompt;
-  const pendingParent = pending?.targetNodeId
-    ? placed.nodes.find((node) => node.id === pending.targetNodeId)
-    : undefined;
-  const pendingSiblings = pendingParent ? children.get(pendingParent.id) ?? [] : [];
-  const pendingTurn: Node<PromptNodeData> | undefined = pending ? {
-    id: pending.message.entryId,
-    type: "prompt",
-    position: pendingParent
-      ? { x: pendingParent.x + pendingParent.width + 92, y: pendingSiblings.length ? Math.max(...pendingSiblings.map((node) => node.y)) + 178 : pendingParent.y }
-      : { x: 48, y: 48 },
-    data: {
-      node: {
-        id: pending.message.entryId,
-        userEntryId: pending.message.entryId,
-        parentId: pending.targetNodeId,
-        title: clipText(pending.message.text, 58) || (pending.message.images?.length ? `🖼 × ${pending.message.images.length}` : "Untitled prompt"),
-        imageCount: pending.message.images?.length,
-        preview: "",
-        timestamp: pending.message.timestamp,
-        rawEntryIds: [pending.message.entryId],
-        leafEntryId: pending.message.entryId,
-        toolCallCount: 0,
-        hasError: false,
-        depth: (pendingParent?.depth ?? -1) + 1,
-        footer: {
-          model: pending.model ?? session.current?.runtime.model ?? null,
-          thinkingLevel: pending.thinkingLevel ?? session.current?.runtime.thinkingLevel ?? "off",
-        },
-      } satisfies GraphNode,
-      active: true,
-      current: false,
-      running: true,
-      runnable: false,
-      blockedReason: "graph.blockedStreaming",
-      content: () => ({ user: pending.message.text, images: pending.message.images, assistant: t("graph.agentRunning") }),
-      onCompose: () => {},
-    },
-  } : undefined;
+  const pendingTurns = (preparingSession.value ? [] : session.currentPendingPrompts).filter(pending =>
+    !pending.requestId || !session.current?.graph?.runs.some(run => run.requestId === pending.requestId)
+  ).map((pending): Node<PromptNodeData> => {
+    const pendingParent = pending.targetNodeId ? placed.nodes.find(node => node.id === pending.targetNodeId) : undefined;
+    const pendingSiblings = pendingParent ? children.get(pendingParent.id) ?? [] : [];
+    return {
+      id: pending.message.entryId,
+      type: "prompt",
+      position: pendingParent
+        ? { x: pendingParent.x + pendingParent.width + 92, y: pendingSiblings.length ? Math.max(...pendingSiblings.map((node) => node.y)) + 178 : pendingParent.y }
+        : { x: 48, y: 48 },
+      data: {
+        node: {
+          id: pending.message.entryId,
+          userEntryId: pending.message.entryId,
+          parentId: pending.targetNodeId,
+          title: clipText(pending.message.text, 58) || (pending.message.images?.length ? `🖼 × ${pending.message.images.length}` : "Untitled prompt"),
+          imageCount: pending.message.images?.length,
+          preview: "",
+          timestamp: pending.message.timestamp,
+          rawEntryIds: [pending.message.entryId],
+          leafEntryId: pending.message.entryId,
+          toolCallCount: 0,
+          hasError: false,
+          depth: (pendingParent?.depth ?? -1) + 1,
+          footer: {
+            model: pending.model ?? session.current?.runtime.model ?? null,
+            thinkingLevel: pending.thinkingLevel ?? session.current?.runtime.thinkingLevel ?? "off",
+          },
+        } satisfies GraphNode,
+        active: true,
+        current: false,
+        running: true,
+        runnable: false,
+        blockedReason: "graph.blockedStreaming",
+        content: () => ({ user: pending.message.text, images: pending.message.images, assistant: t("graph.agentRunning") }),
+        onCompose: () => {},
+      },
+    };
+  });
   const parent = draftParent.value ? placed.nodes.find((node) => node.id === draftParent.value) : undefined;
   const model = draftModel.value === undefined
     ? parent?.footer?.model ?? session.current?.runtime.model ?? null
@@ -400,15 +423,21 @@ function rebuild() {
   const draft: Node<DraftNodeData> | undefined = (parent || rootDraft) ? {
     id: draftId,
     type: "draft",
-    // Keep the editor mounted while sending so failures retain text and images.
-    style: { visibility: pending ? "hidden" : "visible", pointerEvents: pending ? "none" : "auto" },
+    // Keep the editor mounted for failure recovery, but hidden through both
+    // the local submission and the server's pending-to-real-node handoff.
+    style: { visibility: draftSending ? "hidden" : "visible", pointerEvents: draftSending ? "none" : "auto" },
     position: parent
       ? { x: parent.x + parent.width + 92, y: siblings.length ? Math.max(...siblings.map((node) => node.y)) + 178 : parent.y }
       : { x: 48, y: 48 },
     data: {
       draftState: draftState.value,
       parentId: parent?.id ?? null,
-      runnable: Boolean(session.current?.runtime.available),
+      runnable: !preparingSession.value && Boolean(session.current?.runtime.available),
+      initializing: session.creating,
+      creationError: session.creation?.status === "failed" ? session.creation.error : undefined,
+      onRetry: session.creation?.status === "failed" ? () => {
+        void session.create().catch(error => layout.showNotice(String(error), "error"));
+      } : undefined,
       model,
       thinkingLevel,
       models: session.models,
@@ -427,16 +456,17 @@ function rebuild() {
       onSubmit: submitDraft,
     },
   } : undefined;
-  const nextNodes: RenderNode[] = [...turns, ...(pendingTurn ? [pendingTurn] : []), ...(draft ? [draft] : [])];
+  const nextNodes: RenderNode[] = [...turns, ...pendingTurns, ...(draft ? [draft] : [])];
   const nextEdges: Edge[] = value.edges.map((edge) => ({
     ...edge,
     class: "",
   }));
-  if (pending && pendingParent)
-    nextEdges.push({ id: `edge:${pending.message.entryId}`, source: pendingParent.id, target: pending.message.entryId, class: "draft-edge", animated: true });
-  if (parent && draft) nextEdges.push({ id: `edge:${draftId}`, source: parent.id, target: draftId, class: "draft-edge", animated: true });
+  for (const pending of pendingTurns)
+    if (pending.data!.node.parentId && positions.has(pending.data!.node.parentId))
+      nextEdges.push({ id: `edge:${pending.id}`, source: pending.data!.node.parentId, target: pending.id, class: "draft-edge", animated: true });
+  if (parent && draft && !draftSending) nextEdges.push({ id: `edge:${draftId}`, source: parent.id, target: draftId, class: "draft-edge", animated: true });
   const pendingRows = new Map<string | null, number>();
-  for (const run of session.current?.graph?.runs ?? []) {
+  for (const run of preparingSession.value ? [] : session.current?.graph?.runs ?? []) {
     if (!run.pending || run.status !== "running") continue;
     const parentId = run.pending.parentNodeId;
     const anchor = placed.nodes.find(n => n.id === parentId);
@@ -449,6 +479,7 @@ function rebuild() {
     nextNodes.push({ id, type: "prompt", position: { x: anchor ? anchor.x + anchor.width + 92 : 48,
       y: (siblings.length ? Math.max(...siblings.map(n => n.y)) + 178 : anchor?.y ?? 48) + offset * 178 },
       data: { node, active: true, current: false, running: true, runnable: false,
+        activity: () => session.activityFor(id),
         blockedReason: "graph.blockedStreaming", content: () => ({ user: run.pending!.text, assistant: t("graph.agentRunning"), images: run.pending!.images }), onCompose: () => {} } });
     if (parentId) nextEdges.push({ id: `edge:${id}`, source: parentId, target: id, animated: true });
   }
@@ -502,14 +533,14 @@ function layoutBranches(items: RenderNode[]) {
   // Runs on every rebuild and resize so settled lanes follow measured card
   // heights; transients reserve vertical space but never widen columns, and a
   // draft's reservation is capped at its opening slot so growth only overlays.
-  const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
+  const visible = items.filter(node => typeof node.style === "function" || node.style?.visibility !== "hidden");
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
     ? { id: node.id, parentId: node.data.parentId, timestamp: "\uffff", depth: (depths.get(node.data.parentId) ?? -1) + 1 }
     : { ...node.data.node, timestamp: transientNodeIds.has(node.id) ? "\uffff" : node.data.node.timestamp });
   const order = new Map(branchOrder);
   if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
-  const pending = session.pendingPrompt;
+  const pending = !session.current?.graph && session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
   const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.type === "draft"
     ? { width: node.dimensions!.width, height: DRAFT_SIZE.height }
@@ -647,16 +678,27 @@ function resetDraft() {
 async function submitDraft(text: string, images?: PromptImage[]) {
   const order = draftOrder;
   const targetSession = sessionKey.value;
+  const targetDraft = draftState.value;
+  const requestId = order && session.current?.graph ? crypto.randomUUID() : undefined;
+  if (requestId && order) rememberBranchOrder(`pending:${requestId}`, order);
   const delivered = await runDraftSubmit(
     draftParent.value ?? null,
     text,
     draftModel.value,
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
+    requestId ? { requestId } : undefined,
   );
-  if (!delivered) return false;
+  if (!delivered) {
+    if (requestId && targetSession === sessionKey.value) rememberBranchOrder(`pending:${requestId}`, undefined);
+    return false;
+  }
   if (targetSession !== sessionKey.value) return true;
-  if (submittedNodeId.value && order) rememberBranchOrder(submittedNodeId.value, order);
+  if (delivered.nodeId && order) rememberBranchOrder(delivered.nodeId, order, requestId ? `pending:${requestId}` : undefined);
+  if (targetDraft !== draftState.value) {
+    rebuild();
+    return true;
+  }
   if (session.current?.graph) {
     resetDraft(); rebuild();
     await center(session.focusedNode ?? undefined, true);
@@ -879,17 +921,17 @@ function startDrag(event: NodeMouseEvent) {
   dragFollowsBranch = holdsBranchModifier(event);
 }
 
-function trackDragModifier(event: NodeMouseEvent) {
+function trackDrag(event: NodeMouseEvent) {
   if (holdsBranchModifier(event)) dragFollowsBranch = true;
+  // Rebuilds and measurements during a drag must use the current pointer position.
+  dragged.set(event.node.id, { ...event.node.position, branch: dragFollowsBranch });
+  const node = nodes.value.find(node => node.id === event.node.id);
+  if (node) node.position = { ...event.node.position };
 }
 
 function rememberDrag(event: NodeMouseEvent) {
-  const branch = dragFollowsBranch || holdsBranchModifier(event);
+  trackDrag(event);
   dragFollowsBranch = false;
-  dragged.set(event.node.id, { ...event.node.position, branch });
-  const node = nodes.value.find(node => node.id === event.node.id);
-  if (!node) return;
-  node.position = { ...event.node.position };
   // Lay out from the drop at once, so a branch dragged along moves with its card
   // instead of following on some later rebuild.
   layoutBranches(nodes.value);
@@ -917,13 +959,14 @@ function syncNodeDimensions(changes: NodeChange[]) {
 
 const pendingRuns = computed(() => JSON.stringify(session.current?.graph?.runs.filter(run => run.pending && run.status === "running") ?? []));
 watch(
-  [() => sessionKey.value, () => projection.value?.nodes, () => projection.value?.edges,
+  [() => sessionKey.value, () => session.creation, () => projection.value?.nodes, () => projection.value?.edges,
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
-    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns,
+    () => session.models, () => draftParent.value, () => draftState.value.busy,
+    () => session.currentPendingPrompts, () => session.deleteBlockedReason, pendingRuns,
     searchHitIds, graphFilter, labelShortcut],
   () => {
-    if (!session.current) booted.value = false;
+    if (!session.current && !preparingSession.value) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
     // Stash the outgoing session's arrangement and pane position before the
     // rebuild resets per-session state. A teardown (no projection) clears the
@@ -956,12 +999,14 @@ watch(
         {{ t('graph.reopenSession') }}
       </Button>
     </div>
-    <div v-if="!session.current" class="graph-empty">
+    <div v-if="!session.current && !preparingSession" class="graph-empty">
       <div aria-hidden="true"><Network :size="64" :stroke-width="1.6" /></div>
       <span>
         {{ t("graph.empty") }}
       </span>
-      <Button @click="emit('newSession')">{{ t("graph.newSession") }}</Button>
+      <Button :disabled="session.loading" :aria-busy="session.loading" @click="emit('newSession')">
+        {{ t(session.loading ? "graph.startingSession" : "graph.newSession") }}
+      </Button>
     </div>
 
     <VueFlow
@@ -981,7 +1026,7 @@ watch(
       @node-click="nodeClicked"
       @node-double-click="nodeDoubleClicked"
       @node-drag-start="startDrag"
-      @node-drag="trackDragModifier"
+      @node-drag="trackDrag"
       @node-drag-stop="rememberDrag"
       @nodes-change="syncNodeDimensions"
     >

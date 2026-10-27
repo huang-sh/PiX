@@ -87,6 +87,8 @@ export function launcherScript(v: {
   port: number;
   base: string;
   deployCredentials?: boolean;
+  /** Keeps the SSH session carrying the local forward alive until stdin closes. */
+  keepAlive?: boolean;
 }) {
   const flags = `--cwd ${v.cwd} --port ${v.port} --ready-file "$F"` +
     (v.deployCredentials ? " --allow-credential-deploy" : "");
@@ -101,7 +103,8 @@ export function launcherScript(v: {
     // The host removes its own ready file shortly after; the wrapper must
     // not (a blocking rm on a network filesystem pins this shell, and a
     // backgrounded one dies with the session that spawned it).
-    "cat \"$F\" 2>/dev/null",
+    "cat \"$F\" 2>/dev/null || exit 1",
+    ...(v.keepAlive ? ["exec cat >/dev/null"] : []),
   ].join("\n");
 }
 
@@ -127,7 +130,7 @@ export class WslHostClient {
     readonly socket: WebSocket,
     readonly hello: HostHello,
     readonly handle: HostHandle,
-    /** A reattach's `ssh -N` carries the tunnel: its exit ends the link. */
+    /** An SSH child carries the tunnel: its exit ends the link. */
     private readonly childIsTransport = false,
     /** True when this client attached to a host an earlier link started. */
     readonly reattached = false,
@@ -300,6 +303,7 @@ export class WslHostClient {
         port: remotePort,
         base: "$HOME/.pix",
         deployCredentials: options.deployCredentials,
+        keepAlive: true,
       });
       const child = spawn(
         "ssh",
@@ -353,7 +357,7 @@ export class WslHostClient {
           timeout,
           options.signal,
         );
-        return new WslHostClient(child, socket, hello, handle);
+        return new WslHostClient(child, socket, hello, handle, true);
       } catch (error) {
         // The host is up and listening; only the tunnel to it died.
         throw new HostStarted(error instanceof Error ? error.message : String(error), handle);
@@ -591,11 +595,11 @@ export class WslHostClient {
   request<T = unknown>(route: ProjectRoute, input?: unknown, timeoutMs?: number): Promise<T> {
     if (!this.connected)
       return Promise.reject(new Error("Remote host is not connected"));
-    // Long-running work is monitored by the transport heartbeat; timing it out
+    // Work and its cancellation are monitored by the transport heartbeat; timing them out
     // would leave an ambiguous operation running on the host.
     const action = (input as { action?: string } | undefined)?.action;
-    timeoutMs ??= route === "shell.run" || (route === "agent.control" &&
-      ["prompt", "compact", "bash", "navigateTree", "reload", "newSession"].includes(action ?? "")) ? 0 : 30_000;
+    timeoutMs ??= route === "shell.run" || route === "session.stop" || (route === "agent.control" &&
+      ["prompt", "promptAt", "abort", "branchAbort", "compact", "bash", "navigateTree", "reload", "newSession"].includes(action ?? "")) ? 0 : 30_000;
     const id = String(++this.nextId);
     return new Promise<T>((accept, reject) => {
       const finish = (error?: Error, value?: unknown) => {

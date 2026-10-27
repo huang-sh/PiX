@@ -74,13 +74,14 @@ function snapshot(withTurn: boolean): SessionSnapshot {
   };
 }
 
-// The store synthesizes `pending:<ts>` ids for submitted-but-unprocessed prompts.
+// Submitted-but-unprocessed prompts are keyed by their temporary entry id.
 let pendingEntryId = `pending:${Date.now()}`;
 
 function setPendingPrompt(targetNodeId: string | null) {
   const session = useSessionStore();
   pendingEntryId = `pending:${Date.now()}`;
-  session.pendingPrompt = {
+  session.pendingPrompts[pendingEntryId] = {
+    projectId: session.activeProjectId, sessionPath: session.current!.session.path,
     message: {
       entryId: pendingEntryId,
       turnId: pendingEntryId,
@@ -165,7 +166,7 @@ describe("GraphPanel pending prompt", () => {
     const submit = vi.spyOn(session, "promptAt").mockImplementation(async () => {
       setPendingPrompt(null);
       try { await new Promise<void>((_resolve, reject) => { rejectSend = reject; }); }
-      finally { session.pendingPrompt = undefined; }
+      finally { delete session.pendingPrompts[pendingEntryId]; }
     });
     const wrapper = await mountPanel(pinia);
     const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "graph.png", { type: "image/png" });
@@ -192,7 +193,7 @@ describe("GraphPanel pending prompt", () => {
     await flushPromises();
     expect(wrapper.get(".draft-node").isVisible()).toBe(false);
 
-    session.pendingPrompt = undefined;
+    delete session.pendingPrompts[pendingEntryId];
     await flushPromises();
     expect(wrapper.find(".draft-node").exists()).toBe(true);
     expect(wrapper.get<HTMLTextAreaElement>(".draft-node textarea").element.value).toBe("Keep this draft");

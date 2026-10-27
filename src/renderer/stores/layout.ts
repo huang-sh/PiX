@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { toRaw } from "vue";
+import type { ComposerDraft } from "../components/PromptComposer.vue";
 import type { LayoutState, PanelId, SessionSnapshot, SettingsBundle } from "../../shared/types";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
@@ -51,11 +52,9 @@ export const useLayoutStore = defineStore("layout", {
     // own, so the last frame that showed the run in flight is remembered to
     // revert a failed column to the node the prompt was submitted from.
     chatColumnParents: {} as Record<string, string>,
-    // Composer expansion per pinned column. A pinned column remounts when its
-    // node advances, so the flag lives here to survive that remount — fresh
-    // pins and every new session start collapsed. The primary column never
-    // remounts and keeps its expansion in component state.
-    chatColumnComposers: {} as Record<string, boolean>,
+    // A pinned column remounts when its node advances. Keep its editor state
+    // here so an in-flight submission can restore its draft after a failure.
+    chatColumnComposers: {} as Record<string, { open: boolean; draft: ComposerDraft }>,
     commandOpen: false,
     commandQuery: "",
     imagePreview: undefined as { src: string; alt: string } | undefined,
@@ -218,8 +217,8 @@ export const useLayoutStore = defineStore("layout", {
     advanceChatColumn(from: string, to: string) {
       if (!this.chatColumns.includes(from) || from === to) return;
       delete this.chatColumnParents[from];
-      // The composer expansion follows the column across its remount; a merge
-      // onto an already-pinned node keeps that column's own expansion.
+      // The editor follows the column across its remount; a merge onto an
+      // already-pinned node keeps that column's own draft and expansion.
       const composer = this.chatColumnComposers[from];
       delete this.chatColumnComposers[from];
       if (composer !== undefined && !(to in this.chatColumnComposers)) this.chatColumnComposers[to] = composer;

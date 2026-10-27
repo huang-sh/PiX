@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal, X } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
@@ -10,7 +10,7 @@ import CopyButton from "../../components/CopyButton.vue";
 import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import BranchHistory, { type HistoryTurn as Turn } from "./BranchHistory.vue";
 import ToolDuration from "./ToolDuration.vue";
-import PromptComposer from "../../components/PromptComposer.vue";
+import PromptComposer, { type ComposerDraft } from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
@@ -20,14 +20,20 @@ import { useSessionStore } from "../../stores/session";
 const props = defineProps<{ nodeId?: string | null }>();
 const session = useSessionStore();
 const layout = useLayoutStore();
-const panelNodeId = computed(() => props.nodeId ?? session.focusedNode ?? session.current?.projection.activeNodeId ?? null);
+const panelNodeId = computed(() => {
+  const pending = props.nodeId && session.currentPendingPrompts.find(prompt => prompt.columnId === props.nodeId
+    && prompt.columnDraft === layout.chatColumnComposers[props.nodeId!]?.draft);
+  const run = pending && session.current?.graph?.runs.find(run => run.requestId === pending.requestId);
+  return (run && run.status === "running" ? run.nodeId ?? `pending:${run.runId}` : undefined)
+    ?? props.nodeId ?? session.focusedNode ?? session.current?.projection.activeNodeId ?? null;
+});
 const panelNode = computed(() => session.nodeFor(panelNodeId.value));
 const selectedRun = computed(() => session.runFor(panelNodeId.value));
 // Every branch's store updates immediately; only the visible view is frame-paced.
 const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.activityFor(panelNodeId.value));
 const activity = shallowRef<AgentActivity>();
 let activityFrame: number | undefined;
-const { submitDraft, submittedNodeId } = useDraftSubmit();
+const { submitDraft } = useDraftSubmit();
 const { t } = useI18n();
 const scroll = ref<HTMLElement>();
 const content = ref<HTMLElement>();
@@ -131,32 +137,30 @@ function setComposerThinking(level: string, explicit: boolean) {
 
 // The host admits the prompt and its model settings as one branch operation.
 // A pinned column submits without moving the global focus, then follows its
-// own branch to the new node; the primary column keeps the current selection.
+// own branch as soon as progress arrives. Its identity stays on the parent
+// through initialization so failures cannot merge away the submitting editor.
 async function submitComposer(text: string, images?: PromptImage[]) {
-  if (!props.nodeId)
-    return submitDraft(panelNode.value?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
-  const delivered = await submitDraft(props.nodeId, text, composerModelValue.value, composerThinkingValue.value, images, { follow: false });
-  if (delivered && submittedNodeId.value) layout.advanceChatColumn(props.nodeId, submittedNodeId.value);
-  return delivered;
+  return Boolean(await submitDraft(props.nodeId ?? panelNode.value?.id ?? null, text,
+    composerModelValue.value, composerThinkingValue.value, images,
+    props.nodeId ? { follow: false, columnId: props.nodeId } : undefined));
 }
 
-// Each column's composer expands independently. A pinned column remounts
-// when its node advances, so its expansion is kept in the store to survive
-// that remount; the primary column never remounts.
+// Drafts and submission callbacks must share the same state across a pinned
+// column's remounts, including a failed handoff back to the parent node.
 const composer = ref<InstanceType<typeof PromptComposer>>();
-const composerOpen = ref(props.nodeId ? layout.chatColumnComposers[props.nodeId] ?? false : false);
-// Register the live state up front, so a record entry always mirrors a mounted
-// column and an advance can tell a live column from an id no column holds.
-if (props.nodeId) layout.chatColumnComposers[props.nodeId] = composerOpen.value;
+const savedComposer = props.nodeId ? layout.chatColumnComposers[props.nodeId] : undefined;
+const composerState = reactive(savedComposer ?? {
+  open: false,
+  draft: { text: "", images: [], busy: false, readingImages: false, error: "" } as ComposerDraft,
+});
+if (props.nodeId) layout.chatColumnComposers[props.nodeId] = composerState;
 async function openComposer() {
-  composerOpen.value = true;
-  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = true;
+  composerState.open = true;
   await nextTick();
   void composer.value?.focus();
 }
 function closeComposer() {
-  composerOpen.value = false;
-  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = false;
+  composerState.open = false;
 }
 // Reopening the chat panel puts the cursor back in the primary column's
 // composer when it is expanded; pinned columns leave the focus alone.
@@ -479,7 +483,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer v-if="session.current" class="chat-composer">
-      <div v-if="!composerOpen" class="composer-bar">
+      <div v-if="!composerState.open" class="composer-bar">
         <button
           type="button"
           class="composer-collapsed"
@@ -516,6 +520,7 @@ onBeforeUnmount(() => {
         </div>
         <PromptComposer
           ref="composer"
+          :draft-state="composerState.draft"
           :runnable="composerRunnable"
           :model="composerModelValue"
           :thinking-level="composerThinkingValue"

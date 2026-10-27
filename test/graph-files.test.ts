@@ -322,6 +322,32 @@ test("tree ownership is exclusive and released sessions can reopen", () => {
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a foreign-host lock explains recovery, stays intact, and an independent copy can reopen after removing it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-lock-foreign-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    mkdirSync(graph.dir, { recursive: true });
+    durableWrite(graph.main, encodeSession(initial));
+    const file = join(graph.dir, "owner.json");
+    const host = `${hostname()}-other`;
+    const lock = JSON.stringify({ pid: process.pid, host });
+    writeFileSync(file, lock);
+    assert.throws(() => graph.acquire(), (error: Error) => {
+      assert.ok(error.message.includes(host));
+      assert.ok(error.message.includes(hostname()));
+      assert.ok(error.message.includes(file));
+      assert.match(error.message, /shared.*close.*owning computer/);
+      assert.match(error.message, /independent copy.*remove only.*copied lock file/);
+      return true;
+    });
+    assert.equal(readFileSync(file, "utf8"), lock);
+    rmSync(file);
+    graph.acquire();
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).host, hostname());
+    assert.deepEqual(readStrict(graph.main), initial);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a stale lock whose pid was recycled by an unrelated process is taken over", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-lock-recycled-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));

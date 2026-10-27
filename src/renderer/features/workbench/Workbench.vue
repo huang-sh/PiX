@@ -174,7 +174,7 @@ watch(() => [layout.layout.collapsed.navigator, layout.layout.navigatorPinned], 
 // Pinned chat columns die with their node or their session, and a column that
 // submitted follows its branch (pending pin → real node, failed run → parent).
 watch(() => session.current?.session.path, () => layout.clearChatColumns());
-watch([() => session.current?.projection.nodes, () => session.current?.graph?.runs], () => {
+watch([() => session.current?.projection.nodes, () => session.current?.graph?.runs, () => layout.chatColumns], () => {
   const current = session.current;
   layout.trackChatColumns(
     new Set(current?.projection.nodes.map((node) => node.id)),

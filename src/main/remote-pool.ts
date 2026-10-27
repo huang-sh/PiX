@@ -649,6 +649,9 @@ export class RemoteWorkspacePool {
           client = await WslHostClient.reattach(remembered.handle, options);
           abort.signal.throwIfAborted();
         } catch (error) {
+          // Cancellation says nothing about the host's health. A late successful
+          // attachment is released by the outer catch without stopping its host.
+          abort.signal.throwIfAborted();
           client = undefined;
           // An unreachable server may still host running work: fail this
           // attempt and keep the handle for the next one.

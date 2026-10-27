@@ -81,6 +81,11 @@ export const MODEL_ACTIONS = [
   "setBrokerProviders",
 ] as const satisfies readonly AgentControl["action"][];
 
+const READ_ACTIONS = [
+  "commands", "getState", "getModels", "getCustomModels", "getThinkingLevels",
+  "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats",
+] as const satisfies readonly AgentControl["action"][];
+
 export async function piSdkVersion(): Promise<string> {
   const { VERSION } = await import("@earendil-works/pi-coding-agent");
   return VERSION;
@@ -269,6 +274,10 @@ export class PiRuntime {
   openExternal: (url: string) => Promise<void>;
   private closing = false;
   private pendingControls = new Set<Promise<unknown>>();
+  private extensionStartup: Promise<void> = Promise.resolve();
+  private extensionSession?: object;
+  private stopStartupDialogs?: () => void;
+  private controlEpoch = 0;
   private closeTask?: Promise<void>;
   private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
   eventScope?: { graphId: string; branchId: string; runId: string };
@@ -610,40 +619,62 @@ export class PiRuntime {
         sessionManager,
         sessionStartEvent,
       });
-      let signInMessage: string | undefined;
-      const notify = (message: string, level = "info") => {
-        if (/https?:\/\//.test(message)) signInMessage = message;
-        this.emit({ type: "notice", payload: { message, level, source: "extension" } });
-      };
-      const unsupported = async () => {
-        throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
-      };
-      await created.session.bindExtensions({
-        mode: "rpc",
-        uiContext: {
-          ...created.session.extensionRunner.getUIContext(),
-          notify,
-          select: (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) =>
-            this.dialogs?.request(created.session, { kind: "select", title, options, source: cwd, sessionPath: created.session.sessionFile }, opts) ?? unsupported(),
-          confirm: async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
-            (await (this.dialogs?.request(created.session, { kind: "confirm", title, message, options: ["yes"], source: cwd, sessionPath: created.session.sessionFile }, opts) ?? unsupported())) === "yes",
-          input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
-            const message = signInMessage;
-            signInMessage = undefined;
-            return this.dialogs?.request(created.session, { kind: "input", title, placeholder, message, source: cwd, sessionPath: created.session.sessionFile }, opts) ?? unsupported();
-          },
-          editor: unsupported,
-          custom: unsupported,
-        },
-        onError: (error: { extensionPath: string; error: string }) =>
-          notify(`${error.extensionPath}: ${error.error}`, "error"),
-      });
       return {
         ...created,
         services,
         diagnostics: services.diagnostics ?? [],
       };
     };
+  }
+  private startExtensions(session: any, cwd: string) {
+    let signInMessage: string | undefined;
+    const notify = (message: string, level = "info") => {
+      if (/https?:\/\//.test(message)) signInMessage = message;
+      this.emit({ type: "notice", payload: { message, level, source: "extension" } });
+    };
+    const unsupported = async () => {
+      throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
+    };
+    // Session-start hooks may build large search indexes. Show the session
+    // immediately; controls still wait for these hooks before using it.
+    let active = true;
+    this.stopStartupDialogs = () => { active = false; };
+    const startup: Promise<void> = session.bindExtensions({
+      mode: "rpc",
+      uiContext: {
+        ...session.extensionRunner.getUIContext(),
+        notify,
+        select: (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) =>
+          !active || this.closing ? Promise.resolve(undefined) :
+            this.dialogs?.request(session, { kind: "select", title, options, source: cwd, sessionPath: session.sessionFile }, opts) ?? unsupported(),
+        confirm: async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
+          active && !this.closing && (await (this.dialogs?.request(session, { kind: "confirm", title, message, options: ["yes"], source: cwd, sessionPath: session.sessionFile }, opts) ?? unsupported())) === "yes",
+        input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+          if (!active || this.closing) return Promise.resolve(undefined);
+          const message = signInMessage;
+          signInMessage = undefined;
+          return this.dialogs?.request(session, { kind: "input", title, placeholder, message, source: cwd, sessionPath: session.sessionFile }, opts) ?? unsupported();
+        },
+        editor: unsupported,
+        custom: unsupported,
+      },
+      onError: (error: { extensionPath: string; error: string }) =>
+        notify(`${error.extensionPath}: ${error.error}`, "error"),
+    });
+    this.extensionStartup = startup;
+    const settled = (error?: unknown) => {
+      setImmediate(() => {
+        if (this.runtime?.session !== session || this.closing) return;
+        try {
+          if (error !== undefined) notify(error instanceof Error ? error.message : String(error), "error");
+          this.emit({ type: "sessions", payload: { current: this.snapshot() } });
+        } catch (error) { debugLog("pi-runtime: startup notification", error); }
+      });
+    };
+    void startup.then(() => settled(), error => {
+      debugLog("pi-runtime: extension startup", error);
+      settled(error);
+    });
   }
   bind() {
     this.unsubscribe?.();
@@ -656,6 +687,11 @@ export class PiRuntime {
       } catch (e) { debugLog("pi-runtime: event push", e); }
     });
     this.unsubscribe = () => { unsubscribe(); forwarder.dispose(); };
+    const session = this.runtime.session;
+    if (this.extensionSession !== session) {
+      this.extensionSession = session;
+      this.startExtensions(session, this.cwd!);
+    }
   }
   async waitForWrites() {
     await this.runtime?.session.waitForIdle?.();
@@ -745,9 +781,10 @@ export class PiRuntime {
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
-    if (this.runtime)
+    if (this.runtime) {
+      await this.extensionStartup;
       await this.runtime.switchSession(path, { cwdOverride: this.cwd });
-    else {
+    } else {
       const manager = pi.SessionManager.open(path, this.dir, this.cwd);
       this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
         cwd: this.cwd,
@@ -761,8 +798,10 @@ export class PiRuntime {
   async create() {
     if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
-    if (this.runtime) await this.runtime.newSession();
-    else {
+    if (this.runtime) {
+      await this.extensionStartup;
+      await this.runtime.newSession();
+    } else {
       const manager = pi.SessionManager.create(this.cwd, this.dir);
       this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
         cwd: this.cwd,
@@ -871,6 +910,13 @@ export class PiRuntime {
     return pending.finally(() => this.pendingControls.delete(pending));
   }
   private async runControl(input: AgentControl): Promise<unknown> {
+    const epoch = this.controlEpoch;
+    if (input.action === "abort") ++this.controlEpoch;
+    else if (!["abortBash", "abortCompaction", "abortRetry"].includes(input.action)) {
+      await this.extensionStartup;
+      if (this.closing || (epoch !== this.controlEpoch && !(READ_ACTIONS as readonly string[]).includes(input.action)))
+        throw new Error("Session operation cancelled");
+    }
     const s = this.runtime?.session;
     const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
     if (!this.cwd && !modelAction)
@@ -889,6 +935,8 @@ export class PiRuntime {
     }
     switch (input.action) {
       case "prompt": {
+        // Broker model selection can await auth or extension hooks after the startup check.
+        if (this.closing || epoch !== this.controlEpoch) throw new Error("Session operation cancelled");
         // prompt() also resolves without a turn for handled extension
         // commands and throws before appending anything (busy, no model, no
         // auth) — the footer may only be recorded when this call created one.
@@ -1241,24 +1289,34 @@ export class PiRuntime {
     if (!runtime) return;
     this.dialogs?.cancel(runtime.session);
     this.closing = true;
+    this.stopStartupDialogs?.();
+    ++this.controlEpoch;
     this.unsubscribe?.();
     try {
       runtime.session.abortBash();
       await runtime.session.abort();
       // A prompt can still be in preflight, or writing its footer after abort.
       // Drain controller calls before unlinking the session file.
-      await Promise.allSettled([...this.pendingControls]);
+      await Promise.allSettled([this.extensionStartup, ...this.pendingControls]);
       await runtime.dispose();
       if (this.runtime === runtime) this.runtime = undefined;
     } finally {
+      this.extensionSession = undefined;
+      this.extensionStartup = Promise.resolve();
       this.closing = false;
     }
   }
   dispose() {
+    this.stopStartupDialogs?.();
     this.dialogs?.cancel(this);
     if (this.runtime) this.dialogs?.cancel(this.runtime.session);
     this.unsubscribe?.();
-    this.runtime?.session?.dispose?.();
+    const runtime = this.runtime;
+    ++this.controlEpoch;
+    void this.extensionStartup.then(() => runtime?.session?.dispose?.(), () => runtime?.session?.dispose?.())
+      .catch(error => debugLog("pi-runtime: dispose", error));
+    this.extensionStartup = Promise.resolve();
+    this.extensionSession = undefined;
     this.runtime = undefined;
   }
 }

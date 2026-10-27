@@ -14,6 +14,255 @@ async function until(check: () => boolean) {
   throw new Error("Timed out waiting for graph state");
 }
 
+test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 30000 }, async t => {
+  for (const stage of ["startup", "model", "model failure", "startup abort", "model abort", "open abort", "startup direct abort", "model direct abort"]) for (const target of ["main", "branch", "continuation"]) {
+    if (stage === "open abort" && target === "main") continue;
+    if (stage.includes("direct") && target !== "main") continue;
+    await t.test(`${target}: ${stage}`, async () => {
+      const home = mkdtempSync(join(tmpdir(), "pix-pending-startup-"));
+      const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+      process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+      const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+      const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+      const startup = stage.startsWith("startup"), cancelled = stage.endsWith("abort");
+      let block = target === "main" && startup, entered = false;
+      let release!: () => void;
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      runtime["sessionServicesOptions"] = (pi, cwd) => ({
+        cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+        resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+          (pi: any) => pi.on("session_start", async () => {
+            if (block && startup) { entered = true; await blocked; }
+          }),
+        ] },
+      });
+      const factory = runtime.factory.bind(runtime);
+      runtime.factory = pi => async args => {
+        const result = await factory(pi)(args);
+        result.services.modelRuntime.registerNativeProvider(faux.provider);
+        if (block && stage === "open abort") { entered = true; await blocked; }
+        const setModel = result.session.setModel.bind(result.session);
+        result.session.setModel = async (...args: any[]) => {
+          if (block && stage.startsWith("model")) {
+            entered = true; await blocked;
+            if (stage === "model failure") throw new Error("simulated model configuration failure");
+          }
+          return setModel(...args);
+        };
+        return result;
+      };
+      let submitted: Promise<unknown> | undefined, stopped: Promise<unknown> | undefined;
+      try {
+        await runtime.create();
+        if (!block) await runtime.control({ action: "commands" });
+        const manager = runtime.runtime.session.sessionManager;
+        manager.appendMessage({ role: "user", content: "parent", timestamp: 1 });
+        manager.appendMessage(fauxAssistantMessage("parent reply"));
+        let parentId = target === "main" ? runtime.snapshot().projection.activeNodeId : null;
+        if (target === "continuation") {
+          faux.setResponses([fauxAssistantMessage("branch reply")]);
+          await runtime.control({ action: "promptAt", requestId: "first-branch", nodeId: null,
+            text: "branch parent", provider: "faux", modelId: "test" });
+          await until(() => !runtime.busy);
+          parentId = runtime.snapshot().graph!.runs.find(run => run.requestId === "first-branch")!.nodeId;
+          assert.ok(parentId);
+        }
+        block = true;
+        faux.setResponses([fauxAssistantMessage("new reply")]);
+        // The input metadata must survive refresh even before a user entry exists.
+        submitted = runtime.control({ action: "promptAt", requestId: "pending-request", nodeId: parentId,
+          text: "pending question", provider: "faux", modelId: "test" });
+        const failure = cancelled ? /Session operation cancelled/ : /simulated model configuration failure/;
+        const rejected = cancelled || stage === "model failure" ? assert.rejects(submitted, failure) : undefined;
+        assert.equal(runtime.busy, true, "queued admission must prevent session eviction");
+        await until(() => entered && Boolean(runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")));
+        for (let refresh = 0; refresh < 2; refresh++) {
+          const snapshot = runtime.snapshot();
+          const run = snapshot.graph!.runs.find(run => run.requestId === "pending-request")!;
+          assert.equal(runtime.busy, true);
+          assert.equal(run.status, "running");
+          assert.equal(run.nodeId, null, "an old parent must never be acknowledged as the new turn");
+          assert.deepEqual(run.pending, { text: "pending question", parentNodeId: parentId, images: undefined });
+          assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
+        }
+        if (cancelled) {
+          const run = runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")!;
+          stopped = runtime.control(stage.includes("direct") ? { action: "abort" }
+            : { action: "branchAbort", branchId: run.branchId, runId: run.runId });
+          void stopped.catch(() => {});
+          await new Promise<void>(resolve => setImmediate(resolve));
+        }
+        release();
+        if (rejected) await rejected; else await submitted;
+        if (stopped) {
+          const result = await stopped;
+          const stoppedSnapshot = stage.includes("direct") ? runtime.snapshot() : result as SessionSnapshot;
+          assert.notEqual(stoppedSnapshot.graph!.runs.find(run => run.requestId === "pending-request")?.status, "running");
+        }
+        await until(() => !runtime.busy);
+        const snapshot = runtime.snapshot();
+        const run = snapshot.graph!.runs.find(run => run.requestId === "pending-request")!;
+        assert.notEqual(run.status, "running");
+        assert.equal(run.pending, undefined);
+        if (rejected) assert.match(run.error ?? "", failure);
+        else {
+          const node = snapshot.projection.nodes.find(node => node.id === run.nodeId)!;
+          assert.equal(node.title, "pending question");
+          assert.equal(node.parentId, parentId);
+          assert.match(JSON.stringify(snapshot.entries), /new reply/);
+        }
+        if (cancelled) {
+          assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
+          assert.ok(!JSON.stringify(snapshot.entries).includes("new reply"), "no model call may start after stop");
+          block = false;
+          faux.setResponses([fauxAssistantMessage("after cancellation")]);
+          await runtime.control({ action: "promptAt", requestId: "after-stop", nodeId: parentId,
+            text: "fresh question", provider: "faux", modelId: "test" });
+          await until(() => !runtime.busy);
+          assert.match(JSON.stringify(runtime.snapshot().entries), /after cancellation/);
+        }
+      } finally {
+        release();
+        await submitted?.catch(() => {});
+        await stopped?.catch(() => {});
+        await runtime.close();
+        if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+        if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("broker model preflight respects cancellation before a prompt starts", { timeout: 15000 }, async t => {
+  for (const action of ["run", "abort", "branchAbort", "close"] as const) await t.test(action, async t => {
+    const home = mkdtempSync(join(tmpdir(), "pix-broker-preflight-"));
+    const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+    process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+    const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+    const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+    const factory = runtime.factory.bind(runtime);
+    runtime.factory = pi => async args => {
+      const result = await factory(pi)(args);
+      result.services.modelRuntime.registerNativeProvider(faux.provider);
+      return result;
+    };
+    let entered!: () => void, release!: () => void;
+    const updating = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let stopped: Promise<unknown> | undefined;
+    try {
+      await runtime.create();
+      await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+      const session = runtime.runtime.session, manager = session.sessionManager;
+      runtime.brokerProviders.add("faux");
+      const getModel = session.modelRuntime.getModel.bind(session.modelRuntime);
+      t.mock.method(session.modelRuntime, "getModel", (provider: string, id: string) => {
+        const model = getModel(provider, id);
+        return model ? { ...model, name: "updated broker model" } : model;
+      });
+      const setModel = session.setModel.bind(session);
+      const updatingModel = t.mock.method(session, "setModel", async (...args: unknown[]) => {
+        entered(); await blocked;
+        return setModel(...args);
+      });
+      faux.setResponses([fauxAssistantMessage("preflight reply")]);
+      await runtime.control({ action: "promptAt", requestId: "broker-preflight", nodeId: null, text: "pending broker question" });
+      await updating;
+      const run = runtime.snapshot().graph!.runs.find(run => run.requestId === "broker-preflight")!;
+      assert.equal(run.status, "running");
+      assert.equal(run.nodeId, null);
+      if (action !== "run") {
+        stopped = action === "close" ? runtime.close() : runtime.control(action === "abort" ? { action: "abort" }
+          : { action: "branchAbort", branchId: run.branchId, runId: run.runId });
+        void stopped.catch(() => {});
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      release();
+      await stopped;
+      await until(() => !runtime.busy);
+      assert.equal(updatingModel.mock.callCount(), 1);
+      const entries = JSON.stringify(manager.getEntries().filter((entry: { message?: { role?: string } }) =>
+        entry.message?.role === "user" || entry.message?.role === "assistant"));
+      if (action === "run") {
+        assert.match(entries, /pending broker question/);
+        assert.match(entries, /preflight reply/);
+        assert.equal(session.model.name, "updated broker model");
+      } else {
+        assert.doesNotMatch(entries, /pending broker question|preflight reply/);
+        if (action === "close") assert.equal(runtime.runtime, undefined);
+        else {
+          assert.match(runtime.snapshot().graph!.runs.find(run => run.requestId === "broker-preflight")?.error ?? "", /cancelled/);
+          faux.setResponses([fauxAssistantMessage("reply after stop")]);
+          await runtime.control({ action: "promptAt", requestId: "after-broker-stop", nodeId: null, text: "fresh question" });
+          await until(() => !runtime.busy);
+          assert.match(JSON.stringify(runtime.snapshot().entries), /reply after stop/);
+        }
+      }
+    } finally {
+      release();
+      await stopped?.catch(() => {});
+      await runtime.close();
+      if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+      if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+test("each branch waits for its own extension startup without blocking the main session", { timeout: 15000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-branch-startup-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home;
+  process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const events: any[] = [];
+  const runtime = new GraphRuntime(home, join(home, "sessions"), event => { events.push(event); }, async () => {});
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let starts = 0, invoked = 0, shutdown = 0;
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({
+    cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+      (pi: any) => {
+        let ready = false;
+        pi.on("session_start", async () => {
+          if (++starts > 1) await blocked;
+          ready = true;
+        });
+        pi.on("session_shutdown", () => { assert.equal(ready, true); shutdown++; });
+        pi.registerCommand("startup-test", { handler: () => { assert.equal(ready, true); invoked++; } });
+      },
+    ] },
+  });
+  try {
+    const root = await runtime.create();
+    await runtime.control({ action: "commands" });
+    runtime.runtime.session.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+    for (const requestId of ["branch-one", "branch-two"])
+      await runtime.control({ action: "promptAt", requestId, nodeId: null, text: "/startup-test" });
+    let mainCommandsReady = false;
+    const commands = runtime.control({ action: "commands" }).then(() => { mainCommandsReady = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(starts, 3);
+    assert.equal(invoked, 0, "branch commands must wait for their own hooks");
+    assert.equal(shutdown, 0, "a pending branch must not shut down before startup finishes");
+    assert.equal(mainCommandsReady, true, "worker startup must not replace main readiness");
+    release();
+    await commands;
+    await until(() => !runtime.busy);
+    assert.equal(invoked, 2);
+    assert.equal(shutdown, 2);
+    assert.ok(events.filter(event => event.type === "sessions" && event.payload.current)
+      .every(event => event.payload.current.session.path === root.session.path), "worker snapshots stay inside the root graph");
+  } finally {
+    release();
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("restart can continue main and branch turns left without a reply or tool result", { timeout: 30000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "pix-crash-followup-"));
   const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };

@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:http";
 import { electronBinary } from "./lib/electron-binary.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -184,6 +185,7 @@ class Cdp {
 
 let cdp;
 let remoteSshResult;
+let smokeModelServer;
 let imagePreview = false;
 let wslStoppedPid = 0;
 let wslLaunchDirectory = "";
@@ -194,6 +196,122 @@ function signalWslTestHost(pid, signal) {
     String.raw`if test -r "/proc/$1/cmdline"; then args=$(tr '\000' ' ' < "/proc/$1/cmdline"); case "$args" in *"--cwd $2 "*) kill "-$3" "$1" ;; *) exit 2 ;; esac; fi`,
     "sh", String(pid), wslLaunchDirectory, signal], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
   if (result.status !== 0) throw new Error(`WSL test signal failed (${result.status}): ${result.stderr}`);
+}
+async function verifyPromptFeedback(cdp) {
+  const result = {};
+  await cdp.evaluate("window.pix.invoke('agent.control', { action: 'setModel', provider: 'pix-gui-smoke', modelId: 'live' })");
+  await retry(async () => {
+    if (!(await cdp.evaluate("window.__pixTest.state().current?.runtime.model?.provider === 'pix-gui-smoke'")))
+      throw new Error('Isolated GUI model was not selected');
+  });
+  const sendStarted = Date.now();
+  await cdp.evaluate(`(() => {
+    const frames = window.__pixDraftHandoff = { active: true, samples: 0, overlap: 0 };
+    const sample = () => {
+      if (!frames.active) return;
+      frames.samples++;
+      const sent = [...document.querySelectorAll('.prompt-node strong')]
+        .some(node => node.textContent.includes('Remote immediate feedback check'));
+      const draft = [...document.querySelectorAll('.draft-node')].some(node =>
+        node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
+      if (sent && draft) frames.overlap++;
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+    const editor = document.querySelector('.draft-node textarea');
+    editor.value = 'Remote immediate feedback check';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return new Promise(resolve => queueMicrotask(() => {
+      document.querySelector('.draft-node .composer-submit').click(); resolve();
+    }));
+  })()`);
+  await retry(async () => {
+    const visible = await cdp.evaluate(`Boolean(
+      [...document.querySelectorAll('.prompt-node strong')].some(node => node.textContent.includes('Remote immediate feedback check'))
+      && document.querySelector('.branch-panel')?.textContent.includes('Remote immediate feedback check'))`);
+    if (!visible) throw new Error('Submitted prompt is missing from the node or chat');
+  });
+  result.sentPromptVisibleMs = Date.now() - sendStarted;
+  await retry(async () => {
+    if (!(await cdp.evaluate(`Boolean([...document.querySelectorAll('.prompt-node p')]
+      .some(node => node.textContent.includes('REMOTE_LIVE_FIRST') && !node.textContent.includes('REMOTE_LIVE_DONE')))`)))
+      throw new Error('Node did not display partial streamed output');
+  });
+  result.nodeStreamed = true;
+  await retry(async () => {
+    const settled = await cdp.evaluate(`window.__pixTest.state().current?.graph?.runs.every(run => run.status !== 'running')
+      && [...document.querySelectorAll('.prompt-node p')].some(node => node.textContent.includes('REMOTE_LIVE_DONE'))`);
+    if (!settled) throw new Error('Remote GUI fixture did not finish');
+  });
+  result.handoffFrames = await cdp.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
+    window.__pixDraftHandoff.active = false;
+    resolve(window.__pixDraftHandoff);
+  })))`);
+  if (result.handoffFrames.overlap || !result.handoffFrames.samples)
+    throw new Error('Draft and submitted node overlapped: ' + JSON.stringify(result.handoffFrames));
+  const parentId = await cdp.evaluate("window.__pixTest.state().current.projection.activeNodeId");
+  await cdp.evaluate(`window.__pixTest.openChatColumn(${JSON.stringify(parentId)})`);
+  await cdp.evaluate(`(() => {
+    const panel = document.querySelector('[data-action="chat-column-close"]').closest('.branch-panel');
+    panel.querySelector('.composer-collapsed')?.click();
+    document.querySelector('[data-id="' + ${JSON.stringify(parentId)} + '"] .node-add').click();
+  })()`);
+  await retry(async () => {
+    if (!(await cdp.evaluate(`Boolean(document.querySelector('.draft-node textarea')
+      && document.querySelector('[data-action="chat-column-close"]')?.closest('.branch-panel').querySelector('textarea'))`)))
+      throw new Error('Parallel-send editors did not open');
+  });
+  // Both UI submissions happen before IPC replies can run. Their optimistic
+  // cards and pinned chat contents must coexist through that admission gap.
+  result.parallelPending = await cdp.evaluate(`(() => {
+    const panel = document.querySelector('[data-action="chat-column-close"]').closest('.branch-panel');
+    const surfaces = [document.querySelector('.draft-node'), panel];
+    const texts = ['Parallel graph question', 'Parallel pinned question'];
+    surfaces.forEach((surface, index) => {
+      const editor = surface.querySelector('textarea');
+      editor.value = texts[index];
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    return new Promise(resolve => queueMicrotask(() => {
+      surfaces.forEach(surface => surface.querySelector('.composer-submit').click());
+      queueMicrotask(() => {
+        const frames = window.__pixPinnedHandoff = { active: true, samples: 0, missing: 0 };
+        const sample = () => {
+          if (!frames.active) return;
+          frames.samples++;
+          const currentPanel = document.querySelector('[data-action="chat-column-close"]')?.closest('.branch-panel');
+          if (!currentPanel?.querySelector('.branch-messages').textContent.includes('Parallel pinned question')) frames.missing++;
+          requestAnimationFrame(sample);
+        };
+        sample();
+        resolve({
+          titles: [...document.querySelectorAll('.prompt-node strong')].map(node => node.textContent),
+          chat: panel.querySelector('.branch-messages').textContent,
+        });
+      });
+    }));
+  })()`);
+  for (const text of ['Parallel graph question', 'Parallel pinned question']) {
+    if (!result.parallelPending.titles.includes(text) || !result.parallelPending.chat.includes(text))
+      throw new Error('Parallel submission disappeared before admission: ' + JSON.stringify(result.parallelPending));
+  }
+  await retry(async () => {
+    const settled = await cdp.evaluate(`(() => {
+      const current = window.__pixTest.state().current;
+      return current.graph.runs.every(run => run.status !== 'running')
+        && ['Parallel graph question', 'Parallel pinned question'].every(text =>
+          current.projection.nodes.filter(node => node.title === text).length === 1);
+    })()`);
+    if (!settled) throw new Error('Parallel GUI sends did not settle into one node each');
+  }, 60_000);
+  result.pinnedHandoff = await cdp.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
+    window.__pixPinnedHandoff.active = false;
+    resolve(window.__pixPinnedHandoff);
+  })))`);
+  if (!result.pinnedHandoff.samples || result.pinnedHandoff.missing)
+    throw new Error('Pinned question disappeared during node handoff: ' + JSON.stringify(result.pinnedHandoff));
+  await cdp.evaluate(`document.querySelector('[data-action="chat-column-close"]')?.click()`);
+  return result;
 }
 try {
   // Boot budgets are generous: on a cold machine the dev server has to transform
@@ -211,12 +329,37 @@ try {
   await cdp.open();
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
+  if (verifySsh) {
+    // Only an isolated local fixture serves this model. No real provider is called.
+    smokeModelServer = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* consume the model request */ }
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      const chunk = (text, finish = null) => `data: ${JSON.stringify({ id: "pix-gui", choices: [{
+        index: 0, delta: { role: "assistant", content: text }, finish_reason: finish,
+      }] })}\n\n`;
+      response.write(chunk("REMOTE_LIVE_FIRST"));
+      setTimeout(() => response.end(chunk(" REMOTE_LIVE_DONE") + chunk("", "stop") + "data: [DONE]\n\n"), 1800);
+    });
+    await new Promise(resolve => smokeModelServer.listen(0, "127.0.0.1", resolve));
+  }
   await retry(async () => {
     const ready = await cdp.evaluate(
       "window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))",
     );
     if (!ready) throw new Error(`PiX renderer is not ready\n${stderr}`);
   }, 90_000);
+  if (verifySsh) {
+    const modelPort = smokeModelServer.address().port;
+    await cdp.evaluate(`(async () => {
+      const models = await window.pix.invoke('agent.control', { action: 'getCustomModels' });
+      await window.pix.invoke('agent.control', {
+        action: models.some(model => model.provider === 'pix-gui-smoke') ? 'updateCustomModel' : 'addCustomModel',
+        provider: 'pix-gui-smoke', modelId: 'live', name: 'GUI fixture',
+        baseUrl: 'http://127.0.0.1:${modelPort}/v1', api: 'openai-completions', apiKey: 'local-test-only',
+        reasoning: false, imageInput: false, contextWindow: 64000, maxTokens: 128,
+      });
+    })()`);
+  }
   await retry(async () => {
     const value = await cdp.evaluate(`({
       collapsed: window.__pixTest.state().layout.collapsed,
@@ -427,6 +570,41 @@ try {
     if (!workspaceTree.rootCount || !workspaceTree.directory || !workspaceTree.scoped)
       throw new Error(`SSH workspace tree is not scoped to the opened folder: ${JSON.stringify(workspaceTree)}`);
     remoteSshResult.workspaceTree = workspaceTree;
+    const createStarted = Date.now();
+    await cdp.evaluate(`(() => {
+      window.addEventListener('unhandledrejection', event => { window.__pixStartError = String(event.reason); });
+      const start = document.querySelector('.graph-empty > button');
+      if (!start) throw new Error('Remote workspace did not show Start');
+      start.click();
+    })()`);
+    await retry(async () => {
+      const visible = await cdp.evaluate(`Boolean(document.querySelector('.session-flow')
+        && document.querySelector('.draft-node'))`);
+      if (!visible) throw new Error('Remote Start has not shown the new session yet');
+    });
+    remoteSshResult.sessionVisibleMs = Date.now() - createStarted;
+    await cdp.evaluate(`(() => {
+      const editor = document.querySelector('.draft-node textarea');
+      if (!editor || editor.disabled) throw new Error('The preparing session is not editable');
+      editor.value = 'Draft typed during remote initialization';
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await retry(async () => {
+      const state = await cdp.evaluate(`(() => {
+        const state = window.__pixTest.state();
+        return { path: state.current?.session.path, loading: state.loading,
+          flow: Boolean(document.querySelector('.session-flow')),
+          draft: Boolean(document.querySelector('.draft-node')),
+          draftText: document.querySelector('.draft-node textarea')?.value,
+          error: window.__pixStartError };
+      })()`);
+      if (!state.path || !state.flow || !state.draft || state.loading || state.error)
+        throw new Error('Remote Start did not select the new session: ' + JSON.stringify(state));
+      remoteSshResult.newSession = state;
+    }, 60_000);
+    if (remoteSshResult.newSession.draftText !== 'Draft typed during remote initialization')
+      throw new Error('Remote initialization discarded the draft');
+    Object.assign(remoteSshResult, await verifyPromptFeedback(cdp));
     await cdp.evaluate("document.querySelector('[data-action=workspace-picker]').click()");
     await retry(async () => {
       if (!(await cdp.evaluate("Boolean(document.querySelector('[data-action=disconnect-wsl]'))")))
@@ -437,6 +615,9 @@ try {
       if (await cdp.evaluate("Boolean(window.__pixTest.state().project?.remote)"))
         throw new Error("PiX did not disconnect from SSH");
     });
+    const local = await cdp.evaluate("window.pix.invoke('agent.control', { action: 'newSession' })");
+    remoteSshResult.localFeedback = await verifyPromptFeedback(cdp);
+    await cdp.evaluate(`window.pix.invoke('session.delete', { path: ${JSON.stringify(local.session.path)}, confirmed: true })`);
   } else {
     await cdp.evaluate("document.querySelector('[data-action=remote-next]').click()");
     await retry(async () => {
@@ -1607,6 +1788,8 @@ try {
   console.log(JSON.stringify(result, null, 2));
   }
 } finally {
+  smokeModelServer?.closeAllConnections();
+  smokeModelServer?.close();
   // A stalled close (e.g. vite's ws shutdown with a live HMR client) once
   // burned the job's whole timeout with the app still running: bound every
   // teardown await and hard-kill the child when a graceful exit misses.

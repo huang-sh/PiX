@@ -391,13 +391,14 @@ describe("pinned chat columns", () => {
     const running = [{ ...run, nodeId: null, status: "running" as const, pending: { text: "x", parentNodeId: "turn:u3" } }];
 
     layout.chatColumns = ["pending:r1"];
-    layout.chatColumnComposers = { "pending:r1": true };
+    const composer = { open: true, draft: { text: "draft", images: [], busy: false, readingImages: false, error: "" } };
+    layout.chatColumnComposers = { "pending:r1": composer };
     layout.trackChatColumns(ids, running);
     expect(layout.chatColumns).toEqual(["pending:r1"]); // still waiting for its node
 
     layout.trackChatColumns(ids, [{ ...run, nodeId: "turn:u4", status: "running" }]);
     expect(layout.chatColumns).toEqual(["turn:u4"]); // resolved to the new node
-    expect(layout.chatColumnComposers).toEqual({ "turn:u4": true }); // the column's composer expansion followed it
+    expect(layout.chatColumnComposers).toEqual({ "turn:u4": composer }); // the column's editor state followed it
 
     // A settled run carries no pending of its own; the parent comes from the
     // in-flight frame the column remembered.
@@ -415,21 +416,22 @@ describe("pinned chat columns", () => {
     layout.trackChatColumns(ids, []);
     expect(layout.chatColumns).toEqual([]); // vanished run closes the column
 
-    layout.chatColumnComposers = { "turn:u2": true, "turn:gone": false };
+    layout.chatColumnComposers = { "turn:u2": composer, "turn:gone": { ...composer, open: false } };
     layout.chatColumns = ["turn:u2", "turn:gone"];
     layout.trackChatColumns(ids, []);
     expect(layout.chatColumns).toEqual(["turn:u2"]); // deleted nodes close their columns
-    expect(layout.chatColumnComposers).toEqual({ "turn:u2": true }); // closing drops the column's flag
+    expect(layout.chatColumnComposers).toEqual({ "turn:u2": composer }); // closing drops the column's editor state
   });
 
   it("merges columns when an advance lands on an already-pinned node", () => {
     const layout = useLayoutStore();
     layout.chatColumns = ["turn:u2", "turn:u3"];
-    // The surviving column keeps its own composer expansion.
-    layout.chatColumnComposers = { "turn:u2": true, "turn:u3": false };
+    // The surviving column keeps its own draft and expansion.
+    const composer = { open: false, draft: { text: "keep this draft", images: [], busy: false, readingImages: false, error: "" } };
+    layout.chatColumnComposers = { "turn:u2": { ...composer, open: true }, "turn:u3": composer };
     layout.advanceChatColumn("turn:u2", "turn:u3");
     expect(layout.chatColumns).toEqual(["turn:u3"]);
-    expect(layout.chatColumnComposers).toEqual({ "turn:u3": false });
+    expect(layout.chatColumnComposers).toEqual({ "turn:u3": composer });
   });
 
   it("restores the pre-pin width at boot", () => {
