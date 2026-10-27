@@ -58,7 +58,7 @@ async function clickFirstLink(wrapper: { get: (sel: string) => { trigger: (t: st
 describe("MarkdownRenderer", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
-    vi.mocked(window.pix!.invoke).mockClear();
+    vi.mocked(window.pix!.invoke).mockReset().mockResolvedValue({});
   });
 
   it("updates one safe Markdown surface from streaming to final", async () => {
@@ -267,6 +267,142 @@ describe("MarkdownRenderer", () => {
 
     expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "README.md" });
     wrapper.unmount();
+  });
+
+  it.each([
+    [macProject, "[example.ts:12](/Users/foo/project/src/example.ts:12)", "src/example.ts", 12],
+    [macProject, "[My Report.md](</Users/foo/project/My Project/My Report.md>)", "My Project/My Report.md", undefined],
+    [macProject, "[报告.md:12](</Users/foo/project/My Project/报告.md:12>)", "My Project/报告.md", 12],
+    [project, "[example.ts:12](D:/dev/PiX/test/workspace/src/example.ts:12)", "src/example.ts", 12],
+    [project, "[My Report.md:12](<D:/dev/PiX/test/workspace/My Project/My Report.md:12>)", "My Project/My Report.md", 12],
+    [project, "[notes:3](file:///D:/dev/PiX/test/workspace/docs/notes.md:3)", "docs/notes.md", 3],
+    [macProject, "[literal colon](/Users/foo/project/notes%3A12)", "notes:12", undefined],
+  ])("opens formatted file links: %s %s", async (root, markdown, path, line) => {
+    useLayoutStore().settings = settingsWith(true);
+    const workspace = useWorkspaceStore();
+    workspace.project = root;
+    vi.mocked(window.pix!.invoke).mockImplementation(async (route, payload) => {
+      if (route === "workspace.read" && (payload as { path: string }).path !== path)
+        throw new Error("ENOENT: no such file or directory");
+      return {};
+    });
+    const wrapper = await mountWithLink(markdown);
+    try {
+      expect(await clickFirstLink(wrapper)).toBe(true);
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path });
+      expect(workspace.active?.path).toBe(path);
+      expect(workspace.active?.line).toBe(line);
+      expect(useLayoutStore().contentSection).toBe("files");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it.each([
+    ["[report](/Users/foo/project/report:12)", "report:12"],
+    ["[report](./report:12)", "report:12"],
+    ["[report](file:///Users/foo/project/report:12)", "report:12"],
+    ["[report](./:12)", ":12"],
+  ])("preserves literal POSIX filenames ending in colon and digits: %s", async (markdown, path) => {
+    useLayoutStore().settings = settingsWith(true);
+    const workspace = useWorkspaceStore();
+    workspace.project = macProject;
+    const wrapper = await mountWithLink(markdown);
+    try {
+      await clickFirstLink(wrapper);
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path });
+      expect(window.pix!.invoke).not.toHaveBeenCalledWith("workspace.read", { path: path.replace(/:\d+$/, "") });
+      expect(workspace.active?.path).toBe(path);
+      expect(workspace.active?.line).toBeUndefined();
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(["//server/share/project", "\\\\server\\share\\project"])("resolves line links on Windows UNC projects without probing alternate data streams: %s", async root => {
+    useLayoutStore().settings = settingsWith(true);
+    const workspace = useWorkspaceStore();
+    workspace.project = { name: "project", path: root };
+    const wrapper = await mountWithLink("[example](./src/example.ts:12)");
+    try {
+      await clickFirstLink(wrapper);
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "src/example.ts" });
+      expect(window.pix!.invoke).not.toHaveBeenCalledWith("workspace.read", { path: "src/example.ts:12" });
+      expect(workspace.active?.line).toBe(12);
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(["EACCES: permission denied", "Binary file"])("does not reinterpret an unreadable literal file as a line link: %s", async error => {
+    const layout = useLayoutStore();
+    layout.settings = settingsWith(true);
+    useWorkspaceStore().project = macProject;
+    vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error(error));
+    const wrapper = await mountWithLink("[report](/Users/foo/project/report:12)");
+    try {
+      await clickFirstLink(wrapper);
+      await flushPromises();
+      expect(window.pix!.invoke).not.toHaveBeenCalledWith("workspace.read", { path: "report" });
+      expect(useWorkspaceStore().tabs).toHaveLength(0);
+      expect(layout.notice?.message).toContain("report:12");
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(["ENOENT", "ENOTDIR"])("does not treat an errno name in a denied filename as the error code: %s", async name => {
+    const layout = useLayoutStore();
+    layout.settings = settingsWith(true);
+    const workspace = useWorkspaceStore();
+    workspace.project = macProject;
+    vi.mocked(window.pix!.invoke).mockImplementation(async (route, payload) => {
+      if (route === "workspace.read" && (payload as { path: string }).path === `${name}:12`)
+        throw new Error(`EACCES: permission denied, open '/Users/foo/project/${name}:12'`);
+      return {};
+    });
+    const wrapper = await mountWithLink(`[report](/Users/foo/project/${name}:12)`);
+    try {
+      await clickFirstLink(wrapper);
+      await flushPromises();
+      expect(window.pix!.invoke).not.toHaveBeenCalledWith("workspace.read", { path: name });
+      expect(workspace.tabs).toHaveLength(0);
+      expect(layout.notice?.message).toContain(`${name}:12`);
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(["ENOENT", "ENOTDIR"])("resolves a line link only when the errno prefix means the literal file is missing: %s", async code => {
+    const layout = useLayoutStore();
+    layout.settings = settingsWith(true);
+    const workspace = useWorkspaceStore();
+    workspace.project = macProject;
+    vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error(`${code}: cannot open '/Users/foo/project/report.ts:12'`));
+    const wrapper = await mountWithLink("[report](/Users/foo/project/report.ts:12)");
+    try {
+      await clickFirstLink(wrapper);
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "report.ts:12" });
+      expect(window.pix!.invoke).toHaveBeenCalledWith("workspace.read", { path: "report.ts" });
+      expect(workspace.active?.path).toBe("report.ts");
+      expect(workspace.active?.line).toBe(12);
+      expect(layout.notice).toBeUndefined();
+    } finally { wrapper.unmount(); }
+  });
+
+  it("does not resolve an old project's line link against a newly selected project", async () => {
+    const layout = useLayoutStore();
+    layout.settings = settingsWith(true);
+    const workspace = useWorkspaceStore();
+    workspace.project = macProject;
+    let reject!: (error: Error) => void;
+    vi.mocked(window.pix!.invoke).mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+    const wrapper = await mountWithLink("[report](/Users/foo/project/report:12)");
+    try {
+      await clickFirstLink(wrapper);
+      workspace.project = { name: "other", path: "/other" };
+      reject(new Error("ENOENT: no such file or directory"));
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenCalledTimes(1);
+      expect(workspace.tabs).toHaveLength(0);
+      expect(layout.notice).toBeUndefined();
+    } finally { wrapper.unmount(); }
   });
 
   it("warns instead of navigating for links that escape the project", async () => {

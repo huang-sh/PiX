@@ -2,19 +2,20 @@ import { readFileSync } from "node:fs";
 import { parseSkillDocument, type SkillDocument } from "./skill-files.js";
 
 /**
- * Output style is one pi setting, `outputStyle`, that names a skill whose
- * frontmatter opts in with `output-style: true`. The chosen name joins the
- * append-system prompt sections as a bare pointer
- * (`<output_style>name</output_style>`); the model resolves it against
- * <available_skills> exactly like any other skill, so manual-only skills are
- * excluded — they never appear there, and a pointer at one would dangle. An
- * unset or blank setting adds no pointer, leaving the model's own style in
- * charge. The setting lives in pi's settings.json on whatever host runs the
- * session, so it reaches remote sessions through the settings sync PiX
- * already performs. The loader resolves skills (user copies shadow built-ins)
- * before the append-system override runs in the same pass, so checking the
- * final list is all the wiring the runtime needs.
+ * <output_style> combines PiX's always-on <format_rules> with an optional
+ * <content_style> referencing the selected `outputStyle` skill. Only loaded,
+ * model-invocable skills with `output-style: true` can supply the content style.
+ * The loader resolves skills before the append-system override runs; settings
+ * and skills are re-read on reload so the pointer follows the current choice.
  */
+
+const FILE_LINK_RULES = `When referring to files in your responses, prefer clickable Markdown links so users can open them directly in PiX:
+- Use absolute filesystem paths on the session host, for example [app.py](/absolute/path/app.py).
+- Do not wrap Markdown links in backticks or code fences.
+- If a path contains spaces, wrap the link destination in angle brackets: [My Report.md](</absolute/path/My Project/My Report.md>).
+- Optionally append a one-based line number to the path: [app.py:12](/absolute/path/app.py:12) or [My Report.md:12](</absolute/path/My Project/My Report.md:12>).
+- Use forward slashes in Windows paths, for example [app.py](C:/project/app.py:12).
+Content style must preserve these format rules.`;
 
 /** The loaded skills that opted in (`output-style: true`); the configured name is resolved against this list. */
 export interface OutputStyleSkill {
@@ -50,10 +51,8 @@ function configuredName(settings: OutputStyleSettings): string {
 }
 
 /**
- * Appends the selected skill's name to the append-system prompt sections. Any
- * miss — no such loaded skill, skill without the opt-in, manual-only skill —
- * leaves the base untouched; a broken setting must never break the session
- * prompt.
+ * Appends one output-style block. Model default or an unavailable skill omits
+ * only the content style; PiX's format rules remain in every session.
  */
 export function appendOutputStyle(
   base: string[],
@@ -61,9 +60,10 @@ export function appendOutputStyle(
   settings: OutputStyleSettings,
 ): string[] {
   const name = configuredName(settings);
-  // Unset means the model's own style: no pointer at all.
-  if (!name) return base;
   const skill = skills.find((item) => item.name === name);
-  if (!skill || skill.disableModelInvocation) return base;
-  return [...base, `<output_style>${name}</output_style>`];
+  const sections: string[] = [];
+  if (name && skill && !skill.disableModelInvocation)
+    sections.push(`<content_style>\nUse the ${skill.name} skill listed in available_skills.\n</content_style>`);
+  sections.push(`<format_rules>\n${FILE_LINK_RULES}\n</format_rules>`);
+  return [...base, `<output_style>\n${sections.join("\n\n")}\n</output_style>`];
 }

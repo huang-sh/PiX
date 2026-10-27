@@ -76,6 +76,50 @@ describe("tool panel file previews", () => {
     expect(wrapper.find('[data-action="toggle-markdown-edit"]').exists()).toBe(false);
   });
 
+  it("reveals linked lines in existing files, including repeated clicks and clamped lines", async () => {
+    const { wrapper, workspace } = await mountWithFile(
+      fileDocument({ path: "notes.md", content: "# Title\n\nTarget line\nLast line" }),
+    );
+    try {
+      for (const [line, selected] of [[3, "Target line"], [3, "Target line"], [999, "Last line"]] as const) {
+        await workspace.openFile("notes.md", line);
+        await flushPromises();
+        const editor = wrapper.get(".file-editor").element as HTMLTextAreaElement;
+        expect(editor.value.slice(editor.selectionStart, editor.selectionEnd)).toBe(selected);
+        expect(workspace.active?.line).toBeUndefined();
+        expect(workspace.tabs).toHaveLength(1);
+      }
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("waits for the Files panel before revealing a linked line", async () => {
+    const { wrapper, workspace } = await mountWithFile(
+      fileDocument({ path: "notes.md", content: "# Title\nTarget line", readonly: true }),
+    );
+    try {
+      const layout = useLayoutStore();
+      layout.contentSection = "home";
+      await flushPromises();
+      await workspace.openFile("notes.md", 2);
+      await flushPromises();
+      expect(workspace.active?.line).toBe(2);
+      layout.contentSection = "files";
+      await flushPromises();
+      const editor = wrapper.get(".file-editor").element as HTMLTextAreaElement;
+      expect(editor.readOnly).toBe(true);
+      expect(editor.value.slice(editor.selectionStart, editor.selectionEnd)).toBe("Target line");
+      expect(workspace.active?.line).toBeUndefined();
+      expect(wrapper.find('[data-action="toggle-markdown-edit"]').exists()).toBe(true);
+      await wrapper.get('[data-action="toggle-markdown-edit"]').trigger("click");
+      await vi.waitFor(() => expect(wrapper.get('[data-markdown-preview]').text()).toContain("Target line"));
+      expect(wrapper.find(".file-editor").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("shows a notice for oversized binary documents", async () => {
     const { wrapper } = await mountWithFile(
       fileDocument({ path: "big.pdf", language: "pdf", readonly: true, truncated: true }),

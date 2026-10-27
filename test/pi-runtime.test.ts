@@ -724,6 +724,75 @@ test("installs and removes recommended extensions with user scope and PiX's agen
   );
 });
 
+test("output style follows saved selections on reload while preserving format rules and user instructions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pix-file-link-prompt-"));
+  const runtime = new PiRuntime(root, join(root, "sessions"), () => undefined, async () => undefined);
+  runtime.agentDir = () => join(root, "agent");
+  const skillDir = join(runtime.agentDir(), "skills", "sample-style");
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(join(runtime.agentDir(), "APPEND_SYSTEM.md"), "Keep the user's custom instructions.");
+  writeFileSync(join(runtime.agentDir(), "settings.json"), JSON.stringify({ outputStyle: "sample-style" }));
+  writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sample-style\ndescription: Sample output style\noutput-style: true\n---\n\nBe concise.\n");
+  const otherSkillDir = join(runtime.agentDir(), "skills", "other-style");
+  mkdirSync(otherSkillDir);
+  writeFileSync(join(otherSkillDir, "SKILL.md"), "---\nname: other-style\ndescription: Another output style\noutput-style: true\n---\n\nExplain in detail.\n");
+  let session: any;
+  try {
+    const pi = await import("@earendil-works/pi-coding-agent");
+    const options = runtime["sessionServicesOptions"](pi, root);
+    const services = await pi.createAgentSessionServices({
+      ...options,
+      resourceLoaderOptions: {
+        ...options.resourceLoaderOptions,
+        extensionFactories: [], additionalExtensionPaths: [], additionalSkillPaths: [], noExtensions: true,
+      },
+    });
+    ({ session } = await pi.createAgentSessionFromServices({ services, sessionManager: pi.SessionManager.inMemory(root) }));
+    const sections = services.resourceLoader.getAppendSystemPrompt();
+    assert.equal(sections[0], "Keep the user's custom instructions.");
+    assert.equal(sections.length, 2);
+    const outputStyle = sections[1]!;
+    assert.match(outputStyle, /<content_style>\nUse the sample-style skill listed in available_skills\.\n<\/content_style>/);
+    const formatRules = outputStyle.match(/<format_rules>[\s\S]*?<\/format_rules>/)![0];
+    assert.ok(formatRules.includes("clickable Markdown links"));
+    assert.match(session.systemPrompt, /clickable Markdown links/);
+    assert.match(session.systemPrompt, /absolute filesystem paths on the session host/);
+    assert.match(session.systemPrompt, /Do not wrap Markdown links in backticks/);
+    assert.ok(session.systemPrompt.includes("[My Report.md](</absolute/path/My Project/My Report.md>)"));
+    assert.ok(session.systemPrompt.includes("[app.py:12](/absolute/path/app.py:12)"));
+    await session.reload();
+    assert.deepEqual(services.resourceLoader.getAppendSystemPrompt(), sections);
+    assert.equal(session.systemPrompt.split("clickable Markdown links").length, 2);
+    for (const selected of ["other-style", "sample-style", "", undefined, "missing-style"]) {
+      writeFileSync(join(runtime.agentDir(), "settings.json"), JSON.stringify({ outputStyle: selected }));
+      await session.reload();
+      const updated = services.resourceLoader.getAppendSystemPrompt();
+      assert.equal(updated.length, 2);
+      assert.equal(updated[0], sections[0]);
+      const contentStyle = updated[1]!.match(/<content_style>\n([\s\S]*?)\n<\/content_style>/)?.[1];
+      assert.equal(contentStyle, selected === "sample-style" || selected === "other-style"
+        ? `Use the ${selected} skill listed in available_skills.` : undefined);
+      assert.equal(updated[1]!.match(/<format_rules>[\s\S]*?<\/format_rules>/)?.[0], formatRules);
+      assert.equal(session.systemPrompt.split("<output_style>").length, 2);
+      assert.equal(session.systemPrompt.split("clickable Markdown links").length, 2);
+    }
+    writeFileSync(join(runtime.agentDir(), "settings.json"), JSON.stringify({ outputStyle: "sample-style" }));
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    for (const projectStyle of ["other-style", "", null, undefined]) {
+      writeFileSync(join(root, ".pi", "settings.json"), JSON.stringify({ outputStyle: projectStyle }));
+      await session.reload();
+      const updated = services.resourceLoader.getAppendSystemPrompt();
+      const contentStyle = updated[1]!.match(/<content_style>\n([\s\S]*?)\n<\/content_style>/)?.[1];
+      const selected = projectStyle ?? "sample-style";
+      assert.equal(contentStyle, selected ? `Use the ${selected} skill listed in available_skills.` : undefined);
+      assert.equal(updated[1]!.match(/<format_rules>[\s\S]*?<\/format_rules>/)?.[0], formatRules);
+    }
+  } finally {
+    session?.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("factory loads bundled packages as additional extension paths", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   let servicesOptions: any;

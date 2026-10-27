@@ -126,9 +126,9 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         ];
       case "agent":
         return [
-          // The leading "" option is the model's own style: choosing it clears
-          // the setting below, so nothing is written to settings.json.
-          { path: "outputStyle", label: "settings.rows.outputStyle", scope: "global", type: "select", options: ["", ...(outputStyleSkills?.value ?? [])], fallback: "", description: "settings.rows.outputStyleDesc" },
+          // Match the runtime's project-over-global resolution, including a
+          // blank project value that explicitly selects the model's own style.
+          { path: "outputStyle", label: "settings.rows.outputStyle", scope: draft.value?.piProject.outputStyle != null ? "project" : "global", type: "select", options: ["", ...(outputStyleSkills?.value ?? [])], fallback: "", description: "settings.rows.outputStyleDesc" },
           { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
           { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
           { path: "transport", label: "settings.rows.transport", scope: "global", type: "select", options: ["auto", "sse", "websocket", "websocket-cached"], fallback: "auto" },
@@ -169,9 +169,12 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
   }
 
   function rowHint(row: Row) {
-    return row.description
+    const hint = row.description
       ? t(row.description)
       : t("settings.storedIn", { scope: t(`settings.scope.${row.scope}`) });
+    return row.path === "outputStyle"
+      ? `${t(`settings.rows.outputStyle${row.scope === "project" ? "Project" : "Global"}Scope`)} ${hint}`
+      : hint;
   }
 
   function sectionFor(scope: Scope, bundle: SettingsBundle | undefined): Record<string, unknown> | undefined {
@@ -193,6 +196,7 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     for (const key of row.path.split("."))
       current = current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined;
     current ??= row.fallback ?? "";
+    if (row.path === "outputStyle") return typeof current === "string" ? current.trim() : "";
     return Array.isArray(current) ? current.join(", ") : current;
   }
 
@@ -213,9 +217,9 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     if (row.type === "select" && typeof row.fallback === "number") next = Number(next);
     if (["enabledModels", "defaultTools", "npmCommand"].includes(row.path))
       next = String(next).split(",").map((item) => item.trim()).filter(Boolean);
-    // Clearing outputStyle means "unset" — the model's own style, no
-    // <output_style> pointer — not a pointer at a skill named "".
-    if (row.path === "outputStyle" && next === "") next = undefined;
+    // Model default clears the global selection, but a blank project value
+    // must remain to override a global content style. Format rules stay on.
+    if (row.path === "outputStyle" && next === "" && row.scope === "global") next = undefined;
     // Clearing defaultTools means "unset" — Pi's defaults plus PiX's powershell
     // append — not a no-tools list; the settings diff encodes the removed key.
     if (row.path === "defaultTools" && (next as string[]).length === 0)

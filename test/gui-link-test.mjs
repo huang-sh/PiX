@@ -31,12 +31,12 @@ mkdirSync(join(testHome, ".pix"), { recursive: true });
 mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
 writeFileSync(join(project, "README.md"), "# gui-link-project\n\nFixture project for the chat-link GUI test.\n");
 writeFileSync(
-  join(project, "NOTES.md"),
-  "# Notes\n\nFixture file for the absolute-path chat-link GUI test.\n",
+  join(project, "My Notes.md"),
+  Array.from({ length: 100 }, (_, index) => `Notes line ${index + 1}`).join("\n"),
 );
 // Forward slashes on purpose: chat models emit absolute paths this way, and
 // the drive-letter form must survive into the rendered href untouched.
-const notesHref = join(project, "NOTES.md").replaceAll("\\", "/");
+const notesHref = `${join(project, "My Notes.md").replaceAll("\\", "/")}:60`;
 writeFileSync(
   join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
@@ -156,7 +156,7 @@ writeFileSync(
         content: [
           {
             type: "text",
-            text: `The notes live at [NOTES.md](${notesHref}) on disk.`,
+            text: `The notes live at [My Notes.md:60](<${notesHref}>) on disk.`,
           },
         ],
         api: "openai-responses",
@@ -463,21 +463,23 @@ try {
   result.probe = await cdp.evaluate("window.__linkProbe");
 
   // Third turn: an absolute-path link (drive letter on Windows, POSIX on
-  // macOS) to an in-project file must open in the Files tool the same way.
+  // macOS), with spaces and a line suffix, opens and reveals the target line.
   // Vue Flow only mounts on-screen nodes, so the third card may have no DOM
   // element to double-click; focus it through the store instead — the chat
   // panel is already open and follows the focused node.
   await cdp.evaluate('window.__pixTest.selectNode("turn:00000004")');
+  const notesLinkExpression = `[...document.querySelectorAll('.chat .agent-markdown a[href]')]
+    .find(a => decodeURIComponent(a.getAttribute('href')) === ${JSON.stringify(notesHref)})`;
   await retry(async () => {
     if (!(await cdp.evaluate(
-      `Boolean(document.querySelector('.chat .agent-markdown a[href=${JSON.stringify(notesHref)}]'))`,
+      `Boolean(${notesLinkExpression})`,
     )))
       throw new Error("Third turn did not expose the absolute-path file link");
   });
   await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 500))");
   const absoluteLink = await retry(async () => {
     const value = await cdp.evaluate(`(() => {
-      const a = document.querySelector('.chat .agent-markdown a[href=${JSON.stringify(notesHref)}]');
+      const a = ${notesLinkExpression};
       if (!a) return { missing: true };
       a.scrollIntoView({ block: "center" });
       const r = a.getBoundingClientRect();
@@ -507,11 +509,23 @@ try {
   await retry(async () => {
     const value = await cdp.evaluate(`({
       section: window.__pixTest.state().contentSection,
-      fileTab: Boolean(document.querySelector('[data-file-tab="NOTES.md"]')),
-      fileTabActive: document.querySelector('[data-file-tab="NOTES.md"]')?.classList.contains('active'),
-      preview: Boolean(document.querySelector('[data-markdown-preview]'))
+      fileTab: Boolean(document.querySelector('[data-file-tab="My Notes.md"]')),
+      fileTabActive: document.querySelector('[data-file-tab="My Notes.md"]')?.classList.contains('active'),
+      selected: (() => {
+        const editor = document.querySelector('.file-editor');
+        return editor?.value.slice(editor.selectionStart, editor.selectionEnd);
+      })(),
+      scrollTop: document.querySelector('.file-editor')?.scrollTop,
+      targetVisible: (() => {
+        const editor = document.querySelector('.file-editor');
+        if (!editor) return false;
+        const style = getComputedStyle(editor);
+        const y = parseFloat(style.paddingTop) + 59 * parseFloat(style.lineHeight) - editor.scrollTop;
+        return y >= 0 && y + parseFloat(style.lineHeight) <= editor.clientHeight;
+      })()
     })`);
-    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.preview)
+    if (value.section !== "files" || !value.fileTab || !value.fileTabActive
+      || value.selected !== "Notes line 60" || !value.targetVisible)
       throw new Error(
         `Absolute-path link did not open the file in the Files tool: ${JSON.stringify(value)}`,
       );

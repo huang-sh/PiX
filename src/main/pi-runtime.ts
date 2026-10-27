@@ -598,11 +598,9 @@ export class PiRuntime {
           );
           return resolved;
         },
-        // The outputStyle setting names a skill; the name joins the
-        // append-system prompt sections after the user's own file, and the
-        // model resolves it against <available_skills>. Reload re-runs both
-        // closures, so a saved switch takes effect on the next reload like
-        // the other pi settings.
+        // File links are an app convention shared by every output style.
+        // Reload re-runs both closures, so a saved style switch takes effect
+        // like the other pi settings.
         appendSystemPromptOverride: (base: string[]) =>
           appendOutputStyle(base, outputStyleSkills, settingsManager),
       },

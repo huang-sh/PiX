@@ -32,7 +32,9 @@ const inspectorFocus = createInspectorFocus();
 // Created before the draft: the agent category's output-style select lists
 // the loaded skills that opt in with an output-style marker.
 const skillCtx = useSkills();
-const outputStyleSkills = computed(() => skillCtx.skills.value.filter((skill) => skill.outputStyle).map((skill) => skill.name));
+const outputStyleSkills = computed(() => skillCtx.skills.value
+  .filter((skill) => skill.outputStyle && !skill.disableModelInvocation)
+  .map((skill) => skill.name));
 const draftCtx = useSettingsDraft(outputStyleSkills);
 const modelCtx = useModels(draftCtx.draft, inspectorFocus, () => closeDetailsPanel(), draftCtx.save);
 const extensionCtx = useExtensions(inspectorFocus);

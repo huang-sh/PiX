@@ -65,7 +65,7 @@ onBeforeUnmount(() => listObserver?.disconnect());
 // action would navigate the app window itself; those resolve against the
 // project and open as workspace files (anchors scroll within the message),
 // regardless of modifiers.
-function onContentClick(event: MouseEvent) {
+async function onContentClick(event: MouseEvent) {
   if (!(event.target instanceof Element)) return;
   const href = event.target.closest("a[href]")?.getAttribute("href");
   if (!href || layout.settings?.app.openLinksInApp !== true) return;
@@ -102,16 +102,39 @@ function onContentClick(event: MouseEvent) {
       return;
     }
   }
-  const path = resolveProjectPath(href, workspace.project?.path);
+  const project = workspace.project;
+  let path = resolveProjectPath(href, project?.path);
+  // Decode after parsing so a percent-encoded colon stays in the filename.
+  const suffix = /:([1-9]\d*)$/.exec(href);
+  const line = suffix && Number.isSafeInteger(Number(suffix[1])) ? Number(suffix[1]) : undefined;
   event.preventDefault();
   if (!path) {
     layout.showNotice(t("links.fileNotFound", { path: href }), "warning");
     return;
   }
-  workspace
-    .openFile(path)
-    .then(() => layout.openTool("files"))
-    .catch(() => layout.showNotice(t("links.fileNotFound", { path }), "warning"));
+  const linePath = line ? resolveProjectPath(href.slice(0, suffix!.index), project?.path) : null;
+  try {
+    if (linePath && project?.path.startsWith("/") && !project.path.startsWith("//")) {
+      // POSIX filenames can end in :digits. Preserve existing file links,
+      // and only interpret a line suffix if the literal file is missing.
+      try {
+        await workspace.openFile(path);
+      } catch (error) {
+        if (workspace.project !== project) return;
+        // IPC preserves Node's message; errno names inside its path are data.
+        if (!(error instanceof Error) || !/^(?:ENOENT|ENOTDIR):\s/.test(error.message)) throw error;
+        path = linePath;
+        await workspace.openFile(path, line);
+      }
+    } else {
+      path = linePath ?? path;
+      await workspace.openFile(path, linePath ? line : undefined);
+    }
+    if (workspace.project === project) await layout.openTool("files");
+  } catch {
+    if (workspace.project === project)
+      layout.showNotice(t("links.fileNotFound", { path }), "warning");
+  }
 }
 
 // Maps a markdown href onto a project-relative workspace path. file: URLs and

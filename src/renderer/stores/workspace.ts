@@ -16,6 +16,8 @@ export interface WorkspaceTab {
   kind: "file" | "browser" | "changes" | "turn-change";
   title: string;
   path?: string;
+  /** Pending line navigation, consumed when the Files editor is visible. */
+  line?: number;
   url?: string;
   document?: FileDocument;
   savedContent?: string;
@@ -158,9 +160,13 @@ export const useWorkspaceStore = defineStore("workspace", {
         })]);
       } finally { this.gitSwitching = false; }
     },
-    async openFile(path: string) {
+    async openFile(path: string, line?: number) {
       const old = this.tabs.find((tab) => tab.kind === "file" && tab.path === path);
-      if (old) return void (this.activeTab = old.id);
+      if (old) {
+        old.line = line;
+        this.activeTab = old.id;
+        return;
+      }
       const project = this.project;
       const document = await desktop.invoke<FileDocument>("workspace.read", { path });
       if (this.project !== project) return;
@@ -169,6 +175,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         kind: "file",
         title: document.name,
         path,
+        line,
         document,
         savedContent: document.content,
       };

@@ -8,6 +8,7 @@ import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { SETTINGS_RELOAD_QUIET_MS, useSessionStore } from "../../src/renderer/stores/session";
 import { version } from "../../package.json";
+import { appendOutputStyle } from "../../src/main/output-style";
 
 const settings = {
   app: {
@@ -351,6 +352,265 @@ describe("SettingsPage auto-save", () => {
     expect(updates.at(-1)?.patch).toEqual({ canvasDotGrid: false });
     expect((spacing.element as HTMLInputElement).value).toBe("24");
     wrapper.unmount();
+  });
+
+  it("saves the current content-style choice and reloads it once the session is idle", async () => {
+    vi.useFakeTimers();
+    let wrapper: ReturnType<typeof mount> | undefined;
+    try {
+      const stored: SettingsBundle = structuredClone(settings);
+      const skills: RuntimeSkill[] = ["sample-style", "other-style", "manual-style", "ordinary"].map(name => ({
+        name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+        editable: true, outputStyle: name !== "ordinary", disableModelInvocation: name === "manual-style",
+      }));
+      vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+        if (route === "agent.control")
+          return (payload as { action: string }).action === "getSkills" ? skills : { ok: true };
+        if (route === "settings.update") {
+          const { patch } = payload as { patch: Record<string, unknown> };
+          if (patch.outputStyle === null) delete stored.piGlobal.outputStyle;
+          else stored.piGlobal.outputStyle = patch.outputStyle;
+          stored.effective = { ...stored.piGlobal };
+        }
+        return structuredClone(stored);
+      });
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(stored);
+      const session = openSession(true);
+      layout.settingsCategory = "agent";
+      wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+      await flushPromises();
+      const select = wrapper.get('[data-setting-path="outputStyle"] select');
+      expect(select.findAll("option").map(option => option.attributes("value")))
+        .toEqual(["", "sample-style", "other-style"]);
+      for (const name of ["sample-style", "other-style"]) {
+        await select.setValue(name);
+        await flushPromises();
+        expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: name } });
+        expect((select.element as HTMLSelectElement).value).toBe(name);
+      }
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(0);
+      session.current!.runtime.isStreaming = false;
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(1);
+      expect(stored.piGlobal.outputStyle).toBe("other-style");
+
+      await select.setValue("");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: null } });
+      expect(stored.piGlobal.outputStyle).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(2);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { scope: "global", failFirst: false },
+    { scope: "global", failFirst: true },
+    { scope: "project", failFirst: false },
+    { scope: "project", failFirst: true },
+  ])("preserves a queued model-default choice during a $scope style save (failure: $failFirst)", async ({ scope, failFirst }) => {
+    const stored: SettingsBundle = {
+      ...structuredClone(settings), piGlobal: { outputStyle: "sample-style" },
+      piProject: scope === "project" ? { outputStyle: "sample-style" } : {},
+    };
+    const skills: RuntimeSkill[] = ["sample-style", "other-style"].map(name => ({
+      name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+      outputStyle: true, disableModelInvocation: false, editable: true,
+    }));
+    let releaseFirst!: () => void;
+    let first = true;
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control")
+        return (payload as { action: string }).action === "getSkills" ? skills : { ok: true };
+      if (route === "settings.update") {
+        const { scope: savedScope, patch } = payload as UpdatePayload;
+        if (first) {
+          first = false;
+          await new Promise<void>(resolve => { releaseFirst = resolve; });
+          if (failFirst) throw new Error("disk full");
+        }
+        const target = savedScope === "project" ? stored.piProject : stored.piGlobal;
+        if (patch!.outputStyle === null) delete target.outputStyle;
+        else target.outputStyle = patch!.outputStyle;
+      }
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      const select = () => wrapper.get('[data-setting-path="outputStyle"] select');
+      await select().setValue("other-style");
+      await select().setValue("");
+      releaseFirst();
+      await flushPromises();
+      expect(updateCalls()).toEqual([
+        { scope, patch: { outputStyle: "other-style" } },
+        { scope, patch: { outputStyle: scope === "project" ? "" : null } },
+      ]);
+      expect((select().element as HTMLSelectElement).value).toBe("");
+      expect(stored.piProject.outputStyle).toBe(scope === "project" ? "" : undefined);
+      expect(stored.piGlobal.outputStyle).toBe(scope === "project" ? "sample-style" : undefined);
+      if (failFirst) expect(layout.notice?.message).toBe("disk full");
+      await select().setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toEqual({ scope, patch: { outputStyle: "other-style" } });
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each([
+    { projectStyle: "i-have-adhd", selected: "i-have-adhd", scope: "project" },
+    { projectStyle: "", selected: "", scope: "project" },
+    { projectStyle: "   ", selected: "", scope: "project" },
+    { projectStyle: " i-have-adhd ", selected: "i-have-adhd", scope: "project" },
+    { projectStyle: "missing-style", selected: "missing-style", scope: "project" },
+    { projectStyle: undefined, selected: "eli5", scope: "global" },
+    { projectStyle: null, selected: "eli5", scope: "global" },
+  ])("keeps the selected content style aligned with its effective scope: $scope / $projectStyle", async ({ projectStyle, selected, scope }) => {
+    const stored: SettingsBundle = {
+      ...structuredClone(settings), piGlobal: { outputStyle: "eli5" }, piProject: { outputStyle: projectStyle },
+    };
+    const skills: RuntimeSkill[] = ["eli5", "i-have-adhd", "other-style"].map(name => ({
+      name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+      outputStyle: true, disableModelInvocation: false, editable: true,
+    }));
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control")
+        return (payload as { action: string }).action === "getSkills" ? skills : { ok: true };
+      if (route === "settings.update") {
+        const { scope: savedScope, patch } = payload as { scope: string; patch: Record<string, unknown> };
+        const target = savedScope === "project" ? stored.piProject : stored.piGlobal;
+        if (patch.outputStyle === null) delete target.outputStyle;
+        else target.outputStyle = patch.outputStyle;
+        stored.effective = { ...stored.piGlobal, ...stored.piProject };
+      }
+      return structuredClone(stored);
+    });
+    const prompt = () => appendOutputStyle([], skills, {
+      getGlobalSettings: () => stored.piGlobal,
+      getProjectSettings: () => stored.piProject,
+    }).join("\n");
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      const row = wrapper.get('[data-setting-path="outputStyle"]');
+      const select = row.get("select");
+      expect((select.element as HTMLSelectElement).value).toBe(selected);
+      expect(row.text()).toContain(i18n.global.t(`settings.rows.outputStyle${scope === "project" ? "Project" : "Global"}Scope`));
+
+      await select.setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope, patch: { outputStyle: "other-style" } });
+      expect(prompt()).toContain("Use the other-style skill");
+      expect(scope === "project" ? stored.piGlobal.outputStyle : stored.piProject.outputStyle)
+        .toBe(scope === "project" ? "eli5" : projectStyle);
+
+      await select.setValue("");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope, patch: { outputStyle: scope === "project" ? "" : null } });
+      expect((select.element as HTMLSelectElement).value).toBe("");
+      expect(prompt()).not.toContain("<content_style>");
+      expect(prompt()).toContain("<format_rules>");
+
+      await select.setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)?.scope).toBe(scope);
+      expect(prompt()).toContain("Use the other-style skill");
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(["manual-only", "missing"])("preserves an unavailable saved content style (%s) and updates it when restored", async state => {
+    const stored: SettingsBundle = {
+      ...structuredClone(settings), piGlobal: { outputStyle: "eli5" }, effective: { outputStyle: "eli5" },
+    };
+    const available: RuntimeSkill[] = ["eli5", "other-style"].map(name => ({
+      name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+      outputStyle: true, disableModelInvocation: false, editable: true,
+    }));
+    let skills = state === "missing" ? available.slice(1)
+      : available.map(skill => ({ ...skill, disableModelInvocation: skill.name === "eli5" }));
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control")
+        return (payload as { action: string }).action === "getSkills" ? structuredClone(skills) : { ok: true };
+      if (route === "settings.update") {
+        stored.piGlobal.outputStyle = (payload as { patch: Record<string, unknown> }).patch.outputStyle;
+        stored.effective = { ...stored.piGlobal };
+      }
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      let select = wrapper.get('[data-setting-path="outputStyle"] select');
+      let selected = (select.element as HTMLSelectElement).selectedOptions[0]!;
+      expect(selected.value).toBe("eli5");
+      expect(selected.disabled).toBe(true);
+      expect(selected.textContent?.trim()).toBe(i18n.global.t("settings.unavailableOption", { name: "eli5" }));
+      expect(stored.piGlobal.outputStyle).toBe("eli5");
+      expect(updateCalls()).toHaveLength(0);
+
+      skills = available;
+      layout.settingsCategory = "skills";
+      await flushPromises();
+      layout.settingsCategory = "agent";
+      await flushPromises();
+      select = wrapper.get('[data-setting-path="outputStyle"] select');
+      selected = (select.element as HTMLSelectElement).selectedOptions[0]!;
+      expect(selected.value).toBe("eli5");
+      expect(selected.disabled).toBe(false);
+      expect(selected.textContent?.trim()).toBe(i18n.global.t("options.eli5"));
+      expect(select.findAll('option[value="eli5"]')).toHaveLength(1);
+      expect(updateCalls()).toHaveLength(0);
+
+      await select.setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: "other-style" } });
+      expect((select.element as HTMLSelectElement).value).toBe("other-style");
+    } finally { wrapper.unmount(); }
+  });
+
+  it("can clear an unavailable saved content style to model default", async () => {
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) =>
+      route === "agent.control" && (payload as { action: string }).action === "getSkills" ? [] : settings);
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate({ ...structuredClone(settings), piGlobal: { outputStyle: "missing-style" } });
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      const select = wrapper.get('[data-setting-path="outputStyle"] select');
+      expect((select.element as HTMLSelectElement).value).toBe("missing-style");
+      await select.setValue("");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: null } });
+      const selected = (select.element as HTMLSelectElement).selectedOptions[0]!;
+      expect(selected.value).toBe("");
+      expect(selected.disabled).toBe(false);
+      expect(selected.textContent).toBe(i18n.global.t("options.modelDefault"));
+    } finally { wrapper.unmount(); }
   });
 
   it("coalesces a burst of non-app saves into one session reload", async () => {

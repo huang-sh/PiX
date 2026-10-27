@@ -36,39 +36,51 @@ test("a marker in the frontmatter opts a skill file in", () => {
   }
 });
 
-test("appends the selected skill's name as the pointer", () => {
+test("combines the selected content-style skill with PiX's format rules", () => {
   const out = appendOutputStyle(
     ["user append"],
     [{ name: "sample-style", disableModelInvocation: false }],
     settings({}, { outputStyle: "sample-style" }),
   );
-  assert.deepEqual(out, ["user append", "<output_style>sample-style</output_style>"]);
+  assert.equal(out.length, 2);
+  assert.equal(out[0], "user append");
+  assert.match(out[1]!, /^<output_style>\n/);
+  assert.match(out[1]!, /<content_style>\nUse the sample-style skill listed in available_skills\.\n<\/content_style>/);
+  assert.match(out[1]!, /<format_rules>\n[\s\S]*clickable Markdown links[\s\S]*<\/format_rules>\n<\/output_style>$/);
 });
 
-test("an unset or blank setting adds no pointer, leaving the model's own style in charge", () => {
+test("model default keeps the format rules and omits the content style", () => {
   const skills = [{ name: "i-have-adhd", disableModelInvocation: false }];
   for (const configured of [undefined, "", "   "]) {
     const out = appendOutputStyle(
       ["base"],
       skills,
-      settings({}, { outputStyle: configured ?? "" }),
+      settings({}, { outputStyle: configured }),
     );
-    assert.deepEqual(out, ["base"]);
+    assert.equal(out.length, 2);
+    assert.equal(out[0], "base");
+    assert.doesNotMatch(out[1]!, /<content_style>/);
+    assert.match(out[1]!, /<format_rules>/);
+    assert.ok(out[1]!.includes("[My Report.md](</absolute/path/My Project/My Report.md>)"));
+    assert.ok(out[1]!.includes("[app.py:12](/absolute/path/app.py:12)"));
   }
 });
 
-test("leaves the base untouched when the skill is not in the opted-in list", () => {
+test("keeps format rules when the selected skill is not in the opted-in list", () => {
   // Hand-edited settings naming an ordinary skill: the injection list only
   // ever holds opted-in skills, so the pointer never lands.
   assert.deepEqual(
     appendOutputStyle(["base"], [], settings({}, { outputStyle: "zotero-cli" })),
-    ["base"],
+    appendOutputStyle(["base"], [], settings()),
   );
 });
 
-test("leaves the base untouched for a manual-only skill the prompt cannot resolve", () => {
+test("omits manual-only content styles the model cannot resolve", () => {
   const manualOnly = [{ name: "sample-style", disableModelInvocation: true }];
-  assert.deepEqual(appendOutputStyle(["base"], manualOnly, settings({}, { outputStyle: "sample-style" })), ["base"]);
+  assert.deepEqual(
+    appendOutputStyle(["base"], manualOnly, settings({}, { outputStyle: "sample-style" })),
+    appendOutputStyle(["base"], [], settings()),
+  );
 });
 
 test("project settings override the global value", () => {
@@ -77,10 +89,11 @@ test("project settings override the global value", () => {
     [{ name: "sample-style", disableModelInvocation: false }],
     settings({ outputStyle: "sample-style" }, { outputStyle: "i-have-adhd" }),
   );
-  assert.deepEqual(styled, ["base", "<output_style>sample-style</output_style>"]);
+  assert.match(styled[1]!, /Use the sample-style skill/);
+  assert.doesNotMatch(styled[1]!, /i-have-adhd/);
   // A blank project value also wins: unset means unset, not a fallback to global.
   assert.deepEqual(
     appendOutputStyle(["base"], [{ name: "i-have-adhd", disableModelInvocation: false }], settings({ outputStyle: "" }, { outputStyle: "i-have-adhd" })),
-    ["base"],
+    appendOutputStyle(["base"], [], settings()),
   );
 });

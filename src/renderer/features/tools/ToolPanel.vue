@@ -24,7 +24,7 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { desktop } from "../../api";
@@ -109,6 +109,7 @@ function fileTreeExpand() {
   fileTreeOpen.value = true;
 }
 const lineNumbers = ref<HTMLElement>();
+const fileEditor = ref<HTMLTextAreaElement>();
 const hasDesktop = Boolean(window.pix);
 const tools: { id: ContentTab; label: string; icon: unknown }[] = [
   { id: "files", label: "tools.files", icon: FolderTree },
@@ -178,6 +179,31 @@ const markdownEditing = ref(false);
 watch(() => activeFile.value?.id, () => {
   markdownEditing.value = false;
 });
+
+watch(
+  [() => activeFile.value, () => activeFile.value?.line, () => layout.contentSection],
+  async () => {
+    const tab = activeFile.value;
+    const line = tab?.line;
+    if (!tab?.document || !line || layout.contentSection !== "files"
+      || tab.document.dataUrl || isPdf.value || tooLarge.value) return;
+    markdownEditing.value = true;
+    await nextTick();
+    const editor = fileEditor.value;
+    if (!editor || activeFile.value !== tab || tab.line !== line || layout.contentSection !== "files") return;
+    const lines = editor.value.split("\n");
+    const index = Math.min(line, lines.length) - 1;
+    const start = lines.slice(0, index).reduce((offset, value) => offset + value.length + 1, 0);
+    editor.focus();
+    editor.setSelectionRange(start, start + lines[index]!.length);
+    const style = getComputedStyle(editor);
+    const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5 || 20;
+    editor.scrollTop = Math.max(0, index * lineHeight - editor.clientHeight / 2 + lineHeight);
+    if (lineNumbers.value) lineNumbers.value.scrollTop = editor.scrollTop;
+    tab.line = undefined;
+  },
+  { immediate: true, flush: "post" },
+);
 
 async function openFile(path: string) {
   await workspace.openFile(path);
@@ -464,7 +490,7 @@ async function save(tab: WorkspaceTab) {
                 <PanelRight :size="16" />
               </Button>
               <Button
-                v-if="isMarkdown && !activeFile?.document?.readonly"
+                v-if="isMarkdown && (!activeFile?.document?.readonly || markdownEditing)"
                 size="sm"
                 :aria-pressed="markdownEditing"
                 data-action="toggle-markdown-edit"
@@ -509,6 +535,7 @@ async function save(tab: WorkspaceTab) {
           <div v-else-if="activeFile.document" class="code-editor">
             <pre ref="lineNumbers" aria-hidden="true">{{ gutter }}</pre>
             <textarea
+              ref="fileEditor"
               class="file-editor"
               :readonly="activeFile.document.readonly"
               :value="activeFile.document.content"
@@ -621,7 +648,7 @@ async function save(tab: WorkspaceTab) {
             <div class="editor-header">
               <span>{{ active.path }}</span>
               <Button
-                v-if="active.document.language === 'markdown' && !active.document.readonly"
+                v-if="active.document.language === 'markdown' && (!active.document.readonly || markdownEditing)"
                 size="sm"
                 :aria-pressed="markdownEditing"
                 @click="markdownEditing = !markdownEditing"
