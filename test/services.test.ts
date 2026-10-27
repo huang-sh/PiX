@@ -333,6 +333,7 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
       enterToSend: "yes",
       canvasDotGridSpacing: "24",
       canvasDotGridDotSize: 99,
+      nodeCardFields: ["cost", "unknown", "model", "tokens", "thinking", "cost", 42],
       browserHome: 42,
       futureKey: { keep: true },
     }));
@@ -345,6 +346,7 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(app.enterToSend, true);
     assert.equal(app.canvasDotGridSpacing, 24);
     assert.equal(app.canvasDotGridDotSize, 4);
+    assert.deepEqual(app.nodeCardFields, ["cost", "tokens"]);
     assert.equal(app.browserHome, "https://pi.dev");
     // Unknown keys from a newer version must survive normalization.
     assert.deepEqual((app as unknown as Record<string, unknown>).futureKey, { keep: true });
@@ -355,6 +357,12 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(persisted.closeToTray, undefined);
     assert.equal(persisted.canvasDotGridDotSize, undefined);
     assert.deepEqual(persisted.futureKey, { keep: true });
+
+    const service = new SettingsService(temp);
+    service.update({ nodeCardFields: [] });
+    assert.deepEqual(service.bundle().app.nodeCardFields, []);
+    service.update({ nodeCardFields: "invalid" });
+    assert.deepEqual(service.bundle().app.nodeCardFields, ["branch", "context"]);
 
     // Settings-form removals ride as null; the merge drops the key.
     new SettingsService(temp).update({ futureKey: null });

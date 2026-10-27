@@ -1,9 +1,16 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GraphNode } from "../../src/shared/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import { useLayoutStore } from "../../src/renderer/stores/layout";
+import type { GraphNode, SettingsBundle } from "../../src/shared/types";
 import { i18n } from "../../src/renderer/i18n";
 import DraftNode, { type DraftNodeData } from "../../src/renderer/features/graph/DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "../../src/renderer/features/graph/PromptNode.vue";
+
+beforeEach(() => {
+  setActivePinia(createPinia());
+  useLayoutStore().settings = { app: { nodeCardFields: ["branch", "context"] } } as SettingsBundle;
+});
 
 function nodeData(overrides: Partial<PromptNodeData> = {}): PromptNodeData {
   return {
@@ -28,6 +35,107 @@ function nodeData(overrides: Partial<PromptNodeData> = {}): PromptNodeData {
   };
 }
 
+describe("PromptNode information", () => {
+  it("uses the global priority, shows complete details, and honors subscription billing", async () => {
+    vi.useFakeTimers();
+    const layout = useLayoutStore();
+    delete layout.settings!.app.nodeCardFields;
+    const data = nodeData();
+    data.node.gitBranch = "main";
+    data.node.metrics = {
+      usage: { input: 1200, output: 300, cacheRead: 800, cacheWrite: 100, cost: 0.0123 },
+      costs: { openai: 0.0123 }, durationMs: 83_000,
+    };
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    try {
+      expect(wrapper.findAll('[data-node-info]').map(item => item.attributes('data-node-info'))).toEqual(["branch", "context", "model", "thinking"]);
+      expect((wrapper.get(".node-footer").element as HTMLElement).style.gridTemplateColumns).toBe("auto minmax(0,1fr) minmax(0,auto) auto");
+      expect(wrapper.get("[data-node-info=\"model\"]").find("svg").exists()).toBe(false);
+      expect(wrapper.find(".node-info-more").exists()).toBe(false);
+      layout.settings!.app.nodeCardFields = ["duration", "cost"];
+      await flushPromises();
+      expect(wrapper.get('[data-node-info="duration"]').text()).toBe("1m 23s");
+      expect(wrapper.get('[data-node-info="cost"]').text()).toBe("≈$0.0123");
+      await wrapper.get('.node-footer').trigger('mouseenter', { buttons: 0 });
+      await vi.advanceTimersByTimeAsync(280);
+      const details = document.querySelector('.node-info-details')!;
+      expect(details.textContent).toContain("Tokens2,400");
+      expect(details.textContent).toContain("Input tokens1,200");
+      expect(details.textContent).toContain("Cache read tokens800");
+      expect(details.textContent).toContain("Context usage41,000 / 128,000 (32%)");
+      expect(document.querySelector('.node-hover-card .agent-markdown')).toBeNull();
+
+      layout.settings!.app.nodeCardFields = ["cost", "tokens"];
+      layout.settings!.app.usage = { unbilledProviders: ["OpenAI"] };
+      await flushPromises();
+      expect(wrapper.findAll('[data-node-info]').map(item => item.attributes('data-node-info'))).toEqual(["cost", "tokens", "model", "thinking"]);
+      expect(wrapper.get('[data-node-info="cost"]').text()).toBe("$0.0000");
+      expect(wrapper.get('[data-node-info="tokens"]').text()).toBe("2.4K");
+
+      await wrapper.setProps({ data: { ...data, node: { ...data.node, metrics: { usage: data.node.metrics.usage, costs: { openai: null } } } } });
+      delete layout.settings!.app.usage;
+      await flushPromises();
+      expect(wrapper.get('[data-node-info="cost"]').text()).toBe("—");
+      layout.settings!.app.nodeCardFields = [];
+      await flushPromises();
+      expect(wrapper.findAll('[data-node-info]').map(item => item.attributes('data-node-info'))).toEqual(["model", "thinking"]);
+      await wrapper.get('.node-footer').trigger('focus');
+      expect(document.querySelector('.node-info-details')).not.toBeNull();
+      await wrapper.get('.node-footer').trigger('keydown', { key: 'Escape' });
+      expect(document.querySelector('.node-hover-card')).toBeNull();
+    } finally {
+      wrapper.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("fits information in priority order and updates duration while running", async () => {
+    vi.useFakeTimers();
+    const observers: Array<() => void> = [];
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { observers.push(callback); }
+      observe() {}
+      disconnect() {}
+    });
+    const layout = useLayoutStore();
+    layout.settings!.app.nodeCardFields = ["duration", "tokens", "model"];
+    const data = nodeData({ running: true });
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(180);
+    const itemWidth = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(70);
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(wrapper.get('[data-node-info="duration"]').text()).toBe("1s");
+      expect(wrapper.findAll('[data-node-info]').filter(item => item.isVisible()).map(item => item.attributes('data-node-info'))).toEqual(["model", "thinking"]);
+      width.mockReturnValue(260);
+      observers.forEach(resize => resize());
+      await flushPromises();
+      expect(wrapper.findAll('[data-node-info]').filter(item => item.isVisible()).map(item => item.attributes('data-node-info'))).toEqual(["duration", "model", "thinking"]);
+      width.mockReturnValue(80);
+      observers.forEach(resize => resize());
+      await flushPromises();
+      expect(wrapper.findAll('[data-node-info]').filter(item => item.isVisible()).map(item => item.attributes('data-node-info'))).toEqual(["model", "thinking"]);
+      await wrapper.setProps({ data: { ...data, running: false, node: { ...data.node, metrics: { durationMs: 2300 } } } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(wrapper.get('[data-node-info="duration"]').text()).toBe("2s");
+    } finally {
+      width.mockRestore();
+      itemWidth.mockRestore();
+      wrapper.unmount();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("PromptNode branch action", () => {
   it("shows the recorded Git branch with its full name and hides missing history", async () => {
     const data = nodeData();
@@ -36,11 +144,10 @@ describe("PromptNode branch action", () => {
       props: { id: "turn:1", data: { ...data, node: { ...data.node, gitBranch: branch } } },
       global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
     });
-    expect(wrapper.get(".node-git-branch").text()).toBe(branch);
-    expect(wrapper.get(".node-git-branch").attributes("title")).toContain(branch);
-    expect(wrapper.get(".node-git-branch").attributes("aria-label")).toContain(branch);
+    expect(wrapper.get('[data-node-info="branch"]').text()).toBe(branch);
+    expect(wrapper.get('[data-node-info="branch"]').attributes("title")).toContain(branch);
     await wrapper.setProps({ data: { ...data, node: { ...data.node } } });
-    expect(wrapper.find(".node-git-branch").exists()).toBe(false);
+    expect(wrapper.find('[data-node-info="branch"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -91,7 +198,7 @@ describe("PromptNode branch action", () => {
 
     expect(add.attributes("aria-disabled")).toBe("true");
     expect(add.attributes("title")).toBe("等待完成或先停止当前任务");
-    expect(wrapper.get(".node-context-usage").text()).toContain("32%128K");
+    expect(wrapper.get(".node-context-value").text()).toContain("32%128K");
     expect(wrapper.get(".node-model-value").text()).toContain("OpenAI / GPT-5.4");
     expect(wrapper.get(".node-thinking-value").text()).toContain("high");
     expect(wrapper.find(".node-footer button").exists()).toBe(false);
@@ -186,6 +293,57 @@ describe("PromptNode hover card", () => {
   afterEach(() => {
     vi.useRealTimers();
     document.body.innerHTML = "";
+  });
+
+  it("closes keyboard-opened details after focus leaves when the card is not hovered", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data: nodeData() },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    try {
+      const footer = wrapper.get('.node-footer').element as HTMLElement;
+      footer.focus();
+      await flushPromises();
+      expect(document.querySelector('.node-info-details')).not.toBeNull();
+      footer.blur();
+      await vi.advanceTimersByTimeAsync(499);
+      expect(document.querySelector('.node-info-details')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(document.querySelector('.node-hover-card')).toBeNull();
+    } finally { wrapper.unmount(); }
+  });
+
+  it("keeps footer details open after both footer and node leave events, then closes after leaving the card", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data: nodeData() },
+      global: { plugins: [i18n], stubs: { Handle: true, MarkdownRenderer: true } },
+      attachTo: document.body,
+    });
+    try {
+      const node = wrapper.get('.prompt-node');
+      const footer = wrapper.get('.node-footer');
+      await node.trigger('mouseenter', { buttons: 0 });
+      await footer.trigger('mouseenter', { buttons: 0 });
+      await vi.advanceTimersByTimeAsync(280);
+      const card = document.querySelector('.node-hover-card')!;
+      expect(card.querySelector('.node-info-details')).not.toBeNull();
+
+      await footer.trigger('mouseleave', { relatedTarget: card });
+      await node.trigger('mouseleave', { relatedTarget: card });
+      await vi.advanceTimersByTimeAsync(20);
+      card.dispatchEvent(new MouseEvent('mouseenter'));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(document.querySelector('.node-hover-card')).toBe(card);
+
+      card.dispatchEvent(new MouseEvent('mouseleave'));
+      await vi.advanceTimersByTimeAsync(499);
+      expect(document.querySelector('.node-hover-card')).toBe(card);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(document.querySelector('.node-hover-card')).toBeNull();
+    } finally { wrapper.unmount(); }
   });
 
   it("stays closed while a mouse button is held and closes on press outside the card", async () => {

@@ -2,6 +2,8 @@ import type { AnyModel, Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
 import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
+import type { NodeCardField } from "./node-card.js";
+import type { UsageAmount } from "./usage.js";
 
 export type PromptImage = ImageContent;
 
@@ -113,6 +115,13 @@ export interface GraphNode {
   depth: number;
   imageCount?: number;
   footer?: NodeFooterState;
+  metrics?: {
+    usage?: UsageAmount;
+    /** Saved SDK costs by provider; null means that some costs are missing. */
+    costs?: Record<string, number | null>;
+    /** User entry to its saved completion footer; absent for unfinished history. */
+    durationMs?: number;
+  };
   branchId?: string;
   running?: boolean;
   forkable?: boolean;
@@ -371,6 +380,8 @@ export interface AppSettings {
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /** Optional footer fields in priority order; model and thinking always appear. */
+  nodeCardFields?: NodeCardField[];
   /**
    * Deploys this desktop's model API keys and custom models to remote hosts,
    * so remote work runs without the desktop. Off by default; the host only

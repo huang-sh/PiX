@@ -64,6 +64,7 @@ writeFileSync(
   JSON.stringify({
     // The graph assertions below need a session opened at boot.
     openLastSessionOnStartup: true,
+    nodeCardFields: ["context"],
     layout: {
       version: 3,
       widths: { navigator: 248, chat: 356, content: 600 },

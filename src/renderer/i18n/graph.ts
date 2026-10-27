@@ -2,6 +2,13 @@ import { acceptDomainUpdate } from "./registry";
 
 export const en = {
   graph: {
+    nodeInfo: {
+      details: "Node details", model: "Model", duration: "Duration", cost: "Cost", tokens: "Tokens", context: "Context usage", thinking: "Thinking level", branch: "Git branch",
+      input: "Input tokens", output: "Output tokens", cacheRead: "Cache read tokens", cacheWrite: "Cache write tokens", started: "Started",
+      seconds: "{n}s", minutesSeconds: "{m}m {s}s", hoursMinutes: "{h}h {m}m",
+      note: "Totals cover this node only, including tool and summary usage. Costs are reference amounts and may include model pricing estimates; subscription billing follows Usage settings. Duration runs from submission to completion, including tools and retries. Missing records show —.",
+    },
+
     editLabel: "Edit label",
     labelHint: "Mark a task for later. Leave empty to remove the label.",
     filterLabel: "Filter tasks",
@@ -128,6 +135,13 @@ export const en = {
 
 export const zhCN: typeof en = {
   graph: {
+    nodeInfo: {
+      details: "节点明细", model: "模型", duration: "耗时", cost: "费用", tokens: "词元", context: "上下文占用", thinking: "思考等级", branch: "Git 分支",
+      input: "输入词元", output: "输出词元", cacheRead: "缓存读取词元", cacheWrite: "缓存写入词元", started: "开始时间",
+      seconds: "{n}秒", minutesSeconds: "{m}分{s}秒", hoursMinutes: "{h}小时{m}分",
+      note: "统计仅包含本节点，含工具及摘要用量。费用为参考值，可能包含按模型价格计算的估算；订阅计费遵循用量设置。耗时从提交至本轮结束，包含工具执行与重试；缺失记录显示 —。",
+    },
+
     editLabel: "编辑标签",
     labelHint: "标记重要任务，留空保存可移除标签。",
     filterLabel: "筛选任务",

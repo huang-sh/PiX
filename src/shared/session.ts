@@ -11,6 +11,7 @@ import type {
 import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isPromptImage } from "./images.js";
+import { emptyAmount, sumAmount, usageRecordsOf } from "./usage.js";
 
 export function isSessionRunning(snapshot: SessionSnapshot): boolean {
   const runtime = snapshot.runtime;
@@ -186,6 +187,23 @@ const clip = (s: string, n: number) => {
   return c.length > n ? `${c.slice(0, n - 1)}…` : c;
 };
 export const clipText = clip;
+function turnMetrics(entries: RawSessionEntry[], user: RawSessionEntry): GraphNode["metrics"] {
+  const records = usageRecordsOf(entries);
+  const usage = emptyAmount();
+  const costs: Record<string, number | null> = Object.create(null);
+  for (const record of records) {
+    sumAmount(usage, record.usage);
+    const provider = record.model.split("/")[0]!;
+    costs[provider] = record.source === "none" || costs[provider] === null
+      ? null : (costs[provider] ?? 0) + record.usage.cost;
+  }
+  const footer = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === NODE_FOOTER_CUSTOM_TYPE);
+  const elapsed = footer ? Date.parse(footer.timestamp) - Date.parse(user.timestamp) : NaN;
+  return {
+    ...(records.length ? { usage, costs } : {}),
+    ...(Number.isFinite(elapsed) && elapsed >= 0 ? { durationMs: elapsed } : {}),
+  };
+}
 function branchEntries(byId: Map<string, RawSessionEntry>, leaf: string | null) {
   const out: RawSessionEntry[] = [];
   const seen = new Set<string>();
@@ -293,6 +311,7 @@ export function projectSession(
       hasError: finalAssistantReply ? error(finalAssistantReply) : false,
       depth: context(e.id).depth,
       footer: footerState(owned, context(e.parentId).settings),
+      metrics: turnMetrics(owned, e),
       fileChanges: turnFileChanges(owned),
     };
   });

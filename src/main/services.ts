@@ -47,6 +47,7 @@ import type {
 import { projectId } from "../shared/types.js";
 import { migrateShortcutOverrides, validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
+import { normalizeNodeCardFields } from "../shared/node-card.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 import { sessionModifiedAt } from "./graph-files.js";
 import { fileChangeDir } from "./file-changes.js";
@@ -242,6 +243,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     expectBoolean(key);
   expectNumber("canvasDotGridSpacing", 8, 96);
   expectNumber("canvasDotGridDotSize", 1, 6);
+  if (out.nodeCardFields !== undefined) out.nodeCardFields = normalizeNodeCardFields(out.nodeCardFields);
   try {
     if (out.keyboardShortcuts !== undefined) out.keyboardShortcuts = migrateShortcutOverrides(out.keyboardShortcuts);
   } catch {

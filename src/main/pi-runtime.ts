@@ -44,11 +44,10 @@ import {
   aggregateUsage,
   dedupeUsageRecords,
   estimateUsageCosts,
-  usageAmount,
+  usageRecordsOf,
   type UsageOverview,
   type UsageProjectRef,
   type UsageRange,
-  type UsageRecord,
   type UsageSessionInput,
 } from "../shared/usage.js";
 import { loadPricingTable, pricingResolver } from "./usage-pricing.js";
@@ -119,45 +118,6 @@ export interface PiSettingsSdk {
 export async function piSettingsSdk(): Promise<PiSettingsSdk> {
   const moduleUrl = new URL("./core/settings-manager.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
   return import(moduleUrl.href);
-}
-
-/** Usage that no single model reply owns (summaries, tool-side billing). */
-const UNATTRIBUTED_USAGE_MODEL = "Tools/summaries";
-
-/**
- * One billed event per assistant reply, auxiliary usage entry, and summary
- * generation, attributing each the way the SDK's own accounting does
- * (getUsageCostBreakdown): replies to their reporting model, everything else
- * into the shared tools bucket.
- */
-function usageRecordsOf(entries: any[]): UsageRecord[] {
-  const records: UsageRecord[] = [];
-  for (const entry of entries) {
-    let model: string | undefined;
-    let usage: any;
-    if (entry.type === "message" && entry.message?.role === "assistant") {
-      const message = entry.message;
-      model = `${message.provider}/${message.responseModel ?? message.model}`;
-      usage = message.usage;
-    } else if (entry.type === "usage") {
-      model = `${entry.provider}/${entry.model}`;
-      usage = entry.usage;
-    } else if (entry.type === "branch_summary" || entry.type === "compaction") {
-      model = UNATTRIBUTED_USAGE_MODEL;
-      usage = entry.usage;
-    } else if (entry.type === "message" && entry.message?.role === "toolResult") {
-      model = UNATTRIBUTED_USAGE_MODEL;
-      usage = entry.message.usage;
-    }
-    if (!model || !usage) continue;
-    records.push({
-      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
-      model,
-      usage: usageAmount(usage),
-      ...(typeof entry.id === "string" ? { entryId: entry.id } : {}),
-    });
-  }
-  return records;
 }
 
 const usageMessageText = (message: any): string => {

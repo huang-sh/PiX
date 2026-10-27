@@ -25,6 +25,7 @@ export interface Row {
   placeholder?: string;
   min?: number;
   max?: number;
+  group?: "interface" | "canvas";
 }
 
 // Mirrors withDefaultPowershellTool in the main process: Windows agents get
@@ -100,11 +101,11 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         ];
       case "appearance":
         return [
-          { path: "theme", label: "settings.rows.theme", scope: "app", type: "select", options: ["system", "light", "dark", "teal", "peach", "paper", "graphite"] },
-          { path: "density", label: "settings.rows.density", scope: "app", type: "select", options: ["comfortable", "compact"] },
-          { path: "canvasDotGrid", label: "settings.rows.canvasDotGrid", scope: "app", type: "check", fallback: true, description: "settings.rows.canvasDotGridDesc" },
-          { path: "canvasDotGridSpacing", label: "settings.rows.canvasDotGridSpacing", scope: "app", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSpacingDesc" },
-          { path: "canvasDotGridDotSize", label: "settings.rows.canvasDotGridDotSize", scope: "app", type: "number", fallback: 4, min: 1, max: 6, description: "settings.rows.canvasDotGridDotSizeDesc" },
+          { path: "theme", label: "settings.rows.theme", scope: "app", group: "interface", type: "select", options: ["system", "light", "dark", "teal", "peach", "paper", "graphite"] },
+          { path: "density", label: "settings.rows.density", scope: "app", group: "interface", type: "select", options: ["comfortable", "compact"] },
+          { path: "canvasDotGrid", label: "settings.rows.canvasDotGrid", scope: "app", group: "canvas", type: "check", fallback: true, description: "settings.rows.canvasDotGridDesc" },
+          { path: "canvasDotGridSpacing", label: "settings.rows.canvasDotGridSpacing", scope: "app", group: "canvas", type: "number", fallback: 24, min: 8, max: 96, description: "settings.rows.canvasDotGridSpacingDesc" },
+          { path: "canvasDotGridDotSize", label: "settings.rows.canvasDotGridDotSize", scope: "app", group: "canvas", type: "number", fallback: 4, min: 1, max: 6, description: "settings.rows.canvasDotGridDotSizeDesc" },
         ];
       case "models":
         return [

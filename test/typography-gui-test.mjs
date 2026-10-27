@@ -90,13 +90,26 @@ const taskListMarkers = {
 };
 const sessionFile = join(workspace, ".pi", "sessions", "typography.jsonl");
 const timestamp = new Date().toISOString();
+const branch = "feature/node-card-information-display";
 const usage = { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 writeFileSync(sessionFile, [
   { type: "session", version: 3, id: "823f88f0-fb22-42cb-abcd-dc983145b642", cwd: workspace, timestamp },
-  { type: "message", id: "user0001", parentId: null, timestamp, message: { role: "user", content: text, timestamp: Date.now() } },
+  { type: "custom", id: "branch01", parentId: null, timestamp, customType: "pix.git-branch", data: { branch } },
+  { type: "message", id: "user0001", parentId: "branch01", timestamp, message: { role: "user", content: text, timestamp: Date.now() } },
   { type: "message", id: "reply001", parentId: "user0001", timestamp, message: {
     role: "assistant", api: "openai-responses", provider: "openai", model: "gpt-5.6", usage, stopReason: "stop", timestamp: Date.now(),
     content: [{ type: "text", text: `# 中文与 English\n\n${text}\n\n**清晰的层级，让长段落也容易阅读。** 正文、标题与代码采用统一的排版规则，重点信息保留强调。\n\n## 阅读与排版 Typography\n\n- 中英混排：${text}\n- 行内代码：\`const 中文 = 'Hello PiX'\`\n- 长标识符：\`resourceLoaderOptions.additionalExtensionPaths\` 可以在窄栏内自然换行。\n\n\`\`\`typescript\n// 中文注释 English comment\nconst greeting = '你好，PiX';\nconsole.log(greeting);\n\`\`\`\n\n${numberedLists}` }],
+  } },
+].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+const footerSessionFile = join(workspace, ".pi", "sessions", "node-footer.jsonl");
+writeFileSync(footerSessionFile, [
+  { type: "session", version: 3, id: "footer-layout", cwd: workspace, timestamp },
+  { type: "custom", id: "git", parentId: null, timestamp, customType: "pix.git-branch", data: { branch } },
+  { type: "message", id: "prompt", parentId: "git", timestamp: new Date(Date.now() - 83000).toISOString(), message: { role: "user", content: "Footer layout", timestamp: Date.now() - 83000 } },
+  { type: "message", id: "answer", parentId: "prompt", timestamp, message: { role: "assistant", provider: "anthropic", model: "claude-sonnet", content: [{ type: "text", text: "Done" }], usage: { ...usage, input: 1200, output: 300, cacheRead: 800, cacheWrite: 100, cost: { total: 0.0123 } } } },
+  { type: "custom", id: "footer", parentId: "answer", timestamp, customType: "pix.node-footer", data: {
+    model: { provider: "anthropic", id: "claude-sonnet", name: "Claude Sonnet with a very long model name" }, thinkingLevel: "high",
+    contextUsage: { tokens: 41000, contextWindow: 128000, percent: 32 },
   } },
 ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
 const port = 10000 + Math.floor(Math.random() * 1000);
@@ -149,6 +162,7 @@ try {
     if (message.error) request.reject(new Error(message.error.message)); else request.resolve(message.result);
   });
   await send("Page.enable");
+  await send("Page.bringToFront");
   await retry(async () => assert.equal(await evaluate("window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))"), true));
   await evaluate(`window.__pixTest.openSession(${JSON.stringify(sessionFile)})`);
   await evaluate("window.__pixTest.state().layout.collapsed.chat ? window.__pixTest.toggle('chat') : undefined");
@@ -195,6 +209,16 @@ try {
           })(),
           inline: metrics('.final-response .inline-code'), caption: metrics('.node-context-usage b'),
           graph: metrics('.turn-copy p'), navigation: metrics('.project-main strong'),
+          nodeFooter: (() => {
+            const footer = document.querySelector('.node-footer');
+            const fields = [...footer.querySelectorAll('[data-node-info]')].filter(field => getComputedStyle(field).display !== 'none');
+            const branch = footer.querySelector('[data-node-info=branch] > span');
+            return {
+              fields: fields.map(field => field.dataset.nodeInfo),
+              branch: branch.textContent,
+              branchTruncated: branch.scrollWidth > branch.clientWidth,
+            };
+          })(),
         };
         // Clone real rendered Markdown (including scoped style attributes), then
         // check the hover/process overrides and narrow layouts without touching Vue state.
@@ -296,6 +320,9 @@ try {
       assert.equal(measurements.code.family, measurements.editor.family, "code block font");
       assert.equal(measurements.inline.family, measurements.editor.family, "inline code font");
       assert.equal(measurements.caption.size, 12, "node caption");
+      assert.deepEqual(measurements.nodeFooter.fields, ["branch", "context", "model", "thinking"], 'long branch names must not hide the default footer fields');
+      assert.equal(measurements.nodeFooter.branch, branch);
+      assert.equal(measurements.nodeFooter.branchTruncated, true, 'long branches must truncate inside their existing column');
       assert.equal(measurements.graph.family, measurements.ui.family, "graph font");
       assert.equal(measurements.navigation.family, measurements.ui.family, "navigation font");
       assert.equal(measurements['process-item'].size, 14);
@@ -328,9 +355,68 @@ try {
     const element = await send("DOM.querySelector", { nodeId: doc.root.nodeId, selector });
     fonts[selector] = (await send("CSS.getPlatformFontsForNode", { nodeId: element.nodeId })).fonts;
   }
-  writeFileSync(join(artifacts, "typography-checks.json"), JSON.stringify({ passed: true, report, fonts }, null, 2));
   writeFileSync(join(artifacts, "typography-markdown.html"), await evaluate("document.querySelector('.final-response .agent-markdown').outerHTML"));
-  console.log(JSON.stringify({ passed: true, combinations: report.length, fonts }, null, 2));
+  const footerReport = [];
+  const fieldOrders = [[], ['branch', 'context'], ['duration', 'cost', 'tokens', 'context', 'branch'], ['branch', 'duration', 'tokens', 'cost', 'context'], ['context', 'branch', 'tokens', 'cost', 'duration'], ['tokens', 'cost', 'duration', 'branch', 'context']];
+  for (const density of ['comfortable', 'compact']) for (const fields of fieldOrders) {
+    await evaluate(`window.pix.invoke('settings.update', { scope: 'app', patch: ${JSON.stringify({ nodeCardFields: fields, density })} })`);
+    await send('Page.reload');
+    await send('Page.bringToFront');
+    await retry(async () => assert.equal(await evaluate("window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))"), true));
+    await evaluate(`window.__pixTest.openSession(${JSON.stringify(footerSessionFile)})`);
+    await retry(async () => assert.equal(await evaluate("document.querySelector('.node-model-value > span')?.textContent.includes('very long model name')"), true));
+    // Let both Vue's update and the browser's ResizeObserver settle.
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    const measurements = await evaluate(`(() => {
+      const footer = document.querySelector('.prompt-node .node-footer');
+      const bounds = footer.getBoundingClientRect();
+      const items = [...footer.querySelectorAll('[data-node-info]')].filter(el => getComputedStyle(el).display !== 'none').map(el => {
+        const box = el.getBoundingClientRect();
+        return { id: el.dataset.nodeInfo, left: box.left, right: box.right, top: box.top, textWidth: el.querySelector('span')?.clientWidth };
+      });
+      return { items, left: bounds.left, right: bounds.right };
+    })()`);
+    const details = JSON.stringify({ density, fields, measurements });
+    assert.deepEqual(measurements.items.slice(-2).map(item => item.id), ['model', 'thinking'], details);
+    assert.deepEqual(measurements.items.slice(0, -2).map(item => item.id), fields.slice(0, measurements.items.length - 2), details);
+    assert.ok(!fields.length || measurements.items.length > 2, 'the highest priority optional field must fit: ' + details);
+    assert.ok(measurements.items.find(item => item.id === 'model').textWidth >= 60, 'model must keep readable space: ' + details);
+    assert.ok(measurements.items.every((item, index, items) => item.left >= measurements.left - 1 && item.right <= measurements.right + 1
+      && (!index || item.left >= items[index - 1].right - 1 && Math.abs(item.top - items[index - 1].top) <= 1)), 'footer fields must fit without overlap: ' + details);
+    footerReport.push({ density, fields, ...measurements });
+  }
+  const click = async (point, clickCount = 1) => {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount });
+  };
+  const footerPoint = await evaluate(`(() => {
+    const box = document.querySelector('.prompt-node .node-footer').getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  })()`);
+  await click(footerPoint);
+  await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('.node-info-details'))"), true));
+  assert.equal(await evaluate("document.activeElement.matches('.node-footer')"), true, 'clicking the footer must focus it');
+  const textPoint = await evaluate(`(() => {
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector('.node-info-details dd'));
+    const box = range.getClientRects()[0];
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  })()`);
+  // Native clicks reproduce the browser's blur after entering the floating card.
+  await click(textPoint, 2);
+  assert.equal(await evaluate("document.activeElement.matches('.node-footer')"), false, 'clicking detail text must exercise footer blur');
+  await new Promise(resolve => setTimeout(resolve, 750));
+  assert.equal(await evaluate("Boolean(document.querySelector('.node-info-details'))"), true, 'clicking details must keep the hovered card open after footer blur');
+  assert.ok(await evaluate("window.getSelection().toString().length > 0"), 'detail text must remain selectable');
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 });
+  await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('.node-hover-card'))"), false));
+  await evaluate("document.querySelector('.node-footer').focus()");
+  await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('.node-info-details'))"), true));
+  await evaluate("document.querySelector('.node-footer').blur()");
+  await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('.node-hover-card'))"), false));
+  writeFileSync(join(artifacts, "typography-checks.json"), JSON.stringify({ passed: true, report, footerReport, fonts }, null, 2));
+  console.log(JSON.stringify({ passed: true, combinations: report.length, footerCombinations: footerReport.length, fonts }, null, 2));
 } catch (error) {
   if (socket?.readyState === WebSocket.OPEN) {
     const diagnostics = await evaluate("({ state: window.__pixTest?.state(), html: document.querySelector('.chat')?.outerHTML, text: document.body.innerText.slice(-4000) })").catch(() => null);

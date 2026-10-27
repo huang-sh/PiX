@@ -197,6 +197,14 @@ export const en = {
     inheritDefault: "Inherit default",
     storedIn: "Stored in {scope} settings.",
     scope: { app: "PiX", global: "Pi global", project: "project" },
+    appearanceGroups: { interface: "Interface", canvas: "Canvas", nodeCard: "Node cards" },
+    nodeCard: {
+      description: "Model and thinking level always stay visible. Choose additional information and arrange its priority. Earlier items stay visible when space is limited. Hover over the card footer to see all details.",
+      fields: "Additional information in priority order",
+      reset: "Reset",
+      moveUp: "Move {field} up",
+      moveDown: "Move {field} down",
+    },
     categories: {
       general: "General",
       appearance: "Appearance",
@@ -587,6 +595,14 @@ export const zhCN: typeof en = {
     inheritDefault: "继承默认",
     storedIn: "保存在{scope}设置中。",
     scope: { app: "PiX", global: "Pi 全局", project: "项目" },
+    appearanceGroups: { interface: "界面", canvas: "画布", nodeCard: "节点卡片" },
+    nodeCard: {
+      description: "模型和思考等级固定显示。可选择其他常显信息并调整优先顺序，空间不足时优先展示靠前的项。悬浮卡片底部可查看完整明细。",
+      fields: "按优先顺序排列的附加信息",
+      reset: "恢复默认",
+      moveUp: "上移{field}",
+      moveDown: "下移{field}",
+    },
     categories: {
       general: "常规",
       appearance: "外观",

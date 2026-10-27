@@ -75,6 +75,42 @@ describe("SettingsPage auto-save", () => {
       expect(() => structuredClone(payload), `${route} payload`).not.toThrow();
   });
 
+  it("groups appearance settings and persists node information selection and priority", async () => {
+    const stored: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") Object.assign(stored.app, (payload as UpdatePayload).patch);
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "appearance";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      expect(wrapper.findAll('[data-appearance-group]').map(group => group.attributes('data-appearance-group'))).toEqual(["interface", "canvas", "nodeCard"]);
+      expect(wrapper.get('[data-appearance-group="interface"] [data-setting-path="theme"]').exists()).toBe(true);
+      expect(wrapper.get('[data-appearance-group="canvas"] [data-setting-path="canvasDotGrid"]').exists()).toBe(true);
+      expect(wrapper.find('[data-settings-category="nodeCard"]').exists()).toBe(false);
+      expect(wrapper.find('[data-node-card-field="model"]').exists()).toBe(false);
+      expect(wrapper.find('[data-node-card-field="thinking"]').exists()).toBe(false);
+      expect(wrapper.get('[data-appearance-group="nodeCard"]').text()).toContain('Model and thinking level always stay visible.');
+      expect(wrapper.findAll('[data-node-card-field]').filter(item => (item.get('input').element as HTMLInputElement).checked).map(item => item.attributes('data-node-card-field'))).toEqual(["branch", "context"]);
+      await wrapper.get('[data-node-card-field="tokens"] input').setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch).toEqual({ nodeCardFields: ["branch", "context", "tokens"] });
+      await wrapper.get('[data-node-card-field="tokens"] [data-move="up"]').trigger('click');
+      await flushPromises();
+      expect(layout.settings?.app.nodeCardFields).toEqual(["branch", "tokens", "context"]);
+      await wrapper.get('[data-node-card-field="branch"] input').setValue(false);
+      await flushPromises();
+      expect(layout.settings?.app.nodeCardFields).toEqual(["tokens", "context"]);
+      await wrapper.get('[data-node-card-reset]').trigger('click');
+      await flushPromises();
+      expect(layout.settings?.app.nodeCardFields).toEqual(["branch", "context"]);
+    } finally { wrapper.unmount(); }
+  });
+
   it("resizes the settings sidebar by drag and keyboard, persisting the width", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

@@ -403,3 +403,32 @@ test("a turn's own settled footer entry beats the inherited chain", () => {
   ];
   assert.equal(projectSession(entries, "f2").nodes[1]?.footer?.thinkingLevel, "low");
 });
+
+test("node metrics aggregate only owned usage and end at the saved completion", () => {
+  const entry = (id: string, parentId: string | null, seconds: number, extra: Record<string, unknown>): RawSessionEntry => ({
+    id, parentId, timestamp: new Date(Date.UTC(2026, 9, 27, 0, 0, seconds)).toISOString(), type: "message", ...extra,
+  });
+  const entries = [
+    entry("u", null, 0, { message: { role: "user", content: "root" } }),
+    entry("a", "u", 1, { message: { role: "assistant", provider: "openai", model: "m", usage: { input: 100, output: 20, cacheRead: 50, cost: { total: 0.01 } } } }),
+    entry("r", "a", 2, { message: { role: "toolResult", usage: { output: 5, cost: 0.02 } } }),
+    entry("a2", "r", 3, { message: { role: "assistant", provider: "openai", model: "m", usage: { input: 30, output: 10, cacheWrite: 8, cost: { total: 0.03 } } } }),
+    entry("f", "a2", 6, { type: "custom", customType: "pix.node-footer", data: {} }),
+    entry("label", "f", 60, { type: "label", targetId: "u", label: "later" }),
+    entry("child", "f", 10, { message: { role: "user", content: "child" } }),
+    entry("ac", "child", 11, { message: { role: "assistant", provider: "anthropic", model: "m", usage: { output: 3 } } }),
+    entry("sibling", "f", 12, { message: { role: "user", content: "sibling" } }),
+    entry("as", "sibling", 13, { message: { role: "assistant", provider: "openai", model: "m", usage: { output: 500, cost: { total: 4 } } } }),
+  ];
+  const p = projectSession(entries, "as");
+  const root = p.nodes.find(node => node.userEntryId === "u")!.metrics!;
+  assert.deepEqual(root.usage, { input: 130, output: 35, cacheRead: 50, cacheWrite: 8, cost: 0.06 });
+  assert.equal(root.costs?.openai, 0.04);
+  assert.equal(root.costs?.Tools, 0.02);
+  assert.equal(root.durationMs, 6000);
+  const child = p.nodes.find(node => node.userEntryId === "child")!.metrics!;
+  assert.equal(child.durationMs, undefined);
+  assert.equal(child.costs?.anthropic, null);
+  assert.equal(child.usage?.output, 3);
+  assert.equal(p.nodes.find(node => node.userEntryId === "sibling")!.metrics!.usage?.output, 500);
+});

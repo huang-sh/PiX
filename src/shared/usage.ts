@@ -1,3 +1,5 @@
+import type { RawSessionEntry } from "./types.js";
+
 /**
  * Usage accounting for the settings page's usage panel, in the same terms the
  * pi SDK reports: token counts per reply plus the cost the provider returned.
@@ -37,7 +39,7 @@ export interface UsageRecord {
   /** Session entry id; forks and exports copy entries into new files with the
    *  id intact, so cross-file duplicates can be recognized and counted once. */
   entryId?: string;
-  /** Set by estimateUsageCosts; absent while records are still raw. */
+  /** Raw SDK cost availability, refined by estimateUsageCosts. */
   source?: CostSource;
 }
 
@@ -135,7 +137,7 @@ const MAX_DAY_BUCKETS = 90;
 /** Sessions beyond the newest of these would only pad the table. */
 const MAX_SESSION_ROWS = 200;
 
-const emptyAmount = (): UsageAmount => ({
+export const emptyAmount = (): UsageAmount => ({
   input: 0,
   output: 0,
   cacheRead: 0,
@@ -205,7 +207,7 @@ export function estimateUsageCosts(
     }
 }
 
-const sumAmount = (target: UsageAmount, source: UsageAmount) => {
+export const sumAmount = (target: UsageAmount, source: UsageAmount) => {
   target.input += source.input;
   target.output += source.output;
   target.cacheRead += source.cacheRead;
@@ -369,4 +371,48 @@ export function aggregateUsage(
       .sort((a, b) => b.modified.localeCompare(a.modified))
       .slice(0, MAX_SESSION_ROWS),
   };
+}
+
+/** Usage that no single model reply owns (summaries, tool-side billing). */
+const UNATTRIBUTED_USAGE_MODEL = "Tools/summaries";
+
+/**
+ * One billed event per assistant reply, auxiliary usage entry, and summary
+ * generation, attributing each the way the SDK's own accounting does
+ * (getUsageCostBreakdown): replies to their reporting model, everything else
+ * into the shared tools bucket.
+ */
+export function usageRecordsOf(entries: RawSessionEntry[]): UsageRecord[] {
+  const records: UsageRecord[] = [];
+  const object = (value: unknown): Record<string, unknown> | undefined =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  for (const entry of entries) {
+    const message = object(entry.message);
+    let model: string | undefined;
+    let rawUsage: unknown;
+    if (entry.type === "message" && message?.role === "assistant") {
+      model = `${message.provider}/${message.responseModel ?? message.model}`;
+      rawUsage = message.usage;
+    } else if (entry.type === "usage") {
+      model = `${entry.provider}/${entry.model}`;
+      rawUsage = entry.usage;
+    } else if (entry.type === "branch_summary" || entry.type === "compaction") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      rawUsage = entry.usage;
+    } else if (entry.type === "message" && message?.role === "toolResult") {
+      model = UNATTRIBUTED_USAGE_MODEL;
+      rawUsage = message.usage;
+    }
+    const usage = object(rawUsage);
+    if (!model || !usage) continue;
+    const cost = typeof usage.cost === "number" ? usage.cost : object(usage.cost)?.total;
+    records.push({
+      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
+      model,
+      usage: usageAmount(usage),
+      source: typeof cost === "number" && Number.isFinite(cost) ? "actual" : "none",
+      ...(typeof entry.id === "string" ? { entryId: entry.id } : {}),
+    });
+  }
+  return records;
 }
