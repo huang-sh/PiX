@@ -89,15 +89,17 @@ const composerModel = ref<RuntimeModel | null>();
 const composerThinking = ref<string>();
 
 const composerRunnable = computed(() =>
-  Boolean(session.current?.runtime.available && (session.current.graph
+  Boolean(session.current?.runtime.available && (composerRunning.value || (session.current.graph
     ? panelNode.value?.forkable !== false && !panelNodeId.value?.startsWith("pending:")
-    : !session.current.runtime.isStreaming)));
+    : !session.current.runtime.isStreaming))));
 const composerModelValue = computed(() => {
+  if (composerRunning.value) return selectedRun.value?.runtime?.model ?? session.current?.runtime.model ?? null;
   if (composerModel.value !== undefined) return composerModel.value;
   return panelNode.value?.footer?.model ?? session.current?.runtime.model ?? null;
 });
 const composerThinkingValue = computed(() =>
-  composerThinking.value
+  (composerRunning.value ? selectedRun.value?.runtime?.thinkingLevel ?? session.current?.runtime.thinkingLevel : undefined)
+  ?? composerThinking.value
   ?? panelNode.value?.footer?.thinkingLevel
   ?? session.userThinking
   ?? session.current?.runtime.thinkingLevel
@@ -105,11 +107,27 @@ const composerThinkingValue = computed(() =>
 const composerPlaceholder = computed(() => !composerRunnable.value
   ? t(session.current?.runtime.isStreaming ? "graph.blockedStreaming" : "graph.blockedReadonly")
   : t("draft.placeholder"));
-// The composer's send button doubles as the stop control while the branch it
-// targets is running: graph runs stop per-branch, plain sessions abort the stream.
+// Queue and stop controls target the same run, including pinned branch columns.
 const composerRunning = computed(() => Boolean(session.current?.graph
   ? selectedRun.value?.status === "running"
   : session.current?.runtime.isStreaming));
+const composerPending = computed(() => selectedRun.value?.runtime?.queuedMessages ?? (!session.current?.graph
+  ? session.current?.runtime.queuedMessages : undefined));
+
+function queueTarget() {
+  const graph = session.current?.graph, run = selectedRun.value;
+  if (!graph) return {};
+  if (!run) throw new Error(t("draft.runFinished"));
+  return { graphId: graph.id, branchId: run.branchId, runId: run.runId };
+}
+async function queueComposer(text: string, images?: PromptImage[]) {
+  await session.control({ action: "followUp", text, ...(images?.length ? { images } : {}), ...queueTarget() });
+  return true;
+}
+async function updateComposerQueue(id: string, operation: "steer" | "remove" | "edit", text?: string) {
+  await session.control({ action: "updateQueuedMessage", id, operation,
+    ...(operation === "edit" ? { text } : {}), ...queueTarget() });
+}
 
 async function stopComposer() {
   const run = session.current?.graph ? selectedRun.value : undefined;
@@ -534,16 +552,6 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-else class="composer-expanded">
-        <div class="composer-head">
-          <button
-            type="button"
-            :title="t('branch.composerClose')"
-            :aria-label="t('branch.composerClose')"
-            @click="closeComposer"
-          >
-            <ChevronDown :size="14" />
-          </button>
-        </div>
         <PromptComposer
           ref="composer"
           :draft-state="composerState.draft"
@@ -557,7 +565,18 @@ onBeforeUnmount(() => {
           :on-thinking="setComposerThinking"
           :on-submit="submitComposer"
           :on-stop="stopComposer"
-        />
+          :on-queue="queueComposer"
+          :queued-messages="composerRunning ? composerPending : undefined"
+          :on-queued-action="updateComposerQueue"
+        >
+          <template #header>
+            <div class="composer-head">
+              <button type="button" :title="t('branch.composerClose')" :aria-label="t('branch.composerClose')" @click="closeComposer">
+                <ChevronDown :size="14" />
+              </button>
+            </div>
+          </template>
+        </PromptComposer>
       </div>
     </footer>
   </section>

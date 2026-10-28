@@ -119,6 +119,7 @@ test("a failing event consumer cannot throw into SDK message persistence", async
   let delivered = false;
   const runtime = new PiRuntime(null, null, () => { delivered = true; throw new Error("UI failed"); }, async () => {});
   runtime.runtime = { session: {
+    sessionManager: {},
     subscribe: (handler: typeof listener) => { listener = handler; return () => {}; },
     bindExtensions: async () => {}, extensionRunner: { getUIContext: () => ({}) },
   } };
@@ -228,6 +229,7 @@ test("every mutating control action returns the refreshed snapshot", async () =>
     calls.push(name);
   };
   const session = {
+    isStreaming: false,
     prompt: track("prompt"),
     steer: track("steer"),
     followUp: track("followUp"),
@@ -298,12 +300,16 @@ test("every mutating control action returns the refreshed snapshot", async () =>
   };
   for (const [action, input] of Object.entries(actions)) {
     calls.length = 0;
+    session.isStreaming = action === "steer" || action === "followUp";
     const result = await runtime.control({ action, ...input } as AgentControl);
     assert.ok(
       result && typeof result === "object" && "projection" in result,
       `${action} must return the refreshed snapshot`,
     );
-    assert.equal(calls.length, 1, `${action} must run its SDK effect`);
+    if (action === "steer" || action === "followUp") {
+      assert.equal(calls.length, 0, "queued inputs remain editable before their delivery boundary");
+      assert.equal(runtime.state().queuedMessages!.at(-1)!.kind, action);
+    } else assert.equal(calls.length, action === "abort" ? 3 : 1, `${action} must run its SDK effect`);
   }
 });
 

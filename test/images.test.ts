@@ -30,6 +30,7 @@ test("runtime forwards image content to Pi prompt and queues and rejects text-on
   const runtime = new PiRuntime("/project", null, () => {}, async () => {});
   const session = {
     model: { input: ["text", "image"] },
+    isStreaming: false,
     sessionManager: { getEntries: () => [] },
     prompt: async (...args: unknown[]) => { calls.push(args); },
     steer: async (...args: unknown[]) => { calls.push(args); },
@@ -38,9 +39,14 @@ test("runtime forwards image content to Pi prompt and queues and rejects text-on
   runtime.runtime = { session };
   runtime.snapshot = (() => ({})) as typeof runtime.snapshot;
   await runtime.control({ action: "prompt", text: "", images: [image] });
+  session.isStreaming = true;
   await runtime.control({ action: "steer", text: "look", images: [image] });
   await runtime.control({ action: "followUp", text: "look", images: [image] });
+  assert.equal(calls.length, 1, "pending inputs remain editable before their delivery boundary");
+  await runtime["deliverQueuedMessages"]("steer");
+  await runtime["deliverQueuedMessages"]("followUp");
   assert.deepEqual(calls, [["", { source: "interactive", images: [image] }], ["look", [image]], ["look", [image]]]);
+  session.isStreaming = false;
   session.model.input = ["text"];
   await assert.rejects(runtime.control({ action: "prompt", text: "look", images: [image] }), /does not support image/);
   assert.equal(calls.length, 3);

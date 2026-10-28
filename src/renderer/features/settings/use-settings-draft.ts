@@ -130,8 +130,8 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
           // Match the runtime's project-over-global resolution, including a
           // blank project value that explicitly selects the model's own style.
           { path: "outputStyle", label: "settings.rows.outputStyle", scope: draft.value?.piProject.outputStyle != null ? "project" : "global", type: "select", options: ["", ...(outputStyleSkills?.value ?? [])], fallback: "", description: "settings.rows.outputStyleDesc" },
-          { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
-          { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
+          { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time", description: "settings.rows.steeringDeliveryDesc" },
+          { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time", description: "settings.rows.followUpDeliveryDesc" },
           { path: "transport", label: "settings.rows.transport", scope: "global", type: "select", options: ["auto", "sse", "websocket", "websocket-cached"], fallback: "auto" },
           { path: "httpIdleTimeoutMs", label: "settings.rows.httpIdleTimeout", scope: "global", type: "select", options: ["30000", "60000", "120000", "300000", "0"], fallback: 300000 },
           { path: "retry.enabled", label: "settings.rows.autoRetry", scope: "global", type: "check", fallback: true },

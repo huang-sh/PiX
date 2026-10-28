@@ -244,6 +244,16 @@ export const useSessionStore = defineStore("session", {
       const previousGraph = this.current?.graph;
       if (previousGraph && snapshot.graph && previousGraph.id === snapshot.graph.id && previousGraph.epoch === snapshot.graph.epoch && previousGraph.revision > snapshot.graph.revision) return;
       const graphChanged = this.current?.session.path !== snapshot.session.path;
+      // Queued input creates another turn in the same run. Follow that run only
+      // while viewing its live node; selecting history must keep its position.
+      if (!graphChanged && previousGraph?.epoch === snapshot.graph?.epoch) {
+        for (const before of previousGraph?.runs ?? []) {
+          const after = snapshot.graph?.runs.find(run => run.branchId === before.branchId && run.runId === before.runId);
+          if (before.status !== "running" || !before.nodeId || !after?.nodeId || before.nodeId === after.nodeId) continue;
+          if (this.focusedNode === before.nodeId) this.focusedNode = after.nodeId;
+          useLayoutStore().advanceChatColumn(before.nodeId, after.nodeId);
+        }
+      }
       if (!graphChanged && this.focusedNode && previousProjection?.nodes.some(node => node.id === this.focusedNode)
         && !snapshot.projection.nodes.some(node => node.id === this.focusedNode)) {
         const previous = new Map(previousProjection.nodes.map(node => [node.id, node]));
@@ -453,11 +463,11 @@ export const useSessionStore = defineStore("session", {
         ? i18n.global.t("history.abortRun", { name: truncate(node.title) })
         : i18n.global.t("history.abort");
     },
-    // A submitted turn is irreversible: it seals the journal as a lock. Applies
-    // to both the plain prompt action and a pinned-column promptAt.
+    // Submitted input can start model/tool work, including input queued behind
+    // the current turn, so sending seals the history journal as a lock.
     sendPromptLabel(input: Record<string, unknown>): string | null {
       const action = String(input.action);
-      if (action !== "prompt" && action !== "promptAt") return null;
+      if (!["prompt", "promptAt", "steer", "followUp"].includes(action)) return null;
       const text = typeof input.text === "string" && input.text.trim() ? input.text : "";
       return i18n.global.t("history.sendPrompt", { text: truncate(text) || "…" });
     },

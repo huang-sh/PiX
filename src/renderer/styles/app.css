@@ -476,7 +476,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .prompt-composer > footer { display: flex; align-items: center; gap: 4px; min-height: 30px; margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border); }
 .prompt-composer > footer > span { color: var(--faint); font-size: var(--font-size-caption); white-space: nowrap; }
 .composer-settings { display: flex; align-items: center; gap: 2px; min-width: 0; height: 26px; margin-left: auto; }
-.prompt-composer .composer-submit, .composer-collapsed-stop {
+.prompt-composer .composer-submit, .prompt-composer .composer-stop, .composer-collapsed-stop {
   display: grid;
   place-items: center;
   flex: none;
@@ -496,6 +496,22 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .prompt-composer .composer-submit:disabled { background: var(--border); color: var(--muted); opacity: 1; }
 .prompt-composer .composer-submit:active:not(:disabled), .composer-collapsed-stop:active { transform: scale(.94); }
 .prompt-composer .composer-submit:focus-visible, .composer-collapsed-stop:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.composer-queue { max-height: 160px; margin: 0 12px -1px; padding: 3px 10px; overflow: auto; list-style: none; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--surface); font-size: var(--font-size-caption); }
+.composer-queue li { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 3px 0; }
+.composer-queue-icon { flex: none; color: var(--muted); }
+.composer-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-queue-text small { display: block; color: var(--muted); }
+.composer-queue button { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 4px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-queue button:hover:not(:disabled) { color: var(--text); }
+.composer-queue button:disabled { opacity: .45; cursor: default; }
+.composer-queue-label { flex: none; color: var(--muted); }
+.composer-queue-editor { margin: 0 12px; padding: 8px; border: 1px solid var(--border); background: var(--surface); font-size: var(--font-size-caption); }
+.composer-queue-editor textarea { display: block; width: 100%; min-height: 72px; max-height: 180px; padding: 7px; resize: vertical; font-size: var(--font-size-body); }
+.composer-queue-editor > div { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.composer-queue-editor button { padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.composer-queue-edit-save { background: var(--text); color: var(--surface); }
+.composer-queue-editor button:disabled { opacity: .45; cursor: default; }
+.composer-queue-editor p { margin: 5px 0; color: var(--muted); }
 .vue-flow__handle { width: 8px; height: 8px; border: 2px solid var(--surface); background: var(--accent); }
 .vue-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.6; }
 .vue-flow__edge.running-edge .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2.2; }
@@ -580,6 +596,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .composer-head button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--faint); }
 .composer-head button:hover { background: var(--muted-surface); color: var(--text); }
 .chat-composer .prompt-composer {
+  position: relative;
   padding: 8px 9px 7px;
   overflow: hidden;
   border: 1px solid var(--border-strong);

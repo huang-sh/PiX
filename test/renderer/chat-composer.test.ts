@@ -103,7 +103,7 @@ describe("chat panel composer", () => {
     } finally { panel.unmount(); }
   });
 
-  it("turns the send button into a stop control while streaming and aborts from it", async () => {
+  it("keeps the editor usable while streaming and aborts from its separate stop control", async () => {
     // Pi's abort() waits for the agent to go idle before returning, so the
     // control response already carries isStreaming=false — the composer must
     // unlock from that snapshot instead of staying stuck on "Pi is working".
@@ -122,11 +122,10 @@ describe("chat panel composer", () => {
 
     session.current!.runtime.isStreaming = true;
     await flushPromises();
-    // The stop control lives on the send button, not in the panel header.
     expect(panel.find("header .panel-header button").exists()).toBe(false);
     expect(submit().attributes("disabled")).toBeUndefined();
     expect(submit().attributes("aria-label")).toBe("Stop generating");
-    expect(panel.get(".prompt-composer textarea").attributes("disabled")).toBeDefined();
+    expect(panel.get(".prompt-composer textarea").attributes("disabled")).toBeUndefined();
 
     await submit().trigger("click");
     expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
@@ -182,7 +181,7 @@ describe("chat panel composer", () => {
     panel.unmount();
   });
 
-  it("keeps Enter from sending while the composer shows the stop control", async () => {
+  it("defaults to Follow-up while generating without a mode selector, then sends normal prompts when idle", async () => {
     const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
     const { session, panel } = await mountComposer(invoke);
     invoke.mockClear();
@@ -194,19 +193,86 @@ describe("chat panel composer", () => {
     await flushPromises();
     const textarea = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
 
-    await textarea.setValue("fork while running");
+    await textarea.setValue("adjust while running");
     await textarea.trigger("keydown", { key: "Enter" });
     await flushPromises();
-    expect(invoke.mock.calls.filter(([route]) => route === "agent.control")).toHaveLength(0);
-
-    // Once the run settles the button returns to send and Enter delivers again.
-    session.current!.graph!.runs[0]!.status = "idle";
+    expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
+      .toEqual([{ action: "followUp", text: "adjust while running", graphId: "g1", branchId: "b1", runId: "r1" }]);
+    expect(textarea.element.value).toBe("");
+    expect(panel.find(".composer-delivery").exists()).toBe(false);
+    await textarea.setValue("after this task");
+    await panel.get(".composer-submit").trigger("click");
     await flushPromises();
+    expect(invoke).toHaveBeenLastCalledWith("agent.control", {
+      action: "followUp", text: "after this task", graphId: "g1", branchId: "b1", runId: "r1",
+    });
+
+    session.current!.graph!.runs[0]!.status = "idle";
+    session.current!.graph!.runs.push({ branchId: "b2", runId: "r2", nodeId: "turn:u2", status: "running" });
+    session.current!.runtime.isStreaming = true;
+    await flushPromises();
+    await textarea.setValue("continue after finishing");
     await textarea.trigger("keydown", { key: "Enter" });
     await vi.waitFor(() => expect(textarea.element.value).toBe(""));
     expect(invoke.mock.calls.filter(([route]) => route === "agent.control").map(([, input]) => input))
-      .toEqual(expect.arrayContaining([expect.objectContaining({ action: "promptAt", text: "fork while running" })]));
+      .toEqual(expect.arrayContaining([expect.objectContaining({ action: "promptAt", text: "continue after finishing" })]));
     panel.unmount();
+  });
+
+  it("shows queued messages above the editor and targets Steer and remove at the selected branch", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    session.current!.graph = { id: "g1", revision: 1, runs: [
+      { branchId: "b1", runId: "r1", nodeId: "turn:u1", status: "running", runtime: {
+        ...session.current!.runtime, queuedMessages: [
+          { id: "q1", kind: "followUp", text: "first pending", imageCount: 1 },
+          { id: "q2", kind: "followUp", text: "second pending", imageCount: 0 },
+        ],
+      } },
+      { branchId: "b2", runId: "r2", nodeId: "turn:u2", status: "running", runtime: {
+        ...session.current!.runtime, queuedMessages: [{ id: "other", kind: "followUp", text: "other branch pending", imageCount: 0 }],
+      } },
+    ] };
+    await flushPromises();
+    try {
+      expect(panel.findAll(".composer-queue li")).toHaveLength(2);
+      expect(panel.get(".composer-queue").text()).toContain("first pending");
+      expect(panel.get(".composer-queue").text()).toContain("1 attached images");
+      expect(panel.get(".composer-queue").text()).not.toContain("other branch pending");
+      expect(panel.get(".composer-queue").element.nextElementSibling).toBe(panel.get(".prompt-composer").element);
+      await panel.get('[data-queued-message="q1"] .composer-queue-steer').trigger("click");
+      await flushPromises();
+      expect(invoke).toHaveBeenLastCalledWith("agent.control", {
+        action: "updateQueuedMessage", id: "q1", operation: "steer", graphId: "g1", branchId: "b1", runId: "r1",
+      });
+      await panel.get('[data-queued-message="q2"] .composer-queue-remove').trigger("click");
+      await flushPromises();
+      expect(invoke).toHaveBeenLastCalledWith("agent.control", {
+        action: "updateQueuedMessage", id: "q2", operation: "remove", graphId: "g1", branchId: "b1", runId: "r1",
+      });
+    } finally { panel.unmount(); }
+  });
+
+  it("restores a rejected Follow-up and keeps the stop control available while submitting", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { session, panel } = await mountComposer(invoke);
+    session.current!.runtime.isStreaming = true;
+    let reject!: (error: Error) => void;
+    invoke.mockImplementation(async (_route, input) => {
+      if ((input as { action?: string }).action === "followUp") return new Promise((_resolve, fail) => { reject = fail; });
+      return {} as never;
+    });
+    try {
+      await panel.get("textarea").setValue("keep this question");
+      expect(panel.find(".composer-stop").exists()).toBe(true);
+      await panel.get(".composer-submit").trigger("click");
+      await flushPromises();
+      expect(panel.get(".composer-stop").attributes("disabled")).toBeUndefined();
+      reject(new Error("This task has finished"));
+      await flushPromises();
+      expect(panel.get<HTMLTextAreaElement>("textarea").element.value).toBe("keep this question");
+      expect(panel.get('[role="alert"]').text()).toContain("This task has finished");
+    } finally { panel.unmount(); }
   });
 
   it("starts collapsed, expands, and submits through the same pipeline as typing in a node", async () => {

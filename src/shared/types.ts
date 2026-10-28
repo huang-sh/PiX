@@ -213,6 +213,14 @@ export interface RuntimeProvider {
   authTypes: Array<"api_key" | "oauth">;
   status?: { type: "api_key" | "oauth"; source?: string };
 }
+export interface QueuedMessage {
+  id: string;
+  kind: "steer" | "followUp";
+  text: string;
+  imageCount: number;
+  delivering?: boolean;
+  error?: string;
+}
 export interface RuntimeState {
   timing?: RunTiming;
   available: boolean;
@@ -230,6 +238,7 @@ export interface RuntimeState {
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
   pendingMessageCount: number;
+  queuedMessages?: QueuedMessage[];
 }
 export interface SessionSnapshot {
   session: SessionSummary;
@@ -478,11 +487,15 @@ export type AgentControl =
   | { action: "exportBranchSession"; nodeId: string; graphId: string }
   | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
   | { action: "branchAbort"; branchId: string; runId: string }
-  | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[]; submittedAt?: string }
+  | { action: "prompt"; text: string; images?: PromptImage[]; submittedAt?: string }
+  | { action: "steer" | "followUp"; text: string; images?: PromptImage[]; graphId?: string; branchId?: string; runId?: string }
+  | { action: "clearQueue"; graphId?: string; branchId?: string; runId?: string }
+  | ({ action: "updateQueuedMessage"; id: string; graphId?: string; branchId?: string; runId?: string } & (
+      { operation: "steer" | "remove" } | { operation: "edit"; text: string }
+    ))
   | {
       action:
         | "abort"
-        | "clearQueue"
         | "getState"
         | "refreshModels"
         | "cycleModel"

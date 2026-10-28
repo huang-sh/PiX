@@ -210,6 +210,7 @@ export class MainController {
         "agent_start",
         "message_end",
         "agent_settled",
+        "queue_update",
         "entry_appended",
         "session_info_changed",
         "compaction_start",

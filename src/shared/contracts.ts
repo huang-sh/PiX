@@ -303,9 +303,21 @@ export function validateRouteInput(
           thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true) };
       }
       if (action === "branchAbort") return { action, branchId: str(v.branchId, "branchId"), runId: str(v.runId, "runId") };
+      const queueTarget = () => v.graphId !== undefined || v.branchId !== undefined || v.runId !== undefined
+        ? { graphId: str(v.graphId, "graphId"), branchId: str(v.branchId, "branchId"), runId: str(v.runId, "runId") } : {};
+      if (action === "clearQueue") return { action, ...queueTarget() };
+      if (action === "updateQueuedMessage") {
+        if (v.operation === "edit") {
+          if (typeof v.text !== "string") throw new Error("text must be a string");
+          return { action, id: str(v.id, "id"), operation: v.operation, text: v.text, ...queueTarget() };
+        }
+        if (v.operation !== "steer" && v.operation !== "remove") throw new Error("Invalid queued message operation");
+        return { action, id: str(v.id, "id"), operation: v.operation, ...queueTarget() };
+      }
       if (["prompt", "steer", "followUp"].includes(action)) {
         const images = v.images === undefined ? undefined : validatePromptImages(v.images);
-        return { action, text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}) };
+        return { action, text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
+          ...(action === "prompt" ? {} : queueTarget()) };
       }
       if (action === "setModel")
         return {
