@@ -24,13 +24,14 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import { desktop } from "../../api";
 import { useLayoutStore, type ContentTab } from "../../stores/layout";
 import { useWorkspaceStore, type WorkspaceTab } from "../../stores/workspace";
 import { useSessionStore } from "../../stores/session";
+import { whenTransitionsSettle } from "../../lib/frame";
 import type { FileNode } from "../../../shared/types";
 import FileTree from "./FileTree.vue";
 import { filterFileTree } from "./file-tree";
@@ -46,51 +47,40 @@ const terminalConnected = computed(() => !workspace.project?.remote ||
   Boolean(session.projects.find((record) => record.id === session.activeProjectId)?.connected));
 const { t } = useI18n();
 
-// The tree's bounds are percents of the group's settled width, captured once:
-// percents keep the dragged ratio when the workbench narrows or widens the
-// panel (the tree shrinks and grows with it), and freezing them matters —
-// live-updating the min/max props makes reka re-initialize the layout from
-// the default size, discarding the drag. The workspace can mount while the
-// content panel still animates open from 0, and a base captured mid-animation
-// would be wrong forever, so the tree waits until the group's width goes
-// quiet; the percent editor needs no measurement and renders right away.
-// Test environments without ResizeObserver render unmeasured, as before.
+// Freeze percent constraints once per group, after its ancestors finish opening.
+// A nonzero width (or a pause in resize delivery) can still be mid-transition.
+// Remeasuring on ordinary renders would reset the user's dragged tree ratio.
+const fileGroup = ref<{ $el: HTMLElement }>();
 const filesMeasured = ref(false);
 const fileGroupWidth = ref(0);
-let filesObserver: ResizeObserver | undefined;
-let filesSettleTimer: ReturnType<typeof setTimeout> | undefined;
 const pct = (px: number) =>
   Math.min(95, Math.max(0, (px / Math.max(1, fileGroupWidth.value)) * 100));
-const bindFileGroup = (instance: unknown) => {
-  const element = (instance as { $el?: unknown } | null)?.$el;
-  filesObserver?.disconnect();
-  filesObserver = undefined;
-  clearTimeout(filesSettleTimer);
-  filesSettleTimer = undefined;
+watch(() => fileGroup.value?.$el, (element, _, onCleanup) => {
   filesMeasured.value = false;
   fileGroupWidth.value = 0;
   if (!(element instanceof HTMLElement)) return;
-  const width = element.getBoundingClientRect().width;
-  if (width > 0 || typeof ResizeObserver === "undefined") {
-    if (width > 0) fileGroupWidth.value = width;
+  if (typeof ResizeObserver === "undefined") {
+    fileGroupWidth.value = element.getBoundingClientRect().width;
     filesMeasured.value = true;
     return;
   }
-  filesObserver = new ResizeObserver(() => {
-    clearTimeout(filesSettleTimer);
-    filesSettleTimer = setTimeout(() => {
-      filesObserver?.disconnect();
-      filesObserver = undefined;
-      fileGroupWidth.value = element.getBoundingClientRect().width;
-      filesMeasured.value = true;
-    }, 80);
+  const controller = new AbortController();
+  let measuring = false;
+  const observer = new ResizeObserver(async () => {
+    if (controller.signal.aborted || measuring || element.getBoundingClientRect().width <= 0) return;
+    measuring = true;
+    await whenTransitionsSettle(target => target.contains(element), Infinity, controller.signal);
+    if (controller.signal.aborted) return;
+    measuring = false;
+    const width = element.getBoundingClientRect().width;
+    if (width <= 0) return;
+    observer.disconnect();
+    fileGroupWidth.value = width;
+    filesMeasured.value = true;
   });
-  filesObserver.observe(element);
-};
-onBeforeUnmount(() => {
-  filesObserver?.disconnect();
-  clearTimeout(filesSettleTimer);
-});
+  onCleanup(() => { controller.abort(); observer.disconnect(); });
+  observer.observe(element);
+}, { flush: "post" });
 const launchUrl = ref(workspace.browserUrl);
 const fileQuery = ref("");
 const fileTreeOpen = ref(true);
@@ -453,14 +443,14 @@ async function save(tab: WorkspaceTab) {
            live-derived percents changed on every workbench drag, which made
            reka re-initialize the layout and reset the tree to its default,
            while px units froze the width instead of letting the tree shrink
-           with the panel. The tree also waits for filesMeasured so the base
-           is never captured mid-animation. The panel itself stays mounted
+           with the panel. The tree waits for its opening transitions before
+           mounting. The panel itself stays mounted
            while collapsed so its handle can drag it back out (reka snaps a
            collapsible panel shut past min-size and reopens past the halfway
            point); the button restores the pre-collapse width. No auto-save-
            id: the tree always opens at the default width. -->
       <SplitterGroup
-        :ref="bindFileGroup"
+        ref="fileGroup"
         id="pix-file-workspace"
         direction="horizontal"
         class="file-workspace"
