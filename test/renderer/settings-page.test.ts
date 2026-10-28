@@ -21,6 +21,8 @@ const settings = {
     enterToSend: true,
     openLinksInApp: true,
     closeToTray: true,
+    preventSleepDuringTasks: true,
+    keepScreenOnDuringTasks: false,
     canvasDotGrid: true,
     canvasDotGridSpacing: 24,
     canvasDotGridDotSize: 4,
@@ -73,6 +75,43 @@ describe("SettingsPage auto-save", () => {
   afterEach(() => {
     for (const [route, payload] of vi.mocked(desktop.invoke).mock.calls)
       expect(() => structuredClone(payload), `${route} payload`).not.toThrow();
+  });
+
+  it("saves both power preferences independently and shows the Windows limit only when allowing screen-off", async () => {
+    const stored: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") Object.assign(stored.app, (payload as UpdatePayload).patch);
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "general";
+    openSession(true);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      const paths = wrapper.findAll('[data-setting-path]').map(row => row.attributes('data-setting-path'));
+      expect(paths[paths.indexOf('closeToTray') + 1]).toBe('preventSleepDuringTasks');
+      expect(paths[paths.indexOf('preventSleepDuringTasks') + 1]).toBe('keepScreenOnDuringTasks');
+      const row = wrapper.get('[data-setting-path="preventSleepDuringTasks"]');
+      expect(row.text()).toContain('allowing the screen to turn off');
+      expect(row.text()).toContain('Windows limitation:');
+      expect((row.get('input').element as HTMLInputElement).checked).toBe(true);
+      await row.get('input').setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: 'app', patch: { preventSleepDuringTasks: false } });
+      expect(layout.settings?.app.preventSleepDuringTasks).toBe(false);
+      const screen = wrapper.get('[data-setting-path="keepScreenOnDuringTasks"] input');
+      expect((screen.element as HTMLInputElement).checked).toBe(false);
+      await screen.setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: 'app', patch: { keepScreenOnDuringTasks: true } });
+      expect(layout.settings?.app.keepScreenOnDuringTasks).toBe(true);
+      expect(row.text()).not.toContain('Windows limitation:');
+      expect(reloadCalls()).toHaveLength(0);
+    } finally { wrapper.unmount(); platform.mockRestore(); }
   });
 
   it("groups appearance settings and persists node information selection and priority", async () => {

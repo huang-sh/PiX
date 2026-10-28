@@ -402,6 +402,8 @@ export interface AppSettings {
   enterToSend: boolean;
   openLinksInApp: boolean;
   closeToTray: boolean;
+  preventSleepDuringTasks: boolean;
+  keepScreenOnDuringTasks: boolean;
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;

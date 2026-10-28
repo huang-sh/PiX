@@ -114,7 +114,8 @@ export class HostClient {
       throw new Error("The running PiX host has a different version. Stop it after its tasks finish, then reconnect.");
     }
     const client = new HostClient(socket, address, platform);
-    try { await client.request({ method: "attach", cwd, platform: Boolean(platform), clientId, imageReferences }); }
+    try { await client.request({ method: "attach", cwd, platform: Boolean(platform),
+      keepAwake: typeof platform?.setKeepAwake === "function", clientId, imageReferences }); }
     catch (error) { client.close(); throw error; }
     return client;
   }

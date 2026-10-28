@@ -330,6 +330,8 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
       density: 3,
       theme: "purple",
       closeToTray: "false",
+      preventSleepDuringTasks: "false",
+      keepScreenOnDuringTasks: "true",
       enterToSend: "yes",
       canvasDotGridSpacing: "24",
       canvasDotGridDotSize: 99,
@@ -343,6 +345,8 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(app.density, "comfortable");
     assert.equal(app.theme, "light");
     assert.equal(app.closeToTray, true);
+    assert.equal(app.preventSleepDuringTasks, true);
+    assert.equal(app.keepScreenOnDuringTasks, false);
     assert.equal(app.enterToSend, true);
     assert.equal(app.canvasDotGridSpacing, 24);
     assert.equal(app.canvasDotGridDotSize, 4);
@@ -359,6 +363,14 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.deepEqual(persisted.futureKey, { keep: true });
 
     const service = new SettingsService(temp);
+    service.update({ preventSleepDuringTasks: false });
+    assert.equal(new SettingsService(temp).bundle().app.preventSleepDuringTasks, false);
+    service.update({ preventSleepDuringTasks: null });
+    assert.equal(service.bundle().app.preventSleepDuringTasks, true);
+    service.update({ keepScreenOnDuringTasks: true });
+    assert.equal(new SettingsService(temp).bundle().app.keepScreenOnDuringTasks, true);
+    service.update({ keepScreenOnDuringTasks: null });
+    assert.equal(service.bundle().app.keepScreenOnDuringTasks, false);
     service.update({ nodeCardFields: [] });
     assert.deepEqual(service.bundle().app.nodeCardFields, []);
     service.update({ nodeCardFields: "invalid" });

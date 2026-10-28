@@ -43,8 +43,8 @@ async function fixture(t: TestContext) {
     const client = await HostClient.connect(host.address, cwd, platform, id);
     clients.push(client); return client;
   };
-  const connectDesktop = async () => {
-    const desktop = await DesktopHostController.connect(cwd, { ...headlessPlatform });
+  const connectDesktop = async (platform: Platform = { ...headlessPlatform }) => {
+    const desktop = await DesktopHostController.connect(cwd, platform);
     desktops.push(desktop); return desktop;
   };
   return { host, cwd, connect, connectDesktop };
@@ -62,6 +62,168 @@ async function desktopView(t: TestContext) {
   await desktop.invoke("app.bootstrap");
   return { cwd, desktop, controller };
 }
+
+test("desktop power assertions follow all host tasks, live settings and reconnects", async t => {
+  const { host, connect, connectDesktop } = await fixture(t);
+  const running = new Set<string>();
+  t.mock.method(host.owner.registry, "runningPaths", () => new Set(running));
+  const assertions: boolean[] = [];
+  const desktop = await connectDesktop({ ...headlessPlatform, setKeepAwake(active) { assertions.push(active); } });
+  const cli = await connect();
+  await until(() => assertions.length > 0);
+  assert.deepEqual(assertions, [false]);
+
+  running.add("background-session");
+  host.owner.emit({ type: "sessions", payload: {} });
+  await until(() => assertions.at(-1) === true);
+  running.add("another-session");
+  running.delete("background-session");
+  await cli.request({ method: "status" });
+  assert.deepEqual(assertions, [false, true], "ending one task must not release another task's assertion");
+
+  await cli.invoke("settings.update", { scope: "app", patch: { preventSleepDuringTasks: false } });
+  await until(() => assertions.at(-1) === false);
+  await cli.invoke("settings.reset", { scope: "app" });
+  await until(() => assertions.at(-1) === true);
+
+  const original = Reflect.get(desktop, "client") as HostClient;
+  Reflect.get(original, "socket").terminate();
+  await until(() => Reflect.get(desktop, "client") !== original && !Reflect.get(desktop, "reconnecting"));
+  await until(() => assertions.at(-1) === true);
+  assert.deepEqual(assertions.slice(-2), [false, true], "reconnect releases the old assertion and restores active work");
+
+  running.clear();
+  host.owner.emit({ type: "sessions", payload: {} });
+  await until(() => assertions.at(-1) === false);
+  running.add("last-task");
+  host.owner.emit({ type: "sessions", payload: {} });
+  await until(() => assertions.at(-1) === true);
+  await desktop.detach();
+  assert.equal(assertions.at(-1), false, "quitting releases the desktop's power assertion");
+});
+
+test("running remote tasks keep the desktop awake after switching to a local project", async t => {
+  const { host, connect } = await fixture(t);
+  const remote: ProjectInfo = { name: "remote", path: "/workspace", remote: { kind: "ssh", host: "test.invalid" } };
+  let running = true, connected = true;
+  const assertions: boolean[] = [];
+  t.mock.method(MainController.prototype, "projectGroups", () => []);
+  t.mock.method(MainController.prototype, "invoke", async function(this: MainController) {
+    this.settings.rememberProject(remote, [{ path: "/workspace/session.jsonl", running } as never]);
+    t.mock.method(this.pool, "slot", () => ({ client: { connected } }) as never);
+  });
+  const desktop = await connect({ ...headlessPlatform, setKeepAwake(active) { assertions.push(active); } });
+  await desktop.invoke("app.bootstrap");
+  await until(() => assertions.at(-1) === true);
+  connected = false;
+  host.owner.emit({ type: "remote.connection", payload: { connected: false } });
+  await until(() => assertions.at(-1) === false);
+  connected = true;
+  host.owner.emit({ type: "remote.connection", payload: { connected: true } });
+  await until(() => assertions.at(-1) === true);
+  running = false;
+  await desktop.invoke("app.bootstrap");
+  await until(() => assertions.at(-1) === false);
+});
+
+test("screen-on preference works independently, switches live and survives reconnect", async t => {
+  const { host, connect, connectDesktop } = await fixture(t);
+  const running = new Set<string>();
+  t.mock.method(host.owner.registry, "runningPaths", () => new Set(running));
+  const states: Array<[boolean, boolean]> = [];
+  const desktop = await connectDesktop({ ...headlessPlatform,
+    setKeepAwake(active, keepScreenOn = false) { states.push([active, keepScreenOn]); },
+  });
+  const cli = await connect();
+  await until(() => states.length > 0);
+  assert.deepEqual(states.at(-1), [false, false]);
+  running.add("task");
+  host.owner.emit({ type: "sessions", payload: {} });
+  await until(() => states.at(-1)?.[0] === true);
+  const update = async (patch: Record<string, boolean>, expected: [boolean, boolean]) => {
+    await cli.invoke("settings.update", { scope: "app", patch });
+    await until(() => JSON.stringify(states.at(-1)) === JSON.stringify(expected));
+  };
+  await update({ keepScreenOnDuringTasks: true }, [true, true]);
+  await update({ keepScreenOnDuringTasks: false }, [true, false]);
+  await update({ preventSleepDuringTasks: false, keepScreenOnDuringTasks: true }, [true, true]);
+  await update({ keepScreenOnDuringTasks: false }, [false, false]);
+  await update({ keepScreenOnDuringTasks: true }, [true, true]);
+  const original = Reflect.get(desktop, "client") as HostClient;
+  Reflect.get(original, "socket").terminate();
+  await until(() => Reflect.get(desktop, "client") !== original && !Reflect.get(desktop, "reconnecting"));
+  await until(() => states.at(-1)?.[1] === true);
+  assert.deepEqual(states.slice(-2), [[false, false], [true, true]]);
+  running.clear();
+  host.owner.emit({ type: "sessions", payload: {} });
+  await until(() => states.at(-1)?.[0] === false);
+});
+
+test("power-state lookup failures cannot reject unrelated host requests or crash event delivery", async t => {
+  const { host, connect } = await fixture(t);
+  const desktop = await connect({ ...headlessPlatform });
+  const failure = t.mock.method(host.owner.registry, "runningPaths", () => { throw new Error("Runtime is closing"); });
+  assert.ok(await desktop.invoke("settings.get"));
+  host.owner.emit({ type: "sessions", payload: {} });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(await desktop.invoke("settings.get"));
+  failure.mock.restore();
+});
+
+test("terminal input and platform replies do not repeatedly read power settings", async t => {
+  const { host, connect } = await fixture(t);
+  const desktop = await connect({ ...headlessPlatform });
+  // Drain the initial capability reply before measuring unrelated traffic.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const bundle = t.mock.method(host.owner.settings, "bundle");
+  t.mock.method(MainController.prototype, "invoke", async () => ({ ok: true }));
+  for (let i = 0; i < 5; i++) await desktop.invoke("terminal.write", { id: "terminal", data: "x" });
+  assert.equal(bundle.mock.callCount(), 0, "typing must not perform synchronous power-settings I/O per keystroke");
+});
+
+test("power-release failures cannot prevent desktop reconnection or detachment", async t => {
+  const { connectDesktop } = await fixture(t);
+  const desktop = await connectDesktop({ ...headlessPlatform, setKeepAwake() { throw new Error("Power service unavailable"); } });
+  const original = Reflect.get(desktop, "client") as HostClient;
+  Reflect.get(original, "socket").terminate();
+  await until(() => Reflect.get(desktop, "client") !== original && !Reflect.get(desktop, "reconnecting"));
+  assert.ok(await desktop.invoke("app.bootstrap"));
+  await desktop.detach();
+});
+
+test("clients without the optional power capability receive no unsupported callbacks", async t => {
+  const { host, connect } = await fixture(t);
+  const replies: unknown[] = [];
+  const send = Reflect.get(HostClient.prototype, "send");
+  t.mock.method(HostClient.prototype as any, "send", function(this: HostClient, message: { type: string; error?: string }) {
+    if (message.type === "platform.reply" && message.error) replies.push(message);
+    return send.call(this, message);
+  });
+  const { setKeepAwake: _, ...platform } = headlessPlatform;
+  const client = await connect(platform, "legacy-desktop");
+  await client.request({ method: "status" });
+  t.mock.method(host.owner.registry, "runningPaths", () => new Set(["running-session"]));
+  host.owner.emit({ type: "sessions", payload: {} });
+  await client.invoke("settings.update", { scope: "app", patch: { preventSleepDuringTasks: false } });
+  await client.request({ method: "status" });
+  assert.deepEqual(replies, [], "optional capabilities must not generate errors for existing desktop clients");
+});
+
+test("each desktop maintains its own power assertion when another desktop detaches", async t => {
+  const { host, connectDesktop } = await fixture(t);
+  const running = new Set(["already-running"]);
+  t.mock.method(host.owner.registry, "runningPaths", () => new Set(running));
+  const firstStates: boolean[] = [], secondStates: boolean[] = [];
+  const first = await connectDesktop({ ...headlessPlatform, setKeepAwake(active) { firstStates.push(active); } });
+  await connectDesktop({ ...headlessPlatform, setKeepAwake(active) { secondStates.push(active); } });
+  await until(() => firstStates.at(-1) === true && secondStates.at(-1) === true);
+  await first.detach();
+  assert.equal(firstStates.at(-1), false);
+  assert.deepEqual(secondStates, [true]);
+  running.clear();
+  host.owner.emit({ type: "sessions", payload: {} });
+  await until(() => secondStates.at(-1) === false);
+});
 
 test("desktop IPC sends image references, keeps subscriber baselines independent and supports resync", async t => {
   const { cwd, desktop, controller } = await desktopView(t);

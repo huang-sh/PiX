@@ -51,6 +51,8 @@ export interface Platform {
   openExternal(url: string): Promise<void>;
   /** Chromium's system proxy/PAC decision for the independent execution host. */
   resolveProxy?(url: string): Promise<string>;
+  /** Desktop power assertion; the execution host aggregates task activity. */
+  setKeepAwake?(active: boolean, keepScreenOn?: boolean): void | Promise<void>;
   openPath(path: string): Promise<void>;
   /** Windows opens the system Open With dialog; macOS a native app picker. */
   openWith(path: string): Promise<void>;

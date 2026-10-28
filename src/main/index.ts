@@ -8,6 +8,7 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  powerSaveBlocker,
   session,
   shell,
   Tray,
@@ -25,6 +26,7 @@ import type { PromptImage } from "../shared/types.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
+import { createKeepAwake } from "./power-save.js";
 import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
@@ -42,6 +44,7 @@ let win: any, controller: DesktopHostController;
 let closeHttpProxy: (() => Promise<void>) | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
+const setKeepAwake = createKeepAwake(powerSaveBlocker, () => isQuitting);
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
 let started = false;
 let currentTheme: ThemePreference = "light";
@@ -263,6 +266,7 @@ app.whenReady().then(async () => {
     async resolveProxy(url) {
       return session.defaultSession.resolveProxy(url);
     },
+    setKeepAwake,
     async openExternal(url) {
       await openExternal(url);
     },

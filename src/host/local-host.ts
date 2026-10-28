@@ -11,6 +11,7 @@ import { LOCAL_HOST_PROTOCOL, type HostAddress, type LocalRequest } from "../sha
 import type { DesktopEvent } from "../shared/types.js";
 import { sessionImageEncoder } from "../shared/session-images.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import { debugLog } from "../main/debug-log.js";
 
 export const hostRunDir = () => join(pixHome(), ".pix", "run");
 export const hostAddressFile = () => join(hostRunDir(), "host.json");
@@ -21,6 +22,7 @@ export const headlessPlatform: Platform = {
   async confirm() { return false; },
   async openExternal() { throw new Error("This operation needs a desktop client"); },
   async resolveProxy() { return "DIRECT"; },
+  setKeepAwake() {},
   async openPath() { throw new Error("This operation needs a desktop client"); },
   async openWith() { throw new Error("This operation needs a desktop client"); },
   async openWithApps() { return []; },
@@ -65,6 +67,32 @@ export async function serveLocalHost() {
   let sequence = 0;
   let lastLive = Date.now();
   let stopping = false;
+  const keepAwake = new Map<WebSocket, "screen" | "system" | false>();
+  const syncKeepAwake = () => {
+    if (stopping || !platforms.size) return;
+    try {
+      const settings = owner.settings.bundle().app;
+      const active = (settings.preventSleepDuringTasks || settings.keepScreenOnDuringTasks)
+        && (owner.hasPendingWork || owner.registry.runningPaths().size > 0
+        || [...controllers].some(controller => controller.settings.projectHistory().some(record =>
+          record.project.remote && controller.pool.slot(record.id)?.client.connected
+          && record.sessions.some(session => session.running))));
+      const mode = active && (settings.keepScreenOnDuringTasks ? "screen" : "system");
+      for (const [socket, platform] of platforms) {
+        if (socket.readyState !== WebSocket.OPEN || keepAwake.get(socket) === mode) continue;
+        keepAwake.set(socket, mode);
+        void Promise.resolve(platform.setKeepAwake?.(Boolean(mode), mode === "screen")).catch(() => keepAwake.delete(socket));
+      }
+    } catch (error) { debugLog("host: power state sync", error); }
+  };
+  // Runtime events can precede their final state update; read after the burst.
+  let powerSyncQueued = false;
+  const scheduleKeepAwake = (event: DesktopEvent) => {
+    if (event.type !== "sessions" && event.type !== "remote.connection") return;
+    if (powerSyncQueued) return;
+    powerSyncQueued = true;
+    queueMicrotask(() => { powerSyncQueued = false; syncKeepAwake(); });
+  };
   const send = (socket: WebSocket, message: unknown) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   };
@@ -72,6 +100,7 @@ export async function serveLocalHost() {
     for (const socket of wss.clients) send(socket, { type: "event", sequence: ++sequence, event });
   };
   const stopOwnerEvents = owner.onEvent(event => {
+    scheduleKeepAwake(event);
     if (event.type === "ui.request" || event.type === "ui.dismiss") broadcast(event);
   });
   const shutdown = async () => {
@@ -114,6 +143,7 @@ export async function serveLocalHost() {
     socket.on("close", () => {
       stopEvents?.();
       platforms.delete(socket);
+      keepAwake.delete(socket);
       if (clientId && desktopViews.get(clientId)?.socket === socket) {
         // Keep the desktop's selection and remote pool so its next connection
         // takes over the same view, including tasks still running remotely.
@@ -147,8 +177,10 @@ export async function serveLocalHost() {
             if (controller) throw new Error("Client is already attached");
             const platform = { ...headlessPlatform };
             if (request.platform) {
-              for (const name of Object.keys(platform))
+              for (const name of Object.keys(platform)) {
+                if (name === "setKeepAwake" && request.keepAwake !== true) continue;
                 (platform as any)[name] = (...args: unknown[]) => callPlatform(name, args);
+              }
             }
             const cwd = request.cwd ? canonicalPath(request.cwd) : null;
             if (cwd && !statSync(cwd).isDirectory()) throw new Error("Project path is not a directory");
@@ -166,15 +198,20 @@ export async function serveLocalHost() {
             controllers.add(controller);
             imageReferences = request.imageReferences === true;
             const encodeEvent = sessionEventEncoder();
-            stopEvents = controller.onEvent(event => send(socket, { type: "event", sequence: ++sequence,
-              event: encodeEvent(imageReferences ? encodeImages(event) : event) }));
+            stopEvents = controller.onEvent(event => {
+              scheduleKeepAwake(event);
+              send(socket, { type: "event", sequence: ++sequence,
+                event: encodeEvent(imageReferences ? encodeImages(event) : event) });
+            });
             result = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION, pid: process.pid };
             break;
           }
           case "invoke": {
             if (!controller) throw new Error("Attach a client first");
             if (typeof request.route !== "string") throw new Error("Missing route");
-            result = await controller.invoke(request.route, request.input, request.sessionPath);
+            const invoked = controller.invoke(request.route, request.input, request.sessionPath);
+            if (request.route === "agent.control") syncKeepAwake();
+            result = await invoked;
             break;
           }
           case "status":
@@ -195,6 +232,10 @@ export async function serveLocalHost() {
           result: imageReferences && request.route !== "session.image" ? encodeImages(result) : result });
       } catch (error) {
         send(socket, { type: "reply", id: request?.id ?? "", error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        if (request?.method === "attach" || (request?.method === "invoke"
+          && ["agent.control", "session.stop", "settings.update", "settings.reset"].includes(request.route ?? "")))
+          syncKeepAwake();
       }
     });
   });
@@ -208,6 +249,7 @@ export async function serveLocalHost() {
     if (maintaining || stopping) return;
     maintaining = true;
     try {
+      syncKeepAwake();
       for (const [id, view] of desktopViews) {
         if (view.socket.readyState !== WebSocket.OPEN && view.controller.pool.hasConnections)
           await view.controller.pool.closeIdleRemote(() => desktopViews.get(id)?.socket.readyState === WebSocket.OPEN);

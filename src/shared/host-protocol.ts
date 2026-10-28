@@ -10,6 +10,8 @@ export type LocalRequest = {
   input?: unknown;
   sessionPath?: string;
   platform?: boolean;
+  /** Optional desktop power capability; absent on older clients. */
+  keepAwake?: boolean;
   imageReferences?: boolean;
   clientId?: string;
 };

@@ -4,6 +4,7 @@ import type { Platform } from "../main/controller.js";
 import type { DesktopEvent, DesktopRoute, SessionSnapshot } from "../shared/types.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import { connectLocalHost, type HostClient } from "./client.js";
+import { debugLog } from "../main/debug-log.js";
 
 /** Electron retains OS integration while the independent host owns execution. */
 export class DesktopHostController {
@@ -27,6 +28,7 @@ export class DesktopHostController {
     });
     client.onDisconnect(error => {
       if (this.disposed || this.client !== client) return;
+      void this.releaseKeepAwake();
       this.emit({ type: "notice", payload: { level: "warning", message: error.message } });
       void this.reconnect().catch(failure => this.emit({ type: "notice", payload: { level: "error", message: String(failure) } }));
     });
@@ -70,6 +72,10 @@ export class DesktopHostController {
     return () => this.listeners.delete(subscribed);
   }
   emit(event: DesktopEvent) { for (const listener of this.listeners) listener(event); }
-  detach() { this.disposed = true; this.client.close(); return Promise.resolve(); }
-  dispose() { this.disposed = true; this.client.close(); this.listeners.clear(); }
+  private async releaseKeepAwake() {
+    try { await this.platform.setKeepAwake?.(false); }
+    catch (error) { debugLog("desktop: release keep awake", error); }
+  }
+  detach() { this.disposed = true; this.client.close(); return this.releaseKeepAwake(); }
+  dispose() { this.disposed = true; this.client.close(); void this.releaseKeepAwake(); this.listeners.clear(); }
 }

@@ -98,6 +98,8 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
           { path: "confirmDestructiveActions", label: "settings.rows.confirmDestructive", scope: "app", type: "check", description: "settings.rows.confirmDestructiveDesc" },
           { path: "openLastSessionOnStartup", label: "settings.rows.openLastSession", scope: "app", type: "check", fallback: false, description: "settings.rows.openLastSessionDesc" },
           { path: "closeToTray", label: "settings.rows.closeToTray", scope: "app", type: "check", fallback: true, description: "settings.rows.closeToTrayDesc" },
+          { path: "preventSleepDuringTasks", label: "settings.rows.preventSleepDuringTasks", scope: "app", type: "check", fallback: true, description: "settings.rows.preventSleepDuringTasksDesc" },
+          { path: "keepScreenOnDuringTasks", label: "settings.rows.keepScreenOnDuringTasks", scope: "app", type: "check", fallback: false, description: "settings.rows.keepScreenOnDuringTasksDesc" },
         ];
       case "appearance":
         return [
@@ -173,6 +175,8 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     const hint = row.description
       ? t(row.description)
       : t("settings.storedIn", { scope: t(`settings.scope.${row.scope}`) });
+    if (row.path === "preventSleepDuringTasks" && /^Win/i.test(navigator.platform) && !draft.value?.app.keepScreenOnDuringTasks)
+      return `${hint} ${t("settings.rows.preventSleepDuringTasksWindowsLimit")}`;
     return row.path === "outputStyle"
       ? `${t(`settings.rows.outputStyle${row.scope === "project" ? "Project" : "Global"}Scope`)} ${hint}`
       : hint;
