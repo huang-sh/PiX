@@ -8,7 +8,7 @@ import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
 import { pixAgentDir } from "../src/main/paths.js";
 import { validateRouteInput } from "../src/shared/contracts.js";
-import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type AgentControl, type RuntimeSkill, type RuntimeSkillDocument } from "../src/shared/types.js";
 
 for (const action of ["run", "abort", "close"] as const) {
   test(`a session opens before slow startup hooks finish: ${action}`, async () => {
@@ -137,8 +137,9 @@ test("records SDK context usage once after a prompt finishes", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.runtime = {
     session: {
-      prompt: async () => {
-        entries.push({ type: "message", message: { role: "user" } });
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
       },
       getContextUsage: () => {
         usageCalls++;
@@ -164,6 +165,36 @@ test("records SDK context usage once after a prompt finishes", async () => {
     model: { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", contextWindow: 128_000, reasoning: true },
     thinkingLevel: "high",
   }]]);
+});
+
+test("stores structured display text for image prompts", async () => {
+  const appended: unknown[] = [];
+  const entries: unknown[] = [];
+  const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+  runtime.runtime = {
+    session: {
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        assert.deepEqual(appended[0], [PROMPT_DISPLAY_CUSTOM_TYPE, { text: "检查截图" }]);
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
+      },
+      getContextUsage: () => null,
+      model: { provider: "openai", id: "vision", input: ["text", "image"] },
+      thinkingLevel: "off",
+      sessionManager: {
+        getEntries: () => entries,
+        appendCustomEntry: (...args: unknown[]) => appended.push(args),
+      },
+    },
+  };
+  runtime.snapshot = (() => ({ saved: true })) as unknown as typeof runtime.snapshot;
+
+  await runtime.control({ action: "prompt", text: "检查截图", images: [
+    { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+  ] });
+
+  assert.deepEqual(appended[0], [PROMPT_DISPLAY_CUSTOM_TYPE, { text: "检查截图" }]);
+  assert.equal(appended.length, 2, "the prompt display record is followed by the ordinary node footer");
 });
 
 test("skips the node footer when the prompt created no turn", async () => {
@@ -198,8 +229,9 @@ test("records the node footer when a prompt rejects mid-turn", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.runtime = {
     session: {
-      prompt: async () => {
-        entries.push({ type: "message", message: { role: "user" } });
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
         throw new Error("mid-run failure");
       },
       getContextUsage: () => ({ tokens: 900, contextWindow: 128_000, percent: 0.7 }),

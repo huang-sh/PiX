@@ -11,6 +11,9 @@ import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
 
 type PromptAt = Extract<AgentControl, { action: "promptAt" }> & { timestamp?: string };
+// Internal correlation only; the public agent.control validator intentionally
+// does not accept requestId on direct prompt actions.
+type CorrelatedPrompt = Extract<AgentControl, { action: "prompt" }> & { requestId: string };
 type Worker = { pi: PiRuntime; work?: Promise<void>; snapshot?: SessionSnapshot; before?: Set<string> };
 function pendingPrompt(request: BranchRecord["request"], parentNodeId: string | null, runtime: RuntimeState) {
   const model = request.provider && request.modelId
@@ -506,7 +509,8 @@ export class GraphRuntime extends PiRuntime {
         this.notify();
         throw error;
       } finally { this.preparations.delete(this.rootRunId); }
-      const work = super.control({ action: "prompt", text: input.text, images: input.images, submittedAt: input.timestamp });
+      const work = super.control({ action: "prompt", text: input.text, images: input.images,
+        submittedAt: input.timestamp, requestId: input.requestId } as CorrelatedPrompt);
       const settled = work.then(() => {
         this.persist(() => graph.sealMain(this.data(this)));
         this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n"));
@@ -607,7 +611,8 @@ export class GraphRuntime extends PiRuntime {
   private async executeBranch(worker: Worker, record: BranchRecord) {
     const graph = this.graph!;
     try {
-      await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images, submittedAt: record.request.timestamp });
+      await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images,
+        submittedAt: record.request.timestamp, requestId: record.requestId } as CorrelatedPrompt);
       await worker.pi.waitForWrites();
       const manager = worker.pi.runtime.session.sessionManager;
       this.persist(() => graph.seal(record, this.data(worker.pi)));

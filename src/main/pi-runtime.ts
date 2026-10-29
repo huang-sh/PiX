@@ -41,8 +41,8 @@ import type {
   SessionSummary,
 } from "../shared/types.js";
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
-import { projectSession, summarizeSession } from "../shared/session.js";
+import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE } from "../shared/types.js";
+import { needsPromptDisplayBoundary, projectSession, summarizeSession } from "../shared/session.js";
 import type { RunTiming } from "../shared/run-timing.js";
 import {
   aggregateUsage,
@@ -1019,6 +1019,17 @@ export class PiRuntime {
       if (prompt && --this.pendingPrompts === 0) this.promptEpoch = undefined;
     });
   }
+  private preparePromptDisplay(text: string, hasImages: boolean, requestId?: string) {
+    const manager = this.runtime.session.sessionManager;
+    if (hasImages) {
+      manager.appendCustomEntry(PROMPT_DISPLAY_CUSTOM_TYPE, { text, ...(requestId ? { requestId } : {}) });
+      return;
+    }
+    const branch = (typeof manager.getBranch === "function" ? manager.getBranch() : manager.getEntries()) as RawSessionEntry[];
+    const leafId = typeof manager.getLeafId === "function" ? manager.getLeafId() : branch.at(-1)?.id ?? null;
+    if (needsPromptDisplayBoundary(branch, leafId))
+      manager.appendCustomEntry(PROMPT_DISPLAY_CUSTOM_TYPE, { boundary: true });
+  }
   private savePromptFooter(timing: RunTiming) {
     const s = this.runtime.session;
     s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
@@ -1068,7 +1079,14 @@ export class PiRuntime {
         if (!s.isStreaming && !s.isCompacting) { this.promptTiming = timing; this.promptUserSeen = false; }
         let completed = false;
         try {
-          await s.prompt(input.text, { source: "interactive", ...(input.images?.length ? { images: input.images } : {}) });
+          await s.prompt(input.text, {
+            source: "interactive",
+            ...(input.images?.length ? { images: input.images } : {}),
+            preflightResult: (result: "handled" | "queued" | "started") => {
+              const requestId = (input as typeof input & { requestId?: string }).requestId;
+              if (result === "started") this.preparePromptDisplay(input.text, Boolean(input.images?.length), requestId);
+            },
+          });
           // Inputs can arrive while another extension awaits its final settle
           // hook, after our delivery hook already ran. Keep those continuations
           // inside this control's lifetime, including handled or failed inputs.
@@ -1080,7 +1098,8 @@ export class PiRuntime {
             message.delivering = true;
             const queueEpoch = this.queueEpoch;
             try {
-              await s.prompt(message.text, { images: message.images, source: "interactive", preflightResult: () => {
+              await s.prompt(message.text, { images: message.images, source: "interactive", preflightResult: (result: "handled" | "queued" | "started") => {
+                if (result === "started") this.preparePromptDisplay(message.text, Boolean(message.images?.length), message.id);
                 if (epoch === this.controlEpoch) this.deliveredInputs.set(message.id, message);
                 this.queuedMessages = this.queuedMessages.filter(item => item !== message);
                 this.notifyQueue();

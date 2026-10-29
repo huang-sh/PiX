@@ -94,6 +94,7 @@ export interface RawSessionEntry {
   [key: string]: unknown;
 }
 export const NODE_FOOTER_CUSTOM_TYPE = "pix.node-footer";
+export const PROMPT_DISPLAY_CUSTOM_TYPE = "pix.prompt-display";
 export const GIT_BRANCH_CUSTOM_TYPE = "pix.git-branch";
 export interface ContextUsageSnapshot {
   tokens: number | null;

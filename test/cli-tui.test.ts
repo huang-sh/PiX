@@ -4,7 +4,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { Conversation, conversationEntries, graphTree, GraphSelector } from "../src/cli/tui.js";
 import { agentEventForwarder } from "../src/main/agent-event-forwarder.js";
-import type { SessionSnapshot } from "../src/shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type SessionSnapshot } from "../src/shared/types.js";
 
 const entry = (id: string, message: Record<string, unknown>) => ({ id, type: "message", parentId: null, timestamp: new Date(0).toISOString(), message });
 const user = (text: string) => ({ role: "user", content: text, timestamp: 0 });
@@ -45,6 +45,19 @@ test("Pi's native renderers reflow Markdown, CJK and tool output at narrow width
     assert.match(text, /Saved output.ts/);
     assert.ok(lines.every(line => visibleWidth(line) <= width), `render overflow at ${width}`);
   }
+});
+
+test("TUI history uses structured prompt display text", () => {
+  initTheme("dark");
+  const conversation = new Conversation({ requestRender() {} } as TUI, "/tmp");
+  conversation.load([
+    { type: "custom", id: "display", parentId: null, timestamp: new Date(0).toISOString(),
+      customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图" } },
+    { ...entry("user", user("model-only coordinate hint\n\n检查截图")), parentId: "display" },
+  ]);
+  const text = conversation.render(80).map(stripTerminalSequences).join("\n");
+  assert.match(text, /检查截图/);
+  assert.doesNotMatch(text, /coordinate hint/);
 });
 
 test("streaming assistant and tool updates keep one native component per message/call", () => {

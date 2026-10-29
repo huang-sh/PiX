@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { HostClient } from "../host/client.js";
 import type { ExtensionDialog, GraphFilter, RawSessionEntry, RuntimeCommand, RuntimeModel, SessionSnapshot, SessionSummary } from "../shared/types.js";
+import { promptDisplayTextMap } from "../shared/session.js";
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../shared/graph-filter.js";
 import { runTask, type Run, type RunOptions } from "./run.js";
 
@@ -188,7 +189,9 @@ export class Conversation extends Container {
   constructor(private ui: TUI, private cwd: string) { super(); }
   load(entries: RawSessionEntry[]) {
     this.clear(); this.tools.clear(); this.assistant = undefined;
-    for (const entry of entries) if (entry.type === "message") this.message(entry.message as Record<string, any>);
+    const promptTexts = promptDisplayTextMap(entries);
+    for (const entry of entries) if (entry.type === "message")
+      this.message(entry.message as Record<string, any>, promptTexts.get(entry.id));
   }
   private tool(name: string, id: string, args: unknown) {
     let component = this.tools.get(id);
@@ -199,9 +202,9 @@ export class Conversation extends Container {
     } else if (args) component.updateArgs(args);
     return component;
   }
-  private message(message: Record<string, any>) {
+  private message(message: Record<string, any>, displayText?: string) {
     if (message.role === "user") {
-      const text = typeof message.content === "string" ? message.content : (message.content ?? []).map((part: any) => part.type === "image" ? "[image]" : part.text ?? "").join("\n");
+      const text = displayText ?? (typeof message.content === "string" ? message.content : (message.content ?? []).map((part: any) => part.type === "image" ? "[image]" : part.text ?? "").join("\n"));
       this.addChild(new UserMessageComponent(text));
     } else if (message.role === "assistant") {
       this.assistant = new AssistantMessageComponent(message as AssistantMessage, this.hideThinking);

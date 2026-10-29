@@ -8,7 +8,7 @@ import { useSessionStore } from "../../src/renderer/stores/session";
 import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
 import { graphNodeBlobs, searchGraphNodeIds } from "../../src/renderer/lib/graph-search";
-import type { RawSessionEntry, SessionSnapshot, SettingsBundle } from "../../src/shared/types";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type SessionSnapshot, type SettingsBundle } from "../../src/shared/types";
 
 vi.mock("../../src/renderer/lib/frame", () => ({
   nextFrame: vi.fn(async () => {}), whenVisible: async () => {}, whenTransitionsSettle: async () => {},
@@ -31,6 +31,18 @@ describe("graph search matching", () => {
     expect(searchGraphNodeIds(projection, entries, "read")).toEqual(["turn:u1"]);
     expect(searchGraphNodeIds(projection, entries, "docs")).toEqual(["turn:u2"]);
     expect(searchGraphNodeIds(projection, entries, "  ")).toEqual([]);
+  });
+
+  it("searches structured prompt display text instead of model-only image hints", () => {
+    const imageEntries: RawSessionEntry[] = [
+      { type: "custom", id: "display", parentId: null, timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图" } },
+      { type: "message", id: "image-user", parentId: "display", timestamp: "2026-01-01",
+        message: { role: "user", content: "model-only coordinate hint\n\n检查截图" } },
+    ];
+    const imageProjection = projectSession(imageEntries, "image-user");
+    expect(searchGraphNodeIds(imageProjection, imageEntries, "检查截图")).toEqual(["turn:image-user"]);
+    expect(searchGraphNodeIds(imageProjection, imageEntries, "coordinate hint")).toEqual([]);
   });
 
   it("builds text blobs once per immutable snapshot", () => {
