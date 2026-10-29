@@ -44,6 +44,8 @@ const props = defineProps<{
   models: RuntimeModel[];
   placeholder?: string;
   autofocus?: boolean;
+  // Prompt recall list, newest first; hosts that omit it keep native arrows.
+  history?: string[];
   // Fit the editor's height to its text (clamped by CSS min/max-height);
   // the graph draft node opts in, the chat composer stays manually resizable.
   autoGrow?: boolean;
@@ -274,6 +276,7 @@ watch(slashItems, () => {
   slashActive.value = 0;
 });
 watch(draft, (text) => {
+  if (historyIndex.value !== null && text !== (props.history ?? [])[historyIndex.value]) historyIndex.value = null;
   const query = matchSlashTrigger(text);
   if (query === null) {
     closeSlash();
@@ -291,6 +294,42 @@ function moveSlash(delta: number) {
   if (!count) return;
   slashActive.value = (slashActive.value + delta + count) % count;
 }
+
+// Prompt recall: null means the draft is live text, a number is the recalled
+// slot. Recall starts only from an empty box; any edit or history refresh
+// returns to live editing, and Down past the newest clears the box.
+const historyIndex = ref<number | null>(null);
+
+function moveHistory(delta: number): boolean {
+  const items = props.history ?? [];
+  if (!items.length) return false;
+  if (historyIndex.value === null) {
+    // +1 is Up toward older prompts; Down and non-empty drafts stay native.
+    if (delta < 1 || draft.value) return false;
+    historyIndex.value = 0;
+  } else {
+    const next = historyIndex.value + delta;
+    if (next >= items.length) return true;
+    if (next < 0) {
+      historyIndex.value = null;
+      draft.value = "";
+      void recallCaretEnd();
+      return true;
+    }
+    historyIndex.value = next;
+  }
+  draft.value = items[historyIndex.value]!;
+  void recallCaretEnd();
+  return true;
+}
+
+// Recalled text lands with the caret at the end, matching terminal recall.
+async function recallCaretEnd() {
+  await nextTick();
+  editor.value?.setSelectionRange(draft.value.length, draft.value.length);
+}
+
+watch(() => props.history, () => { historyIndex.value = null; });
 
 async function selectSlash(command: RuntimeCommand) {
   closeSlash();
@@ -350,6 +389,15 @@ function onKeydown(event: KeyboardEvent) {
     }
     // With no matches Enter falls through and submits the literal "/foo"
     // text — unknown commands reach the model, matching the Pi TUI.
+  }
+  // Prompt recall runs after the slash menu (which owns the arrows while
+  // open) and only from an empty box or mid-browse, so caret movement inside
+  // multi-line drafts stays native.
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+    && (event.key === "ArrowUp" || event.key === "ArrowDown")
+    && moveHistory(event.key === "ArrowUp" ? 1 : -1)) {
+    event.preventDefault();
+    return;
   }
   if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
   if (!enterToSend.value && !event.ctrlKey && !event.metaKey) return;

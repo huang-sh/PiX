@@ -103,6 +103,39 @@ describe("chat panel composer", () => {
     } finally { panel.unmount(); }
   });
 
+  it("recalls past prompts with the arrow keys", async () => {
+    const invoke = vi.spyOn(desktop, "invoke").mockResolvedValue({} as never);
+    const { panel } = await mountComposer(invoke);
+    try {
+      const editor = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
+      // Empty box: Up recalls the newest prompt, then walks older.
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("second");
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("first");
+      // Oldest reached: Up stays on it.
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("first");
+      // Down walks back toward the newest, then past it restores the draft.
+      await editor.trigger("keydown", { key: "ArrowDown" });
+      expect(editor.element.value).toBe("second");
+      await editor.trigger("keydown", { key: "ArrowDown" });
+      expect(editor.element.value).toBe("");
+      // A non-empty box keeps native arrows — no hijacking caret movement.
+      await editor.setValue("draft");
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("draft");
+      // Editing a recalled prompt returns to live editing.
+      await editor.setValue("");
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("second");
+      await editor.setValue("second!");
+      await editor.trigger("keydown", { key: "ArrowDown" });
+      expect(editor.element.value).toBe("second!");
+      expect(promptCalls(invoke)).toHaveLength(0);
+    } finally { panel.unmount(); }
+  });
+
   it("keeps the editor usable while streaming and aborts from its separate stop control", async () => {
     // Pi's abort() waits for the agent to go idle before returning, so the
     // control response already carries isStreaming=false — the composer must

@@ -2,7 +2,7 @@
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { withoutToolLabels } from "../../../shared/session";
+import { promptDisplayTextMap, sessionEntryDisplayText, withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import type { CompactionRecord } from "../../../shared/run-timing";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
@@ -30,6 +30,21 @@ const panelNodeId = computed(() => {
 });
 const panelNode = computed(() => session.nodeFor(panelNodeId.value));
 const selectedRun = computed(() => session.runFor(panelNodeId.value));
+// Composer recall list: the session's user prompts, newest first, with
+// consecutive duplicates collapsed. Session-wide so a fork can recall the
+// latest phrasing even when another branch sent it.
+const promptHistory = computed(() => {
+  const entries = session.current?.entries ?? [];
+  const texts = promptDisplayTextMap(entries);
+  const history: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    if (entry.type !== "message" || (entry.message as { role?: string } | undefined)?.role !== "user") continue;
+    const text = sessionEntryDisplayText(entry, texts).trim();
+    if (text && text !== history.at(-1)) history.push(text);
+  }
+  return history;
+});
 const liveCompactions = computed<CompactionRecord[] | undefined>(() => {
   const run = selectedRun.value;
   if (run?.status !== "running") return undefined;
@@ -556,6 +571,7 @@ onBeforeUnmount(() => {
         <PromptComposer
           ref="composer"
           :draft-state="composerState.draft"
+          :history="promptHistory"
           :runnable="composerRunnable"
           :model="composerModelValue"
           :thinking-level="composerThinkingValue"
