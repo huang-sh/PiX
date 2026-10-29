@@ -137,13 +137,25 @@ describe("PromptNode information", () => {
 });
 
 describe("PromptNode branch action", () => {
-  it("shows the recorded Git branch with its full name and hides missing history", async () => {
+  it("shows the recorded Git branch and commit, preserves legacy branches and hides missing history", async () => {
     const data = nodeData();
     const branch = "feature/Case-Sensitive-Long-Branch-Name";
+    const commit = "0123456789abcdef0123456789abcdef01234567";
     const wrapper = mount(PromptNode, {
-      props: { id: "turn:1", data: { ...data, node: { ...data.node, gitBranch: branch } } },
+      props: { id: "turn:1", data: { ...data, node: { ...data.node, gitBranch: branch, gitCommit: commit } } },
       global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
     });
+    expect(wrapper.get('[data-node-info="branch"]').text()).toBe(`${branch} · ${commit.slice(0, 7)}`);
+    expect(wrapper.get('[data-node-info="branch"]').attributes("title")).toContain(commit);
+    useLayoutStore().settings!.app.nodeCardShowCommit = false;
+    await flushPromises();
+    expect(wrapper.get('[data-node-info="branch"]').text()).toBe(branch);
+    expect(wrapper.find('.node-git-commit').exists()).toBe(false);
+    expect(wrapper.get('[data-node-info="branch"]').attributes("title")).toContain(commit);
+    useLayoutStore().settings!.app.nodeCardShowCommit = true;
+    await flushPromises();
+    expect(wrapper.get('[data-node-info="branch"]').text()).toBe(`${branch} · ${commit.slice(0, 7)}`);
+    await wrapper.setProps({ data: { ...data, node: { ...data.node, gitBranch: branch } } });
     expect(wrapper.get('[data-node-info="branch"]').text()).toBe(branch);
     expect(wrapper.get('[data-node-info="branch"]').attributes("title")).toContain(branch);
     await wrapper.setProps({ data: { ...data, node: { ...data.node } } });

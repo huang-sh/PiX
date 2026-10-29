@@ -135,6 +135,12 @@ describe("SettingsPage auto-save", () => {
       expect(wrapper.find('[data-node-card-field="thinking"]').exists()).toBe(false);
       expect(wrapper.get('[data-appearance-group="nodeCard"]').text()).toContain('Model and thinking level always stay visible.');
       expect(wrapper.findAll('[data-node-card-field]').filter(item => (item.get('input').element as HTMLInputElement).checked).map(item => item.attributes('data-node-card-field'))).toEqual(["branch", "context"]);
+      const commitToggle = wrapper.get('[data-node-card-show-commit] input');
+      expect((commitToggle.element as HTMLInputElement).checked).toBe(true);
+      await commitToggle.setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch).toEqual({ nodeCardShowCommit: false });
+      expect(layout.settings?.app.nodeCardShowCommit).toBe(false);
       await wrapper.get('[data-node-card-field="tokens"] input').setValue(true);
       await flushPromises();
       expect(updateCalls().at(-1)?.patch).toEqual({ nodeCardFields: ["branch", "context", "tokens"] });
@@ -147,6 +153,7 @@ describe("SettingsPage auto-save", () => {
       await wrapper.get('[data-node-card-reset]').trigger('click');
       await flushPromises();
       expect(layout.settings?.app.nodeCardFields).toEqual(["branch", "context"]);
+      expect(layout.settings?.app.nodeCardShowCommit).toBe(true);
     } finally { wrapper.unmount(); }
   });
 

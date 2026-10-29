@@ -243,10 +243,13 @@ export function projectSession(
   }
   // The git-branch extension appends its record right before the user message
   // lands, so the message's parent is that record: pair them by the link.
-  const gitBranches = new Map<string, string>();
-  for (const entry of entries)
-    if (entry.type === "custom" && entry.customType === GIT_BRANCH_CUSTOM_TYPE && typeof rec(entry.data)?.branch === "string")
-      gitBranches.set(entry.id, rec(entry.data)!.branch as string);
+  const gitHeads = new Map<string, { gitBranch: string; gitCommit?: string }>();
+  for (const entry of entries) {
+    const data = rec(entry.data);
+    if (entry.type === "custom" && entry.customType === GIT_BRANCH_CUSTOM_TYPE && typeof data?.branch === "string" && data.branch)
+      gitHeads.set(entry.id, { gitBranch: data.branch,
+        ...(typeof data.commit === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(data.commit) ? { gitCommit: data.commit } : {}) });
+  }
   const owners = new Map<string, string>();
   const ownedEntries = new Map<string, RawSessionEntry[]>();
   const contexts = new Map<string | null, { owner: string | null; depth: number; settings: SettingsState }>();
@@ -290,12 +293,12 @@ export function projectSession(
     const finalAssistantReply = owned
       .filter((x) => x.type === "message" && role(x) === "assistant")
       .at(-1);
-    const gitBranch = gitBranches.get(e.parentId ?? "");
+    const gitHead = gitHeads.get(e.parentId ?? "");
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
       ...(labels.has(e.id) ? { label: labels.get(e.id) } : {}),
-      ...(gitBranch ? { gitBranch } : {}),
+      ...(gitHead ?? {}),
       parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
       title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
       ...(images(e).length ? { imageCount: images(e).length } : {}),

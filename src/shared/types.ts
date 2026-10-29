@@ -110,6 +110,8 @@ export interface GraphNode {
   label?: string;
   /** Git branch at turn start, recorded as the pix.git-branch entry the user message hangs off. */
   gitBranch?: string;
+  /** Full HEAD commit SHA at turn start; absent for unborn branches and legacy records. */
+  gitCommit?: string;
   fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
@@ -409,6 +411,8 @@ export interface AppSettings {
   canvasDotGridDotSize: number;
   /** Optional footer fields in priority order; model and thinking always appear. */
   nodeCardFields?: NodeCardField[];
+  /** Show a short commit SHA beside the branch in node footers; defaults to true. */
+  nodeCardShowCommit?: boolean;
   /**
    * Deploys this desktop's model API keys and custom models to remote hosts,
    * so remote work runs without the desktop. Off by default; the host only

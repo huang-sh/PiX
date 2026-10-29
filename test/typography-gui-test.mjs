@@ -91,10 +91,11 @@ const taskListMarkers = {
 const sessionFile = join(workspace, ".pi", "sessions", "typography.jsonl");
 const timestamp = new Date().toISOString();
 const branch = "feature/node-card-information-display";
+const commit = "0123456789abcdef0123456789abcdef01234567";
 const usage = { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 writeFileSync(sessionFile, [
   { type: "session", version: 3, id: "823f88f0-fb22-42cb-abcd-dc983145b642", cwd: workspace, timestamp },
-  { type: "custom", id: "branch01", parentId: null, timestamp, customType: "pix.git-branch", data: { branch } },
+  { type: "custom", id: "branch01", parentId: null, timestamp, customType: "pix.git-branch", data: { branch, commit } },
   { type: "message", id: "user0001", parentId: "branch01", timestamp, message: { role: "user", content: text, timestamp: Date.now() } },
   { type: "message", id: "reply001", parentId: "user0001", timestamp, message: {
     role: "assistant", api: "openai-responses", provider: "openai", model: "gpt-5.6", usage, stopReason: "stop", timestamp: Date.now(),
@@ -104,7 +105,7 @@ writeFileSync(sessionFile, [
 const footerSessionFile = join(workspace, ".pi", "sessions", "node-footer.jsonl");
 writeFileSync(footerSessionFile, [
   { type: "session", version: 3, id: "footer-layout", cwd: workspace, timestamp },
-  { type: "custom", id: "git", parentId: null, timestamp, customType: "pix.git-branch", data: { branch } },
+  { type: "custom", id: "git", parentId: null, timestamp, customType: "pix.git-branch", data: { branch, commit } },
   { type: "message", id: "prompt", parentId: "git", timestamp: new Date(Date.now() - 83000).toISOString(), message: { role: "user", content: "Footer layout", timestamp: Date.now() - 83000 } },
   { type: "message", id: "answer", parentId: "prompt", timestamp, message: { role: "assistant", provider: "anthropic", model: "claude-sonnet", content: [{ type: "text", text: "Done" }], usage: { ...usage, input: 1200, output: 300, cacheRead: 800, cacheWrite: 100, cost: { total: 0.0123 } } } },
   { type: "custom", id: "footer", parentId: "answer", timestamp, customType: "pix.node-footer", data: {
@@ -372,7 +373,10 @@ try {
       const bounds = footer.getBoundingClientRect();
       const items = [...footer.querySelectorAll('[data-node-info]')].filter(el => getComputedStyle(el).display !== 'none').map(el => {
         const box = el.getBoundingClientRect();
-        return { id: el.dataset.nodeInfo, left: box.left, right: box.right, top: box.top, textWidth: el.querySelector('span')?.clientWidth };
+        const commit = el.querySelector('.node-git-commit');
+        const commitBox = commit?.getBoundingClientRect();
+        return { id: el.dataset.nodeInfo, left: box.left, right: box.right, top: box.top, textWidth: el.querySelector('span')?.clientWidth,
+          ...(commit && commitBox ? { commitVisible: commit.clientWidth >= commit.scrollWidth - 1 && commitBox.left >= box.left && commitBox.right <= box.right + 1 } : {}) };
       });
       return { items, left: bounds.left, right: bounds.right };
     })()`);
@@ -381,6 +385,7 @@ try {
     assert.deepEqual(measurements.items.slice(0, -2).map(item => item.id), fields.slice(0, measurements.items.length - 2), details);
     assert.ok(!fields.length || measurements.items.length > 2, 'the highest priority optional field must fit: ' + details);
     assert.ok(measurements.items.find(item => item.id === 'model').textWidth >= 60, 'model must keep readable space: ' + details);
+    assert.ok(measurements.items.every(item => item.commitVisible !== false), 'short commit SHA must remain fully visible: ' + details);
     assert.ok(measurements.items.every((item, index, items) => item.left >= measurements.left - 1 && item.right <= measurements.right + 1
       && (!index || item.left >= items[index - 1].right - 1 && Math.abs(item.top - items[index - 1].top) <= 1)), 'footer fields must fit without overlap: ' + details);
     footerReport.push({ density, fields, ...measurements });

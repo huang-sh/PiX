@@ -199,6 +199,7 @@ export const en = {
     scope: { app: "PiX", global: "Pi global", project: "project" },
     appearanceGroups: { interface: "Interface", canvas: "Canvas", nodeCard: "Node cards" },
     nodeCard: {
+      showCommit: "Show Git commit in node footers",
       description: "Model and thinking level always stay visible. Choose additional information and arrange its priority. Earlier items stay visible when space is limited. Hover over the card footer to see all details.",
       fields: "Additional information in priority order",
       reset: "Reset",
@@ -604,6 +605,7 @@ export const zhCN: typeof en = {
     scope: { app: "PiX", global: "Pi 全局", project: "项目" },
     appearanceGroups: { interface: "界面", canvas: "画布", nodeCard: "节点卡片" },
     nodeCard: {
+      showCommit: "在节点底部显示 Git commit",
       description: "模型和思考等级固定显示。可选择其他常显信息并调整优先顺序，空间不足时优先展示靠前的项。悬浮卡片底部可查看完整明细。",
       fields: "按优先顺序排列的附加信息",
       reset: "恢复默认",

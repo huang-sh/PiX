@@ -19,6 +19,16 @@ function update(fields: readonly NodeCardField[]) {
 function toggle(field: NodeCardField) {
   update(selected.value.includes(field) ? selected.value.filter(item => item !== field) : [...selected.value, field]);
 }
+function toggleCommit() {
+  if (!draft.value) return;
+  draft.value.app.nodeCardShowCommit = draft.value.app.nodeCardShowCommit === false;
+  save("app");
+}
+function reset() {
+  if (!draft.value) return;
+  draft.value.app.nodeCardShowCommit = true;
+  update(DEFAULT_NODE_CARD_FIELDS);
+}
 function move(field: NodeCardField, offset: number) {
   const next = [...selected.value];
   const index = next.indexOf(field);
@@ -36,7 +46,7 @@ function move(field: NodeCardField, offset: number) {
         <h2 class="settings-group-title">{{ t('settings.appearanceGroups.nodeCard') }}</h2>
         <p>{{ t('settings.nodeCard.description') }}</p>
       </div>
-      <Button variant="ghost" size="sm" type="button" data-node-card-reset @click="update(DEFAULT_NODE_CARD_FIELDS)">{{ t('settings.nodeCard.reset') }}</Button>
+      <Button variant="ghost" size="sm" type="button" data-node-card-reset @click="reset">{{ t('settings.nodeCard.reset') }}</Button>
     </header>
     <ol class="node-card-fields" :aria-label="t('settings.nodeCard.fields')">
       <li v-for="field in fields" :key="field" :data-node-card-field="field">
@@ -45,6 +55,9 @@ function move(field: NodeCardField, offset: number) {
           <Button variant="ghost" size="icon" type="button" :disabled="selected.indexOf(field) === 0" :aria-label="t('settings.nodeCard.moveUp', { field: t(`graph.nodeInfo.${field}`) })" data-move="up" @click="move(field, -1)"><ArrowUp :size="14" /></Button>
           <Button variant="ghost" size="icon" type="button" :disabled="selected.indexOf(field) === selected.length - 1" :aria-label="t('settings.nodeCard.moveDown', { field: t(`graph.nodeInfo.${field}`) })" data-move="down" @click="move(field, 1)"><ArrowDown :size="14" /></Button>
         </div>
+      </li>
+      <li data-node-card-show-commit>
+        <label><input type="checkbox" :checked="draft?.app.nodeCardShowCommit !== false" @change="toggleCommit" /><span>{{ t('settings.nodeCard.showCommit') }}</span></label>
       </li>
     </ol>
   </section>

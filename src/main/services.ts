@@ -239,6 +239,7 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "preventSleepDuringTasks",
     "keepScreenOnDuringTasks",
     "canvasDotGrid",
+    "nodeCardShowCommit",
     "deployModelCredentialsToRemote",
     "experimentalHistory",
   ])
@@ -314,6 +315,7 @@ export class SettingsService {
       preventSleepDuringTasks: true,
       keepScreenOnDuringTasks: false,
       canvasDotGrid: true,
+      nodeCardShowCommit: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
       deployModelCredentialsToRemote: false,

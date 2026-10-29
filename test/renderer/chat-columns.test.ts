@@ -135,6 +135,8 @@ describe("pinned chat columns", () => {
     const session = useSessionStore();
     const recorded = snapshot("a2");
     recorded.projection.nodes.forEach((node, index) => { node.gitBranch = ["main", "feature/Left", "feature/Right"][index]; });
+    const commit = "0123456789abcdef0123456789abcdef01234567";
+    recorded.projection.nodes[2]!.gitCommit = commit;
     session.applySnapshot(recorded);
     session.focusedNode = "turn:u2";
     layout.chatColumns = ["turn:u3"];
@@ -144,8 +146,9 @@ describe("pinned chat columns", () => {
     const primary = mount(BranchContextPanel, { global: { plugins: [i18n], stubs } });
     const branches = (panel: typeof pinned) => panel.findAll(".chat-git-branch").map(badge => badge.text());
     expect(branches(primary)).toEqual(["main", "feature/Left"]);
-    expect(branches(pinned)).toEqual(["main", "feature/Right"]);
+    expect(branches(pinned)).toEqual(["main", `feature/Right · ${commit.slice(0, 7)}`]);
     expect(pinned.findAll(".chat-git-branch")[1]!.attributes("title")).toContain("feature/Right");
+    expect(pinned.findAll(".chat-git-branch")[1]!.attributes("title")).toContain(commit);
 
     expect(pinned.find(".branch-title small").text()).toContain("right prompt");
     expect(pinned.find('[data-action="chat-column-close"]').exists()).toBe(true);
@@ -164,7 +167,7 @@ describe("pinned chat columns", () => {
     expect(replies(primary)).toContain("shared reply");
     expect(replies(primary)).not.toContain("right reply");
     expect(branches(primary)).toEqual(["main"]);
-    expect(branches(pinned)).toEqual(["main", "feature/Right"]);
+    expect(branches(pinned)).toEqual(["main", `feature/Right · ${commit.slice(0, 7)}`]);
 
     await pinned.get('[data-action="chat-column-close"]').trigger("click");
     expect(layout.chatColumns).toEqual([]);

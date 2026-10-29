@@ -238,6 +238,7 @@ const visibleTurns = computed<Turn[]>(() =>
     return {
       id,
       gitBranch: node?.gitBranch,
+      gitCommit: node?.gitCommit,
       fileChanges: node?.fileChanges,
       user,
       terminal,
