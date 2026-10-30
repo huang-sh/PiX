@@ -161,13 +161,13 @@ test("previewSystemPrompt renders without an open session", { timeout: 60000 }, 
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home;
   process.env.PI_CODING_AGENT_DIR = join(home, "agent");
-  t.after(() => {
+  const runtime = new PiRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  t.after(async () => {
+    await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });
   });
-  const runtime = new PiRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
-  t.after(() => runtime.close());
   const { text } = await runtime.previewSystemPrompt();
   assert.ok(text.startsWith("You are an expert coding assistant"), "stock preamble renders without a session");
   assert.ok(text.includes("<tools>"), "tool section renders from the project services");
@@ -247,6 +247,7 @@ test("controller defaults reach background projects, future sessions and shared 
 test("runtime persona pick rewrites the next turn and forks inherit it", { timeout: 60000 }, async t => {
   const home = mkdtempSync(join(tmpdir(), "pix-persona-"));
   const cwd = join(home, "workspace");
+  const promptCwd = cwd.replace(/\\/g, "/");
   mkdirSync(cwd);
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home;
@@ -333,7 +334,7 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
   assert.ok(!sentSystemPrompt.includes("Pi documentation (read only when"));
   assert.ok(!sentSystemPrompt.includes("Always answer in rhyme"));
   assert.ok(sentSystemPrompt.includes("<tools>"), "section edits preserve the dynamic tool instructions");
-  assert.ok(sentSystemPrompt.includes(`<cwd>\n${cwd}\n</cwd>`));
+  assert.ok(sentSystemPrompt.includes(`<cwd>\n${promptCwd}\n</cwd>`));
   await runtime.control({ action: "setPromptCustomization", customization: {} });
   await prompt("restore all default sections", customized.id);
   assert.ok(sentSystemPrompt.startsWith("You are an expert coding assistant"));
@@ -343,7 +344,7 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
   // A draft attached to history applies its persona only after the branch is
   // chosen, while the main branch and other parallel drafts retain theirs.
   const fork = await prompt("explicit fork persona", root.id, { mode: "strict", name: "fork", text: "Fork persona" });
-  assert.equal(sentSystemPrompt, `Fork persona\n\nCurrent working directory: ${cwd}`);
+  assert.equal(sentSystemPrompt, `Fork persona\n\nCurrent working directory: ${promptCwd}`);
   assert.equal(sentSystemMessageCount, 1);
   assert.deepEqual(fork.promptOverride, { mode: "strict", name: "fork" });
   assert.equal(runtime.snapshot().projection.activePromptOverride, null);

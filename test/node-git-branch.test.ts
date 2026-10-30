@@ -125,6 +125,8 @@ test("readGitHead follows relative gitdir files and supports SHA-256 commits", a
     const cwd = join(home, "workspace");
     const git = (...args: string[]) => execFileSync("git", args, { cwd: home, encoding: "utf8", windowsHide: true }).trim();
     git("init", "--object-format=sha256", "--initial-branch=main", "--separate-git-dir", join(home, "gitdir"), cwd);
+    // Git marks this file hidden on Windows, which prevents truncating it.
+    rmSync(join(cwd, ".git"));
     writeFileSync(join(cwd, ".git"), "gitdir: ../gitdir\n");
     assert.deepEqual(await readGitHead(cwd), { branch: "main" });
     git("-C", cwd, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial");
