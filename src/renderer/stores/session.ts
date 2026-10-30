@@ -655,6 +655,37 @@ export const useSessionStore = defineStore("session", {
       return this.current?.projection.activeNodeId ?? undefined;
     },
     async create() {
+      if (this.creating) return;
+      if (useWorkspaceStore().project && this.creation?.status !== "failed") {
+        const project = this.activeProjectId;
+        const current = this.current;
+        const candidates = current
+          ? [this.sessions.find(item => item.path === current.session.path) ?? current.session,
+            ...this.sessions.filter(item => item.path !== current.session.path)]
+          : this.sessions;
+        const isEmpty = (item: SessionSummary) => item.messageCount === 0 && !item.running
+          && !this.marks.archivedSessions.includes(item.path)
+          && !Object.values(this.pendingPrompts).some(pending =>
+            pending.projectId === project && pending.sessionPath === item.path);
+        const canReuse = (snapshot: SessionSnapshot) => isEmpty(snapshot.session)
+          // The summary counts the main file; entries also include graph branches.
+          && !snapshot.entries.some(entry => entry.type === "message")
+          && snapshot.runtime.available && !isSessionRunning(snapshot)
+          && !snapshot.graph?.storageError && !snapshot.graph?.recoveredInputs?.length;
+        for (const candidate of candidates) {
+          if (!isEmpty(candidate)) continue;
+          if (candidate.path === this.current?.session.path && !this.loading) {
+            // Keeping the current view also preserves its unsent composer draft.
+            if (canReuse(this.current)) return;
+            continue;
+          }
+          const request = ++this.viewRequest;
+          await this.open(candidate.path, request);
+          if (project !== this.activeProjectId || request !== this.viewRequest) return;
+          // Cached rows can become used, busy or read-only before they open.
+          if (this.current && canReuse(this.current)) return;
+        }
+      }
       const snapshot = await this.applyCreate();
       if (!snapshot) return;
       const createdPath = snapshot.session.path;

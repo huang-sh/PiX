@@ -131,7 +131,51 @@ try {
   const createdPath = await evaluate(`__pixTest.state().current.session.path`);
   assert.equal(await evaluate(`(async () => (await window.pix.invoke('session.snapshot')).session.path)()`), createdPath,
     "new session must be selected in both processes");
-  console.log("Same-project switches and creation keep renderer/main session selection in sync");
+
+  const sessionCount = await evaluate(`__pixTest.state().sessions.length`);
+  await until(`document.querySelector('.draft-node textarea')`);
+  await evaluate(`(() => {
+    const input = document.querySelector('.draft-node textarea');
+    input.value = 'preserve this unsent draft';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await evaluate(`(async () => {
+    for (let i = 0; i < 5; i++) {
+      document.querySelector('[data-action="create-project-session"]').click();
+      await Promise.resolve();
+    }
+  })()`);
+  await until(`!__pixTest.state().loading`);
+  assert.equal(await evaluate(`__pixTest.state().current.session.path`), createdPath,
+    "repeated creation must reuse the current empty session");
+  assert.equal(await evaluate(`document.querySelector('.draft-node textarea').value`), 'preserve this unsent draft',
+    "reusing the current session must preserve its draft");
+  assert.equal(await evaluate(`(async () => (await window.pix.invoke('session.list')).length)()`), sessionCount,
+    "repeated creation must not create additional files");
+
+  await evaluate(`__pixTest.openSession(${JSON.stringify(firstPath)})`);
+  assert.ok(await evaluate(`__pixTest.state().current.session.messageCount > 0`));
+  await click('[data-action="create-project-session"]');
+  await until(`!__pixTest.state().loading && __pixTest.state().current.session.path === ${JSON.stringify(createdPath)}`);
+  assert.equal(await evaluate(`(async () => (await window.pix.invoke('session.snapshot')).session.path)()`), createdPath,
+    "reusing a background empty session must select it in both processes");
+
+  const overlappingReuse = await evaluate(`(async () => {
+    const opening = __pixTest.openSession(${JSON.stringify(firstPath)});
+    const loading = __pixTest.state().loading;
+    document.querySelector('[data-action="create-project-session"]').click();
+    await opening;
+    return loading;
+  })()`);
+  assert.equal(overlappingReuse, true, "reuse must overlap a real session open");
+  await until(`!__pixTest.state().loading && __pixTest.state().current.session.path === ${JSON.stringify(createdPath)}`);
+  assert.equal(await evaluate(`(async () => (await window.pix.invoke('session.snapshot')).session.path)()`), createdPath,
+    "reuse during navigation must keep renderer and main process in sync");
+  assert.equal(await evaluate(`(async () => (await window.pix.invoke('session.list')).length)()`), sessionCount,
+    "reusing an existing empty session must not create additional files");
+  assert.equal(await evaluate(`__pixTest.state().layout.collapsed.chat`), false,
+    "reusing an empty session must keep chat expanded");
+  console.log("Session switches, creation and empty-session reuse keep selection, files, drafts and chat state consistent");
 } finally {
   socket?.close();
   child.kill();
