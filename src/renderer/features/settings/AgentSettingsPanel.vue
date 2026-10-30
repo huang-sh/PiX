@@ -17,15 +17,15 @@ const tabs = [
 </script>
 
 <template>
-  <TabsRoot class="agent-settings" default-value="prompts" :unmount-on-hide="false">
-    <TabsList class="agent-settings-tabs" :aria-label="t('settings.agentTabsLabel')">
+  <TabsRoot class="settings-tabbed" default-value="prompts" :unmount-on-hide="false">
+    <TabsList class="settings-tabs" :aria-label="t('settings.agentTabsLabel')">
       <TabsTrigger v-for="tab in tabs" :key="tab.id" :value="tab.id" :data-agent-tab="tab.id">
         <component :is="tab.icon" :size="16" aria-hidden="true" />
         {{ t(`settings.agentTabs.${tab.id}`) }}
       </TabsTrigger>
     </TabsList>
 
-    <TabsContent value="prompts" class="agent-settings-panel" data-agent-panel="prompts">
+    <TabsContent value="prompts" class="settings-tab-panel" data-agent-panel="prompts">
       <section class="settings-card" data-agent-group="personas"><PersonasPanel /></section>
       <section class="settings-card" data-agent-group="style">
         <SettingRow v-for="row in rows.filter(row => row.group === 'prompts')" :key="row.path" :row="row" />
@@ -33,7 +33,7 @@ const tabs = [
       <section class="settings-card" data-agent-group="systemPrompt"><SystemPromptSection /></section>
     </TabsContent>
 
-    <TabsContent value="queue" class="agent-settings-panel" data-agent-panel="queue">
+    <TabsContent value="queue" class="settings-tab-panel" data-agent-panel="queue">
       <section class="settings-card" data-agent-group="queue">
         <header class="agent-settings-card-head">
           <h2>{{ t('settings.agentGroups.queue') }}</h2>
@@ -43,7 +43,7 @@ const tabs = [
       </section>
     </TabsContent>
 
-    <TabsContent value="connection" class="agent-settings-panel" data-agent-panel="connection">
+    <TabsContent value="connection" class="settings-tab-panel" data-agent-panel="connection">
       <section v-for="group in (['connection', 'retry'] as const)" :key="group" class="settings-card" :data-agent-group="group">
         <header class="agent-settings-card-head">
           <h2>{{ t(`settings.agentGroups.${group}`) }}</h2>

@@ -12,7 +12,7 @@ import ModelsPanel from "./ModelsPanel.vue";
 import RemotePanel from "./RemotePanel.vue";
 import SettingsRowsPanel from "./SettingsRowsPanel.vue";
 import SkillsPanel from "./SkillsPanel.vue";
-import UsagePanel from "./UsagePanel.vue";
+import UsageSettingsPanel from "./UsageSettingsPanel.vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -179,7 +179,7 @@ watch(
       <KeyboardShortcuts ref="shortcutsPage" v-show="layout.settingsCategory === 'shortcuts'" />
       <ModelsPanel v-if="layout.settingsCategory === 'models'" />
       <SkillsPanel v-else-if="layout.settingsCategory === 'skills'" />
-      <UsagePanel v-else-if="layout.settingsCategory === 'usage'" />
+      <UsageSettingsPanel v-else-if="layout.settingsCategory === 'usage'" />
       <RemotePanel v-else-if="layout.settingsCategory === 'remote'" />
       <ExtensionsPanel v-else-if="layout.settingsCategory === 'extensions'" />
       <AboutPage v-else-if="layout.settingsCategory === 'about'" />

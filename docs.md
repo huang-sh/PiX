@@ -50,6 +50,37 @@ Renderer -> isolated preload -> MainController
 Routes are runtime-validated before dispatch. Workspace paths are confined to
 the active project. Browser content uses an isolated webview partition.
 
+## Provider balances
+
+Settings → Usage separates session token/cost statistics and provider balances
+into tabs, sharing the Agent settings page's tab style. Switching tabs retains
+filters and unsaved balance-query edits; automatic balance polling pauses while
+its tab is hidden. `usage.balances` follows the desktop's provider catalog and logins,
+including while an SSH/WSL project is selected; it is not a remote project
+route. Requests use the existing SDK auth resolution and global proxy support.
+
+Automatic queries match the effective model endpoint's origin for DeepSeek,
+Kimi/Moonshot, OpenRouter and SiliconFlow. Other providers can save a same-origin
+HTTP(S) URL, dot-separated JSON field, currency and positive amount multiplier
+under `app.usage.balanceQueries[providerId]`. For example, a relay reporting
+500000 quota units per dollar can use `data.total_available`, `USD`, and
+`0.000002`. Fields are traversed as data; expressions are not evaluated.
+Saving patches only the selected provider; resetting sends that provider as
+`null`, preserving other providers' queries and concurrent settings changes.
+Subscription quota windows require their own provider adapters and are not
+inferred from local costs.
+
+Cards refresh independently, with a one-minute cache and visible-page polling.
+Concurrent reads share one request. The last successful amount/time survives
+temporary failures and restarts; failed authentication clears that reading.
+Cache keys fingerprint endpoint, query and resolved auth, so changing accounts
+or query configuration cannot reuse another account's balance. Credentials and
+response bodies never enter the cache or renderer. Requests reject redirects,
+share an eight-second deadline across auth checks, auth resolution and fetching,
+and bound response reads to 64 KiB.
+
+Run `npm run test:gui:usage` for the isolated Electron/local-server check.
+
 ## Session lifecycle and the remote pool
 
 Opening a session switches the view; it never closes another session's

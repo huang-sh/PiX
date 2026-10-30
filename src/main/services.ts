@@ -48,6 +48,7 @@ import { projectId } from "../shared/types.js";
 import { migrateShortcutOverrides, validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
 import { normalizeNodeCardFields } from "../shared/node-card.js";
+import { balanceQuery } from "../shared/provider-balances.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
 import { sessionModifiedAt } from "./graph-files.js";
 import { fileChangeDir } from "./file-changes.js";
@@ -253,7 +254,8 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     drop("keyboardShortcuts");
   }
   if (out.usage !== undefined) {
-    const providers = (out.usage as { unbilledProviders?: unknown }).unbilledProviders;
+    const usage = out.usage && typeof out.usage === "object" ? out.usage as Record<string, unknown> : {};
+    const providers = usage.unbilledProviders;
     const unbilled = [
       ...new Set(
         (Array.isArray(providers) ? providers : []).filter(
@@ -261,7 +263,17 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
         ),
       ),
     ];
-    if (unbilled.length) out.usage = { unbilledProviders: unbilled };
+    const queries = usage.balanceQueries;
+    const balanceQueries = Object.fromEntries(
+      (queries && typeof queries === "object" && !Array.isArray(queries) ? Object.entries(queries) : []).flatMap(([id, value]) => {
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id) || ["__proto__", "prototype", "constructor"].includes(id)) return [];
+        try { return [[id, balanceQuery(value)]]; } catch { return []; }
+      }),
+    );
+    if (unbilled.length || Object.keys(balanceQueries).length) out.usage = {
+      ...(unbilled.length ? { unbilledProviders: unbilled } : {}),
+      ...(Object.keys(balanceQueries).length ? { balanceQueries } : {}),
+    };
     else drop("usage");
   }
   if (out.personas !== undefined) {

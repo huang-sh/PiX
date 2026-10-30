@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, parse, posix, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { debugLog, logFile } from "./debug-log.js";
 import type {
@@ -18,7 +18,8 @@ import { projectId } from "../shared/types.js";
 import { isPromptImage } from "../shared/images.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
-import { canonicalPath } from "./paths.js";
+import { canonicalPath, pixHome } from "./paths.js";
+import { ProviderBalanceService } from "./provider-balances.js";
 import { createHash } from "node:crypto";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
@@ -88,6 +89,7 @@ export class MainController {
   private gitSwitches = new Set<string>();
   private pendingAgentControls = new Map<string, number>();
   private readonly promptConfiguration: { customization?: PromptCustomization };
+  private readonly providerBalances: ProviderBalanceService;
   get hasPendingWork() { return this.pendingAgentControls.size > 0; }
   listeners = new Set<(e: DesktopEvent) => void>();
   /** Progress baselines of background runs, replayed when their session returns to view. */
@@ -115,6 +117,7 @@ export class MainController {
     this.platform = platform;
     this.settings = new SettingsService(path);
     this.promptConfiguration = owner?.promptConfiguration ?? {};
+    this.providerBalances = owner?.providerBalances ?? new ProviderBalanceService(join(pixHome(), ".pix", "provider-balances.json"));
     this.library = new LibraryService();
     if (!owner) this.settings.applyInstallerLanguage();
     this.workspace = new WorkspaceService(path);
@@ -981,6 +984,22 @@ export class MainController {
         this.rememberProject(sessions);
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
+      }
+      // Like the provider catalog/login UI, balances use this desktop's
+      // credentials even while the selected project runs on SSH or WSL.
+      case "usage.balances": {
+        const queries = this.settings.bundle().app.usage?.balanceQueries ?? {};
+        const runtime = await this.projectRuntime.modelRuntime();
+        const providers = runtime.getProviders().filter((p: { id: string }) => !v.provider || p.id === v.provider);
+        const balances = await Promise.all(providers.map(async (p: { id: string; name: string; baseUrl?: string }) => {
+          const signal = AbortSignal.timeout(8000);
+          try { if (!await runtime.checkAuth(p.id, { signal })) return undefined; }
+          catch { return { provider: p.id, name: p.name, amounts: [], error: signal.aborted ? "timeout" : "credentials" }; }
+          const model = runtime.getAllModels(p.id)[0];
+          return this.providerBalances.read({ provider: p.id, name: p.name, baseUrl: model?.baseUrl ?? p.baseUrl,
+            query: queries[p.id], auth: async signal => (await runtime.getAuth(model ?? p.id, { signal }))?.auth }, v.refresh === true, signal);
+        }));
+        return balances.filter(Boolean);
       }
       case "usage.overview": {
         const bundle = this.settings.bundle();

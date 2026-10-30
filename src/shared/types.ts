@@ -4,6 +4,7 @@ import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
 import type { NodeCardField } from "./node-card.js";
 import type { UsageAmount } from "./usage.js";
+import type { BalanceQuery } from "./provider-balances.js";
 import type { CompactionRecord, RunTiming } from "./run-timing.js";
 
 export type PromptImage = ImageContent;
@@ -477,9 +478,11 @@ export interface AppSettings {
   experimentalHistory: boolean;
   /** Latest release the user chose to stop being notified about. */
   updateSkippedVersion?: string;
-  /** Usage panel preferences: providers on flat subscription plans (coding
-   *  plans) whose per-token costs should not count as billed. */
-  usage?: { unbilledProviders?: string[] };
+  usage?: {
+    /** Flat subscriptions whose per-token costs should not count as billed. */
+    unbilledProviders?: string[];
+    balanceQueries?: Record<string, BalanceQuery>;
+  };
   /** Named system prompts offered in the composer's persona picker. */
   personas?: PersonaDefinition[];
   /** Overrides for pi's stock prompt sections; empty sections stay dynamic. */
@@ -672,6 +675,7 @@ export type DesktopRoute =
   | "session.rename"
   | "session.delete"
   | "usage.overview"
+  | "usage.balances"
   | "library.pin"
   | "library.archiveSession"
   | "library.archiveProject"

@@ -240,6 +240,8 @@ export function validateRouteInput(
             : "30d",
         scope: v.scope === "all" ? "all" : "project",
       };
+    case "usage.balances":
+      return { provider: str(v.provider, "provider", true), refresh: v.refresh === true };
     case "library.pin":
       return { path: str(v.path, "path"), pinned: v.pinned === true };
     case "library.archiveSession":

@@ -1057,16 +1057,16 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .appearance-settings { display: grid; gap: 20px; max-width: 1120px; margin: auto; }
 .appearance-settings > .settings-card { width: 100%; }
 .settings-group-title { margin: 0; padding: 18px 18px 10px; font-size: var(--font-size-ui); font-weight: 650; }
-.agent-settings { max-width: 1120px; margin: auto; }
-.agent-settings-tabs { display: flex; gap: 24px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }
-.agent-settings-tabs > button { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 2px 12px; border-bottom: 2px solid transparent; color: var(--muted); font-size: var(--font-size-small); white-space: nowrap; }
-.agent-settings-tabs > button:hover { color: var(--text); }
-.agent-settings-tabs > button[data-state="active"] { border-bottom-color: var(--accent); color: var(--accent-strong); font-weight: 600; }
-.agent-settings-tabs > button:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 3px; }
-.agent-settings-panel { display: grid; gap: 20px; }
-.agent-settings-panel[hidden] { display: none; }
-.agent-settings-panel > .settings-card { width: 100%; }
-.agent-settings-panel .setting-row:last-child { border-bottom: 0; }
+.settings-tabbed { max-width: 1120px; margin: auto; }
+.settings-tabs { display: flex; gap: 24px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }
+.settings-tabs > button { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 2px 12px; border-bottom: 2px solid transparent; color: var(--muted); font-size: var(--font-size-small); white-space: nowrap; }
+.settings-tabs > button:hover { color: var(--text); }
+.settings-tabs > button[data-state="active"] { border-bottom-color: var(--accent); color: var(--accent-strong); font-weight: 600; }
+.settings-tabs > button:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 3px; }
+.settings-tab-panel { display: grid; gap: 20px; }
+.settings-tab-panel[hidden] { display: none; }
+.settings-tab-panel > .settings-card { width: 100%; }
+.settings-tab-panel .setting-row:last-child { border-bottom: 0; }
 .agent-settings-card-head { padding: 18px; border-bottom: 1px solid var(--border); }
 .agent-settings-card-head h2 { margin: 0 0 4px; font-size: var(--font-size-ui); font-weight: 650; }
 .agent-settings-card-head p { margin: 0; color: var(--muted); font-size: var(--font-size-caption); }

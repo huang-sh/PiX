@@ -15,6 +15,7 @@ const scope = ref<"project" | "all">("project");
 const overview = ref<UsageOverview>();
 const loading = ref(false);
 const error = ref("");
+let loadSequence = 0;
 
 // Subscription-billed providers (coding plans) the user marked as not billed
 // per token; persisted with the app settings, applied by the main process.
@@ -108,18 +109,21 @@ const heatLevel = (day: UsageDayRow) =>
   day.tokens <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((4 * day.tokens) / maxDayTokens.value)));
 
 async function load() {
+  const sequence = ++loadSequence;
   loading.value = true;
   error.value = "";
   try {
-    overview.value = await desktop.invoke<UsageOverview>("usage.overview", {
+    const next = await desktop.invoke<UsageOverview>("usage.overview", {
       range: range.value,
       scope: scope.value,
     });
+    if (sequence === loadSequence) overview.value = next;
   } catch (e) {
+    if (sequence !== loadSequence) return;
     overview.value = undefined;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    loading.value = false;
+    if (sequence === loadSequence) loading.value = false;
   }
 }
 
@@ -312,8 +316,8 @@ watch([range, scope], load);
 </template>
 
 <style scoped>
-.usage-panel { display: grid; gap: 18px; }
-.usage-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.usage-panel { display: grid; gap: 18px; padding: 0 16px 16px; }
+.usage-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 -16px; }
 .usage-toolbar-right { display: flex; align-items: center; gap: 10px; }
 .usage-ranges { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .usage-ranges button {
