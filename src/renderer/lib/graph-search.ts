@@ -1,4 +1,4 @@
-import { entrySearchText, sessionEntryIndex } from "../../shared/session";
+import { entrySearchText, promptDisplayTextMap, sessionEntryIndex } from "../../shared/session";
 import type { RawSessionEntry, SessionProjection } from "../../shared/types";
 
 // Snapshots are immutable, so the per-node text blobs are built once per
@@ -9,8 +9,9 @@ export function graphNodeBlobs(projection: SessionProjection, entries: RawSessio
   const cached = blobCache.get(projection);
   if (cached && cached.entries === entries) return cached.blobs;
   const index = sessionEntryIndex(entries);
+  const promptTexts = promptDisplayTextMap(entries);
   const blobs = projection.nodes.map(node =>
-    [node.title, node.label, ...node.rawEntryIds.flatMap(id => index.get(id) ?? []).map(entrySearchText)]
+    [node.title, node.label, ...node.rawEntryIds.flatMap(id => index.get(id) ?? []).map(entry => entrySearchText(entry, promptTexts))]
       .filter(Boolean)
       .join("\n"),
   );

@@ -54,6 +54,7 @@ export interface PromptNodeData {
 const props = defineProps<{ id: string; data: PromptNodeData; selected?: boolean }>();
 const { t } = useI18n();
 const layout = useLayoutStore();
+const showCommit = computed(() => layout.settings?.app.nodeCardShowCommit !== false);
 const root = ref<HTMLElement>();
 const footer = ref<HTMLElement>();
 const measure = ref<HTMLElement>();
@@ -109,7 +110,9 @@ const allInfo = computed(() => {
     context: { icon: PieChart, text: context?.percent == null ? "—" : `${Math.round(context.percent)}% ${compactTokens(context.contextWindow)}`,
       detail: context ? `${context.tokens?.toLocaleString() ?? "—"} / ${context.contextWindow.toLocaleString()}${context.percent == null ? "" : ` (${Math.round(context.percent)}%)`}` : "—" },
     thinking: { icon: Brain, text: props.data.node.footer?.thinkingLevel ?? "—", detail: props.data.node.footer?.thinkingLevel ?? "—" },
-    branch: { icon: GitBranch, text: props.data.node.gitBranch ?? "—", detail: props.data.node.gitBranch ?? "—" },
+    branch: { icon: GitBranch,
+      text: props.data.node.gitBranch ?? "—",
+      detail: props.data.node.gitCommit ? `${props.data.node.gitBranch} · ${props.data.node.gitCommit}` : props.data.node.gitBranch ?? "—" },
   };
   return NODE_CARD_FIELDS.map(id => ({ id, ...values[id] }));
 });
@@ -144,7 +147,7 @@ function fitFooter() {
   visibleCount.value = Math.max(FIXED_NODE_CARD_FIELDS.length, count);
 }
 
-watch(selectedInfo, async () => { await nextTick(); fitFooter(); });
+watch([selectedInfo, showCommit], async () => { await nextTick(); fitFooter(); });
 watch(() => props.data.running, running => {
   window.clearInterval(elapsedTimer);
   now.value = Date.now();
@@ -383,14 +386,14 @@ function relative(value: string) {
           <i :style="{ '--usage': `${Math.max(0, Math.min(100, usage?.percent ?? 0)) * 3.6}deg` }" />
           <b>{{ usage?.percent == null ? "—" : `${Math.round(usage.percent)}%` }}</b><em>{{ compactTokens(usage?.contextWindow) }}</em>
         </template>
-        <template v-else><component v-if="field.id !== 'model'" :is="field.icon" :size="12" aria-hidden="true" /><span>{{ field.text }}</span></template>
+        <template v-else><component v-if="field.id !== 'model'" :is="field.icon" :size="12" aria-hidden="true" /><span>{{ field.text }}</span><span v-if="field.id === 'branch' && showCommit && data.node.gitCommit" class="node-git-commit"> · {{ data.node.gitCommit.slice(0, 7) }}</span></template>
       </span>
       <span ref="measure" class="node-info-measure" aria-hidden="true">
         <span v-for="field in selectedInfo" :key="field.id" class="node-info-item node-footer-value" :class="[`node-${field.id}-value`, { 'node-context-usage': field.id === 'context' }]">
           <template v-if="field.id === 'context'">
             <i /><b>{{ usage?.percent == null ? "—" : `${Math.round(usage.percent)}%` }}</b><em>{{ compactTokens(usage?.contextWindow) }}</em>
           </template>
-          <template v-else><component v-if="field.id !== 'model'" :is="field.icon" :size="12" /><span>{{ field.text }}</span></template>
+          <template v-else><component v-if="field.id !== 'model'" :is="field.icon" :size="12" /><span>{{ field.text }}</span><span v-if="field.id === 'branch' && showCommit && data.node.gitCommit" class="node-git-commit"> · {{ data.node.gitCommit.slice(0, 7) }}</span></template>
         </span>
       </span>
     </footer>

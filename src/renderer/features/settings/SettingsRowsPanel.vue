@@ -4,6 +4,7 @@ import SettingRow from "./SettingRow.vue";
 import { useI18n } from "vue-i18n";
 import { useSettingsDraftContext } from "./settings-context";
 import NodeCardSettings from "./NodeCardSettings.vue";
+import AgentSettingsPanel from "./AgentSettingsPanel.vue";
 
 const layout = useLayoutStore();
 const { t } = useI18n();
@@ -18,6 +19,7 @@ const { rows } = useSettingsDraftContext();
     </section>
     <NodeCardSettings />
   </div>
+  <AgentSettingsPanel v-else-if="layout.settingsCategory === 'agent'" />
   <section v-else class="settings-card">
     <p v-if="layout.settingsCategory === 'tools'" class="settings-hint">{{ t('settings.mcpHint') }}</p>
     <SettingRow

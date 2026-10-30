@@ -442,6 +442,8 @@ function rebuild() {
       model,
       thinkingLevel,
       models: session.models,
+      personas: layout.settings?.app.personas ?? [],
+      promptOverride: session.promptOverrideAt(parent?.id ?? null),
       onModel: (next: RuntimeModel) => {
         draftModel.value = next;
         if (next.reasoning === false) draftThinking.value = "off";
@@ -719,7 +721,9 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     draftModel.value,
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
-    requestId ? { requestId } : undefined,
+    requestId || targetDraft.promptOverride !== undefined
+      ? { ...(requestId ? { requestId } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
+      : undefined,
   );
   if (!delivered) {
     if (requestId && targetSession === sessionKey.value) rememberBranchOrder(`pending:${requestId}`, undefined);
@@ -994,7 +998,8 @@ watch(
   [() => sessionKey.value, () => session.creation, () => projection.value?.nodes, () => projection.value?.edges,
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
-    () => session.models, () => draftParent.value, () => draftState.value.busy,
+    () => session.models, () => layout.settings?.app.personas, () => projection.value?.activePromptOverride,
+    () => draftParent.value, () => draftState.value.busy,
     () => session.currentPendingPrompts, () => session.deleteBlockedReason, pendingRuns,
     searchHitIds, graphFilter],
   () => {

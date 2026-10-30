@@ -330,10 +330,13 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
       density: 3,
       theme: "purple",
       closeToTray: "false",
+      preventSleepDuringTasks: "false",
+      keepScreenOnDuringTasks: "true",
       enterToSend: "yes",
       canvasDotGridSpacing: "24",
       canvasDotGridDotSize: 99,
       nodeCardFields: ["cost", "unknown", "model", "tokens", "thinking", "cost", 42],
+      nodeCardShowCommit: "false",
       browserHome: 42,
       futureKey: { keep: true },
     }));
@@ -343,10 +346,13 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(app.density, "comfortable");
     assert.equal(app.theme, "light");
     assert.equal(app.closeToTray, true);
+    assert.equal(app.preventSleepDuringTasks, true);
+    assert.equal(app.keepScreenOnDuringTasks, false);
     assert.equal(app.enterToSend, true);
     assert.equal(app.canvasDotGridSpacing, 24);
     assert.equal(app.canvasDotGridDotSize, 4);
     assert.deepEqual(app.nodeCardFields, ["cost", "tokens"]);
+    assert.equal(app.nodeCardShowCommit, true);
     assert.equal(app.browserHome, "https://pi.dev");
     // Unknown keys from a newer version must survive normalization.
     assert.deepEqual((app as unknown as Record<string, unknown>).futureKey, { keep: true });
@@ -359,10 +365,22 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.deepEqual(persisted.futureKey, { keep: true });
 
     const service = new SettingsService(temp);
+    service.update({ preventSleepDuringTasks: false });
+    assert.equal(new SettingsService(temp).bundle().app.preventSleepDuringTasks, false);
+    service.update({ preventSleepDuringTasks: null });
+    assert.equal(service.bundle().app.preventSleepDuringTasks, true);
+    service.update({ keepScreenOnDuringTasks: true });
+    assert.equal(new SettingsService(temp).bundle().app.keepScreenOnDuringTasks, true);
+    service.update({ keepScreenOnDuringTasks: null });
+    assert.equal(service.bundle().app.keepScreenOnDuringTasks, false);
     service.update({ nodeCardFields: [] });
     assert.deepEqual(service.bundle().app.nodeCardFields, []);
     service.update({ nodeCardFields: "invalid" });
     assert.deepEqual(service.bundle().app.nodeCardFields, ["branch", "context"]);
+    service.update({ nodeCardShowCommit: false });
+    assert.equal(new SettingsService(temp).bundle().app.nodeCardShowCommit, false);
+    service.update({ nodeCardShowCommit: null });
+    assert.equal(service.bundle().app.nodeCardShowCommit, true);
 
     // Settings-form removals ride as null; the merge drops the key.
     new SettingsService(temp).update({ futureKey: null });
@@ -373,6 +391,34 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     rmSync(temp, { recursive: true, force: true });
   }
 });
+test("prompt settings retain picker provenance across reads and drop it when the preamble resets", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-preamble-source-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = temp;
+  try {
+    const settings = new SettingsService(temp);
+    settings.update({ promptCustomization: { preamble: "Same body", preamblePersona: " second ", rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization,
+      { preamble: "Same body", preamblePersona: "second", rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamble: "Same body", preamblePersona: null, rules: "Keep rules" } });
+    settings.update({ theme: "dark" });
+    settings.update({ personas: [{ name: "other", text: "Same body" }] });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization,
+      { preamble: "Same body", preamblePersona: null, rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamblePersona: null, rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamblePersona: "second", rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamble: "Legacy text" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { preamble: "Legacy text" });
+    settings.update({ promptCustomization: { preamble: "Text", preamblePersona: { invalid: true } } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { preamble: "Text" });
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("pi settings writes go through the sdk: merge, replace, freeze, reset", async () => {
   const temp = mkdtempSync(join(tmpdir(), "pix-pi-settings-"));
   const previous = process.env.PIX_HOME;

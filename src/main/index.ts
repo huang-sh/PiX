@@ -8,6 +8,7 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  powerSaveBlocker,
   session,
   shell,
   Tray,
@@ -15,16 +16,20 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { registerDesktopCommand } from "./cli-command.js";
-import { DesktopHostController } from "../host/desktop.js";
+import { desktopClientId, DesktopHostController } from "../host/desktop.js";
 import { imageThumbnail } from "./image-thumbnail.js";
 import type { PromptImage } from "../shared/types.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
+import { createKeepAwake } from "./power-save.js";
+import { isMacInstallSource, offerMacInstall } from "./mac-install.js";
+import { handleDesktopClose, quitWithHost } from "./host-quit.js";
+import { SettingsService } from "./services.js";
+import type { HostConnectionState } from "../shared/host-protocol.js";
 import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
@@ -42,6 +47,8 @@ let win: any, controller: DesktopHostController;
 let closeHttpProxy: (() => Promise<void>) | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
+let quitPromptAbort: AbortController | undefined;
+const setKeepAwake = createKeepAwake(powerSaveBlocker, () => isQuitting);
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
 let started = false;
 let currentTheme: ThemePreference = "light";
@@ -205,17 +212,15 @@ async function create() {
       p.sandbox = true;
     },
   );
-  // Close-to-tray (Windows/Linux): the X button hides the window instead of
-  // destroying it, keeping the process alive. Real quits bypass this via the
-  // isQuitting flag (before-quit fires before close events) or the tray
-  // menu's Quit item. macOS keeps native behavior: the window closes and the
-  // app stays in the dock.
+  // Windows/Linux close either hides to tray or enters the full Quit flow.
+  // Preserve the window if task confirmation is cancelled. macOS keeps its
+  // native close-window behavior until the user explicitly quits the app.
   created.on("close", (e: { preventDefault(): void }) => {
-    if (isQuitting || process.platform === "darwin") return;
-    if (controller.settings.bundle().app.closeToTray === false) return;
-    e.preventDefault();
-    created.hide();
-    ensureTray();
+    handleDesktopClose(e, {
+      platform: process.platform, quitting: isQuitting,
+      closeToTray: controller.settings.bundle().app.closeToTray !== false,
+      hide() { created.hide(); ensureTray(); }, quit() { app.quit(); },
+    });
   });
   // Release the reference the moment the window is destroyed: every later
   // broadcast and theme sync then no-ops instead of throwing into the agent
@@ -226,6 +231,16 @@ async function create() {
   else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
+  if (isMacInstallSource(process.platform, app.isPackaged, app.getPath("exe"))) {
+    const language = new SettingsService(null).bundle().app.language;
+    const result = await offerMacInstall({
+      zh: language === "zh-CN" || (language === "system" && app.getLocale().startsWith("zh")), version: app.getVersion(),
+      show: options => dialog.showMessageBox(options),
+      // A running destination must never focus the old version and quit this installer.
+      move: () => app.moveToApplicationsFolder({ conflictHandler: conflict => conflict === "exists" }),
+    });
+    if (result === "quit") { app.quit(); return; }
+  }
   if (app.isPackaged) {
     try { registerDesktopCommand(join(process.resourcesPath, "cli", process.platform === "win32" ? "pix.cmd" : "pix")); }
     catch (error) { debugLog("index: terminal command registration", error); }
@@ -235,7 +250,9 @@ app.whenReady().then(async () => {
   const initial = process.env.PIX_PROJECT
     ? resolve(process.env.PIX_PROJECT)
     : null;
-  controller = await DesktopHostController.connect(initial, {
+  const clientId = desktopClientId(app.getPath("userData"), app.getAppPath(), app.isPackaged);
+  const legacyClientId = app.isPackaged ? undefined : desktopClientId(app.getPath("userData"), app.getAppPath(), true);
+  controller = DesktopHostController.create(initial, {
     async pickProject() {
       const r = await dialog.showOpenDialog(win, {
         properties: ["openDirectory"],
@@ -263,6 +280,7 @@ app.whenReady().then(async () => {
     async resolveProxy(url) {
       return session.defaultSession.resolveProxy(url);
     },
+    setKeepAwake,
     async openExternal(url) {
       await openExternal(url);
     },
@@ -361,8 +379,11 @@ app.whenReady().then(async () => {
     quit() {
       app.quit();
     },
-  }, `desktop-${createHash("sha256").update(app.getPath("userData")).digest("hex")}`);
-  controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
+  }, clientId, legacyClientId);
+  controller.onEvent((e) => {
+    if (e.type === "host.shutdown") { quitPromptAbort?.abort(); return; }
+    win?.webContents.send("pix:event", e);
+  }, true);
   closeHttpProxy = installHttpProxy(
     () => controller.settings.bundle().piGlobal.httpProxy,
     (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
@@ -419,18 +440,39 @@ app.whenReady().then(async () => {
 let clientDetached = false;
 let detachingClient = false;
 app.on("before-quit", (event) => {
-  isQuitting = true;
   if (!clientDetached && controller) {
     event.preventDefault();
     if (!detachingClient) {
       detachingClient = true;
-      void controller.detach().finally(() => closeHttpProxy?.()).finally(() => {
+      void (async () => {
+        if (started && !controller.hostShutdownRequested) {
+          quitPromptAbort = new AbortController();
+          const accepted = await quitWithHost({
+            zh: zhUi(),
+            status: () => controller.invoke("app.hostStatus") as Promise<HostConnectionState>,
+            disconnect: async () => { isQuitting = true; await controller.disconnectForQuit(); },
+            resume: async () => { isQuitting = false; await controller.resumeAfterCancelledQuit(); },
+            show: options => dialog.showMessageBox({ ...options, signal: quitPromptAbort?.signal }),
+            alreadyStopping: () => controller.hostShutdownRequested,
+          });
+          quitPromptAbort = undefined;
+          if (!accepted && !controller.hostShutdownRequested) { isQuitting = false; detachingClient = false; return; }
+        }
+        isQuitting = true;
+        await controller.detach().catch(error => debugLog("index: detach on quit", error));
+        try { await closeHttpProxy?.(); } catch (error) { debugLog("index: close proxy on quit", error); }
         clientDetached = true;
         app.quit();
-      }).catch(() => {});
+      })().catch(error => {
+        isQuitting = false;
+        detachingClient = false;
+        debugLog("index: quit", error);
+        dialog.showErrorBox("PiX", String(error));
+      });
     }
     return;
   }
+  isQuitting = true;
   tray?.destroy();
   tray = undefined;
   controller?.dispose();

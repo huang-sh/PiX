@@ -107,6 +107,21 @@ mac:
     - target: dmg
     - target: zip
 
+dmg:
+  title: PiX ${version}
+  backgroundColor: "#f7f7f7"
+  # Launch the app to check/stop its host before replacement; Finder drag-copy
+  # cannot run a pre-install hook.
+  contents:
+    - x: 180
+      y: 150
+      type: file
+    - x: 380
+      y: 150
+      type: file
+      path: build/Install PiX.txt
+      name: 安装说明 - Install PiX.txt
+
 linux:
   icon: build/icon.png
   category: Development

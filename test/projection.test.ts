@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { entryAnchorForNode, projectSession } from "../src/shared/session.js";
+import { entryAnchorForNode, needsPromptDisplayBoundary, projectSession, summarizeSession } from "../src/shared/session.js";
 import { createBranchMessageCache } from "../src/renderer/lib/session-view.js";
-import type { RawSessionEntry } from "../src/shared/types.js";
+import { GIT_BRANCH_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry } from "../src/shared/types.js";
 test("history window matches the selected ancestry without including sibling turns", () => {
   const entries: RawSessionEntry[] = [
     { type: "message", id: "root", parentId: null, timestamp: "0", message: { role: "user", content: "root" } },
@@ -107,6 +107,72 @@ test("projects sibling branches without mixing chat", () => {
 });
 test("selects branch-specific raw anchor", () =>
   assert.equal(entryAnchorForNode(projectSession(e, "a3"), "turn:u1"), "s1"));
+
+test("uses structured prompt display metadata without changing model-visible content", () => {
+  const modelText = "model-only image coordinate hint\n\n检查这个截图";
+  const entries: RawSessionEntry[] = [
+    { type: "custom", id: "display", parentId: null, timestamp: "1", customType: PROMPT_DISPLAY_CUSTOM_TYPE,
+      data: { text: "检查这个截图" } },
+    { type: "message", id: "u1", parentId: "display", timestamp: "2", message: { role: "user", content: [
+      { type: "text", text: modelText }, { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+    ] } },
+  ];
+  const projection = projectSession(entries, "u1");
+  assert.equal(projection.messages[0]?.text, "检查这个截图");
+  assert.equal(projection.messages[0]?.images?.length, 1);
+  assert.equal(projection.nodes[0]?.title, "检查这个截图");
+  assert.deepEqual(projection.nodes[0]?.rawEntryIds, ["display", "u1"]);
+  assert.equal(summarizeSession("session.jsonl", null, entries, "2").firstMessage, "检查这个截图");
+  assert.equal(((entries[1]!.message as { content: Array<{ text?: string }> }).content[0]?.text), modelText);
+});
+
+test("a newer prompt display marker supersedes an interrupted marker without changing the previous turn", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "message", id: "u1", parentId: null, timestamp: "1", message: { role: "user", content: "first" } },
+    { type: "message", id: "a1", parentId: "u1", timestamp: "2", message: { role: "assistant", content: "done" } },
+    { type: "custom", id: "interrupted", parentId: "a1", timestamp: "3", customType: PROMPT_DISPLAY_CUSTOM_TYPE,
+      data: { text: "interrupted image" } },
+    { type: "custom", id: "next", parentId: "interrupted", timestamp: "4", customType: PROMPT_DISPLAY_CUSTOM_TYPE,
+      data: { text: "next prompt" } },
+    { type: "message", id: "u2", parentId: "next", timestamp: "5", message: { role: "user", content: "model text" } },
+  ];
+  const projection = projectSession(entries, "u2");
+  assert.equal(projection.messages.find(message => message.entryId === "u2")?.text, "next prompt");
+  assert.deepEqual(projection.nodes.find(node => node.userEntryId === "u1")?.rawEntryIds, ["u1", "a1"]);
+  assert.deepEqual(projection.nodes.find(node => node.userEntryId === "u2")?.rawEntryIds, ["next", "u2"]);
+});
+
+test("a text prompt adds a boundary only when an image display marker was interrupted before its user message", () => {
+  const interrupted: RawSessionEntry[] = [
+    { type: "message", id: "u1", parentId: null, timestamp: "1", message: { role: "user", content: "first" } },
+    { type: "message", id: "a1", parentId: "u1", timestamp: "2", message: { role: "assistant", content: "done" } },
+    { type: "custom", id: "display", parentId: "a1", timestamp: "3", customType: PROMPT_DISPLAY_CUSTOM_TYPE,
+      data: { text: "interrupted image" } },
+  ];
+  assert.equal(needsPromptDisplayBoundary(interrupted, "display"), true);
+  const entries: RawSessionEntry[] = [...interrupted,
+    { type: "custom", id: "boundary", parentId: "display", timestamp: "4", customType: PROMPT_DISPLAY_CUSTOM_TYPE,
+      data: { boundary: true } },
+    { type: "message", id: "u2", parentId: "boundary", timestamp: "5", message: { role: "user", content: "plain text" } },
+  ];
+  assert.equal(needsPromptDisplayBoundary(entries, "u2"), false);
+  const projection = projectSession(entries, "u2");
+  assert.equal(projection.messages.find(message => message.entryId === "u2")?.text, "plain text");
+  assert.deepEqual(projection.nodes.find(node => node.userEntryId === "u2")?.rawEntryIds, ["u2"]);
+});
+
+test("prompt display metadata preserves the Git record immediately before it", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "custom", id: "git", parentId: null, timestamp: "1", customType: GIT_BRANCH_CUSTOM_TYPE,
+      data: { branch: "feature/image", commit: "a".repeat(40) } },
+    { type: "custom", id: "display", parentId: "git", timestamp: "2", customType: PROMPT_DISPLAY_CUSTOM_TYPE,
+      data: { text: "检查图片" } },
+    { type: "message", id: "user", parentId: "display", timestamp: "3", message: { role: "user", content: "model text" } },
+  ];
+  const node = projectSession(entries, "user").nodes[0];
+  assert.equal(node?.gitBranch, "feature/image");
+  assert.equal(node?.gitCommit, "a".repeat(40));
+});
 
 test("context status follows the selected branch and latest edit while preserving original messages", () => {
   const entries: RawSessionEntry[] = [...e,

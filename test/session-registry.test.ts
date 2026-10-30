@@ -1315,6 +1315,13 @@ test("a custom model reaches the session that was already open", { timeout: 3000
     await controller.invoke("agent.control", { action: "updateCustomModel", ...definition, contextWindow: 2000 });
     assert.equal(entry.runtime!.state().model?.contextWindow, 2000,
       "a session running the updated model adopts the new definition");
+
+    await controller.invoke("agent.control", { action: "addCustomModels", ...definition,
+      apiKey: "", models: [{ modelId: "acme-2" }, { modelId: "acme-3" }] });
+    for (const modelId of ["acme-2", "acme-3"]) {
+      const selected = await controller.invoke("agent.control", { action: "setModel", provider: "acme", modelId }) as SessionSnapshot;
+      assert.equal(selected.runtime.model?.id, modelId, "every batch model reaches an existing session");
+    }
   } finally {
     await controller.closeAll();
     rmSync(ws, { recursive: true, force: true });

@@ -32,6 +32,8 @@ import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
 import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
+import HostRecovery from "./features/workbench/HostRecovery.vue";
+import type { HostConnectionState } from "../shared/host-protocol";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
@@ -88,6 +90,8 @@ const compactBusy = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
 const updateNotice = ref<{ version: string; url: string } | null>(null);
+const hostRecovery = ref<HostConnectionState | null>(null);
+const hostBusy = ref(false);
 
 // macOS keeps a small titlebar inset when fullscreen hides the traffic lights
 // and has no right-side window controls (see .platform-darwin in app.css).
@@ -132,15 +136,43 @@ async function hydrate(data: BootstrapData, openFirst = false, request = ++sessi
 }
 
 async function bootstrap() {
+  if (hostBusy.value) return;
+  hostBusy.value = true;
   const request = ++session.viewRequest;
   try {
     const data = await desktop.invoke<BootstrapData>("app.bootstrap");
+    hostRecovery.value = null;
     await hydrate(data, data.settings.app.openLastSessionOnStartup, request);
   } catch (error) {
     if (request !== session.viewRequest) return;
     session.loading = false;
+    try {
+      const state = await desktop.invoke<HostConnectionState>("app.hostStatus");
+      if (state.connected === false) {
+        if (state.language) locale.value = state.language === "system" ? navigator.language.startsWith("zh") ? "zh-CN" : "en" : state.language;
+        hostRecovery.value = { ...state, error: state.error ?? (error instanceof Error ? error.message : String(error)) };
+        return;
+      }
+      if (state.connected === true) hostRecovery.value = null;
+    } catch { /* A non-host bootstrap failure still uses the regular notice. */ }
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
-  }
+  } finally { hostBusy.value = false; }
+}
+
+async function restartHost(id: string) {
+  if (hostBusy.value) return;
+  hostBusy.value = true;
+  try {
+    await desktop.invoke("app.hostRestart", { id, force: true });
+  } catch (error) {
+    if (hostRecovery.value) hostRecovery.value.error = error instanceof Error ? error.message : String(error);
+    try {
+      const state = await desktop.invoke<HostConnectionState>("app.hostStatus");
+      hostRecovery.value = { ...state, error: hostRecovery.value?.error ?? state.error };
+    } catch {}
+    return;
+  } finally { hostBusy.value = false; }
+  await bootstrap();
 }
 
 async function pickProject() {
@@ -476,6 +508,13 @@ const decodeSessionEvent = sessionEventDecoder(() => desktop.invoke("session.sna
 function onEvent(wireEvent: DesktopEvent) {
   const event = decodeSessionEvent(wireEvent);
   if (!event) return;
+  if (event.type === "host.connection") {
+    const { connected, reconnecting } = event.payload as { connected: boolean; reconnecting?: boolean };
+    // Normal transport recovery restores its own view. Rehydrating here would
+    // reset open panels and drafts after an otherwise transparent reconnect.
+    if (!reconnecting && (!connected || hostRecovery.value)) void bootstrap();
+    return;
+  }
   if (event.type === "remote.progress") {
     if (wslOpen.value && wslBusy.value) {
       const { stage } = event.payload as { stage: RemoteConnectStage };
@@ -539,6 +578,7 @@ function openReleaseNotes() {
 }
 
 function keydown(event: KeyboardEvent) {
+  if (hostRecovery.value) return;
   if (shortcutsBlocked(event)) return;
   if (handleHistoryKeys(event)) return;
   const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
@@ -567,6 +607,7 @@ onMounted(() => {
     __pixTest: {
       state: () => JSON.parse(JSON.stringify({
         loading: session.loading,
+        hostRecovery: hostRecovery.value,
         project: workspace.project,
         welcome: !workspace.project,
         sessions: session.sessions,
@@ -606,31 +647,35 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-frame" :class="{ 'platform-darwin': isDarwin }">
-    <AppTitlebar
+    <header v-if="hostRecovery" class="app-titlebar"><span class="window-controls-spacer left" /><span class="justify-self-center">PiX</span></header>
+    <AppTitlebar v-else
       @pick-project="pickProject"
       @connect-remote="openRemote"
       @disconnect-remote="disconnectRemote"
     />
     <div class="app-content">
-      <SettingsPage v-if="layout.screen === 'settings'" ref="settingsPage" />
-      <KeepAlive>
-        <Workbench
-          v-if="layout.hydrated && layout.screen === 'workbench'"
-          @settings="layout.screen = 'settings'"
-          @pick-project="pickProject"
-          @new-session="session.create"
-          @activate-project="activateProject"
-          @create-project-session="createProjectSession"
-          @open-project-session="openProjectSession"
-          @rename="renameProjectSession"
-          @remove-project-session="removeProjectSession"
-          @forget-project="forgetProject"
+      <HostRecovery v-if="hostRecovery" :state="hostRecovery" :busy="hostBusy" @retry="bootstrap" @restart="restartHost" @logs="desktop.invoke('app.revealLogs')" @quit="desktop.invoke('app.quit')" />
+      <div v-show="!hostRecovery" class="contents">
+        <SettingsPage v-if="layout.screen === 'settings'" ref="settingsPage" />
+        <KeepAlive>
+          <Workbench
+            v-if="layout.hydrated && layout.screen === 'workbench'"
+            @settings="layout.screen = 'settings'"
+            @pick-project="pickProject"
+            @new-session="session.create"
+            @activate-project="activateProject"
+            @create-project-session="createProjectSession"
+            @open-project-session="openProjectSession"
+            @rename="renameProjectSession"
+            @remove-project-session="removeProjectSession"
+            @forget-project="forgetProject"
+          />
+        </KeepAlive>
+        <WelcomeScreen
+          v-if="!layout.hydrated && layout.screen === 'workbench' && !workspace.project"
+          @open-project="pickProject"
         />
-      </KeepAlive>
-      <WelcomeScreen
-        v-if="!layout.hydrated && layout.screen === 'workbench' && !workspace.project"
-        @open-project="pickProject"
-      />
+      </div>
     </div>
   </div>
   <CommandPalette @run="runCommand" />

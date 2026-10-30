@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, basename, join } from "node:path";
 import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
@@ -7,6 +8,7 @@ import type { ModelOperation } from "../shared/remote-protocol.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { pixGitBranchExtension } from "./extensions/git-branch.js";
+import { composeSystemPrompt, latestPromptOverride, pixPromptOverrideExtension } from "./extensions/prompt-override.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -22,7 +24,8 @@ import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.j
 import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skills.js";
 import { SkillControls } from "./skill-controls.js";
 import { canonicalPath, pixAgentDir } from "./paths.js";
-import { addCustomModel, getCustomModels } from "./custom-models.js";
+import { addCustomModel, addCustomModels, getCustomModels } from "./custom-models.js";
+import { discoverModels } from "./model-discovery.js";
 import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
@@ -34,12 +37,15 @@ import type {
   RuntimeExtension,
   RuntimeProvider,
   RuntimeState,
+  PromptImage,
+  QueuedMessage,
   SessionSnapshot,
   SessionSummary,
 } from "../shared/types.js";
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
-import { projectSession, summarizeSession } from "../shared/session.js";
+import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
+import type { PromptCustomization, SystemPromptPreview } from "../shared/types.js";
+import { needsPromptDisplayBoundary, projectSession, summarizeSession } from "../shared/session.js";
 import type { RunTiming } from "../shared/run-timing.js";
 import {
   aggregateUsage,
@@ -56,12 +62,18 @@ import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+// Branches share the services factory, but each live session owns its input queue.
+const inputQueueOwners = new WeakMap<object, PiRuntime>();
+export type QueuedInput = QueuedMessage & { images?: PromptImage[]; nodeId?: string | null };
+export type QueuedInputState = "queued" | "prepared" | "settled" | "cancelled" | "interrupted";
 
 /** Control actions that need no open session; everything else is session-scoped. */
 export const MODEL_ACTIONS = [
   "getModels",
   "refreshModels",
   "addCustomModel",
+  "addCustomModels",
+  "discoverModels",
   "updateCustomModel",
   "getCustomModels",
   "getProviders",
@@ -82,8 +94,8 @@ export const MODEL_ACTIONS = [
 ] as const satisfies readonly AgentControl["action"][];
 
 const READ_ACTIONS = [
-  "commands", "getState", "getModels", "getCustomModels", "getThinkingLevels",
-  "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats",
+  "commands", "getState", "getModels", "getCustomModels", "discoverModels", "getThinkingLevels",
+  "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats", "systemPromptPreview",
 ] as const satisfies readonly AgentControl["action"][];
 
 export async function piSdkVersion(): Promise<string> {
@@ -235,13 +247,25 @@ export class PiRuntime {
   openExternal: (url: string) => Promise<void>;
   private closing = false;
   private pendingControls = new Set<Promise<unknown>>();
+  private pendingPrompts = 0;
+  private promptEpoch?: number;
+  private queueAdmissions = new Set<Promise<void>>();
+  private queueEpoch = 0;
+  private queuedMessages: QueuedInput[] = [];
+  private deliveredInputs = new Map<string, QueuedInput>();
+  onQueuedInput?: (message: QueuedInput, state: QueuedInputState) => void;
   private extensionStartup: Promise<void> = Promise.resolve();
   private extensionSession?: object;
   private stopStartupDialogs?: () => void;
   private controlEpoch = 0;
   private closeTask?: Promise<void>;
   private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
+  /** Standalone defaults; controller-owned sessions and graph workers share
+   * their owner's accessor so background runs always see current settings. */
+  promptCustomization: PromptCustomization | undefined;
+  getPromptCustomization = (): PromptCustomization | undefined => this.promptCustomization;
   private promptTiming?: RunTiming;
+  private promptUserSeen = false;
   eventScope?: { graphId: string; branchId: string; runId: string };
   /** The settings page's skill management; every SDK touch stays behind live accessors. */
   readonly skillControls = new SkillControls({
@@ -319,6 +343,39 @@ export class PiRuntime {
   }
   setModelBroker(broker?: PiRuntime["modelBroker"]) {
     this.modelBroker = broker;
+  }
+  /**
+   * The system prompt the next run would send. An open session answers with
+   * its own rendering (live tool set, project context, skills); without one, a
+   * throwaway in-memory session is built from fresh project services, so the
+   * settings page can show the prompt before any session exists. The in-memory
+   * session never touches disk or an extension UI.
+   */
+  async previewSystemPrompt(): Promise<SystemPromptPreview> {
+    const session = this.runtime?.session;
+    const preview = (s: typeof session) => composeSystemPrompt(
+      s.extensionRunner.createCommandContext().getSystemPromptOptions(),
+      this.getPromptCustomization(),
+      latestPromptOverride(s.sessionManager.getBranch()),
+    );
+    if (session) return preview(session);
+    const pi = await this.pi();
+    const cwd = this.cwd ?? homedir();
+    // Catalog services can predate settings changes. Keep preview resources
+    // fresh without reloading a loader another catalog request may be using.
+    const services = await pi.createAgentSessionServices(
+      this.sessionServicesOptions(pi, cwd),
+    );
+    await this.applyModelBroker(services.modelRuntime);
+    const created = await pi.createAgentSessionFromServices({
+      services,
+      sessionManager: pi.SessionManager.inMemory(cwd),
+    });
+    try {
+      return await preview(created.session);
+    } finally {
+      created.session.dispose();
+    }
   }
 
   async configuredProviderIds() {
@@ -539,6 +596,18 @@ export class PiRuntime {
           { name: "tool-search", builtin: true, factory: pi.createToolSearchExtension() },
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
           pixGitBranchExtension,
+          pixPromptOverrideExtension(() => this.getPromptCustomization()),
+          { name: "pix-input-queue", factory: extension => {
+            extension.on("turn_end", (_event, context) => inputQueueOwners.get(context.sessionManager)?.deliverQueuedMessages("steer"));
+            extension.on("agent_before_settle", async (_event, context) => {
+              const owner = inputQueueOwners.get(context.sessionManager);
+              await owner?.deliverQueuedMessages("steer");
+              await owner?.deliverQueuedMessages("followUp");
+              // Follow-up input handlers may await while the user adds or
+              // promotes a Steer. Admit it before the SDK chooses its next turn.
+              await owner?.deliverQueuedMessages("steer");
+            });
+          } },
         ] as InlineExtension[],
         additionalExtensionPaths: resolveBuiltinPackages(
           moduleDir,
@@ -638,6 +707,7 @@ export class PiRuntime {
   }
   bind() {
     this.unsubscribe?.();
+    inputQueueOwners.set(this.runtime.session.sessionManager, this);
     const forwarder = agentEventForwarder(payload => {
       if (!this.closing) this.emit({ type: "agent", payload });
     });
@@ -645,6 +715,9 @@ export class PiRuntime {
       // SDK emits message_end BEFORE persisting it. A UI listener must never
       // throw into that call stack, or the message would not be saved.
       try {
+        if ((payload as { type?: string }).type === "agent_start" && this.promptEpoch !== undefined
+          && (this.closing || this.promptEpoch !== this.controlEpoch))
+          void this.runtime.session.abort().catch((error: unknown) => debugLog("pi-runtime: cancelled prompt startup", error));
         this.recordTiming(payload);
         forwarder.push({ ...(payload as object), ...this.eventScope });
       } catch (e) { debugLog("pi-runtime: event push", e); }
@@ -653,6 +726,8 @@ export class PiRuntime {
     const session = this.runtime.session;
     if (this.extensionSession !== session) {
       this.promptTiming = undefined;
+      this.queuedMessages = [];
+      this.deliveredInputs.clear();
       this.extensionSession = session;
       this.startExtensions(session, this.cwd!);
     }
@@ -660,8 +735,21 @@ export class PiRuntime {
   private recordTiming(payload: unknown) {
     if (!this.promptTiming) return;
     const event = payload as { type?: string; aborted?: boolean; errorMessage?: string;
+      message?: { role?: string; timestamp?: number };
       result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
     const now = new Date().toISOString();
+    if (event.type === "message_start" && event.message?.role === "user") {
+      if (this.promptUserSeen) {
+        this.savePromptFooter(this.promptTiming);
+        // Keep the timing object owned by the original prompt control, while
+        // starting fresh measurements for the queued user turn.
+        this.promptTiming.startedAt = typeof event.message.timestamp === "number"
+          ? new Date(event.message.timestamp).toISOString() : now;
+        this.promptTiming.agentStartedAt = now;
+        this.promptTiming.compactions = [];
+      }
+      this.promptUserSeen = true;
+    }
     if (event.type === "agent_start") this.promptTiming.agentStartedAt ??= now;
     if (event.type === "compaction_start") this.promptTiming.compactions.push({ status: "running", startedAt: now });
     if (event.type !== "compaction_end") return;
@@ -808,6 +896,73 @@ export class PiRuntime {
     durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
     return path;
   }
+  private queueSnapshot(): QueuedMessage[] {
+    return this.queuedMessages.map(({ images: _images, nodeId: _nodeId, ...message }) => ({ ...message }));
+  }
+  private notifyQueue() {
+    setImmediate(() => {
+      if (this.closing || !this.runtime) return;
+      try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); }
+      catch (error) { debugLog("pi-runtime: queue notification", error); }
+    });
+  }
+  private requireActiveQueue() {
+    if (this.promptEpoch !== undefined ? this.promptEpoch !== this.controlEpoch : !this.runtime?.session.isStreaming)
+      throw new Error("This task has finished. Send the message again to start a new turn.");
+  }
+  updateQueuedMessage(id: string, operation: "steer" | "remove" | "edit", text?: string) {
+    const message = this.queuedMessages.find(message => message.id === id);
+    if (!message || message.delivering) throw new Error("This message is already being processed");
+    if (operation === "remove") {
+      this.onQueuedInput?.(message, "cancelled");
+      this.queuedMessages = this.queuedMessages.filter(message => message.id !== id);
+    } else if (operation === "edit") {
+      if (typeof text !== "string") throw new Error("text must be a string");
+      const edited = text.trim();
+      if (!edited && !message.images?.length) throw new Error("A queued message must contain text or images");
+      if (edited.startsWith("/") && this.runtime.session.extensionRunner.getCommand(edited.slice(1).split(/\s/)[0]))
+        throw new Error("Extension commands cannot be queued. Run the command after the task finishes.");
+      this.onQueuedInput?.({ ...message, text: edited }, "queued");
+      message.text = edited;
+      delete message.error;
+    } else {
+      this.onQueuedInput?.({ ...message, kind: "steer" }, "queued");
+      message.kind = "steer"; delete message.error;
+    }
+    this.notifyQueue();
+  }
+  private async deliverQueuedMessages(kind: "steer" | "followUp") {
+    const session = this.runtime?.session;
+    if (!session || this.closing || this.promptEpoch !== undefined && this.promptEpoch !== this.controlEpoch) return;
+    const mode = kind === "steer" ? session.steeringMode : session.followUpMode;
+    const epoch = this.queueEpoch;
+    const pending = this.queuedMessages.filter(message => message.kind === kind && !message.delivering && !message.error);
+    for (const message of mode === "all" ? pending : pending.slice(0, 1)) {
+      if (this.closing || epoch !== this.queueEpoch) break;
+      if (!this.queuedMessages.includes(message) || message.kind !== kind) continue;
+      message.delivering = true;
+      const admission = (async () => {
+        try {
+          this.onQueuedInput?.(message, "prepared");
+          await session[kind](message.text, message.images);
+          this.deliveredInputs.set(message.id, message);
+          this.queuedMessages = this.queuedMessages.filter(item => item !== message);
+        } catch (error) {
+          message.error = error instanceof Error ? error.message : String(error);
+          message.delivering = false;
+        }
+      })();
+      this.queueAdmissions.add(admission);
+      try { await admission; }
+      finally { this.queueAdmissions.delete(admission); this.notifyQueue(); }
+    }
+  }
+  private cancelQueuedInputs() {
+    const cancelled = new Map([...this.deliveredInputs, ...this.queuedMessages.map(message => [message.id, message] as const)]);
+    this.queuedMessages = [];
+    this.deliveredInputs.clear();
+    for (const message of cancelled.values()) this.onQueuedInput?.(message, "cancelled");
+  }
   state(): RuntimeState {
     const s = this.runtime?.session;
     if (!s)
@@ -823,8 +978,12 @@ export class PiRuntime {
         autoRetryEnabled: true,
         steeringMode: "one-at-a-time",
         followUpMode: "one-at-a-time",
-        pendingMessageCount: 0,
+        pendingMessageCount: this.queuedMessages.length,
+        queuedMessages: this.queueSnapshot(),
       };
+    // The SDK's text bookkeeping retains empty image-only inputs after delivery.
+    // The Agent's actual queue is the authority for whether SDK work remains.
+    const sdkPending = s.agent?.hasQueuedMessages?.() === false ? 0 : Number(s.pendingMessageCount ?? 0);
     return {
       ...(this.promptTiming ? { timing: structuredClone(this.promptTiming) } : {}),
       available: true,
@@ -851,7 +1010,8 @@ export class PiRuntime {
       autoRetryEnabled: Boolean(s.autoRetryEnabled),
       steeringMode: s.steeringMode ?? "one-at-a-time",
       followUpMode: s.followUpMode ?? "one-at-a-time",
-      pendingMessageCount: Number(s.pendingMessageCount ?? 0),
+      pendingMessageCount: sdkPending + this.queuedMessages.filter(message => !message.delivering).length,
+      queuedMessages: this.queueSnapshot(),
     };
   }
   snapshot(): SessionSnapshot {
@@ -889,10 +1049,42 @@ export class PiRuntime {
   }
   control(input: AgentControl): Promise<unknown> {
     if (this.closing) return Promise.reject(new Error("Session is closing"));
-    if (input.action === "prompt") input = { ...input, submittedAt: input.submittedAt ?? new Date().toISOString() };
+    const prompt = input.action === "prompt";
+    if (input.action === "prompt") {
+      input = { ...input, submittedAt: input.submittedAt ?? new Date().toISOString() };
+      if (!this.pendingPrompts) this.promptEpoch = this.controlEpoch;
+      this.pendingPrompts++;
+    }
     const pending = this.runControl(input);
     this.pendingControls.add(pending);
-    return pending.finally(() => this.pendingControls.delete(pending));
+    return pending.finally(() => {
+      this.pendingControls.delete(pending);
+      if (prompt && --this.pendingPrompts === 0) this.promptEpoch = undefined;
+    });
+  }
+  private preparePromptDisplay(text: string, hasImages: boolean, requestId?: string) {
+    const manager = this.runtime.session.sessionManager;
+    if (hasImages) {
+      manager.appendCustomEntry(PROMPT_DISPLAY_CUSTOM_TYPE, { text, ...(requestId ? { requestId } : {}) });
+      return;
+    }
+    const branch = (typeof manager.getBranch === "function" ? manager.getBranch() : manager.getEntries()) as RawSessionEntry[];
+    const leafId = typeof manager.getLeafId === "function" ? manager.getLeafId() : branch.at(-1)?.id ?? null;
+    if (needsPromptDisplayBoundary(branch, leafId))
+      manager.appendCustomEntry(PROMPT_DISPLAY_CUSTOM_TYPE, { boundary: true });
+  }
+  private savePromptFooter(timing: RunTiming) {
+    const s = this.runtime.session;
+    s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
+      timing: structuredClone(timing),
+      contextUsage: s.getContextUsage() ?? null,
+      model: s.model ? {
+        provider: String(s.model.provider), id: String(s.model.id), name: s.model.name,
+        contextWindow: s.model.contextWindow, reasoning: Boolean(s.model.reasoning),
+        ...(s.model.input ? { input: s.model.input } : {}),
+      } : null,
+      thinkingLevel: String(s.thinkingLevel ?? "off"),
+    });
   }
   private async runControl(input: AgentControl): Promise<unknown> {
     const epoch = this.controlEpoch;
@@ -904,9 +1096,9 @@ export class PiRuntime {
     }
     const s = this.runtime?.session;
     const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
-    if (!this.cwd && !modelAction)
+    if (!this.cwd && !modelAction && input.action !== "systemPromptPreview")
       throw new Error("Open a project first");
-    if (!s && input.action !== "newSession" && !modelAction)
+    if (!s && input.action !== "newSession" && input.action !== "systemPromptPreview" && !modelAction)
       throw new Error("Open a session first");
     // Broker updates can replace a model while the remote session still holds its old definition.
     if (input.action === "prompt" && s?.model && this.brokerProviders.has(s.model.provider) && !s.isStreaming) {
@@ -927,10 +1119,49 @@ export class PiRuntime {
         // auth) — the footer may only be recorded when this call created one.
         const before = s.sessionManager.getEntries().length;
         const timing: RunTiming = { startedAt: input.submittedAt ?? new Date().toISOString(), compactions: [] };
-        if (!s.isStreaming && !s.isCompacting) this.promptTiming = timing;
+        if (!s.isStreaming && !s.isCompacting) { this.promptTiming = timing; this.promptUserSeen = false; }
+        let completed = false;
         try {
-          await s.prompt(input.text, { source: "interactive", ...(input.images?.length ? { images: input.images } : {}) });
+          await s.prompt(input.text, {
+            source: "interactive",
+            ...(input.images?.length ? { images: input.images } : {}),
+            preflightResult: (result: "handled" | "queued" | "started") => {
+              const requestId = (input as typeof input & { requestId?: string }).requestId;
+              if (result === "started") this.preparePromptDisplay(input.text, Boolean(input.images?.length), requestId);
+            },
+          });
+          // Inputs can arrive while another extension awaits its final settle
+          // hook, after our delivery hook already ran. Keep those continuations
+          // inside this control's lifetime, including handled or failed inputs.
+          while (!this.closing && epoch === this.controlEpoch) {
+            const ready = this.queuedMessages.filter(message => !message.error && !message.delivering);
+            const message = ready.find(message => message.kind === "steer") ?? ready[0];
+            if (!message) break;
+            this.onQueuedInput?.(message, "prepared");
+            message.delivering = true;
+            const queueEpoch = this.queueEpoch;
+            try {
+              await s.prompt(message.text, { images: message.images, source: "interactive", preflightResult: (result: "handled" | "queued" | "started") => {
+                if (result === "started") this.preparePromptDisplay(message.text, Boolean(message.images?.length), message.id);
+                if (epoch === this.controlEpoch) this.deliveredInputs.set(message.id, message);
+                this.queuedMessages = this.queuedMessages.filter(item => item !== message);
+                this.notifyQueue();
+              } });
+            } catch (error) {
+              if (!this.closing && epoch === this.controlEpoch && queueEpoch === this.queueEpoch) {
+                // Preflight can remove the input before Agent.prompt rejects.
+                // Keep that failure recoverable unless the user cancelled it.
+                this.deliveredInputs.delete(message.id);
+                if (!this.queuedMessages.includes(message)) this.queuedMessages.unshift(message);
+              }
+              message.delivering = false;
+              message.error = error instanceof Error ? error.message : String(error);
+              this.notifyQueue();
+            }
+          }
+          completed = true;
         } finally {
+          if (this.promptEpoch === epoch) this.promptEpoch = undefined;
           // The SDK retains footer data by reference; stop recording before saving it.
           if (this.promptTiming === timing) this.promptTiming = undefined;
           const createdTurn = s.sessionManager
@@ -941,37 +1172,57 @@ export class PiRuntime {
                 e.type === "message" &&
                 (e.message as { role?: string } | undefined)?.role === "user",
             );
-          if (createdTurn)
-            s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
-              timing,
-              contextUsage: s.getContextUsage() ?? null,
-              model: s.model
-                ? {
-                    provider: String(s.model.provider),
-                    id: String(s.model.id),
-                    name: s.model.name,
-                    contextWindow: s.model.contextWindow,
-                    reasoning: Boolean(s.model.reasoning),
-                    ...(s.model.input ? { input: s.model.input } : {}),
-                  }
-                : null,
-              thinkingLevel: String(s.thinkingLevel ?? "off"),
-            });
+          if (createdTurn) this.savePromptFooter(timing);
+          if (completed && !this.closing) {
+            for (const message of this.deliveredInputs.values()) this.onQueuedInput?.(message, "settled");
+            this.deliveredInputs.clear();
+          }
+          for (const message of this.queuedMessages) {
+            message.delivering = false;
+            message.error ??= "The task ended before this message could be processed. Remove it and send again.";
+          }
+          if (!this.closing && this.onQueuedInput) {
+            const unfinished = new Map([
+              ...(!completed ? this.deliveredInputs : []),
+              ...this.queuedMessages.map(message => [message.id, message] as const),
+            ]);
+            for (const message of unfinished.values()) this.onQueuedInput(message, "interrupted");
+            this.queuedMessages = [];
+            this.deliveredInputs.clear();
+            if (!completed) s.clearQueue();
+          }
         }
         break;
       }
       case "steer":
-        await s.steer(input.text, input.images);
-        break;
       case "followUp":
-        await s.followUp(input.text, input.images);
+        this.requireActiveQueue();
+        if (input.text.startsWith("/") && s.extensionRunner.getCommand(input.text.slice(1).split(/\s/)[0]))
+          throw new Error("Extension commands cannot be queued. Run the command after the task finishes.");
+        {
+          const message: QueuedInput = { id: randomUUID(), kind: input.action, text: input.text,
+            imageCount: input.images?.length ?? 0, images: input.images };
+          this.onQueuedInput?.(message, "queued");
+          this.queuedMessages.push(message);
+        }
+        this.notifyQueue();
+        break;
+      case "updateQueuedMessage":
+        if (input.operation !== "remove") this.requireActiveQueue();
+        this.updateQueuedMessage(input.id, input.operation, input.operation === "edit" ? input.text : undefined);
         break;
       case "abort":
         this.dialogs?.cancel(s);
-        await s.abort();
+        ++this.queueEpoch;
+        await Promise.allSettled([...this.queueAdmissions]);
+        try { this.cancelQueuedInputs(); }
+        finally { s.clearQueue(); await s.abort(); s.clearQueue(); }
         break;
       case "clearQueue":
-        await s.clearQueue();
+        ++this.queueEpoch;
+        await Promise.allSettled([...this.queueAdmissions]);
+        try { this.cancelQueuedInputs(); }
+        finally { s.clearQueue(); }
         break;
       case "getState":
         return this.state();
@@ -1006,15 +1257,30 @@ export class PiRuntime {
       case "getCustomModels": {
         return getCustomModels(join(this.agentDir(), "models.json"));
       }
+      case "discoverModels": {
+        const modelRuntime = await this.modelRuntime();
+        const signal = AbortSignal.timeout(15000);
+        const auth = await modelRuntime.getAuth(input.provider, { apiKey: input.apiKey?.trim() || undefined, signal })
+          .catch((error: unknown) => {
+            if (signal.aborted) throw new Error("Fetching models timed out. Please try again.");
+            throw error;
+          });
+        const models = await discoverModels(input, auth?.auth, signal);
+        return models.map(model => ({ ...model, exists: !!modelRuntime.getModel(input.provider, model.id) }));
+      }
       case "addCustomModel":
+      case "addCustomModels":
       case "updateCustomModel": {
         const update = input.action === "updateCustomModel";
         if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
         const modelRuntime = await this.modelRuntime();
-        if (!update && modelRuntime.getModel(input.provider, input.modelId))
+        const models = input.action === "addCustomModels" ? input.models : [{ modelId: input.modelId }];
+        if (!update && models.some(model => modelRuntime.getModel(input.provider, model.modelId)))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
         if (!update && modelRuntime.getError()) throw new Error(modelRuntime.getError());
-        addCustomModel(join(this.agentDir(), "models.json"), input, update);
+        const path = join(this.agentDir(), "models.json");
+        if (input.action === "addCustomModels") addCustomModels(path, input);
+        else addCustomModel(path, input, update);
         await modelRuntime.refresh({ allowNetwork: false });
         if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
         if (input.apiKey?.trim()) {
@@ -1028,7 +1294,7 @@ export class PiRuntime {
             throw new Error(`Model saved, but credential setup failed. Configure this provider in settings: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
-        if (update && s?.model?.provider === input.provider && s.model.id === input.modelId) {
+        if (input.action === "updateCustomModel" && s?.model?.provider === input.provider && s.model.id === input.modelId) {
           await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
           return this.snapshot();
         }
@@ -1245,9 +1511,33 @@ export class PiRuntime {
         // A revoked local credential hands the provider back to the broker.
         await this.refreshBrokerAuth();
         return { ok: true };
+      case "setPromptCustomization": {
+        // Pure runtime memory: the desktop owns the persisted copy in app
+        // settings and re-syncs after every save, so nothing lands on disk here.
+        this.promptCustomization = input.customization;
+        break;
+      }
+      case "systemPromptPreview":
+        return this.previewSystemPrompt();
       case "setLabel":
         s.sessionManager.appendLabelChange(input.entryId, input.label);
         break;
+      case "setPromptOverride": {
+        // The persona text arrives with the action (settings live on the
+        // desktop), and the record snapshots it, so history stays faithful
+        // after the definition changes or disappears.
+        if ("off" in input) {
+          s.sessionManager.appendCustomEntry(PROMPT_OVERRIDE_CUSTOM_TYPE, { off: true });
+          break;
+        }
+        if (!input.text.trim()) throw new Error("Persona text is empty");
+        s.sessionManager.appendCustomEntry(PROMPT_OVERRIDE_CUSTOM_TYPE, {
+          mode: input.mode,
+          name: input.name,
+          text: input.text,
+        });
+        break;
+      }
       case "navigateTree":
         await s.navigateTree(input.entryId, { summarize: false });
         break;
@@ -1279,9 +1569,13 @@ export class PiRuntime {
     if (!runtime) return;
     this.dialogs?.cancel(runtime.session);
     this.closing = true;
+    ++this.queueEpoch;
     this.stopStartupDialogs?.();
     ++this.controlEpoch;
     try {
+      if (runtime.session.isStreaming) this.queuedMessages = [];
+      await Promise.allSettled([...this.queueAdmissions]);
+      runtime.session.clearQueue();
       runtime.session.abortBash();
       // Keep internal timing subscribed until abort and footer persistence finish.
       await runtime.session.abort();

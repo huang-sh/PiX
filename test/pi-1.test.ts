@@ -65,6 +65,8 @@ test("Codemode runs nested writes through PiX hooks and restores records and too
     code: 'text(await tools.write({ path: "nested.txt", content: "Pi 1.0" }));',
   })], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
   await runtime.control({ action: "prompt", text: "write a file using Codemode" });
+  // Live events are forwarded on the next event-loop turn, after SDK persistence.
+  await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(readFileSync(join(root, "nested.txt"), "utf8"), "Pi 1.0");
   const snapshot = runtime.snapshot();
   assert.equal(snapshot.projection.nodes.at(-1)!.fileChanges?.length, 1);

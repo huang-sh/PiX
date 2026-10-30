@@ -8,7 +8,7 @@ import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
 import { pixAgentDir } from "../src/main/paths.js";
 import { validateRouteInput } from "../src/shared/contracts.js";
-import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type AgentControl, type RuntimeSkill, type RuntimeSkillDocument } from "../src/shared/types.js";
 
 for (const action of ["run", "abort", "close"] as const) {
   test(`a session opens before slow startup hooks finish: ${action}`, async () => {
@@ -73,6 +73,55 @@ for (const action of ["run", "abort", "close"] as const) {
   });
 }
 
+test("aborting a prompt during extension startup does not cancel model discovery", async t => {
+  const runtime = new PiRuntime("/project", null, () => {}, async () => {});
+  let release!: () => void;
+  runtime["extensionStartup"] = new Promise<void>(resolve => { release = resolve; });
+  runtime.runtime = { session: {
+    modelRuntime: { getModels: () => [], getModel: () => undefined, getAuth: async () => undefined },
+    clearQueue: () => {}, abort: async () => {},
+  } };
+  runtime.snapshot = (() => ({})) as typeof runtime.snapshot;
+  t.mock.method(globalThis, "fetch", async () => Response.json({ data: [] }));
+  const discovery = runtime.control({ action: "discoverModels", provider: "custom", baseUrl: "https://example.test/v1", api: "openai-completions" });
+  const result = discovery.then(value => value, error => error);
+  await runtime.control({ action: "abort" });
+  release();
+  assert.deepEqual(await result, []);
+});
+
+test("the discovery deadline also bounds a stalled credential lookup", async t => {
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  const deadline = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+    assert.equal(milliseconds, 15000);
+    return deadline.signal;
+  });
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({ data: [] }));
+  let started!: () => void, release!: () => void;
+  const authStarted = new Promise<void>(resolve => { started = resolve; });
+  runtime.modelServices = { modelRuntime: {
+    getModels: () => [],
+    getAuth: async (_provider: string, options: { signal?: AbortSignal }) => {
+      started();
+      return new Promise((_resolve, reject) => {
+        release = () => reject(new Error("Released stalled credential lookup"));
+        options.signal?.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+      });
+    },
+  } };
+  const result = runtime.control({ action: "discoverModels", provider: "proxy", baseUrl: "https://proxy.test/v1", api: "openai-completions" })
+    .then(value => value, error => error);
+  try {
+    await authStarted;
+    deadline.abort(new DOMException("Deadline reached", "TimeoutError"));
+    const completed = await Promise.race([result, new Promise(resolve => setImmediate(() => resolve("still pending")))]);
+    assert.ok(completed instanceof Error, "the request must settle when credential lookup exceeds its deadline");
+    assert.match(completed.message, /timed out/);
+    assert.equal(fetch.mock.callCount(), 0);
+  } finally { release(); await result; }
+});
+
 test("extension commands deliver notifications and errors before and after reload", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-slash-"));
   assert.equal(dirname(home), tmpdir());
@@ -119,6 +168,7 @@ test("a failing event consumer cannot throw into SDK message persistence", async
   let delivered = false;
   const runtime = new PiRuntime(null, null, () => { delivered = true; throw new Error("UI failed"); }, async () => {});
   runtime.runtime = { session: {
+    sessionManager: {},
     subscribe: (handler: typeof listener) => { listener = handler; return () => {}; },
     bindExtensions: async () => {}, extensionRunner: { getUIContext: () => ({}) },
   } };
@@ -136,8 +186,9 @@ test("records SDK context usage once after a prompt finishes", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.runtime = {
     session: {
-      prompt: async () => {
-        entries.push({ type: "message", message: { role: "user" } });
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
       },
       getContextUsage: () => {
         usageCalls++;
@@ -163,6 +214,36 @@ test("records SDK context usage once after a prompt finishes", async () => {
     model: { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", contextWindow: 128_000, reasoning: true },
     thinkingLevel: "high",
   }]]);
+});
+
+test("stores structured display text for image prompts", async () => {
+  const appended: unknown[] = [];
+  const entries: unknown[] = [];
+  const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+  runtime.runtime = {
+    session: {
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        assert.deepEqual(appended[0], [PROMPT_DISPLAY_CUSTOM_TYPE, { text: "检查截图" }]);
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
+      },
+      getContextUsage: () => null,
+      model: { provider: "openai", id: "vision", input: ["text", "image"] },
+      thinkingLevel: "off",
+      sessionManager: {
+        getEntries: () => entries,
+        appendCustomEntry: (...args: unknown[]) => appended.push(args),
+      },
+    },
+  };
+  runtime.snapshot = (() => ({ saved: true })) as unknown as typeof runtime.snapshot;
+
+  await runtime.control({ action: "prompt", text: "检查截图", images: [
+    { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+  ] });
+
+  assert.deepEqual(appended[0], [PROMPT_DISPLAY_CUSTOM_TYPE, { text: "检查截图" }]);
+  assert.equal(appended.length, 2, "the prompt display record is followed by the ordinary node footer");
 });
 
 test("skips the node footer when the prompt created no turn", async () => {
@@ -197,8 +278,9 @@ test("records the node footer when a prompt rejects mid-turn", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.runtime = {
     session: {
-      prompt: async () => {
-        entries.push({ type: "message", message: { role: "user" } });
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
         throw new Error("mid-run failure");
       },
       getContextUsage: () => ({ tokens: 900, contextWindow: 128_000, percent: 0.7 }),
@@ -228,6 +310,7 @@ test("every mutating control action returns the refreshed snapshot", async () =>
     calls.push(name);
   };
   const session = {
+    isStreaming: false,
     prompt: track("prompt"),
     steer: track("steer"),
     followUp: track("followUp"),
@@ -298,12 +381,16 @@ test("every mutating control action returns the refreshed snapshot", async () =>
   };
   for (const [action, input] of Object.entries(actions)) {
     calls.length = 0;
+    session.isStreaming = action === "steer" || action === "followUp";
     const result = await runtime.control({ action, ...input } as AgentControl);
     assert.ok(
       result && typeof result === "object" && "projection" in result,
       `${action} must return the refreshed snapshot`,
     );
-    assert.equal(calls.length, 1, `${action} must run its SDK effect`);
+    if (action === "steer" || action === "followUp") {
+      assert.equal(calls.length, 0, "queued inputs remain editable before their delivery boundary");
+      assert.equal(runtime.state().queuedMessages!.at(-1)!.kind, action);
+    } else assert.equal(calls.length, action === "abort" ? 3 : 1, `${action} must run its SDK effect`);
   }
 });
 

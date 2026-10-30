@@ -387,6 +387,34 @@ function remoteSnapshot(path = "/old/session.jsonl", running = false): SessionSn
   } as unknown as SessionSnapshot;
 }
 
+test("app prompt changes sync every connected remote host, including background projects", async t => {
+  const { controller, old } = controllerFixture(t);
+  const second = candidate(controller);
+  const project: ProjectInfo = { name: "second", path: "/second", remote: { kind: "ssh", host: "second" } };
+  controller.installSlot(second as never, project, controller.settings.bundle());
+  controller.configure(controller.localProjectPath);
+  const customization = { preamble: "Shared persona", rules: "Shared rules" };
+  await controller.invoke("settings.update", { scope: "app", patch: { promptCustomization: customization } });
+  for (const remote of [old, second])
+    assert.deepEqual(remote.calls.at(-1), ["agent.control", { action: "setPromptCustomization", customization }]);
+  await controller.invoke("settings.reset", { scope: "app" });
+  for (const remote of [old, second])
+    assert.deepEqual(remote.calls.at(-1), ["agent.control", { action: "setPromptCustomization", customization: {} }]);
+});
+
+test("remote prompt synchronization failures are reported and retried on restore", async t => {
+  const { controller, old } = controllerFixture(t);
+  const request = old.request.bind(old);
+  old.request = async (route, input) => {
+    if (input?.action === "setPromptCustomization") throw new Error("prompt sync failed");
+    return request(route, input);
+  };
+  await assert.rejects(controller.invoke("settings.update", { scope: "app", patch: { promptCustomization: { rules: "New rules" } } }), /prompt sync failed/);
+  old.request = request;
+  await controller.pool.wslBootstrap();
+  assert.ok(old.calls.some(([route, input]) => route === "agent.control" && input?.action === "setPromptCustomization" && input.customization.rules === "New rules"));
+});
+
 test("dialog replies retain their remote owner after switching back to a local project", async t => {
   const { controller, old, project } = controllerFixture(t);
   const id = projectId(project);

@@ -367,6 +367,17 @@ test("adding a remote custom model saves credentials on the desktop only", async
   assert.equal((localCalls[0] as typeof input).action, "updateCustomModel");
   assert.deepEqual(remoteCalls, [{ action: "setBrokerProviders", providers: [model.provider], models: [model] }]);
   assert.ok(!JSON.stringify(remoteCalls).includes(input.apiKey));
+  localCalls.length = 0;
+  remoteCalls.length = 0;
+  await controller.invoke("agent.control", { ...input, action: "addCustomModels", models: [{ modelId: "a" }, { modelId: "b" }] });
+  assert.equal((localCalls[0] as { action: string }).action, "addCustomModels");
+  assert.deepEqual(remoteCalls, [{ action: "setBrokerProviders", providers: [model.provider], models: [model] }]);
+  assert.ok(!JSON.stringify(remoteCalls).includes(input.apiKey));
+  localCalls.length = 0;
+  remoteCalls.length = 0;
+  await controller.invoke("agent.control", { ...input, action: "discoverModels" });
+  assert.equal((localCalls[0] as { action: string }).action, "discoverModels");
+  assert.deepEqual(remoteCalls, [], "discovery runs on the desktop and does not forward keys");
   remoteCalls.length = 0;
   await controller.invoke("agent.control", { action: "getCustomModels" });
   assert.deepEqual(remoteCalls, []);

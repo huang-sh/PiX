@@ -3,12 +3,13 @@ import type {
   GraphEdge,
   GraphNode,
   NodeFooterState,
+  NodePromptOverride,
   RawSessionEntry,
   SessionProjection,
   SessionSummary,
   SessionSnapshot,
 } from "./types.js";
-import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE } from "./types.js";
+import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isSessionImage } from "./images.js";
 import { emptyAmount, sumAmount, usageRecordsOf } from "./usage.js";
@@ -84,6 +85,77 @@ function text(e: RawSessionEntry) {
   if (e.type === "bash_execution") return String(e.output ?? "");
   return contentText(e.content);
 }
+function promptDisplayState(entries: RawSessionEntry[]) {
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  const markerIds = new Set<string>();
+  const markerTexts = new Map<string, string>();
+  const texts = new Map<string, string>();
+  const owners = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== PROMPT_DISPLAY_CUSTOM_TYPE) continue;
+    markerIds.add(entry.id);
+    const data = rec(entry.data);
+    if (typeof data?.text !== "string") continue;
+    markerTexts.set(entry.id, data.text);
+    // Target-linked records remain readable for sessions written by the earlier post-run format.
+    if (typeof data.targetId === "string") {
+      const target = byId.get(data.targetId);
+      if (target?.type === "message" && role(target) === "user") {
+        texts.set(data.targetId, data.text);
+        owners.set(entry.id, data.targetId);
+      }
+    }
+  }
+  const nearestCache = new Map<string, string | undefined>();
+  const nearestMarker = (start: string | null): string | undefined => {
+    if (!start) return undefined;
+    const path: string[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null = start;
+    let found: string | undefined;
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      if (markerIds.has(cursor)) { found = cursor; break; }
+      if (nearestCache.has(cursor)) { found = nearestCache.get(cursor); break; }
+      path.push(cursor);
+      cursor = byId.get(cursor)?.parentId ?? null;
+    }
+    for (const id of path) nearestCache.set(id, found);
+    return found;
+  };
+  for (const entry of entries) {
+    if (entry.type !== "message" || role(entry) !== "user" || texts.has(entry.id)) continue;
+    const marker = nearestMarker(entry.parentId);
+    if (!marker || !markerTexts.has(marker) || owners.has(marker)) continue;
+    texts.set(entry.id, markerTexts.get(marker)!);
+    owners.set(marker, entry.id);
+  }
+  return { texts, owners, markerIds };
+}
+export function promptDisplayTextMap(entries: RawSessionEntry[]) {
+  return promptDisplayState(entries).texts;
+}
+export function needsPromptDisplayBoundary(entries: RawSessionEntry[], leafId: string | null) {
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  const seen = new Set<string>();
+  let cursor = leafId;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const entry = byId.get(cursor);
+    if (!entry) return false;
+    if (entry.type === "custom" && entry.customType === PROMPT_DISPLAY_CUSTOM_TYPE) {
+      const data = rec(entry.data);
+      return typeof data?.text === "string" && typeof data.targetId !== "string";
+    }
+    // Reaching a user proves any older marker already acquired its owner.
+    if (entry.type === "message" && role(entry) === "user") return false;
+    cursor = entry.parentId;
+  }
+  return false;
+}
+export function sessionEntryDisplayText(e: RawSessionEntry, prompts: Map<string, string>) {
+  return role(e) === "user" ? prompts.get(e.id) ?? text(e) : text(e);
+}
 function tool(e: RawSessionEntry) {
   const n = msg(e)?.toolName ?? e.toolName;
   return typeof n === "string" ? n : undefined;
@@ -123,9 +195,10 @@ function errorMessageText(e: RawSessionEntry) {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 /** Searchable text of one raw entry: prompt/reply prose plus the tool name. */
-export function entrySearchText(e: RawSessionEntry): string {
+export function entrySearchText(e: RawSessionEntry, prompts?: Map<string, string>): string {
+  const value = prompts ? sessionEntryDisplayText(e, prompts) : text(e);
   const name = tool(e);
-  return name ? `${text(e)}\n${name}` : text(e);
+  return name ? `${value}\n${name}` : value;
 }
 function modelState(current: NodeFooterState["model"], provider: string, id: string) {
   return current?.provider === provider && current.id === id ? current : { provider, id };
@@ -226,6 +299,9 @@ export function projectSession(
   leafId: string | null,
 ): SessionProjection {
   const byId = new Map(entries.map((e) => [e.id, e]));
+  const entryOrder = new Map(entries.map((entry, index) => [entry.id, index]));
+  const promptDisplays = promptDisplayState(entries);
+  const promptTexts = promptDisplays.texts;
   const labels = new Map<string, string>();
   for (const entry of entries) if (entry.type === "label" && typeof entry.targetId === "string") {
     if (typeof entry.label === "string" && entry.label.trim()) labels.set(entry.targetId, entry.label.trim());
@@ -241,16 +317,67 @@ export function projectSession(
         toolInputs.set(call.id, toolInput(call.arguments));
     }
   }
-  // The git-branch extension appends its record right before the user message
-  // lands, so the message's parent is that record: pair them by the link.
-  const gitBranches = new Map<string, string>();
-  for (const entry of entries)
-    if (entry.type === "custom" && entry.customType === GIT_BRANCH_CUSTOM_TYPE && typeof rec(entry.data)?.branch === "string")
-      gitBranches.set(entry.id, rec(entry.data)!.branch as string);
+  // Prompt display metadata may sit between the Git record and user message,
+  // so resolve the nearest branch record through ancestry instead of assuming
+  // it is the direct parent.
+  const gitHeads = new Map<string, { gitBranch: string; gitCommit?: string }>();
+  for (const entry of entries) {
+    const data = rec(entry.data);
+    if (entry.type === "custom" && entry.customType === GIT_BRANCH_CUSTOM_TYPE && typeof data?.branch === "string" && data.branch)
+      gitHeads.set(entry.id, { gitBranch: data.branch,
+        ...(typeof data.commit === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(data.commit) ? { gitCommit: data.commit } : {}) });
+  }
+  const gitHeadOf = (start: string | null) => {
+    const seen = new Set<string>();
+    let cursor = start;
+    // Only PiX prompt-display records may separate the Git record from its
+    // user message. Do not inherit an older turn's Git record through normal
+    // conversation ancestry.
+    while (cursor && promptDisplays.markerIds.has(cursor) && !seen.has(cursor)) {
+      seen.add(cursor);
+      cursor = byId.get(cursor)?.parentId ?? null;
+    }
+    return cursor ? gitHeads.get(cursor) : undefined;
+  };
   const owners = new Map<string, string>();
   const ownedEntries = new Map<string, RawSessionEntry[]>();
   const contexts = new Map<string | null, { owner: string | null; depth: number; settings: SettingsState }>();
   contexts.set(null, { owner: null, depth: -1, settings: { model: null, thinkingLevel: "off" } });
+  // Override records resolve by ancestry: the nearest `pix.prompt-override`
+  // entry above a node is what that turn ran under, so forks inherit it.
+  const overrides = new Map<string, NodePromptOverride | null>();
+  for (const entry of entries)
+    if (entry.type === "custom" && entry.customType === PROMPT_OVERRIDE_CUSTOM_TYPE) {
+      const data = rec(entry.data);
+      const mode = data?.mode;
+      // Malformed records are skipped, not treated as off: ancestry keeps looking up.
+      if (data?.off === true) overrides.set(entry.id, null);
+      else if ((mode === "append" || mode === "replace" || mode === "strict")
+        && typeof data?.name === "string" && typeof data?.text === "string" && data.text.trim())
+        overrides.set(entry.id, { mode, name: data.name });
+    }
+  const overrideCache = new Map<string | null, NodePromptOverride | null | undefined>();
+  overrideCache.set(null, undefined);
+  const overrideOf = (id: string | null): NodePromptOverride | null | undefined => {
+    const path: RawSessionEntry[] = [];
+    const seen = new Set<string>();
+    let cursor = id;
+    while (cursor && !overrideCache.has(cursor) && !seen.has(cursor)) {
+      seen.add(cursor);
+      const entry = byId.get(cursor);
+      if (!entry) break;
+      path.push(entry);
+      cursor = entry.parentId;
+    }
+    let value = overrideCache.get(cursor);
+    // Ancestors resolve before descendants: reverse the leaf→root walk so an
+    // override record propagates down to every entry below it.
+    for (const entry of path.reverse()) {
+      if (overrides.has(entry.id)) value = overrides.get(entry.id)!;
+      overrideCache.set(entry.id, value);
+    }
+    return overrideCache.has(id) ? overrideCache.get(id) : undefined;
+  };
   // Resolve each ancestor once, including records supplied out of file order.
   const context = (id: string | null) => {
     const path: RawSessionEntry[] = [];
@@ -274,12 +401,28 @@ export function projectSession(
     return contexts.get(id) ?? contexts.get(null)!;
   };
   for (const e of entries) {
+    // Override records live between turns: they belong to no turn, so a turn's
+    // leafEntryId never reaches past its own reply to the record — forking a
+    // node then copies its conversation without the persona switches that
+    // landed after it, while the ancestry still resolves them.
+    if (overrides.has(e.id) || promptDisplays.markerIds.has(e.id)) continue;
     const o = context(e.id).owner;
     if (!o) continue;
     owners.set(e.id, o);
     const group = ownedEntries.get(o) ?? [];
     group.push(e);
     ownedEntries.set(o, group);
+  }
+  // Display records are interturn metadata but travel with their target turn
+  // for branch export, CLI rendering, and deletion.
+  for (const [markerId, targetId] of promptDisplays.owners) {
+    const marker = byId.get(markerId);
+    if (!marker) continue;
+    owners.set(markerId, targetId);
+    const group = ownedEntries.get(targetId) ?? [];
+    group.push(marker);
+    group.sort((a, b) => (entryOrder.get(a.id) ?? 0) - (entryOrder.get(b.id) ?? 0));
+    ownedEntries.set(targetId, group);
   }
   const users = entries.filter(
     (e) => e.type === "message" && role(e) === "user",
@@ -290,14 +433,16 @@ export function projectSession(
     const finalAssistantReply = owned
       .filter((x) => x.type === "message" && role(x) === "assistant")
       .at(-1);
-    const gitBranch = gitBranches.get(e.parentId ?? "");
+    const gitHead = gitHeadOf(e.parentId);
+    const promptOverride = overrideOf(e.parentId) ?? undefined;
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
       ...(labels.has(e.id) ? { label: labels.get(e.id) } : {}),
-      ...(gitBranch ? { gitBranch } : {}),
+      ...(gitHead ?? {}),
+      ...(promptOverride ? { promptOverride } : {}),
       parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
-      title: clip(text(e), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
+      title: clip(sessionEntryDisplayText(e, promptTexts), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
       ...(images(e).length ? { imageCount: images(e).length } : {}),
       preview: clip(
         owned
@@ -345,7 +490,7 @@ export function projectSession(
         entryId: id,
         turnId,
         role: r as "user" | "assistant",
-        text: text(e),
+        text: sessionEntryDisplayText(e, promptTexts),
         ...(images(e).length ? { images: images(e) } : {}),
         thinking: r === "assistant" ? thinkingText(msg(e)?.content) : undefined,
         timestamp: e.timestamp,
@@ -413,6 +558,7 @@ export function projectSession(
     messages,
     leafId,
     activeNodeId: activeBranchNodeIds.at(-1) ?? nodes.at(-1)?.id ?? null,
+    ...(overrideOf(leafId) !== undefined ? { activePromptOverride: overrideOf(leafId)! } : {}),
   };
 }
 export function entryAnchorForNode(p: SessionProjection, nodeId: string) {
@@ -452,6 +598,7 @@ export function summarizeSession(
     .reverse()
     .find((e) => e.type === "session_info")?.name;
   const first = entries.find((e) => e.type === "message" && role(e) === "user");
+  const promptTexts = promptDisplayTextMap(entries);
   return {
     id: String(header?.id ?? path),
     path,
@@ -460,6 +607,6 @@ export function summarizeSession(
     created: String(header?.timestamp ?? entries[0]?.timestamp ?? modified),
     modified,
     messageCount: entries.filter((e) => e.type === "message").length,
-    firstMessage: clip(first ? text(first) : "", 120) || "(no user message)",
+    firstMessage: clip(first ? sessionEntryDisplayText(first, promptTexts) : "", 120) || "(no user message)",
   };
 }

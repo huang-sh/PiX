@@ -2,7 +2,7 @@
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { withoutToolLabels } from "../../../shared/session";
+import { promptDisplayTextMap, sessionEntryDisplayText, withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import type { CompactionRecord } from "../../../shared/run-timing";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
@@ -30,6 +30,21 @@ const panelNodeId = computed(() => {
 });
 const panelNode = computed(() => session.nodeFor(panelNodeId.value));
 const selectedRun = computed(() => session.runFor(panelNodeId.value));
+// Composer recall list: the session's user prompts, newest first, with
+// consecutive duplicates collapsed. Session-wide so a fork can recall the
+// latest phrasing even when another branch sent it.
+const promptHistory = computed(() => {
+  const entries = session.current?.entries ?? [];
+  const texts = promptDisplayTextMap(entries);
+  const history: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    if (entry.type !== "message" || (entry.message as { role?: string } | undefined)?.role !== "user") continue;
+    const text = sessionEntryDisplayText(entry, texts).trim();
+    if (text && text !== history.at(-1)) history.push(text);
+  }
+  return history;
+});
 const liveCompactions = computed<CompactionRecord[] | undefined>(() => {
   const run = selectedRun.value;
   if (run?.status !== "running") return undefined;
@@ -89,15 +104,17 @@ const composerModel = ref<RuntimeModel | null>();
 const composerThinking = ref<string>();
 
 const composerRunnable = computed(() =>
-  Boolean(session.current?.runtime.available && (session.current.graph
+  Boolean(session.current?.runtime.available && (composerRunning.value || (session.current.graph
     ? panelNode.value?.forkable !== false && !panelNodeId.value?.startsWith("pending:")
-    : !session.current.runtime.isStreaming)));
+    : !session.current.runtime.isStreaming))));
 const composerModelValue = computed(() => {
+  if (composerRunning.value) return selectedRun.value?.runtime?.model ?? session.current?.runtime.model ?? null;
   if (composerModel.value !== undefined) return composerModel.value;
   return panelNode.value?.footer?.model ?? session.current?.runtime.model ?? null;
 });
 const composerThinkingValue = computed(() =>
-  composerThinking.value
+  (composerRunning.value ? selectedRun.value?.runtime?.thinkingLevel ?? session.current?.runtime.thinkingLevel : undefined)
+  ?? composerThinking.value
   ?? panelNode.value?.footer?.thinkingLevel
   ?? session.userThinking
   ?? session.current?.runtime.thinkingLevel
@@ -105,11 +122,27 @@ const composerThinkingValue = computed(() =>
 const composerPlaceholder = computed(() => !composerRunnable.value
   ? t(session.current?.runtime.isStreaming ? "graph.blockedStreaming" : "graph.blockedReadonly")
   : t("draft.placeholder"));
-// The composer's send button doubles as the stop control while the branch it
-// targets is running: graph runs stop per-branch, plain sessions abort the stream.
+// Queue and stop controls target the same run, including pinned branch columns.
 const composerRunning = computed(() => Boolean(session.current?.graph
   ? selectedRun.value?.status === "running"
   : session.current?.runtime.isStreaming));
+const composerPending = computed(() => selectedRun.value?.runtime?.queuedMessages ?? (!session.current?.graph
+  ? session.current?.runtime.queuedMessages : undefined));
+
+function queueTarget() {
+  const graph = session.current?.graph, run = selectedRun.value;
+  if (!graph) return {};
+  if (!run) throw new Error(t("draft.runFinished"));
+  return { graphId: graph.id, branchId: run.branchId, runId: run.runId };
+}
+async function queueComposer(text: string, images?: PromptImage[]) {
+  await session.control({ action: "followUp", text, ...(images?.length ? { images } : {}), ...queueTarget() });
+  return true;
+}
+async function updateComposerQueue(id: string, operation: "steer" | "remove" | "edit", text?: string) {
+  await session.control({ action: "updateQueuedMessage", id, operation,
+    ...(operation === "edit" ? { text } : {}), ...queueTarget() });
+}
 
 async function stopComposer() {
   const run = session.current?.graph ? selectedRun.value : undefined;
@@ -150,7 +183,9 @@ function setComposerThinking(level: string, explicit: boolean) {
 async function submitComposer(text: string, images?: PromptImage[]) {
   return Boolean(await submitDraft(props.nodeId ?? panelNode.value?.id ?? null, text,
     composerModelValue.value, composerThinkingValue.value, images,
-    props.nodeId ? { follow: false, columnId: props.nodeId } : undefined));
+    props.nodeId || composerState.draft.promptOverride !== undefined
+      ? { ...(props.nodeId ? { follow: false, columnId: props.nodeId } : {}), ...(composerState.draft.promptOverride !== undefined ? { promptOverride: composerState.draft.promptOverride } : {}) }
+      : undefined));
 }
 
 // Drafts and submission callbacks must share the same state across a pinned
@@ -220,6 +255,7 @@ const visibleTurns = computed<Turn[]>(() =>
     return {
       id,
       gitBranch: node?.gitBranch,
+      gitCommit: node?.gitCommit,
       fileChanges: node?.fileChanges,
       user,
       terminal,
@@ -534,30 +570,34 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-else class="composer-expanded">
-        <div class="composer-head">
-          <button
-            type="button"
-            :title="t('branch.composerClose')"
-            :aria-label="t('branch.composerClose')"
-            @click="closeComposer"
-          >
-            <ChevronDown :size="14" />
-          </button>
-        </div>
         <PromptComposer
           ref="composer"
           :draft-state="composerState.draft"
+          :history="promptHistory"
           :runnable="composerRunnable"
           :model="composerModelValue"
           :thinking-level="composerThinkingValue"
           :models="session.models"
+          :personas="layout.settings?.app.personas ?? []"
+          :prompt-override="session.promptOverrideAt(props.nodeId ?? panelNode?.id ?? null)"
           :placeholder="composerPlaceholder"
           :running="composerRunning"
           :on-model="setComposerModel"
           :on-thinking="setComposerThinking"
           :on-submit="submitComposer"
           :on-stop="stopComposer"
-        />
+          :on-queue="queueComposer"
+          :queued-messages="composerRunning ? composerPending : undefined"
+          :on-queued-action="updateComposerQueue"
+        >
+          <template #header>
+            <div class="composer-head">
+              <button type="button" :title="t('branch.composerClose')" :aria-label="t('branch.composerClose')" @click="closeComposer">
+                <ChevronDown :size="14" />
+              </button>
+            </div>
+          </template>
+        </PromptComposer>
       </div>
     </footer>
   </section>

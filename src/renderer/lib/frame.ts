@@ -101,26 +101,46 @@ export function whenPanelsSettle(targets: PanelSettleTarget[], timeoutMs = 1500)
 
 // Resolves once no matching element has a running CSS transition. Re-checks
 // after each batch settles because transitions register on the next rendering
-// update, not synchronously with the style change.
+// update, not synchronously with the style change. Infinity disables the
+// timeout for geometry that must never be frozen mid-transition.
 export function whenTransitionsSettle(
   matches: (target: Element) => boolean,
   timeoutMs = 1500,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return (async () => {
-    await nextFrame();
-    if (typeof document.getAnimations !== "function") return;
-    for (;;) {
-      const running = document.getAnimations().filter((animation) => {
-        const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
-        return target instanceof Element && matches(target);
-      });
-      if (!running.length || Date.now() >= deadline) return;
-      await Promise.race([
-        Promise.allSettled(running.map((animation) => animation.finished)),
-        new Promise((resolve) => setTimeout(resolve, deadline - Date.now())),
-      ]);
-      if (Date.now() >= deadline) return;
+    if (signal?.aborted) return;
+    let onAbort: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancelled = signal ? new Promise<void>(resolve => {
+      onAbort = resolve;
+      signal.addEventListener("abort", onAbort, { once: true });
+    }) : undefined;
+    try {
+      await (cancelled ? Promise.race([nextFrame(), cancelled]) : nextFrame());
+      if (typeof document.getAnimations !== "function") return;
+      for (;;) {
+        if (signal?.aborted) return;
+        const running = document.getAnimations().filter((animation) => {
+          if (!animation.pending && (animation.playState === "finished" || animation.playState === "idle")) return false;
+          const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
+          return target instanceof Element && matches(target);
+        });
+        if (!running.length || Date.now() >= deadline) return;
+        const waiting: Promise<unknown>[] = [Promise.allSettled(running.map(animation => animation.finished))];
+        if (cancelled) waiting.push(cancelled);
+        if (Number.isFinite(deadline)) waiting.push(new Promise(resolve => {
+          timer = setTimeout(resolve, deadline - Date.now());
+        }));
+        await Promise.race(waiting);
+        clearTimeout(timer);
+        timer = undefined;
+        if (Date.now() >= deadline) return;
+      }
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal!.removeEventListener("abort", onAbort);
     }
   })();
 }

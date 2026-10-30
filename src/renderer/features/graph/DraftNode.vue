@@ -3,6 +3,7 @@ import { X } from "@lucide/vue";
 import { Handle, Position } from "@vue-flow/core";
 import { useI18n } from "vue-i18n";
 import type { PromptImage, RuntimeModel } from "../../../shared/types";
+import type { NodePromptOverride, PersonaDefinition } from "../../../shared/types";
 import PromptComposer, { type ComposerDraft } from "../../components/PromptComposer.vue";
 import Button from "../../components/ui/Button.vue";
 
@@ -16,6 +17,8 @@ export interface DraftNodeData {
   model: RuntimeModel | null;
   thinkingLevel: string;
   models: RuntimeModel[];
+  personas?: PersonaDefinition[];
+  promptOverride?: NodePromptOverride | null;
   onModel: (model: RuntimeModel) => void;
   onThinking: (level: string, explicit: boolean) => void;
   onCancel?: () => void;
@@ -42,6 +45,8 @@ const { t } = useI18n();
       :model="data.model"
       :thinking-level="data.thinkingLevel"
       :models="data.models"
+      :personas="data.personas"
+      :prompt-override="data.promptOverride"
       :placeholder="data.initializing ? t('graph.preparingSession') : data.runnable || data.creationError ? t('draft.placeholder') : t('graph.blockedReadonly')"
       autofocus
       auto-grow

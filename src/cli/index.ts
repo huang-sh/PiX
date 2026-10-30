@@ -1,7 +1,7 @@
 import { commandStatus, installCommand, uninstallCommand } from "../main/cli-command.js";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { connectLocalHost, type HostClient } from "../host/client.js";
+import { connectLocalHost, inspectLocalHost, restartLocalHost, stopLocalHost, type HostClient } from "../host/client.js";
 import { runTask } from "./run.js";
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../shared/graph-filter.js";
 import type { GraphFilter, SessionSnapshot, SessionSummary } from "../shared/types.js";
@@ -22,7 +22,7 @@ Usage: pix [command] [arguments] [options]
   models                       List available chat models
   dialogs                      List pending extension input requests
   respond <id> [value]         Answer a pending input request
-  host <status|stop>           Inspect or stop the shared background host
+  host <status|stop|restart>   Inspect, stop or restart the background host
   command <install|uninstall|status>  Manage the terminal command and PATH
 
   --cwd <path>                 Project directory (default: current directory)
@@ -34,6 +34,7 @@ Usage: pix [command] [arguments] [options]
   --filter <mode>              Tree filter: all, labeled, running, errors
   --json                       Emit NDJSON events and a final result
   --detach                     Submit a task and exit; the host keeps running
+  --force                      With host stop/restart: interrupt tasks and other clients
   --timeout <seconds>          Stop waiting after this time; task keeps running
   --request-id <id>            Stable submission ID for safe retries
   --branch <id> --run-id <id>  Stop exactly one run
@@ -49,6 +50,7 @@ const parsed = parseArgs({ allowPositionals: true, options: {
   detach: { type: "boolean" }, timeout: { type: "string" }, "request-id": { type: "string" },
   branch: { type: "string" }, "run-id": { type: "string" }, root: { type: "boolean" },
   filter: { type: "string" },
+  force: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 } });
 const options = parsed.values;
@@ -103,6 +105,25 @@ async function main() {
   }
   const known = ["chat", "run", "resume", "fork", "new", "sessions", "tree", "label", "stop", "models", "dialogs", "respond", "host"];
   if (!known.includes(command)) throw new Error(`Unknown command: ${command}. See pix --help.`);
+  if (options.force && (command !== "host" || !["stop", "restart"].includes(args[0] ?? "")))
+    throw new Error("Use --force only with pix host stop or pix host restart; it interrupts tasks and other clients");
+  if (command === "host") {
+    const action = args[0] ?? "status";
+    if (!["status", "stop", "restart"].includes(action)) throw new Error("Use pix host status, stop or restart");
+    const inspected = await inspectLocalHost();
+    if (action === "status") {
+      if (!inspected) throw new Error("PiX host is not running");
+      print(inspected.status); return;
+    }
+    if (action === "stop") {
+      if (inspected) await stopLocalHost(inspected.id, options.force);
+      print({ stopped: true }); return;
+    }
+    const client = inspected ? await restartLocalHost(inspected.id, options.force) : await connectLocalHost(null);
+    try { print(await client.request({ method: "status" })); }
+    finally { await client.close(); }
+    return;
+  }
   if (options.timeout && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0))
     throw new Error("--timeout must be a positive number of seconds");
   if (options["request-id"] && !/^[a-zA-Z0-9-]{1,100}$/.test(options["request-id"]))
@@ -114,13 +135,8 @@ async function main() {
     throw new Error("Use --filter all, labeled, running, or errors");
   if (options.filter && command !== "tree") throw new Error("--filter is only supported by pix tree");
   const cwd = resolve(options.cwd ?? process.cwd());
-  const client = await connectLocalHost(cwd, undefined, command !== "host");
+  const client = await connectLocalHost(cwd);
   try {
-    if (command === "host") {
-      const action = args[0] ?? "status";
-      if (action !== "status" && action !== "stop") throw new Error("Use pix host status or pix host stop");
-      print(await client.request({ method: action === "stop" ? "shutdown" : "status" })); return;
-    }
     if (command === "sessions") {
       const sessions = await client.invoke<SessionSummary[]>("session.list");
       if (options.json) print({ type: "sessions", sessions });
@@ -173,7 +189,7 @@ async function main() {
       const { interactive } = await import("./tui.js");
       await interactive(client, snapshot, options);
     }
-  } finally { client.close(); }
+  } finally { await client.close(); }
 }
 
 main().catch(error => {

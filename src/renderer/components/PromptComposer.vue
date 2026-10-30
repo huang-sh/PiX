@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowUp, Brain, Check, ChevronDown, ChevronRight, FileText, Paperclip, Square, X } from "@lucide/vue";
+import { ArrowUp, Brain, Check, ChevronDown, ChevronRight, CornerDownRight, FileText, ListEnd, Paperclip, Pencil, Square, Trash2, VenetianMask, X } from "@lucide/vue";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -14,18 +14,19 @@ import { getActivePinia } from "pinia";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { APP_COMMANDS } from "../../shared/commands";
-import { THINKING_LEVELS, type PromptImage, type RuntimeCommand, type RuntimeModel } from "../../shared/types";
+import { THINKING_LEVELS, type PersonaDefinition, type PromptImage, type PromptOverrideMode, type QueuedMessage, type RuntimeCommand, type RuntimeModel } from "../../shared/types";
 import { IMAGE_MIME_TYPES, MAX_IMAGE_BYTES, MAX_PROMPT_IMAGES, imageDataUrl, validatePromptImages } from "../../shared/images";
 import { useRunCommand } from "../features/commands/runCommand";
 import { createImeGuard, describeCommand, filterSlashCommands, matchSlashTrigger } from "../lib/slash";
 import { MAX_PROMPT_FILES, promptFilePath, type PromptFile } from "../lib/prompt-files";
 import { useLayoutStore } from "../stores/layout";
 import { useSessionStore } from "../stores/session";
+import type { NodePromptOverride } from "../../shared/types";
 import Button from "./ui/Button.vue";
 import SlashMenu from "./SlashMenu.vue";
 
-// Shared prompt editor used by the graph draft node and the chat panel composer,
-// so both input paths expose identical model/thinking controls and submit rules.
+// Shared prompt editor for graph drafts and chat: model/thinking controls,
+// attachments, and submission state stay consistent across both surfaces.
 export interface ComposerDraft {
   text: string;
   images: PromptImage[];
@@ -33,6 +34,9 @@ export interface ComposerDraft {
   busy: boolean;
   readingImages: boolean;
   error: string;
+  /** undefined inherits the parent; null explicitly restores the default. */
+  promptOverride?: NodePromptOverride | null;
+  queueEdit?: { id: string; text: string; saving: boolean; error: string };
 }
 const props = defineProps<{
   draftState?: ComposerDraft;
@@ -43,6 +47,8 @@ const props = defineProps<{
   models: RuntimeModel[];
   placeholder?: string;
   autofocus?: boolean;
+  // Prompt recall list, newest first; hosts that omit it keep native arrows.
+  history?: string[];
   // Fit the editor's height to its text (clamped by CSS min/max-height);
   // the graph draft node opts in, the chat composer stays manually resizable.
   autoGrow?: boolean;
@@ -50,13 +56,20 @@ const props = defineProps<{
   // explicit=true marks a user pick from the thinking menu; explicit=false marks a
   // model-driven adjustment so hosts can avoid persisting it as a user choice.
   onThinking: (level: string, explicit: boolean) => void;
+  // The inherited persona; explicit picks stay in the draft until submission.
+  personas?: PersonaDefinition[];
+  promptOverride?: NodePromptOverride | null;
   onSubmit: (text: string, images?: PromptImage[]) => Promise<boolean>;
-  // While the branch this composer targets is running, the submit button
-  // becomes the stop control for that run instead of living elsewhere in the host.
   running?: boolean;
   onStop?: () => void;
+  onQueue?: (text: string, images?: PromptImage[]) => Promise<boolean>;
+  queuedMessages?: QueuedMessage[];
+  onQueuedAction?: (id: string, operation: "steer" | "remove" | "edit", text?: string) => Promise<void>;
 }>();
-const stopping = computed(() => props.running === true && props.onStop !== undefined);
+const queueing = computed(() => props.runnable && props.running === true && props.onQueue !== undefined);
+const stopping = computed(() => props.running === true && props.onStop !== undefined && (!queueing.value || !hasContent.value));
+const pending = computed(() => props.queuedMessages ?? []);
+const queueEditor = ref<HTMLTextAreaElement>();
 
 const { t, te } = useI18n();
 // The composer is also mounted in isolated tests with no pinia installed; without
@@ -69,6 +82,10 @@ const runCommand = useRunCommand();
 const ime = createImeGuard();
 const local = reactive<ComposerDraft>({ text: "", images: [], busy: false, readingImages: false, error: "" });
 const state = computed(() => props.draftState ?? local);
+const queueEdit = computed({ get: () => state.value.queueEdit, set: value => { state.value.queueEdit = value; } });
+const editingMessage = computed(() => pending.value.find(message => message.id === queueEdit.value?.id));
+const canSaveQueueEdit = computed(() => props.runnable && props.running && editingMessage.value && !editingMessage.value.delivering
+  && !queueEdit.value?.saving && Boolean(queueEdit.value?.text.trim() || editingMessage.value.imageCount));
 const draft = computed({ get: () => state.value.text, set: value => { state.value.text = value; } });
 const busy = computed({ get: () => state.value.busy, set: value => { state.value.busy = value; } });
 const editor = ref<HTMLTextAreaElement>();
@@ -92,11 +109,21 @@ const modelProviders = computed(() =>
 const selectedModel = computed(() => modelOptions.value.find((item) =>
   item.provider === props.model?.provider && item.id === props.model?.id) ?? props.model);
 const supportsImages = computed(() => selectedModel.value?.input?.includes("image") === true);
+const hasContent = computed(() => !!(draft.value.trim() || images.value.length || files.value.length));
 const canAttach = computed(() => props.runnable && !busy.value && !readingImages.value);
 const canSubmit = computed(() => props.runnable && !busy.value && !readingImages.value
-  && !!(draft.value.trim() || images.value.length || files.value.length) && (!images.value.length || supportsImages.value));
+  && hasContent.value && (!images.value.length || supportsImages.value));
 const thinkingLevels = computed(() => selectedModel.value?.thinkingLevels
   ?? (selectedModel.value?.reasoning === false ? ["off"] : [...THINKING_LEVELS]));
+const personaModes: PromptOverrideMode[] = ["replace", "append", "strict"];
+const selectedPromptOverride = computed(() => state.value.promptOverride === undefined ? props.promptOverride : state.value.promptOverride);
+// Mode picks persist across menu use so switching personas keeps the mode.
+const personaMode = ref<PromptOverrideMode>("replace");
+watch(() => selectedPromptOverride.value?.mode, mode => { if (mode) personaMode.value = mode; }, { immediate: true });
+function selectPersonaMode(mode: PromptOverrideMode) {
+  personaMode.value = mode;
+  if (selectedPromptOverride.value) state.value.promptOverride = { mode, name: selectedPromptOverride.value.name };
+}
 
 function providerName(value?: string) {
   if (!value) return "—";
@@ -119,7 +146,6 @@ function selectModel(model: RuntimeModel) {
 
 async function submit() {
   const text = draft.value.trim();
-  // While the button is the stop control, no surface may send — Enter included.
   if (stopping.value || !canSubmit.value) return;
   const command = slashCommands.value.find(command => `/${command.name}` === text
     && (command.source === "builtin" || command.source === "app"));
@@ -131,16 +157,20 @@ async function submit() {
   const attachments = images.value.map((image) => ({ ...image }));
   const documents = files.value;
   const prompt = [text, ...documents.map(file => `Attached file: ${file.path}`)].filter(Boolean).join("\n\n");
+  const deliver = queueing.value
+    ? props.onQueue!
+    : props.onSubmit;
   draft.value = "";
   images.value = [];
   files.value = [];
   busy.value = true;
   try {
     const delivered = attachments.length
-      ? await props.onSubmit(prompt, attachments)
-      : await props.onSubmit(prompt);
+      ? await deliver(prompt, attachments)
+      : await deliver(prompt);
     if (delivered) {
       target.error = "";
+      delete target.promptOverride;
     } else {
       target.text = text;
       target.images = attachments;
@@ -154,6 +184,36 @@ async function submit() {
   } finally {
     target.busy = false;
   }
+}
+
+async function queuedAction(id: string, operation: "steer" | "remove") {
+  const target = state.value;
+  try {
+    await props.onQueuedAction?.(id, operation);
+    if (operation === "remove" && target.queueEdit?.id === id) target.queueEdit = undefined;
+  }
+  catch (error) { target.error = error instanceof Error ? error.message : String(error); }
+}
+
+async function editQueuedMessage(message: QueuedMessage) {
+  if (message.delivering || queueEdit.value?.saving) return;
+  queueEdit.value = { id: message.id, text: message.text, saving: false, error: "" };
+  await nextTick();
+  queueEditor.value?.focus();
+}
+
+async function saveQueueEdit() {
+  const target = state.value;
+  const edit = target.queueEdit;
+  if (!edit || !canSaveQueueEdit.value) return;
+  edit.saving = true;
+  edit.error = "";
+  try {
+    await props.onQueuedAction?.(edit.id, "edit", edit.text);
+    if (target.queueEdit === edit) target.queueEdit = undefined;
+  } catch (error) {
+    edit.error = error instanceof Error ? error.message : String(error);
+  } finally { edit.saving = false; }
 }
 
 async function addFiles(selected: File[]) {
@@ -232,6 +292,7 @@ watch(slashItems, () => {
   slashActive.value = 0;
 });
 watch(draft, (text) => {
+  if (historyIndex.value !== null && text !== (props.history ?? [])[historyIndex.value]) historyIndex.value = null;
   const query = matchSlashTrigger(text);
   if (query === null) {
     closeSlash();
@@ -249,6 +310,42 @@ function moveSlash(delta: number) {
   if (!count) return;
   slashActive.value = (slashActive.value + delta + count) % count;
 }
+
+// Prompt recall: null means the draft is live text, a number is the recalled
+// slot. Recall starts only from an empty box; any edit or history refresh
+// returns to live editing, and Down past the newest clears the box.
+const historyIndex = ref<number | null>(null);
+
+function moveHistory(delta: number): boolean {
+  const items = props.history ?? [];
+  if (!items.length) return false;
+  if (historyIndex.value === null) {
+    // +1 is Up toward older prompts; Down and non-empty drafts stay native.
+    if (delta < 1 || draft.value) return false;
+    historyIndex.value = 0;
+  } else {
+    const next = historyIndex.value + delta;
+    if (next >= items.length) return true;
+    if (next < 0) {
+      historyIndex.value = null;
+      draft.value = "";
+      void recallCaretEnd();
+      return true;
+    }
+    historyIndex.value = next;
+  }
+  draft.value = items[historyIndex.value]!;
+  void recallCaretEnd();
+  return true;
+}
+
+// Recalled text lands with the caret at the end, matching terminal recall.
+async function recallCaretEnd() {
+  await nextTick();
+  editor.value?.setSelectionRange(draft.value.length, draft.value.length);
+}
+
+watch(() => props.history, () => { historyIndex.value = null; });
 
 async function selectSlash(command: RuntimeCommand) {
   closeSlash();
@@ -309,6 +406,15 @@ function onKeydown(event: KeyboardEvent) {
     // With no matches Enter falls through and submits the literal "/foo"
     // text — unknown commands reach the model, matching the Pi TUI.
   }
+  // Prompt recall runs after the slash menu (which owns the arrows while
+  // open) and only from an empty box or mid-browse, so caret movement inside
+  // multi-line drafts stays native.
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+    && (event.key === "ArrowUp" || event.key === "ArrowDown")
+    && moveHistory(event.key === "ArrowUp" ? 1 : -1)) {
+    event.preventDefault();
+    return;
+  }
   if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
   if (!enterToSend.value && !event.ctrlKey && !event.metaKey) return;
   event.preventDefault();
@@ -349,7 +455,42 @@ defineExpose({ focus: focusEditor });
 </script>
 
 <template>
-  <div class="prompt-composer" @paste="pasteImages" @dragover.prevent @drop.stop="dropImages">
+  <div class="prompt-composer-shell" @paste="pasteImages" @dragover.prevent @drop.stop="dropImages">
+  <ul v-if="pending.length" class="composer-queue" :aria-label="t('draft.queuedMessages')">
+    <li v-for="message in pending" :key="message.id" :data-queued-message="message.id">
+      <ListEnd :size="15" class="composer-queue-icon" />
+      <span class="composer-queue-text" :title="message.text">
+        {{ message.text || t('draft.queuedImage') }}
+        <small v-if="message.imageCount">{{ t('draft.attachedImages', { n: message.imageCount }) }}</small>
+        <small v-if="message.error" role="alert">{{ message.error }}</small>
+      </span>
+      <span v-if="message.kind === 'steer'" class="composer-queue-label">{{ t('draft.steer') }}</span>
+      <button v-else-if="running" class="composer-queue-steer" type="button" :disabled="message.delivering"
+        :title="t('draft.steerHint')" @click="queuedAction(message.id, 'steer')">
+        <CornerDownRight :size="14" />{{ t('draft.steer') }}
+      </button>
+      <button class="composer-queue-edit" type="button" :disabled="message.delivering || Boolean(queueEdit)"
+        :aria-label="t('draft.editQueued')" :title="t('draft.editQueued')" @click="editQueuedMessage(message)">
+        <Pencil :size="15" />
+      </button>
+      <button class="composer-queue-remove" type="button" :disabled="message.delivering"
+        :aria-label="t('draft.removeQueued')" :title="t('draft.removeQueued')" @click="queuedAction(message.id, 'remove')">
+        <Trash2 :size="15" />
+      </button>
+    </li>
+  </ul>
+  <form v-if="queueEdit" class="composer-queue-editor" @submit.prevent="saveQueueEdit" @keydown.stop @paste.stop @drop.prevent.stop @dragover.prevent.stop>
+    <textarea ref="queueEditor" v-model="queueEdit.text" :aria-label="t('draft.editQueued')" :disabled="queueEdit.saving" />
+    <small v-if="editingMessage?.imageCount">{{ t('draft.attachedImages', { n: editingMessage.imageCount }) }}</small>
+    <p v-if="queueEdit.error" role="alert">{{ queueEdit.error }}</p>
+    <p v-else-if="!editingMessage || editingMessage.delivering || !running" role="status">{{ t('draft.queueEditUnavailable') }}</p>
+    <div>
+      <button type="button" class="composer-queue-edit-cancel" :disabled="queueEdit.saving" @click="queueEdit = undefined">{{ t('draft.cancelQueueEdit') }}</button>
+      <button type="submit" class="composer-queue-edit-save" :disabled="!canSaveQueueEdit">{{ t('draft.saveQueueEdit') }}</button>
+    </div>
+  </form>
+  <div class="prompt-composer">
+    <slot name="header" />
     <input ref="imagePicker" class="composer-image-picker" type="file" multiple :disabled="!canAttach" tabindex="-1" aria-hidden="true" @change="addFiles(Array.from(($event.target as HTMLInputElement).files ?? []))" />
     <div v-if="files.length" class="composer-files">
       <div v-for="(file, index) in files" :key="index" class="composer-file" :title="file.path">
@@ -393,11 +534,11 @@ defineExpose({ focus: focusEditor });
       <button class="composer-attach" type="button" :disabled="!canAttach" :title="t('draft.addFiles')" :aria-label="t('draft.addFiles')" @click="imagePicker?.click()"><Paperclip :size="16" /></button>
       <div class="composer-settings">
       <DropdownMenuRoot :modal="false">
-        <DropdownMenuTrigger as-child :disabled="!runnable || busy || !modelOptions.length">
+        <DropdownMenuTrigger as-child :disabled="!runnable || busy || queueing || !modelOptions.length">
           <button
             type="button"
             class="node-footer-select node-model-select"
-            :disabled="!runnable || busy || !modelOptions.length"
+            :disabled="!runnable || busy || queueing || !modelOptions.length"
             :title="`${providerName(model?.provider)} / ${modelName(model)}`"
             aria-label="Draft model"
           >
@@ -432,11 +573,11 @@ defineExpose({ focus: focusEditor });
         </DropdownMenuPortal>
       </DropdownMenuRoot>
       <DropdownMenuRoot :modal="false">
-        <DropdownMenuTrigger as-child :disabled="!runnable || busy">
+        <DropdownMenuTrigger as-child :disabled="!runnable || busy || queueing">
           <button
             type="button"
             class="node-footer-select node-thinking-select"
-            :disabled="!runnable || busy"
+            :disabled="!runnable || busy || queueing"
             title="Draft thinking level"
             aria-label="Draft thinking level"
           >
@@ -461,14 +602,77 @@ defineExpose({ focus: focusEditor });
           </DropdownMenuContent>
         </DropdownMenuPortal>
       </DropdownMenuRoot>
+      <DropdownMenuRoot v-if="personas" :modal="false">
+        <DropdownMenuTrigger as-child :disabled="!runnable || busy || queueing">
+          <button
+            type="button"
+            class="node-footer-select node-persona-select"
+            :class="{ 'persona-active': selectedPromptOverride }"
+            :disabled="!runnable || busy || queueing"
+            :title="selectedPromptOverride ? `${selectedPromptOverride.name} · ${t(`draft.personaMode_${selectedPromptOverride.mode}`)}` : t('draft.personaOff')"
+            aria-label="Draft persona"
+          >
+            <VenetianMask :size="12" />
+            <span>{{ selectedPromptOverride?.name ?? t('draft.personaLabel') }}</span>
+            <ChevronDown :size="11" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuPortal>
+          <DropdownMenuContent class="menu-content node-thinking-menu" align="end" :side-offset="5">
+            <DropdownMenuItem class="menu-item node-model-option" @select="state.promptOverride = null">
+              <Check v-if="!selectedPromptOverride" :size="12" />
+              <i v-else />
+              <span>{{ t('draft.personaOff') }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="!personas?.length" class="menu-item node-persona-empty" disabled>
+              <i /><span>{{ t('draft.personaNone') }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              v-for="persona in personas"
+              :key="persona.name"
+              :data-persona-option="persona.name"
+              class="menu-item node-model-option"
+              @select="state.promptOverride = { mode: personaMode, name: persona.name }"
+            >
+              <Check v-if="selectedPromptOverride?.name === persona.name" :size="12" />
+              <i v-else />
+              <span>{{ persona.name }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger class="menu-item node-model-provider">
+                <span>{{ t('draft.personaMode') }}</span>
+                <ChevronRight :size="13" />
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuSubContent class="menu-content node-thinking-menu" :side-offset="4" :align-offset="-5">
+                  <DropdownMenuItem
+                    v-for="mode in personaModes"
+                    :key="mode"
+                    class="menu-item node-model-option"
+                    @select="selectPersonaMode(mode)"
+                  >
+                    <Check v-if="mode === personaMode" :size="12" />
+                    <i v-else />
+                    <span>{{ t(`draft.personaMode_${mode}`) }}</span>
+                  </DropdownMenuItem>
+                </DropdownMenuSubContent>
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
+          </DropdownMenuContent>
+        </DropdownMenuPortal>
+      </DropdownMenuRoot>
       </div>
-      <!-- One button element morphs between send and stop so focus survives the swap. -->
+      <Button v-if="queueing && onStop && hasContent" class="composer-stop" type="button" size="sm"
+        :aria-label="pending.length ? t('draft.stopAndClear') : t('graph.stopBranch')"
+        :title="pending.length ? t('draft.stopAndClear') : t('graph.stopBranch')" @click="onStop()">
+        <Square :size="12" :stroke-width="0" fill="currentColor" />
+      </Button>
       <Button
         :class="stopping ? 'composer-submit composer-stop' : 'composer-submit'"
         type="button"
         size="sm"
-        :aria-label="stopping ? t('graph.stopBranch') : sendHint"
-        :title="stopping ? t('graph.stopBranch') : sendHint"
+        :aria-label="stopping ? (pending.length ? t('draft.stopAndClear') : t('graph.stopBranch')) : sendHint"
+        :title="stopping ? (pending.length ? t('draft.stopAndClear') : t('graph.stopBranch')) : queueing ? `${t('draft.followUpHint')} · ${sendHint}` : sendHint"
         :disabled="!stopping && !canSubmit"
         @click="stopping ? onStop?.() : submit()"
       >
@@ -476,5 +680,6 @@ defineExpose({ focus: focusEditor });
         <ArrowUp v-else :size="16" :stroke-width="2" />
       </Button>
     </footer>
+  </div>
   </div>
 </template>

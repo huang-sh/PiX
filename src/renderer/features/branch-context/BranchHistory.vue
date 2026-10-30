@@ -20,6 +20,7 @@ export interface HistoryTurn {
   terminal?: BranchMessage;
   running?: boolean;
   gitBranch?: string;
+  gitCommit?: string;
   fileChanges?: FileChange[];
   compactions?: CompactionRecord[];
   trailingCompactions?: CompactionRecord[];
@@ -51,10 +52,10 @@ const { t } = useI18n();
         </article>
         <CompactionBubble v-for="(compaction, index) in turn.compactions" :key="`pre:${index}`" :compaction="compaction" />
         <div v-if="turn.gitBranch" class="chat-git-branch"
-          :title="t('graph.gitBranchAtStart', { branch: turn.gitBranch })"
-          :aria-label="t('graph.gitBranchAtStart', { branch: turn.gitBranch })">
+          :title="t('graph.gitBranchAtStart', { branch: turn.gitCommit ? `${turn.gitBranch} · ${turn.gitCommit}` : turn.gitBranch })"
+          :aria-label="t('graph.gitBranchAtStart', { branch: turn.gitCommit ? `${turn.gitBranch} · ${turn.gitCommit}` : turn.gitBranch })">
           <GitBranch :size="13" aria-hidden="true" />
-          <span>{{ turn.gitBranch }}</span>
+          <span>{{ turn.gitBranch }}<template v-if="turn.gitCommit"> · {{ turn.gitCommit.slice(0, 7) }}</template></span>
         </div>
 
         <details v-if="turn.process.length || turn.terminal?.thinking" class="agent-process"

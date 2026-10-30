@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, type BranchRecord, type SessionData } from "../src/main/graph-files.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE } from "../src/shared/types.js";
 
 const header = { type: "session", version: 3, id: "test", cwd: "/test", timestamp: "2026-01-01" };
 const user = (id: string, parentId: string | null) => ({ type: "message", id, parentId, timestamp: "2026-01-01", message: { role: "user", content: id, timestamp: 1 } });
@@ -50,6 +51,31 @@ test("permanent deletion prunes branch sources, checkpoints, requests and backup
     assert.equal(graph.records.size, 0);
     assert.equal(graph.leafId, null);
     assert.deepEqual(parseStrict(readFileSync(graph.main, "utf8")).entries, []);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("deleting an image turn removes its parent display marker and sanitizes the original-input receipt", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-delete-image-display-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  const image = { type: "image", mimeType: "image/png", data: "b3JpZ2luYWw=" };
+  const normalizedImage = { ...image, data: "cmVzaXplZA==" };
+  try {
+    graph.acquire();
+    durableWrite(graph.main, encodeSession({ header, entries: [
+      { type: "custom", id: "display", parentId: null, timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图", requestId: "image" } },
+      { type: "message", id: "image", parentId: "display", timestamp: "2026-01-01",
+        message: { role: "user", content: [{ type: "text", text: "model-only coordinate hint" }, normalizedImage], timestamp: 1 } },
+      { type: "message", id: "assistant", parentId: "image", timestamp: "2026-01-01",
+        message: fauxAssistantMessage("done") },
+    ] }));
+    durableWrite(join(graph.dir, "request-image.json"), JSON.stringify({ requestId: "image", state: "prepared",
+      nodeId: null, text: "检查截图", images: [image] }));
+
+    assert.equal(graph.deleteNode("image", "assistant"), null);
+    assert.deepEqual(readStrict(graph.main).entries, []);
+    assert.deepEqual(JSON.parse(readFileSync(join(graph.dir, "request-image.json"), "utf8")),
+      { requestId: "image", state: "cancelled" });
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -208,6 +234,30 @@ test("persistence checks use Pi JSON semantics but still reject changed or missi
     assert.equal(readFileSync(graph.path("A"), "utf8"), encodeSession(memory));
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
+test("prompt display metadata survives branch export with its target canonicalized", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-prompt-display-export-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    durableWrite(graph.main, encodeSession(initial)); graph.acquire();
+    const a = record("A");
+    const data: SessionData = { header: a.header, entries: [...initial.entries,
+      { type: "custom", id: "display", parentId: "root", timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图" } },
+      user("image", "display"),
+      user("legacy-image", "image"),
+      { type: "custom", id: "legacy-display", parentId: "legacy-image", timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { targetId: "legacy-image", text: "旧版截图" } },
+    ] };
+    graph.create(a, data);
+    const exported = graph.candidate(initial);
+    const display = exported.entries.find(entry => entry.id === "A:display");
+    assert.equal(display?.parentId, "root");
+    assert.equal(exported.entries.find(entry => entry.id === "A:image")?.parentId, "A:display");
+    const legacyDisplay = exported.entries.find(entry => entry.id === "A:legacy-display");
+    assert.equal((legacyDisplay?.data as { targetId?: string })?.targetId, "A:legacy-image");
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("nested branches export in dependency order without modifying any source", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-archive-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));

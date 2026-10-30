@@ -19,6 +19,8 @@ const busy = ref(false);
 let unsubscribe: (() => void) | undefined;
 let mounted = false;
 let replaying = 0;
+let hostConnected = true;
+let hostEpoch = 0;
 const dismissed = new Set<string>();
 const disconnected = new Set<string>();
 watch(() => current.value?.id, () => { answer.value = current.value?.options?.[0] ?? ""; });
@@ -29,13 +31,24 @@ function add(request: ExtensionDialog) {
 }
 async function restore() {
   replaying++;
+  const epoch = hostEpoch;
   try {
     const requests = await desktop.invoke<ExtensionDialog[]>("ui.pending");
-    if (mounted) requests.forEach(add);
-  } catch { /* A disconnected host will publish requests after reconnecting. */ }
+    if (mounted && hostConnected && epoch === hostEpoch) requests.forEach(add);
+  } catch { /* The next successful connection triggers another replay. */ }
   finally { if (--replaying === 0) dismissed.clear(); }
 }
 function onEvent(event: DesktopEvent) {
+  if (event.type === "host.connection") {
+    hostConnected = (event.payload as { connected: boolean }).connected;
+    if (hostConnected) void restore();
+    else {
+      hostEpoch++;
+      queue.value = [];
+      disconnected.clear();
+    }
+    return;
+  }
   if (event.type === "ui.request") add(event.payload as ExtensionDialog);
   if (event.type === "ui.dismiss") {
     const { id } = event.payload as { id: string };

@@ -4,7 +4,7 @@ import { validateRouteInput } from "../src/shared/contracts.js";
 import { projectSession } from "../src/shared/session.js";
 import { MAX_IMAGE_BYTES } from "../src/shared/images.js";
 import { PiRuntime } from "../src/main/pi-runtime.js";
-import type { PromptImage } from "../src/shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type PromptImage } from "../src/shared/types.js";
 
 const image: PromptImage = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
 
@@ -27,20 +27,37 @@ test("projects persisted images into branch messages and labels image-only graph
 
 test("runtime forwards image content to Pi prompt and queues and rejects text-only models", async () => {
   const calls: unknown[][] = [];
+  const displayEntries: Array<[string, unknown]> = [];
   const runtime = new PiRuntime("/project", null, () => {}, async () => {});
   const session = {
     model: { input: ["text", "image"] },
-    sessionManager: { getEntries: () => [] },
-    prompt: async (...args: unknown[]) => { calls.push(args); },
+    isStreaming: false,
+    sessionManager: {
+      getEntries: () => [],
+      appendCustomEntry: (type: string, data: unknown) => { displayEntries.push([type, data]); },
+    },
+    prompt: async (...args: unknown[]) => {
+      calls.push(args);
+      (args[1] as { preflightResult?: (result: "started") => void })?.preflightResult?.("started");
+    },
     steer: async (...args: unknown[]) => { calls.push(args); },
     followUp: async (...args: unknown[]) => { calls.push(args); },
   };
   runtime.runtime = { session };
   runtime.snapshot = (() => ({})) as typeof runtime.snapshot;
   await runtime.control({ action: "prompt", text: "", images: [image] });
+  session.isStreaming = true;
   await runtime.control({ action: "steer", text: "look", images: [image] });
   await runtime.control({ action: "followUp", text: "look", images: [image] });
-  assert.deepEqual(calls, [["", { source: "interactive", images: [image] }], ["look", [image]], ["look", [image]]]);
+  assert.equal(calls.length, 1, "pending inputs remain editable before their delivery boundary");
+  await runtime["deliverQueuedMessages"]("steer");
+  await runtime["deliverQueuedMessages"]("followUp");
+  const initialOptions = calls[0]?.[1] as { source?: string; images?: PromptImage[]; preflightResult?: unknown };
+  assert.equal(typeof initialOptions.preflightResult, "function");
+  assert.deepEqual({ source: initialOptions.source, images: initialOptions.images }, { source: "interactive", images: [image] });
+  assert.deepEqual(calls.slice(1), [["look", [image]], ["look", [image]]]);
+  assert.deepEqual(displayEntries, [[PROMPT_DISPLAY_CUSTOM_TYPE, { text: "" }]]);
+  session.isStreaming = false;
   session.model.input = ["text"];
   await assert.rejects(runtime.control({ action: "prompt", text: "look", images: [image] }), /does not support image/);
   assert.equal(calls.length, 3);

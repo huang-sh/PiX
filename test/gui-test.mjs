@@ -1290,25 +1290,56 @@ try {
   );
   await cdp.evaluate("document.querySelector('[data-file-tab=\"sample.pdf\"] .tool-tab-close')?.click()");
   await cdp.evaluate("document.querySelector('[data-file-tab=\"README.md\"] .tool-tab-close')?.click()");
-  // Closing the last tool tab collapses the panel. Reopening Files from
-  // collapsed remounts the workspace while the panel animates open from 0
-  // width; a tree registered before the group settles renders flex-fill
-  // instead of its 200px default.
-  await cdp.evaluate(
-    "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').closeTool('files')",
-  );
+  // Reopen both during collapse and after it finishes. A positive intermediate
+  // width must not become the new group's permanent percentage baseline.
+  const fileTreeReopenWidths = [];
+  for (const delay of [0, 60, 320, 0, 60, 320]) {
+    await cdp.evaluate(
+      "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').closeTool('files')",
+    );
+    await retry(async () => {
+      if (!(await cdp.evaluate("window.__pixTest.state().layout.collapsed.content")))
+        throw new Error("Closing the files tab did not collapse the panel");
+    });
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+    await cdp.evaluate(
+      "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').openTool('files')",
+    );
+    fileTreeReopenWidths.push(await retry(async () => {
+      const width = await cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
+      if (Math.abs(width - 200) > 4)
+        throw new Error(`Files reopened after ${delay}ms with the tree at ${width}px, expected 200px`);
+      return width;
+    }));
+  }
+  // A paused opening must not hit a timeout and freeze its intermediate size.
+  await cdp.evaluate("document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').closeTool('files')");
   await retry(async () => {
-    if (!(await cdp.evaluate("window.__pixTest.state().layout.collapsed.content")))
-      throw new Error("Closing the files tab did not collapse the panel");
+    if ((await cdp.evaluate("document.querySelector('#content-panel').getBoundingClientRect().width")) > 1)
+      throw new Error("Content panel is still collapsing before the paused-opening probe");
   });
-  await cdp.evaluate(
-    "document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').openTool('files')",
-  );
+  await cdp.evaluate("document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').openTool('files')");
   await retry(async () => {
-    const width = await cdp.evaluate("(() => { const el = document.querySelector('.file-explorer'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()");
-    if (Math.abs(width - 200) > 4)
-      throw new Error(`Files reopened from collapsed with the tree at ${width}px, expected 200px`);
+    const paused = await cdp.evaluate(`(() => {
+      const panel = document.querySelector('#content-panel');
+      const animation = panel.getAnimations().find(item => item.transitionProperty === 'flex-basis' && item.playState === 'running');
+      const width = panel.getBoundingClientRect().width;
+      const target = window.__pixTest.state().layout.widths.content;
+      if (!animation || width <= 1 || width >= target - 1) return false;
+      animation.pause(); window.__pixPausedFileOpening = animation;
+      return true;
+    })()`);
+    if (!paused) throw new Error("Files opening transition has not reached an intermediate width");
   });
+  await new Promise(resolve => setTimeout(resolve, 1700));
+  if (await cdp.evaluate("Boolean(document.querySelector('.file-explorer'))"))
+    throw new Error("Paused Files opening froze its intermediate width after the transition timeout");
+  await cdp.evaluate("window.__pixPausedFileOpening.play(); delete window.__pixPausedFileOpening");
+  fileTreeReopenWidths.push(await retry(async () => {
+    const width = await cdp.evaluate("Math.round(document.querySelector('.file-explorer')?.getBoundingClientRect().width ?? -1)");
+    if (Math.abs(width - 200) > 4) throw new Error(`Resumed Files opening has tree width ${width}px`);
+    return width;
+  }));
   imagePreview = true;
   await cdp.evaluate("document.querySelector('[data-action=add-tool-tab]').click()");
   await retry(async () => {
@@ -1377,6 +1408,7 @@ try {
   result.toolTabs = true;
   result.fileWorkspace = true;
   result.imagePreview = imagePreview;
+  result.fileTreeReopenWidths = fileTreeReopenWidths;
   screenshot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(
     join(artifacts, allowEmpty ? "gui-empty.png" : "gui-smoke.png"),

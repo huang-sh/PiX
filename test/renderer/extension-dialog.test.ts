@@ -5,6 +5,50 @@ import ExtensionDialogHost from "../../src/renderer/components/ExtensionDialogHo
 import { i18n } from "../../src/renderer/i18n";
 import type { DesktopEvent, ExtensionDialog } from "../../src/shared/types";
 
+it("ignores a stale pending-dialog reply from a disconnected host", async () => {
+  let emit!: (event: DesktopEvent) => void;
+  let replay!: (requests: ExtensionDialog[]) => void;
+  const events = vi.spyOn(window.pix!, "onEvent").mockImplementation(listener => { emit = listener; return () => {}; });
+  const invoke = vi.spyOn(window.pix!, "invoke").mockImplementation(() => new Promise(resolve => { replay = resolve as typeof replay; }));
+  const wrapper = mount(ExtensionDialogHost, { attachTo: document.body, global: { plugins: [createPinia(), i18n] } });
+  const request: ExtensionDialog = { id: "old-host-dialog", kind: "input", title: "Old input", source: "extension" };
+  try {
+    emit({ type: "host.connection", payload: { connected: false, reconnecting: true } });
+    replay([request]);
+    await flushPromises();
+    expect(document.querySelector("[data-extension-dialog]")).toBeNull();
+    emit({ type: "host.connection", payload: { connected: true } });
+    replay([{ ...request, id: "new-host-dialog", title: "Restored input" }]);
+    await flushPromises();
+    expect(document.querySelector("[data-extension-dialog]")?.textContent).toContain("Restored input");
+  } finally { wrapper.unmount(); events.mockRestore(); invoke.mockRestore(); }
+});
+
+it("restores pending input after an initially failed host connection", async () => {
+  let emit!: (event: DesktopEvent) => void;
+  let connected = false;
+  const request: ExtensionDialog = { id: "waiting", kind: "input", title: "Enter verification code", source: "extension" };
+  const events = vi.spyOn(window.pix!, "onEvent").mockImplementation(listener => { emit = listener; return () => {}; });
+  const invoke = vi.spyOn(window.pix!, "invoke").mockImplementation(async route => {
+    if (route === "ui.pending") {
+      if (!connected) throw new Error("Host unavailable");
+      return [request];
+    }
+    return true as any;
+  });
+  const wrapper = mount(ExtensionDialogHost, { attachTo: document.body, global: { plugins: [createPinia(), i18n] } });
+  try {
+    await flushPromises();
+    connected = true;
+    emit({ type: "host.connection", payload: { connected: true } });
+    await flushPromises();
+    expect(document.querySelector("[data-extension-dialog]")?.textContent).toContain(request.title);
+    emit({ type: "host.connection", payload: { connected: false } });
+    await flushPromises();
+    expect(document.querySelector("[data-extension-dialog]")).toBeNull();
+  } finally { wrapper.unmount(); events.mockRestore(); invoke.mockRestore(); }
+});
+
 it("replays pending dialogs without reviving dismissed requests and routes replies to their host", async () => {
   let emit!: (event: DesktopEvent) => void;
   let replay!: (requests: ExtensionDialog[]) => void;

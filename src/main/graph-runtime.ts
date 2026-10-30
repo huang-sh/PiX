@@ -3,14 +3,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
 import { sessionModifiedAt } from "./graph-files.js";
-import { PiRuntime } from "./pi-runtime.js";
+import { PiRuntime, type QueuedInput, type QueuedInputState } from "./pi-runtime.js";
 import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
+import { PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 
 type PromptAt = Extract<AgentControl, { action: "promptAt" }> & { timestamp?: string };
+// Internal correlation only; the public agent.control validator intentionally
+// does not accept requestId on direct prompt actions.
+type CorrelatedPrompt = Extract<AgentControl, { action: "prompt" }> & { requestId: string };
 type Worker = { pi: PiRuntime; work?: Promise<void>; snapshot?: SessionSnapshot; before?: Set<string> };
 function pendingPrompt(request: BranchRecord["request"], parentNodeId: string | null, runtime: RuntimeState) {
   const model = request.provider && request.modelId
@@ -19,6 +23,40 @@ function pendingPrompt(request: BranchRecord["request"], parentNodeId: string | 
     : runtime.model;
   return { text: request.text, parentNodeId, images: request.images, timestamp: request.timestamp,
     model, thinkingLevel: request.thinkingLevel ?? runtime.thinkingLevel };
+}
+/** Persona switches land on the interturn tail after a node's last assistant
+ * reply. Forking rewinds to the node's own state, so those switches are dropped
+ * from the copied history and the chain re-links through them; switches from
+ * the node's ancestry stay, which is exactly the inherited persona at fork. */
+/** Reverse of `graph.canonical`: the branch-local id behind a canonical one. */
+function localIdOf(record: BranchRecord, canonicalId: string): string {
+  for (const [local, canonical] of Object.entries(record.inherited))
+    if (canonical === canonicalId) return local;
+  return canonicalId;
+}
+function trimInterturnOverrides(entries: RawSessionEntry[], node: { rawEntryIds: string[] } | undefined): RawSessionEntry[] {
+  if (!node) return entries;
+  const byId = new Map(entries.map(e => [e.id, e]));
+  let boundaryIndex = -1;
+  for (const id of node.rawEntryIds) {
+    const entry = byId.get(id);
+    if (!entry) continue;
+    const index = entries.indexOf(entry);
+    // The conversation body ends at the last assistant reply; a turn without
+    // one (failed or interrupted) still owns its tail from the user entry on.
+    if ((entry as { message?: { role?: string } }).message?.role === "assistant"
+      || (entry as { message?: { role?: string } }).message?.role === "user")
+      boundaryIndex = Math.max(boundaryIndex, index);
+  }
+  if (boundaryIndex === -1) return entries;
+  const removed = new Set(entries.slice(boundaryIndex + 1)
+    .filter(e => e.type === "custom" && e.customType === PROMPT_OVERRIDE_CUSTOM_TYPE).map(e => e.id));
+  if (!removed.size) return entries;
+  const resolve = (id: string | null): string | null => {
+    while (id && removed.has(id)) id = byId.get(id)?.parentId ?? null;
+    return id;
+  };
+  return entries.filter(e => !removed.has(e.id)).map(e => ({ ...e, parentId: resolve(e.parentId) }));
 }
 function snapshotParent(id: string, entries: Map<string, RawSessionEntry>): string | null {
   const seen = new Set<string>();
@@ -34,6 +72,7 @@ function snapshotParent(id: string, entries: Map<string, RawSessionEntry>): stri
 /** One owner per graph; SDK runtimes themselves remain independent. */
 export class GraphRuntime extends PiRuntime {
   graph?: GraphFiles;
+  override onQueuedInput = (message: QueuedInput, state: QueuedInputState) => this.saveQueuedInput("main", message, state);
   private workers = new Map<string, Worker>();
   private admission: Promise<unknown> = Promise.resolve();
   private mainWork?: Promise<void>;
@@ -82,6 +121,19 @@ export class GraphRuntime extends PiRuntime {
   private notify() {
     if (!this.runtime && !this.lastMain && !this.deletionRecovery) return;
     try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); } catch (e) { debugLog("graph-runtime: notify emit", e); }
+  }
+  private saveQueuedInput(branchId: string, message: QueuedInput, state: QueuedInputState) {
+    const graph = this.graph;
+    if (!graph) return;
+    const record = graph.records.get(branchId);
+    message.nodeId ??= this.snapshot().graph?.runs.find(run => run.branchId === branchId)?.nodeId ?? null;
+    const storedState = state === "interrupted" ? "prepared" : state;
+    const receipt = state === "settled" || state === "cancelled" ? { requestId: message.id, state }
+      : { requestId: message.id, nodeId: message.nodeId, text: message.text, images: message.images,
+        kind: message.kind, branchId, runId: record?.runId ?? this.rootRunId, state: storedState };
+    this.persist(() => durableWrite(join(graph.dir, `request-${message.id}.json`), JSON.stringify(receipt) + "\n"));
+    if (state === "interrupted" && !graph.recoveredInputs.some(input => input.requestId === message.id))
+      graph.recoveredInputs.push({ requestId: message.id, text: message.text, nodeId: message.nodeId, images: message.images });
   }
   private data(pi: PiRuntime): SessionData {
     const manager = pi.runtime.session.sessionManager;
@@ -175,7 +227,7 @@ export class GraphRuntime extends PiRuntime {
         return;
       }
       try { this.emit(event); } catch (e) { debugLog("graph-runtime: worker event emit", e); }
-      if (["agent_start", "message_end", "agent_settled", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
+      if (["agent_start", "message_end", "agent_settled", "queue_update", "entry_appended", "session_info_changed", "compaction_start", "compaction_end"].includes(value.payload?.type ?? "")) {
         const worker = this.workers.get(record.id);
         if (worker?.pi.runtime) {
           try { worker.snapshot = worker.pi.snapshot(); this.notify(); } catch (e) { debugLog("graph-runtime: worker snapshot refresh", e); }
@@ -183,19 +235,25 @@ export class GraphRuntime extends PiRuntime {
       }
     }, this.openExternal, this.dialogs);
     child.mod = this.mod;
+    child.onQueuedInput = (message, state) => this.saveQueuedInput(record.id, message, state);
     child.factory = this.factory.bind(this);
     child.modelBroker = this.modelBroker;
     child.brokerProviders = new Set(this.brokerProviders);
     child.brokerModels = this.brokerModels;
     child.eventScope = { graphId: this.graph!.main, branchId: record.id, runId: record.runId };
+    child.getPromptCustomization = () => this.getPromptCustomization();
     return child;
   }
   private fileSnapshot(record: BranchRecord, data: SessionData): SessionSnapshot {
     const path = this.graph!.path(record.id);
+    const worker = this.workers.get(record.id);
+    const runtime = worker?.snapshot?.runtime ?? super.state();
+    const queue = worker?.pi.state();
     return { session: { id: String(data.header.id), path, cwd: String(data.header.cwd),
       created: String(data.header.timestamp), modified: sessionModifiedAt(path, String(data.header.timestamp)), messageCount: data.entries.length, firstMessage: record.request.text },
       entries: data.entries, projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null),
-      runtime: { ...super.state(), isStreaming: false, isCompacting: false, isRetrying: false } };
+      runtime: { ...runtime, pendingMessageCount: queue?.pendingMessageCount ?? 0, queuedMessages: queue?.queuedMessages ?? [],
+        isStreaming: false, isCompacting: false, isRetrying: false } };
   }
   override snapshot(): SessionSnapshot {
     if (this.deletionRecovery) {
@@ -244,7 +302,7 @@ export class GraphRuntime extends PiRuntime {
     const timings = new Map(runs.filter(run => run.status === "running" && run.nodeId).map(run => {
       const startedAt = run.branchId === "main" ? this.rootRequest?.timestamp : this.graph!.records.get(run.branchId)?.request.timestamp;
       const timing = run.runtime?.timing;
-      return [run.nodeId, startedAt ? timing?.startedAt === startedAt ? timing : { startedAt, compactions: [] } : undefined] as const;
+      return [run.nodeId, timing ?? (startedAt ? { startedAt, compactions: [] } : undefined)] as const;
     }));
     const timedProjection = timings.size ? { ...projection, nodes: projection.nodes.map(node => {
       const timing = timings.get(node.id);
@@ -253,7 +311,7 @@ export class GraphRuntime extends PiRuntime {
     return { ...main, runtime: this.writeFailure ? { ...main.runtime, available: false } : main.runtime,
       entries: values, projection: timedProjection,
       graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, runs, storageError: this.storageError,
-        recoveredInputs: this.graph.recoveredInputs } };
+        recoveredInputs: [...this.graph.recoveredInputs] } };
   }
   override control(input: AgentControl): Promise<unknown> {
     if (this.writeFailure && !["abort", "branchAbort", "newSession", "getModels", "getProviders", "commands"].includes(input.action))
@@ -263,9 +321,32 @@ export class GraphRuntime extends PiRuntime {
       return Promise.reject(new Error("Reopen this session to recover the failed node deletion"));
     if (input.action === "deleteNode") return this.exclusive(() => this.deleteNode(input));
     if (input.action === "setLabel") return this.exclusive(() => this.setLabel(input));
+    if (input.action === "setPromptOverride") return this.exclusive(() => this.setPromptOverride(input));
+    if (input.action === "setPromptCustomization") {
+      // Workers resolve their graph owner's current defaults before each run.
+      this.promptCustomization = input.customization;
+      this.notify();
+      return Promise.resolve(this.snapshot());
+    }
     if (input.action === "newSession") return this.create();
     if (this.stopping && this.runtime && !["abort", "branchAbort"].includes(input.action))
       return Promise.reject(new Error("Session is closing"));
+    if (input.action === "steer" || input.action === "followUp" || input.action === "clearQueue" || input.action === "updateQueuedMessage")
+      return this.exclusive(async () => {
+        const branchId = input.branchId ?? "main";
+        const worker = this.workers.get(branchId);
+        const runId = branchId === "main" ? this.rootRunId : this.graph?.records.get(branchId)?.runId;
+        if (input.graphId !== undefined && input.graphId !== this.graph?.main
+          || input.runId !== undefined && input.runId !== runId)
+          throw new Error("This run has already ended");
+        const pi = branchId === "main" ? this : worker?.pi;
+        if (!pi?.runtime || branchId !== "main" && !worker?.work)
+          throw new Error("This run has already ended");
+        await PiRuntime.prototype.control.call(pi, input);
+        if (worker) worker.snapshot = pi.snapshot();
+        this.notify();
+        return this.snapshot();
+      });
     if (input.action === "branchAbort") {
       if (input.branchId === "main") {
         if (input.runId !== this.rootRunId) return Promise.reject(new Error("This run has already ended"));
@@ -296,7 +377,7 @@ export class GraphRuntime extends PiRuntime {
     if (input.action === "exportBranchSession")
       return this.exclusive(async () => ({ work: this.exportBranch(input) })).then(({ work }) => work);
     if (input.action === "abort") this.preparations.get(this.rootRunId)?.abort(new Error("Session operation cancelled"));
-    if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands"].includes(input.action))
+    if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands", "systemPromptPreview"].includes(input.action))
       return super.control(input);
     // Prompt lifetime stays outside admission, so creating a sibling never waits for it.
     if (input.action === "prompt") return this.exclusive(async () => {
@@ -342,6 +423,20 @@ export class GraphRuntime extends PiRuntime {
       const data = this.persist(() => graph.seal(record, { header: manager.getHeader(), entries: manager.getEntries() }));
       worker.snapshot = this.fileSnapshot(record, data);
     }
+    this.notify();
+    return this.snapshot();
+  }
+  // The override lands on the active branch's tip: the next prompt on that
+  // branch runs under it, and forks inherit it from the ancestry.
+  private async setPromptOverride(input: Extract<AgentControl, { action: "setPromptOverride" }>) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a writable graph first");
+    if (this.mainWork || this.state().isStreaming)
+      throw new Error("Wait for this branch to finish before changing personas");
+    try { await super.control(input); }
+    catch (error) { this.failStorage(error); throw error; }
+    this.persist(() => graph.sealMain(this.data(this)));
+    this.persist(() => graph.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
     this.notify();
     return this.snapshot();
   }
@@ -471,7 +566,8 @@ export class GraphRuntime extends PiRuntime {
         this.notify();
         throw error;
       } finally { this.preparations.delete(this.rootRunId); }
-      const work = super.control({ action: "prompt", text: input.text, images: input.images, submittedAt: input.timestamp });
+      const work = super.control({ action: "prompt", text: input.text, images: input.images,
+        submittedAt: input.timestamp, requestId: input.requestId } as CorrelatedPrompt);
       const settled = work.then(() => {
         this.persist(() => graph.sealMain(this.data(this)));
         this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "settled" }) + "\n"));
@@ -508,8 +604,15 @@ export class GraphRuntime extends PiRuntime {
     // identity: the graph already gets inherited labels from their owning source.
     // The SDK places these records after the copied conversation, so omitting
     // them leaves all conversation parents and canonical IDs intact.
+    const copied = manager.getEntries().filter((entry: RawSessionEntry) => entry.type !== "label");
+    // Node ids are canonical in the graph projection; the copied entries carry
+    // this branch's local ids, so translate before locating the conversation
+    // boundary that bounds the interturn override records.
+    const localNode = node && parentRecord
+      ? { rawEntryIds: node.rawEntryIds.map(id => localIdOf(parentRecord, id)) }
+      : node;
     const data: SessionData = { header: { ...manager.getHeader(), parentSession: parent.session.path },
-      entries: manager.getEntries().filter((entry: RawSessionEntry) => entry.type !== "label") };
+      entries: trimInterturnOverrides(copied, localNode) };
     const inherited: Record<string, string> = {};
     const sourceIds = new Set(parent.entries.map(e => e.id));
     for (const entry of data.entries) {
@@ -568,11 +671,16 @@ export class GraphRuntime extends PiRuntime {
       await PiRuntime.prototype.control.call(pi, { action: "setThinking", level: input.thinkingLevel });
       signal.throwIfAborted();
     }
+    if (input.promptOverride) {
+      await PiRuntime.prototype.control.call(pi, { action: "setPromptOverride", ...input.promptOverride });
+      signal.throwIfAborted();
+    }
   }
   private async executeBranch(worker: Worker, record: BranchRecord) {
     const graph = this.graph!;
     try {
-      await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images, submittedAt: record.request.timestamp });
+      await worker.pi.control({ action: "prompt", text: record.request.text, images: record.request.images,
+        submittedAt: record.request.timestamp, requestId: record.requestId } as CorrelatedPrompt);
       await worker.pi.waitForWrites();
       const manager = worker.pi.runtime.session.sessionManager;
       this.persist(() => graph.seal(record, this.data(worker.pi)));

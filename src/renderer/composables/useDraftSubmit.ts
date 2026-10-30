@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
-import type { PromptImage, RuntimeModel } from "../../shared/types";
+import type { NodePromptOverride, PromptImage, RuntimeModel } from "../../shared/types";
 import { useLayoutStore } from "../stores/layout";
 import { useSessionStore } from "../stores/session";
 
@@ -19,7 +19,7 @@ export function useDraftSubmit() {
     model?: RuntimeModel | null,
     thinkingLevel?: string,
     images?: PromptImage[],
-    options?: { follow?: boolean; columnId?: string; requestId?: string },
+    options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null },
   ): Promise<{ nodeId?: string } | false> {
     submitted.value = session.current?.graph ? undefined : {
       parentId,

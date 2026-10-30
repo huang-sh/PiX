@@ -29,6 +29,15 @@ export interface CustomModelInput {
   reasoning: boolean;
   imageInput: boolean;
 }
+export type CustomProviderInput = Pick<CustomModelInput, "provider" | "baseUrl" | "api" | "apiKey">;
+export type CustomModelsInput = Omit<CustomModelInput, "modelId" | "name"> & {
+  models: Array<{ modelId: string; name?: string }>;
+};
+export interface DiscoveredModel {
+  id: string;
+  name?: string;
+  exists?: boolean;
+}
 type BrokerFields = "provider" | "id" | "name" | "api" | "input" | "cost";
 export type BrokerModel =
   | (Pick<Model<Api>, BrokerFields | "reasoning" | "thinkingLevelMap" | "contextWindow" | "maxTokens"> & { type?: "chat" })
@@ -94,7 +103,48 @@ export interface RawSessionEntry {
   [key: string]: unknown;
 }
 export const NODE_FOOTER_CUSTOM_TYPE = "pix.node-footer";
+export const PROMPT_DISPLAY_CUSTOM_TYPE = "pix.prompt-display";
 export const GIT_BRANCH_CUSTOM_TYPE = "pix.git-branch";
+export const PROMPT_OVERRIDE_CUSTOM_TYPE = "pix.prompt-override";
+export type PromptOverrideMode = "append" | "replace" | "strict";
+/** Data of a `pix.prompt-override` entry: the persona snapshot in force from
+ * the entry onward on that branch. `off` restores the desktop's defaults. */
+export interface PromptOverrideRecord {
+  mode: PromptOverrideMode;
+  /** Persona display name; absent on `off` records. */
+  name?: string;
+  /** Persona contents captured when applied, preserving history after edits. */
+  text?: string;
+  off?: true;
+}
+/** The override a node ran under, resolved by ancestry (absent = defaults). */
+export interface NodePromptOverride {
+  mode: PromptOverrideMode;
+  name: string;
+}
+/** A named system prompt (persona) managed on the settings page. The text is
+ * snapshotted into the session record when applied, so history stays accurate
+ * and remote hosts need no persona definitions of their own. */
+export interface PersonaDefinition {
+  name: string;
+  text: string;
+}
+/** Desktop-level overrides for pi's stock prompt sections. Absent or empty
+ * sections keep their dynamically generated content; remote hosts receive the
+ * text through a runtime sync, so they need no settings of their own. */
+export interface PromptCustomization {
+  preamble?: string;
+  /** Desktop picker provenance: null means explicitly custom; absent is legacy. */
+  preamblePersona?: string | null;
+  rules?: string;
+  docs?: string;
+}
+export type PromptOverrideInput = { off: true } | { mode: PromptOverrideMode; name: string; text: string };
+export interface SystemPromptPreview {
+  text: string;
+  preamble: string;
+  sections: Array<{ name: string; content: string }>;
+}
 export interface ContextUsageSnapshot {
   tokens: number | null;
   contextWindow: number;
@@ -110,6 +160,10 @@ export interface GraphNode {
   label?: string;
   /** Git branch at turn start, recorded as the pix.git-branch entry the user message hangs off. */
   gitBranch?: string;
+  /** Full HEAD commit SHA at turn start; absent for unborn branches and legacy records. */
+  gitCommit?: string;
+  /** System-prompt override this turn ran under, resolved by ancestry. */
+  promptOverride?: NodePromptOverride;
   fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
@@ -193,6 +247,8 @@ export interface SessionProjection {
   messages: BranchMessage[];
   leafId: string | null;
   activeNodeId: string | null;
+  /** Override in force at the active leaf, null once an `off` record is set, undefined before any record. */
+  activePromptOverride?: NodePromptOverride | null;
 }
 export interface RuntimeModel {
   type?: "chat" | "image" | "classifier";
@@ -213,6 +269,14 @@ export interface RuntimeProvider {
   authTypes: Array<"api_key" | "oauth">;
   status?: { type: "api_key" | "oauth"; source?: string };
 }
+export interface QueuedMessage {
+  id: string;
+  kind: "steer" | "followUp";
+  text: string;
+  imageCount: number;
+  delivering?: boolean;
+  error?: string;
+}
 export interface RuntimeState {
   timing?: RunTiming;
   available: boolean;
@@ -230,6 +294,7 @@ export interface RuntimeState {
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
   pendingMessageCount: number;
+  queuedMessages?: QueuedMessage[];
 }
 export interface SessionSnapshot {
   session: SessionSummary;
@@ -393,11 +458,15 @@ export interface AppSettings {
   enterToSend: boolean;
   openLinksInApp: boolean;
   closeToTray: boolean;
+  preventSleepDuringTasks: boolean;
+  keepScreenOnDuringTasks: boolean;
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
   /** Optional footer fields in priority order; model and thinking always appear. */
   nodeCardFields?: NodeCardField[];
+  /** Show a short commit SHA beside the branch in node footers; defaults to true. */
+  nodeCardShowCommit?: boolean;
   /**
    * Deploys this desktop's model API keys and custom models to remote hosts,
    * so remote work runs without the desktop. Off by default; the host only
@@ -411,6 +480,10 @@ export interface AppSettings {
   /** Usage panel preferences: providers on flat subscription plans (coding
    *  plans) whose per-token costs should not count as billed. */
   usage?: { unbilledProviders?: string[] };
+  /** Named system prompts offered in the composer's persona picker. */
+  personas?: PersonaDefinition[];
+  /** Overrides for pi's stock prompt sections; empty sections stay dynamic. */
+  promptCustomization?: PromptCustomization;
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -476,13 +549,17 @@ export interface RuntimeExtension {
 export type AgentControl =
   | { action: "deleteNode"; nodeId: string; graphId: string }
   | { action: "exportBranchSession"; nodeId: string; graphId: string }
-  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
+  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
   | { action: "branchAbort"; branchId: string; runId: string }
-  | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[]; submittedAt?: string }
+  | { action: "prompt"; text: string; images?: PromptImage[]; submittedAt?: string }
+  | { action: "steer" | "followUp"; text: string; images?: PromptImage[]; graphId?: string; branchId?: string; runId?: string }
+  | { action: "clearQueue"; graphId?: string; branchId?: string; runId?: string }
+  | ({ action: "updateQueuedMessage"; id: string; graphId?: string; branchId?: string; runId?: string } & (
+      { operation: "steer" | "remove" } | { operation: "edit"; text: string }
+    ))
   | {
       action:
         | "abort"
-        | "clearQueue"
         | "getState"
         | "refreshModels"
         | "cycleModel"
@@ -546,15 +623,22 @@ export type AgentControl =
   | { action: "setTools"; names: string[] }
   | { action: "setBrokerProviders"; providers: string[]; models?: BrokerModel[] }
   | ({ action: "addCustomModel" | "updateCustomModel" } & CustomModelInput)
+  | ({ action: "addCustomModels" } & CustomModelsInput)
+  | ({ action: "discoverModels" } & CustomProviderInput)
   | { action: "loginApiKey"; provider: string; apiKey: string }
   | { action: "loginOAuth"; provider: string; method: "browser" | "device-code" }
   | { action: "logout"; provider: string }
   | { action: "setLabel"; entryId: string; label?: string }
+  | ({ action: "setPromptOverride" } & PromptOverrideInput)
+  | { action: "setPromptCustomization"; customization: PromptCustomization }
+  | { action: "systemPromptPreview" }
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
   | "ui.respond"
   | "ui.pending"
   | "app.bootstrap"
+  | "app.hostStatus"
+  | "app.hostRestart"
   | "app.pickProject"
   | "app.openProject"
   | "app.revealLogs"
@@ -613,7 +697,7 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "host.connection" | "host.shutdown" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
   payload: unknown;
 }
 export interface ExtensionDialog {

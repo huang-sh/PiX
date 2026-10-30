@@ -14,7 +14,7 @@ test("Pi execution stays in runtime adapters; the terminal imports only Pi prese
   );
   assert.deepEqual(
     hits.map((p) => p.replace(root, "").replaceAll("\\", "/")),
-    ["/cli/tui.ts", "/main/extensions/file-changes.ts", "/main/extensions/git-branch.ts", "/main/pi-runtime.ts"],
+    ["/cli/tui.ts", "/main/extensions/file-changes.ts", "/main/extensions/git-branch.ts", "/main/extensions/prompt-override.ts", "/main/pi-runtime.ts"],
   );
   assert.doesNotMatch(readFileSync(join(root, "cli/tui.ts"), "utf8"), /\b(?:createAgentSession|AgentSessionRuntime|SessionManager|createCodingTools|InteractiveMode)\b/);
 });

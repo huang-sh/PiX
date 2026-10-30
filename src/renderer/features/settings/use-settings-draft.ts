@@ -25,7 +25,7 @@ export interface Row {
   placeholder?: string;
   min?: number;
   max?: number;
-  group?: "interface" | "canvas";
+  group?: "interface" | "canvas" | "prompts" | "queue" | "connection" | "retry";
 }
 
 // Mirrors withDefaultPowershellTool in the main process: Windows agents get
@@ -98,6 +98,8 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
           { path: "confirmDestructiveActions", label: "settings.rows.confirmDestructive", scope: "app", type: "check", description: "settings.rows.confirmDestructiveDesc" },
           { path: "openLastSessionOnStartup", label: "settings.rows.openLastSession", scope: "app", type: "check", fallback: false, description: "settings.rows.openLastSessionDesc" },
           { path: "closeToTray", label: "settings.rows.closeToTray", scope: "app", type: "check", fallback: true, description: "settings.rows.closeToTrayDesc" },
+          { path: "preventSleepDuringTasks", label: "settings.rows.preventSleepDuringTasks", scope: "app", type: "check", fallback: true, description: "settings.rows.preventSleepDuringTasksDesc" },
+          { path: "keepScreenOnDuringTasks", label: "settings.rows.keepScreenOnDuringTasks", scope: "app", type: "check", fallback: false, description: "settings.rows.keepScreenOnDuringTasksDesc" },
         ];
       case "appearance":
         return [
@@ -129,17 +131,17 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
         return [
           // Match the runtime's project-over-global resolution, including a
           // blank project value that explicitly selects the model's own style.
-          { path: "outputStyle", label: "settings.rows.outputStyle", scope: draft.value?.piProject.outputStyle != null ? "project" : "global", type: "select", options: ["", ...(outputStyleSkills?.value ?? [])], fallback: "", description: "settings.rows.outputStyleDesc" },
-          { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
-          { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time" },
-          { path: "transport", label: "settings.rows.transport", scope: "global", type: "select", options: ["auto", "sse", "websocket", "websocket-cached"], fallback: "auto" },
-          { path: "httpIdleTimeoutMs", label: "settings.rows.httpIdleTimeout", scope: "global", type: "select", options: ["30000", "60000", "120000", "300000", "0"], fallback: 300000 },
-          { path: "retry.enabled", label: "settings.rows.autoRetry", scope: "global", type: "check", fallback: true },
-          { path: "retry.maxRetries", label: "settings.rows.maxRetries", scope: "global", type: "number", fallback: 3 },
-          { path: "retry.baseDelayMs", label: "settings.rows.retryBaseDelay", scope: "global", type: "number", fallback: 1000 },
-          { path: "retry.maxDelayMs", label: "settings.rows.retryMaxDelay", scope: "global", type: "number", fallback: 60000 },
-          { path: "retry.providerRetryTimeoutMs", label: "settings.rows.providerRetryTimeout", scope: "global", type: "number", fallback: 120000 },
-          { path: "retry.providerMaxRetries", label: "settings.rows.providerMaxRetries", scope: "global", type: "number", fallback: 5 },
+          { path: "outputStyle", label: "settings.rows.outputStyle", scope: draft.value?.piProject.outputStyle != null ? "project" : "global", group: "prompts", type: "select", options: ["", ...(outputStyleSkills?.value ?? [])], fallback: "", description: "settings.rows.outputStyleDesc" },
+          { path: "steeringMode", label: "settings.rows.steeringDelivery", scope: "global", group: "queue", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time", description: "settings.rows.steeringDeliveryDesc" },
+          { path: "followUpMode", label: "settings.rows.followUpDelivery", scope: "global", group: "queue", type: "select", options: ["one-at-a-time", "all"], fallback: "one-at-a-time", description: "settings.rows.followUpDeliveryDesc" },
+          { path: "transport", label: "settings.rows.transport", scope: "global", group: "connection", type: "select", options: ["auto", "sse", "websocket", "websocket-cached"], fallback: "auto" },
+          { path: "httpIdleTimeoutMs", label: "settings.rows.httpIdleTimeout", scope: "global", group: "connection", type: "select", options: ["30000", "60000", "120000", "300000", "0"], fallback: 300000 },
+          { path: "retry.enabled", label: "settings.rows.autoRetry", scope: "global", group: "retry", type: "check", fallback: true },
+          { path: "retry.maxRetries", label: "settings.rows.maxRetries", scope: "global", group: "retry", type: "number", fallback: 3 },
+          { path: "retry.baseDelayMs", label: "settings.rows.retryBaseDelay", scope: "global", group: "retry", type: "number", fallback: 1000 },
+          { path: "retry.maxDelayMs", label: "settings.rows.retryMaxDelay", scope: "global", group: "retry", type: "number", fallback: 60000 },
+          { path: "retry.providerRetryTimeoutMs", label: "settings.rows.providerRetryTimeout", scope: "global", group: "retry", type: "number", fallback: 120000 },
+          { path: "retry.providerMaxRetries", label: "settings.rows.providerMaxRetries", scope: "global", group: "retry", type: "number", fallback: 5 },
         ];
       case "tools":
         return [
@@ -173,6 +175,8 @@ export function useSettingsDraft(outputStyleSkills?: Ref<string[]>) {
     const hint = row.description
       ? t(row.description)
       : t("settings.storedIn", { scope: t(`settings.scope.${row.scope}`) });
+    if (row.path === "preventSleepDuringTasks" && /^Win/i.test(navigator.platform) && !draft.value?.app.keepScreenOnDuringTasks)
+      return `${hint} ${t("settings.rows.preventSleepDuringTasksWindowsLimit")}`;
     return row.path === "outputStyle"
       ? `${t(`settings.rows.outputStyle${row.scope === "project" ? "Project" : "Global"}Scope`)} ${hint}`
       : hint;
