@@ -9,10 +9,12 @@ GUI 与 CLI 都连接到独立的 PiX Host。Host 在同一台机器、同一 `P
 桌面版包含专用 CLI 启动器，使用应用自带运行时，不要求另装 Node.js。安装后打开新的终端运行 `pix --help`。
 
 - **Windows 安装版**：NSIS 将安装目录中的 `resources\cli` 加入 PATH；仅当前用户安装写用户 PATH，所有用户安装写系统 PATH。卸载时只移除该安装器实际添加的目录。重复安装不重复添加，搬迁安装会清理旧目录。已有相同 PATH 项会保留。
-- **macOS DMG/ZIP**：将 PiX.app 放到 Applications 并启动一次，自动创建 `~/.pix/bin/pix`，为 zsh 及已有 Bash/fish 配置添加带标记的 PATH 块。DMG 拖拽与移入废纸篓都没有可执行的安装/卸载钩子，因此删除应用前运行 `pix command uninstall`；会移除启动器和 PiX 添加的配置块，保留其他配置。
+- **macOS DMG**：双击磁盘映像中的 PiX，选择“安装并打开”。安装前会检查任务和连接，关闭旧窗口及后台，再由系统替换应用并启动；有任务或其他连接时可取消、重新检查，或确认终止并安装。取消或替换失败时会尝试重新打开此前的 PiX 窗口，无法打开时提供提示。ZIP 仍需将 PiX.app 放到 Applications，覆盖前先“退出 PiX”。安装后启动一次，自动创建 `~/.pix/bin/pix`，为 zsh 及已有 Bash/fish 配置添加带标记的 PATH 块。Finder 拖拽覆盖无法执行安装检查；请使用 DMG 中的引导安装。移入废纸篓没有卸载钩子，因此删除应用前运行 `pix command uninstall`；会移除启动器和 PiX 添加的配置块，保留其他配置。
 - **Linux deb/rpm**：安装器自动注册 `/usr/bin/pix`，GUI 使用独立的 `pix-desktop` 命令；卸载清理 CLI 链接。保留 electron-builder 原有的 sandbox、MIME 与 AppArmor 安装行为。
 - **Linux tar.gz**：解压到固定目录并启动 GUI 一次后，按用户注册命令。
 - **Windows 便携版、AppImage**：不会自动修改 PATH；需要 `pix` 终端命令时，请使用支持命令注册的安装格式。macOS 直接从 `/Volumes/` 中运行也不会注册，避免指向稍后卸载的磁盘映像。
+
+macOS 的“终止并安装”会先尝试正常退出；确认强制安装后，无法退出的旧 PiX 窗口也会被强制关闭。普通安装不会强制关闭窗口。
 
 ```sh
 pix command status
@@ -71,11 +73,19 @@ pix tree --session <会话>
 pix stop --session <会话> --branch <branchId> --run-id <runId>
 ```
 
-默认等待所提交的任务完成；`--detach` 在接受任务后退出。关闭 GUI、退出终端或客户端意外断开不会取消已接受的任务。等待过程中 Ctrl+C 只停止该 CLI 提交的 run；`--timeout <秒>` 只停止等待，任务继续执行。
+默认等待所提交的任务完成；`--detach` 在接受任务后退出。关闭 macOS 窗口、最小化到托盘、退出 CLI 或客户端意外断开不会取消已接受的 Agent 任务。等待过程中 Ctrl+C 只停止该 CLI 提交的 run；`--timeout <秒>` 只停止等待，任务继续执行。
+
+桌面端菜单、快捷键、托盘或界面中的“退出 PiX”会完整关闭本机共享后台。存在 Agent 任务、终端命令、终端会话、远程连接或其他客户端时，会先确认影响，默认取消；确认后停止本地任务并关闭连接的 PiX 窗口，防止其他窗口自动重启后台。取消保留原界面和任务；后台停止失败时可重试，取消退出会恢复连接。Windows/Linux 关闭窗口且未启用最小化到托盘时，也走完整退出流程。
 
 分支会话历史独立，但项目文件与 Git 工作目录共享。需要同时修改互不影响的代码时，请使用不同目录或 Git worktree。
 
-Host 没有客户端连接、没有任务和远程连接时，默认空闲 10 分钟退出，`PIX_HOST_LINGER_MS` 可调整。`pix host status` 显示状态；`pix host stop` 在没有任务及远程连接时关闭 Host。版本不兼容时拒绝连接，需用原版本在任务完成后关闭旧 Host，再启动新版。
+Host 没有客户端连接、没有任务和远程连接时，默认空闲 10 分钟退出，`PIX_HOST_LINGER_MS` 可调整。`pix host status` 显示状态；`pix host stop` 在没有其他客户端、任务及远程连接时关闭 Host。新版启动时，若旧 Host 协议兼容且没有其他客户端、任务及远程连接，会让旧 Host 正常退出并启动新版后台；不能自动切换时进入恢复界面，可等待或确认强制重启。
+
+后台暂时无法切换时，PiX 窗口仍会打开，显示后台版本、任务及连接状态，并自动重试。可点击“重试连接”，或点击“终止任务并重启…”查看影响并确认。强制重启会中断本地任务、终端命令及其他客户端连接；已保存的会话记录保留，未保存内容可能丢失。远程任务可能仍在远程主机运行，重连后请检查。
+
+命令行管理操作无需连接同版本的会话服务：`pix host status` 可检查旧后台，`pix host restart` 安全重启；明确需要中断任务时使用 `pix host restart --force`（仅停止后台则使用 `pix host stop --force`）。强制操作先尝试正常保存退出，无响应时才强制终止；如果检查后后台已被替换，会要求重新检查，避免停止新的后台。
+
+安装版保留原桌面身份，开发版按源码目录区分身份。支持桌面身份迁移的 Host 会在新身份还没有视图、旧身份的连接已经断开时，原子转移旧视图及其远程连接池；已有的新视图优先，在线的旧连接不会被抢占。旧身份原本由安装版和开发版共用，Host 无法追溯区分其来源。已运行且不支持迁移的旧 Host 会使开发版明确报错；应先用原客户端等待任务完成，再执行 `pix host stop` 并启动新版，不能把旧进程中的内存视图无损迁入一个重启后的 Host。会话文件仍按原规则保存。
 
 仅本机回环地址开放 WebSocket，使用私有 profile 中的随机 token 验证连接；浏览器 Origin 请求被拒绝。后台地址和启动日志在 `~/.pix/run/`，运行诊断沿用 `~/.pix/log/main.log`。Host 使用 Node.js 网络栈，代理通过 PiX 的 `httpProxy` 设置或标准代理环境变量配置；不使用 Chromium 的系统 PAC 解析。不要让外部 Pi CLI 绕过 Host 写入同一个源文件；现有整图独占锁继续生效。
 
@@ -107,11 +117,14 @@ npm test
 npm run test:cli
 npm run test:cli:package
 npm run test:installation
+npm run test:gui:install
 PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:real
 PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:tui:real
 ```
 
 `test:cli` 使用真实 Pi SDK、真实文件工具、本机可控 HTTP 模型、多个 CLI 进程和真实 Electron GUI，验证并发启动、分支并行、上下文隔离、独立停止、退出存活、GUI 实时同步和重启恢复。需要允许本机监听和桌面应用运行。
+
+`test:gui:install` 在 macOS 创建独立临时应用，验证正常退出、拒绝退出和确认强制关闭，不操作已安装的 PiX；其他系统跳过原生测试。
 
 `test:cli:package` 在仓库外的临时目录完成 npm 安装，确认没有 Electron/Vue 依赖，再启动 Host 并创建、读取会话；需要下载依赖。
 

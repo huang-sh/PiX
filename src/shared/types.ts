@@ -637,6 +637,8 @@ export type DesktopRoute =
   | "ui.respond"
   | "ui.pending"
   | "app.bootstrap"
+  | "app.hostStatus"
+  | "app.hostRestart"
   | "app.pickProject"
   | "app.openProject"
   | "app.revealLogs"
@@ -695,7 +697,7 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
+  type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "host.connection" | "host.shutdown" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
   payload: unknown;
 }
 export interface ExtensionDialog {

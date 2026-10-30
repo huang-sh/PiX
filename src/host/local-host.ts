@@ -64,6 +64,11 @@ export async function serveLocalHost() {
     },
   });
   const controllers = new Set<MainController>();
+  const attached = new Set<WebSocket>();
+  const shellActivity = () => [...controllers, owner].reduce((counts, controller) => ({
+    commands: counts.commands + controller.shell.running.size,
+    terminals: counts.terminals + controller.shell.terminals.size,
+  }), { commands: 0, terminals: 0 });
   let sequence = 0;
   let lastLive = Date.now();
   let stopping = false;
@@ -141,6 +146,7 @@ export async function serveLocalHost() {
     });
     socket.on("error", () => {});
     socket.on("close", () => {
+      attached.delete(socket);
       stopEvents?.();
       platforms.delete(socket);
       keepAwake.delete(socket);
@@ -148,7 +154,7 @@ export async function serveLocalHost() {
         // Keep the desktop's selection and remote pool so its next connection
         // takes over the same view, including tasks still running remotely.
         controller?.suspend();
-      } else if (controller && (!clientId || desktopViews.get(clientId)?.controller !== controller)) {
+      } else if (controller && ![...desktopViews.values()].some(view => view.controller === controller)) {
         controller.detach();
         void controller.pool.closeAllRemote().catch(error => console.error("PiX host client cleanup", error))
           .finally(() => controllers.delete(controller!));
@@ -171,6 +177,8 @@ export async function serveLocalHost() {
         }
         request = value;
         if (!request || request.type !== "request" || typeof request.id !== "string") throw new Error("Invalid host request");
+        if (stopping && request.method !== "status" && request.method !== "shutdown")
+          throw new Error("PiX host is shutting down. Reconnect to start a new host.");
         let result: unknown;
         switch (request.method) {
           case "attach": {
@@ -186,8 +194,19 @@ export async function serveLocalHost() {
             if (cwd && !statSync(cwd).isDirectory()) throw new Error("Project path is not a directory");
             if (request.clientId !== undefined && (!request.platform || typeof request.clientId !== "string" || !/^[\w-]{1,100}$/.test(request.clientId)))
               throw new Error("Invalid desktop client identity");
+            if (request.legacyClientId !== undefined && (!request.clientId || typeof request.legacyClientId !== "string"
+              || !/^[\w-]{1,100}$/.test(request.legacyClientId))) throw new Error("Invalid previous desktop client identity");
             clientId = request.clientId;
-            const previous = clientId ? desktopViews.get(clientId) : undefined;
+            let previous = clientId ? desktopViews.get(clientId) : undefined;
+            if (!previous && request.legacyClientId) {
+              const legacy = desktopViews.get(request.legacyClientId);
+              // Never take over a live desktop. Move the retained view rather
+              // than aliasing it, so its old identity can be used independently.
+              if (legacy && legacy.socket.readyState >= WebSocket.CLOSING) {
+                previous = legacy;
+                desktopViews.delete(request.legacyClientId);
+              }
+            }
             controller = previous?.controller ?? new MainController(cwd, platform, owner);
             // Platform callbacks already captured by remote pools must follow
             // the live socket, too; preserve the object and replace its methods.
@@ -196,6 +215,7 @@ export async function serveLocalHost() {
             if (request.platform) platforms.set(socket, controller.platform);
             previous?.socket.close();
             controllers.add(controller);
+            attached.add(socket);
             imageReferences = request.imageReferences === true;
             const encodeEvent = sessionEventEncoder();
             stopEvents = controller.onEvent(event => {
@@ -216,14 +236,22 @@ export async function serveLocalHost() {
           }
           case "status":
             result = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION, pid: process.pid,
-              clients: wss.clients.size, sessions: owner.registry.liveEntries().length,
-              running: [...owner.registry.runningPaths()] };
+              clients: [...wss.clients].filter(client => client.readyState === WebSocket.OPEN && (client === socket || attached.has(client))).length,
+              sessions: owner.registry.liveEntries().length,
+              running: [...owner.registry.runningPaths()], pending: owner.hasPendingWork, stopping,
+              ...shellActivity(),
+              remoteConnections: [...controllers].filter(c => c.pool.hasConnections).length };
             break;
           case "shutdown":
-            if (owner.hasPendingWork || owner.registry.runningPaths().size || [...controllers].some(c => c.pool.hasConnections))
+            if (!stopping && request.force !== true && (owner.hasPendingWork || owner.registry.runningPaths().size || [...controllers].some(c => c.pool.hasConnections)))
               throw new Error("Stop running tasks and disconnect remote workspaces before stopping the host");
+            if (!stopping && request.force !== true && (shellActivity().commands || shellActivity().terminals))
+              throw new Error("Stop shell commands and close terminals before stopping the host");
+            if (!stopping && request.force !== true && [...attached].some(client => client !== socket && client.readyState === WebSocket.OPEN))
+              throw new Error("Close other PiX windows and terminal clients before stopping the host");
             result = { stopped: true };
             send(socket, { type: "reply", id: request.id, result });
+            if (request.quitClients === true) broadcast({ type: "host.shutdown", payload: {} });
             void shutdown();
             return;
           default: throw new Error("Unknown host method");
@@ -241,7 +269,7 @@ export async function serveLocalHost() {
   });
   await new Promise<void>((resolve, reject) => { wss.once("listening", resolve); wss.once("error", reject); });
   const address: HostAddress = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION,
-    pid: process.pid, port: (wss.address() as { port: number }).port, token };
+    pid: process.pid, port: (wss.address() as { port: number }).port, token, desktopViewMigration: true };
   mkdirSync(hostRunDir(), { recursive: true, mode: 0o700 });
   writeFileSync(hostAddressFile(), JSON.stringify(address), { mode: 0o600 });
   let maintaining = false;

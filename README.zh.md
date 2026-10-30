@@ -73,7 +73,7 @@ PiX 还内置两个带原生二进制的扩展，扩展及运行依赖随安装�
 
 桌面安装版会注册 `pix` 终端命令（macOS 在移入 Applications 后首次启动时注册）；桌面 CLI 使用应用自带运行时，无需另装 Node.js。注册、卸载及便携格式的区别见 [CLI 文档](docs/cli.md)。
 
-GUI 与 CLI 共享同一个独立后台 Host 和现有 PiX 会话树，可在多个终端同时运行分支任务。关闭界面后，已接受的任务继续执行。
+GUI 与 CLI 共享同一个独立后台 Host 和现有 PiX 会话树，可在多个终端同时运行分支任务。退出 CLI、关闭 macOS 窗口或最小化到托盘后，已接受的 Agent 任务继续执行。“退出 PiX”会完整停止本机后台；有任务时先确认，默认取消。
 
 交互模式复用 Pi 原生终端编辑器、Markdown 与工具卡片、模型选择器和可搜索的会话树。输入 `/` 补全命令、`/tree` 选择分支、`/sessions` 恢复会话。
 
@@ -96,6 +96,7 @@ pix tree --session <会话ID或路径>
 - **macOS**：根据 Mac 的芯片选择安装包（点击 ** → 关于本机** 查看）：
   - **Apple 芯片**（M1、M2、M3、M4 等）：`PiX-x.y.z-arm64.dmg`。
   - **Intel 处理器**：`PiX-x.y.z-x64.dmg`。
+  - 打开 DMG 后双击 PiX，选择“安装并打开”；更新前会检查任务并关闭旧后台。
   - 另提供 zip 包，同样按芯片选择：Apple 芯片选 `arm64`，Intel 选 `x64`。
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（免安装）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`，另提供 tar.gz，x64。
 
@@ -103,7 +104,7 @@ pix tree --session <会话ID或路径>
 
 ## 交流群
 
-扫码加入微信交流群：
+扫码加入微信交流群，请备注 `pix`：
 
 <p>
   <img src="assets/images/Weixin.png" width="220" alt="PiX 微信交流群二维码">

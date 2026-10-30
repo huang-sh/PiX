@@ -414,11 +414,12 @@ try {
   const guiPid = (await cli(['host', 'status'])).events[0].pid;
   assert.equal(guiPid, hostPid);
   console.error('A GUI-started');
-  // A GUI-started run survives quitting the entire Electron process.
+  // An unexpected GUI process exit preserves accepted work; explicit Quit now
+  // stops the shared host and is checked separately below.
   await gui.evaluate(`window.pix.invoke('agent.control', {action:'promptAt', requestId:'gui-detach', nodeId:${JSON.stringify(rootNode)}, text:'HOLD GUI quit'})`);
   await until(() => held.has('HOLD GUI quit'));
   const guiQuit = async () => {
-    try { await gui.evaluate("void window.pix.invoke('app.quit'); true"); } catch {}
+    desktop.kill('SIGKILL');
     gui?.close(); gui = undefined;
   };
   const exited = new Promise(resolve => desktop.once('exit', resolve));
@@ -459,8 +460,10 @@ try {
   await gui.evaluate("void window.pix.invoke('app.quit'); true");
   gui.close(); gui = undefined;
   await guiExit; desktop = undefined;
+  await until(() => !existsSync(join(home, '.pix', 'run', 'host.json')));
+  await until(() => { try { process.kill(hostPid, 0); return false; } catch { return true; } });
   await cli(['host', 'stop']);
-  console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'automatic retry success', 'running main request deduplication', 'live node admission', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI quit preserves run', 'GUI reopen restores silent stream without replay', 'restart persistence'],
+  console.log(JSON.stringify({ passed: true, cases: ['cold-start race', 'automatic retry success', 'running main request deduplication', 'live node admission', 'real SDK write tool', 'parallel CLI branches', 'independent stop', 'branch context isolation', 'nested branch', 'detach and request deduplication', 'interactive PTY and Ctrl+C', 'model error recovery', 'one-shot extension input', 'GUI/CLI shared host', 'independent client views', 'GUI live updates', 'GUI crash preserves run', 'GUI reopen restores silent stream without replay', 'restart persistence', 'explicit GUI quit stops host and process'],
     tuiChecks: ['tree stays focused after a running task settles', 'tree label editing and empty filters', 'GUI menu label editing', 'native GUI label shortcut and Enter to save', 'label menu restores while sibling keeps running', 'bidirectional GUI/CLI labels', 'restart and export labels', 'native tree search and fold/unfold', 'model fuzzy search', 'narrow terminal resize', 'draft preservation',
       'cancel and continue', 'native input/select/confirm dialogs', 'confirmation defaults to cancel', 'CJK multiline paste',
       'native tool cards', 'exit preserves accepted work'], modelRequests: requests.length, home }));

@@ -73,7 +73,7 @@ PiX also loads internal extensions: `file-changes` snapshots files before and af
 
 Desktop installers register the `pix` terminal command; macOS registers it on first launch after moving the app to Applications. The desktop CLI uses the bundled runtime and requires no separate Node.js installation. See [CLI documentation](docs/cli.md) for removal and portable-format behavior.
 
-The GUI and CLI share an independent background host and the existing PiX session tree. Multiple terminals can run branches concurrently; accepted tasks keep running after a client exits.
+The GUI and CLI share an independent background host and the existing PiX session tree. Multiple terminals can run branches concurrently. Accepted agent tasks survive CLI exits, macOS window closure and minimizing to the tray. “Quit PiX” stops the local host completely; active work requires confirmation, defaulting to cancel.
 
 Interactive mode uses Pi's native terminal editor, Markdown and tool cards, model picker, and searchable tree selector. Type `/` for commands, `/tree` to choose a branch, or `/sessions` to resume.
 
@@ -96,6 +96,7 @@ Grab the installer for your platform from [GitHub Releases](https://github.com/h
 - **macOS**: choose the installer that matches your Mac's chip (check ** → About This Mac**):
   - **Apple silicon** (M1, M2, M3, M4, etc.): `PiX-x.y.z-arm64.dmg`.
   - **Intel processor**: `PiX-x.y.z-x64.dmg`.
+  - Open the DMG, double-click PiX and choose “Install and Open”; installation checks tasks and closes the previous host before replacing the app.
   - Zip archives are also available; choose `arm64` for Apple silicon or `x64` for Intel.
 - **Linux**: `PiX-x.y.z-x86_64.AppImage` (portable), `PiX-x.y.z-amd64.deb`, `PiX-x.y.z-x86_64.rpm`, plus tar.gz. x64.
 
@@ -103,7 +104,7 @@ Installers are unsigned: if Windows SmartScreen warns, choose "Run anyway"; on m
 
 ## Community
 
-Join our WeChat group:
+Join our WeChat group and include `pix` in your request message:
 
 <p>
   <img src="assets/images/Weixin.png" width="220" alt="PiX WeChat group QR code">

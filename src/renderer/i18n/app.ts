@@ -1,6 +1,24 @@
 import { acceptDomainUpdate } from "./registry";
 
 export const en = {
+  hostRecovery: {
+    title: "Reconnect the PiX background service",
+    unavailable: "PiX is open, but its background service is not responding. Your saved sessions are still available on disk.",
+    stopping: "The previous background service is still shutting down. You can wait for cleanup to finish or confirm a forced restart.",
+    tasksActive: "The previous background service still has work in progress. PiX has kept it running so your tasks can finish.",
+    clientsActive: "Another PiX window or terminal client is using the background service. Close it when you are ready to switch versions.",
+    remoteActive: "The previous background service still has remote workspaces connected. Disconnect them to continue safely.",
+    versionConflict: "The background service needs to restart to work with this version of PiX.",
+    backgroundVersion: "Background version", runningTasks: "Running tasks", pendingTasks: "Tasks being prepared", yes: "Yes",
+    otherClients: "Other connected clients", remoteConnections: "Remote connections",
+    commands: "Shell commands", terminals: "Terminal sessions",
+    autoRetry: "PiX checks again automatically and will continue when it can safely reconnect. You can also retry now or interrupt the background service below.",
+    unverifiedHint: "PiX is retrying automatically. It cannot confirm the background service's identity yet, so forced restart is unavailable. Retry or open the logs for details.",
+    retry: "Retry connection", connecting: "Connecting…", restart: "Stop tasks and restart…", restarting: "Restarting…",
+    confirmTitle: "Stop tasks and restart the background service?",
+    confirmBody: "This interrupts all local PiX tasks and terminal commands, and disconnects other PiX windows and CLI clients. Saved session history is kept, but unsaved work may be lost.\nPiX first tries to save and shut down; if the service does not respond, it will be forcibly terminated. Remote tasks may continue on their remote hosts; check them after reconnecting.",
+    confirmRestart: "Stop tasks and restart", details: "Technical details", logs: "Open logs", quit: "Quit PiX",
+  },
   fileChanges: {
     oldLine: "Original line {n}", newLine: "Updated line {n}",
     count: "1 file changed | {n} files changed", review: "review", more: "Show more lines",
@@ -159,6 +177,24 @@ export const en = {
 };
 
 export const zhCN: typeof en = {
+  hostRecovery: {
+    title: "重新连接 PiX 后台",
+    unavailable: "PiX 已打开，但暂时无法连接后台服务。已保存的会话仍保留在本机。",
+    stopping: "之前的后台正在退出，清理尚未完成。您可以等待，或确认强制重启。",
+    tasksActive: "之前的后台仍有任务进行中。PiX 已保留它，让任务可以继续完成。",
+    clientsActive: "还有其他 PiX 窗口或终端客户端正在使用后台。准备好切换版本后，请先关闭它们。",
+    remoteActive: "之前的后台仍连接着远程工作区。断开远程连接后即可安全继续。",
+    versionConflict: "后台需要重新启动，才能与当前版本的 PiX 配合使用。",
+    backgroundVersion: "后台版本", runningTasks: "运行中的任务", pendingTasks: "正在准备任务", yes: "是",
+    otherClients: "其他已连接客户端", remoteConnections: "远程连接",
+    commands: "终端命令", terminals: "终端会话",
+    autoRetry: "PiX 会自动重试，在能够安全连接时继续。您也可以立即重试，或选择终止任务并重启后台。",
+    unverifiedHint: "PiX 正在自动重试。暂时无法确认后台身份，因此不能强制重启。您可以重试连接，或打开日志查看详情。",
+    retry: "重试连接", connecting: "正在连接…", restart: "终止任务并重启…", restarting: "正在重启…",
+    confirmTitle: "终止任务并重启后台？",
+    confirmBody: "这会中断所有本地 PiX 任务和终端命令，并断开其他 PiX 窗口及命令行客户端。已保存的会话记录会保留，但未保存的内容可能丢失。\nPiX 会先尝试保存状态并正常退出；后台无响应时会强制终止。远程任务可能仍在远程主机运行，请在重新连接后检查。",
+    confirmRestart: "确认终止并重启", details: "技术详情", logs: "打开日志", quit: "退出 PiX",
+  },
   fileChanges: {
     oldLine: "修改前第 {n} 行", newLine: "修改后第 {n} 行",
     count: "{n} 个文件已更改", review: "审查", more: "显示更多行",
