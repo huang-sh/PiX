@@ -29,6 +29,15 @@ export interface CustomModelInput {
   reasoning: boolean;
   imageInput: boolean;
 }
+export type CustomProviderInput = Pick<CustomModelInput, "provider" | "baseUrl" | "api" | "apiKey">;
+export type CustomModelsInput = Omit<CustomModelInput, "modelId" | "name"> & {
+  models: Array<{ modelId: string; name?: string }>;
+};
+export interface DiscoveredModel {
+  id: string;
+  name?: string;
+  exists?: boolean;
+}
 type BrokerFields = "provider" | "id" | "name" | "api" | "input" | "cost";
 export type BrokerModel =
   | (Pick<Model<Api>, BrokerFields | "reasoning" | "thinkingLevelMap" | "contextWindow" | "maxTokens"> & { type?: "chat" })
@@ -614,6 +623,8 @@ export type AgentControl =
   | { action: "setTools"; names: string[] }
   | { action: "setBrokerProviders"; providers: string[]; models?: BrokerModel[] }
   | ({ action: "addCustomModel" | "updateCustomModel" } & CustomModelInput)
+  | ({ action: "addCustomModels" } & CustomModelsInput)
+  | ({ action: "discoverModels" } & CustomProviderInput)
   | { action: "loginApiKey"; provider: string; apiKey: string }
   | { action: "loginOAuth"; provider: string; method: "browser" | "device-code" }
   | { action: "logout"; provider: string }

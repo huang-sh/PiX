@@ -65,7 +65,7 @@ export interface Platform {
   quit(): void | Promise<void>;
 }
 /** Model actions whose catalog or credential change must reach open sessions. */
-const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
+const CATALOG_MUTATIONS = ["addCustomModel", "addCustomModels", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 export class MainController {
   readonly dialogs: ExtensionDialogs;
   project: ProjectInfo | null;

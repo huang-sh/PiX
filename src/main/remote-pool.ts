@@ -846,9 +846,9 @@ export class RemoteWorkspacePool {
     };
     if (route === "agent.control") {
       const action = String(v.action);
-      if (action === "getProviders" || action === "getModels" || action === "getCustomModels")
+      if (action === "getProviders" || action === "getModels" || action === "getCustomModels" || action === "discoverModels")
         return this.host.projectRuntime.control(v as unknown as AgentControl);
-      if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels" || action === "addCustomModel" || action === "updateCustomModel") {
+      if (action === "loginApiKey" || action === "loginOAuth" || action === "refreshModels" || action === "addCustomModel" || action === "addCustomModels" || action === "updateCustomModel") {
         const result = await this.host.projectRuntime.control(v as unknown as AgentControl);
         await this.syncModelBroker(client);
         // Credential and definition changes re-deploy so the host stays autonomous.

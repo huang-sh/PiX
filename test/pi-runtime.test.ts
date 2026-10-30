@@ -73,6 +73,55 @@ for (const action of ["run", "abort", "close"] as const) {
   });
 }
 
+test("aborting a prompt during extension startup does not cancel model discovery", async t => {
+  const runtime = new PiRuntime("/project", null, () => {}, async () => {});
+  let release!: () => void;
+  runtime["extensionStartup"] = new Promise<void>(resolve => { release = resolve; });
+  runtime.runtime = { session: {
+    modelRuntime: { getModels: () => [], getModel: () => undefined, getAuth: async () => undefined },
+    clearQueue: () => {}, abort: async () => {},
+  } };
+  runtime.snapshot = (() => ({})) as typeof runtime.snapshot;
+  t.mock.method(globalThis, "fetch", async () => Response.json({ data: [] }));
+  const discovery = runtime.control({ action: "discoverModels", provider: "custom", baseUrl: "https://example.test/v1", api: "openai-completions" });
+  const result = discovery.then(value => value, error => error);
+  await runtime.control({ action: "abort" });
+  release();
+  assert.deepEqual(await result, []);
+});
+
+test("the discovery deadline also bounds a stalled credential lookup", async t => {
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  const deadline = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+    assert.equal(milliseconds, 15000);
+    return deadline.signal;
+  });
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({ data: [] }));
+  let started!: () => void, release!: () => void;
+  const authStarted = new Promise<void>(resolve => { started = resolve; });
+  runtime.modelServices = { modelRuntime: {
+    getModels: () => [],
+    getAuth: async (_provider: string, options: { signal?: AbortSignal }) => {
+      started();
+      return new Promise((_resolve, reject) => {
+        release = () => reject(new Error("Released stalled credential lookup"));
+        options.signal?.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+      });
+    },
+  } };
+  const result = runtime.control({ action: "discoverModels", provider: "proxy", baseUrl: "https://proxy.test/v1", api: "openai-completions" })
+    .then(value => value, error => error);
+  try {
+    await authStarted;
+    deadline.abort(new DOMException("Deadline reached", "TimeoutError"));
+    const completed = await Promise.race([result, new Promise(resolve => setImmediate(() => resolve("still pending")))]);
+    assert.ok(completed instanceof Error, "the request must settle when credential lookup exceeds its deadline");
+    assert.match(completed.message, /timed out/);
+    assert.equal(fetch.mock.callCount(), 0);
+  } finally { release(); await result; }
+});
+
 test("extension commands deliver notifications and errors before and after reload", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-slash-"));
   assert.equal(dirname(home), tmpdir());

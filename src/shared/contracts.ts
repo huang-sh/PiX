@@ -1,5 +1,7 @@
 import type {
   CustomModelInput,
+  CustomModelsInput,
+  CustomProviderInput,
   DesktopRoute,
   LayoutState,
   PanelId,
@@ -57,9 +59,7 @@ const objectField = (value: unknown, name: string): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 
-/** Validates a custom model form submission; shared by the agent.control
- *  route and models.json writes in custom-models.ts. */
-export function customModelInput(value: unknown): CustomModelInput {
+export function customProviderInput(value: unknown): CustomProviderInput {
   const v = obj(value);
   const provider = str(v.provider, "provider")!.trim();
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provider) || ["__proto__", "constructor", "prototype"].includes(provider))
@@ -74,14 +74,36 @@ export function customModelInput(value: unknown): CustomModelInput {
     provider,
     baseUrl,
     api,
+    apiKey: str(v.apiKey, "apiKey", true)?.trim(),
+  };
+}
+
+/** Shared by agent.control and models.json writes. */
+export function customModelInput(value: unknown): CustomModelInput {
+  const v = obj(value);
+  return {
+    ...customProviderInput(v),
     modelId: str(v.modelId, "modelId")!.trim(),
     name: str(v.name, "name", true)?.trim(),
-    apiKey: str(v.apiKey, "apiKey", true)?.trim(),
     contextWindow: integer(v.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
     maxTokens: integer(v.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
     reasoning: v.reasoning === true,
     imageInput: v.imageInput === true,
   };
+}
+
+export function customModelsInput(value: unknown): CustomModelsInput {
+  const v = obj(value);
+  if (!Array.isArray(v.models) || !v.models.length || v.models.length > 10000)
+    throw new Error("Choose between 1 and 10000 models");
+  const models = v.models.map((model) => {
+    const m = obj(model);
+    return customModelInput({ ...v, modelId: m.modelId, name: m.name });
+  });
+  if (new Set(models.map(model => model.modelId)).size !== models.length)
+    throw new Error("Duplicate model IDs");
+  const { modelId, name, ...common } = models[0]!;
+  return { ...common, models: models.map(({ modelId, name }) => ({ modelId, name })) };
 }
 
 /** The persisted workbench layout arrives as one opaque renderer object;
@@ -337,6 +359,10 @@ export function validateRouteInput(
         };
       if (action === "addCustomModel" || action === "updateCustomModel")
         return { action, ...customModelInput(v) };
+      if (action === "addCustomModels")
+        return { action, ...customModelsInput(v) };
+      if (action === "discoverModels")
+        return { action, ...customProviderInput(v) };
       if (action === "setThinking")
         return { action, level: str(v.level, "level") };
       if (action === "setQueueMode")

@@ -1005,6 +1005,7 @@ describe("SettingsPage auto-save", () => {
     await flushPromises();
     await wrapper.get("[data-add-custom-model]").trigger("click");
     await wrapper.get('[name="provider"]').setValue("my-provider");
+    await wrapper.get('[name="modelId"]').setValue("my-model");
     await wrapper.get("[data-custom-model-form]").trigger("submit");
     await flushPromises();
     expect(wrapper.get('[data-custom-model-form] [role="alert"]').text()).toContain("Invalid model endpoint");

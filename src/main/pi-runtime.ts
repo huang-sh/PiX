@@ -24,7 +24,8 @@ import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.j
 import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skills.js";
 import { SkillControls } from "./skill-controls.js";
 import { canonicalPath, pixAgentDir } from "./paths.js";
-import { addCustomModel, getCustomModels } from "./custom-models.js";
+import { addCustomModel, addCustomModels, getCustomModels } from "./custom-models.js";
+import { discoverModels } from "./model-discovery.js";
 import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
@@ -71,6 +72,8 @@ export const MODEL_ACTIONS = [
   "getModels",
   "refreshModels",
   "addCustomModel",
+  "addCustomModels",
+  "discoverModels",
   "updateCustomModel",
   "getCustomModels",
   "getProviders",
@@ -91,7 +94,7 @@ export const MODEL_ACTIONS = [
 ] as const satisfies readonly AgentControl["action"][];
 
 const READ_ACTIONS = [
-  "commands", "getState", "getModels", "getCustomModels", "getThinkingLevels",
+  "commands", "getState", "getModels", "getCustomModels", "discoverModels", "getThinkingLevels",
   "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats", "systemPromptPreview",
 ] as const satisfies readonly AgentControl["action"][];
 
@@ -1254,15 +1257,30 @@ export class PiRuntime {
       case "getCustomModels": {
         return getCustomModels(join(this.agentDir(), "models.json"));
       }
+      case "discoverModels": {
+        const modelRuntime = await this.modelRuntime();
+        const signal = AbortSignal.timeout(15000);
+        const auth = await modelRuntime.getAuth(input.provider, { apiKey: input.apiKey?.trim() || undefined, signal })
+          .catch((error: unknown) => {
+            if (signal.aborted) throw new Error("Fetching models timed out. Please try again.");
+            throw error;
+          });
+        const models = await discoverModels(input, auth?.auth, signal);
+        return models.map(model => ({ ...model, exists: !!modelRuntime.getModel(input.provider, model.id) }));
+      }
       case "addCustomModel":
+      case "addCustomModels":
       case "updateCustomModel": {
         const update = input.action === "updateCustomModel";
         if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
         const modelRuntime = await this.modelRuntime();
-        if (!update && modelRuntime.getModel(input.provider, input.modelId))
+        const models = input.action === "addCustomModels" ? input.models : [{ modelId: input.modelId }];
+        if (!update && models.some(model => modelRuntime.getModel(input.provider, model.modelId)))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
         if (!update && modelRuntime.getError()) throw new Error(modelRuntime.getError());
-        addCustomModel(join(this.agentDir(), "models.json"), input, update);
+        const path = join(this.agentDir(), "models.json");
+        if (input.action === "addCustomModels") addCustomModels(path, input);
+        else addCustomModel(path, input, update);
         await modelRuntime.refresh({ allowNetwork: false });
         if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
         if (input.apiKey?.trim()) {
@@ -1276,7 +1294,7 @@ export class PiRuntime {
             throw new Error(`Model saved, but credential setup failed. Configure this provider in settings: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
-        if (update && s?.model?.provider === input.provider && s.model.id === input.modelId) {
+        if (input.action === "updateCustomModel" && s?.model?.provider === input.provider && s.model.id === input.modelId) {
           await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
           return this.snapshot();
         }
