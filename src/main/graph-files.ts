@@ -4,7 +4,7 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, re
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type PromptImage } from "../shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type PromptImage, type PromptOverrideInput } from "../shared/types.js";
 import { debugLog } from "./debug-log.js";
 import { projectSession, promptDisplayTextMap } from "../shared/session.js";
 
@@ -14,7 +14,7 @@ export interface BranchRecord {
   parentId: string;
   forkEntryId: string;
   requestId: string;
-  request: { text: string; nodeId?: string | null; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; timestamp?: string };
+  request: { text: string; nodeId?: string | null; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; timestamp?: string; promptOverride?: PromptOverrideInput };
   inherited: Record<string, string>;
   baseline: RawSessionEntry[];
   header: Record<string, unknown>;

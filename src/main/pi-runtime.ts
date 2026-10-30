@@ -8,6 +8,7 @@ import type { ModelOperation } from "../shared/remote-protocol.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
 import { pixGitBranchExtension } from "./extensions/git-branch.js";
+import { composeSystemPrompt, latestPromptOverride, pixPromptOverrideExtension } from "./extensions/prompt-override.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -41,7 +42,8 @@ import type {
   SessionSummary,
 } from "../shared/types.js";
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE } from "../shared/types.js";
+import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
+import type { PromptCustomization, SystemPromptPreview } from "../shared/types.js";
 import { needsPromptDisplayBoundary, projectSession, summarizeSession } from "../shared/session.js";
 import type { RunTiming } from "../shared/run-timing.js";
 import {
@@ -90,7 +92,7 @@ export const MODEL_ACTIONS = [
 
 const READ_ACTIONS = [
   "commands", "getState", "getModels", "getCustomModels", "getThinkingLevels",
-  "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats",
+  "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats", "systemPromptPreview",
 ] as const satisfies readonly AgentControl["action"][];
 
 export async function piSdkVersion(): Promise<string> {
@@ -255,6 +257,10 @@ export class PiRuntime {
   private controlEpoch = 0;
   private closeTask?: Promise<void>;
   private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
+  /** Standalone defaults; controller-owned sessions and graph workers share
+   * their owner's accessor so background runs always see current settings. */
+  promptCustomization: PromptCustomization | undefined;
+  getPromptCustomization = (): PromptCustomization | undefined => this.promptCustomization;
   private promptTiming?: RunTiming;
   private promptUserSeen = false;
   eventScope?: { graphId: string; branchId: string; runId: string };
@@ -334,6 +340,39 @@ export class PiRuntime {
   }
   setModelBroker(broker?: PiRuntime["modelBroker"]) {
     this.modelBroker = broker;
+  }
+  /**
+   * The system prompt the next run would send. An open session answers with
+   * its own rendering (live tool set, project context, skills); without one, a
+   * throwaway in-memory session is built from fresh project services, so the
+   * settings page can show the prompt before any session exists. The in-memory
+   * session never touches disk or an extension UI.
+   */
+  async previewSystemPrompt(): Promise<SystemPromptPreview> {
+    const session = this.runtime?.session;
+    const preview = (s: typeof session) => composeSystemPrompt(
+      s.extensionRunner.createCommandContext().getSystemPromptOptions(),
+      this.getPromptCustomization(),
+      latestPromptOverride(s.sessionManager.getBranch()),
+    );
+    if (session) return preview(session);
+    const pi = await this.pi();
+    const cwd = this.cwd ?? homedir();
+    // Catalog services can predate settings changes. Keep preview resources
+    // fresh without reloading a loader another catalog request may be using.
+    const services = await pi.createAgentSessionServices(
+      this.sessionServicesOptions(pi, cwd),
+    );
+    await this.applyModelBroker(services.modelRuntime);
+    const created = await pi.createAgentSessionFromServices({
+      services,
+      sessionManager: pi.SessionManager.inMemory(cwd),
+    });
+    try {
+      return await preview(created.session);
+    } finally {
+      created.session.dispose();
+    }
   }
 
   async configuredProviderIds() {
@@ -554,6 +593,7 @@ export class PiRuntime {
           { name: "tool-search", builtin: true, factory: pi.createToolSearchExtension() },
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
           pixGitBranchExtension,
+          pixPromptOverrideExtension(() => this.getPromptCustomization()),
           { name: "pix-input-queue", factory: extension => {
             extension.on("turn_end", (_event, context) => inputQueueOwners.get(context.sessionManager)?.deliverQueuedMessages("steer"));
             extension.on("agent_before_settle", async (_event, context) => {
@@ -1053,9 +1093,9 @@ export class PiRuntime {
     }
     const s = this.runtime?.session;
     const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
-    if (!this.cwd && !modelAction)
+    if (!this.cwd && !modelAction && input.action !== "systemPromptPreview")
       throw new Error("Open a project first");
-    if (!s && input.action !== "newSession" && !modelAction)
+    if (!s && input.action !== "newSession" && input.action !== "systemPromptPreview" && !modelAction)
       throw new Error("Open a session first");
     // Broker updates can replace a model while the remote session still holds its old definition.
     if (input.action === "prompt" && s?.model && this.brokerProviders.has(s.model.provider) && !s.isStreaming) {
@@ -1453,9 +1493,33 @@ export class PiRuntime {
         // A revoked local credential hands the provider back to the broker.
         await this.refreshBrokerAuth();
         return { ok: true };
+      case "setPromptCustomization": {
+        // Pure runtime memory: the desktop owns the persisted copy in app
+        // settings and re-syncs after every save, so nothing lands on disk here.
+        this.promptCustomization = input.customization;
+        break;
+      }
+      case "systemPromptPreview":
+        return this.previewSystemPrompt();
       case "setLabel":
         s.sessionManager.appendLabelChange(input.entryId, input.label);
         break;
+      case "setPromptOverride": {
+        // The persona text arrives with the action (settings live on the
+        // desktop), and the record snapshots it, so history stays faithful
+        // after the definition changes or disappears.
+        if ("off" in input) {
+          s.sessionManager.appendCustomEntry(PROMPT_OVERRIDE_CUSTOM_TYPE, { off: true });
+          break;
+        }
+        if (!input.text.trim()) throw new Error("Persona text is empty");
+        s.sessionManager.appendCustomEntry(PROMPT_OVERRIDE_CUSTOM_TYPE, {
+          mode: input.mode,
+          name: input.name,
+          text: input.text,
+        });
+        break;
+      }
       case "navigateTree":
         await s.navigateTree(input.entryId, { summarize: false });
         break;

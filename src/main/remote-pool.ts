@@ -167,6 +167,15 @@ export class RemoteWorkspacePool {
   slot(id: string): RemoteSlot | undefined {
     return this.remotePool.get(id);
   }
+  async syncPromptCustomization(client?: WslHostClient) {
+    const clients = client ? [client] : [...this.remotePool.values()].filter(slot => slot.client.connected).map(slot => slot.client);
+    const customization = this.host.settings.bundle().app.promptCustomization ?? {};
+    const results = await Promise.allSettled(clients.map(client => client.request("agent.control", {
+      action: "setPromptCustomization", customization,
+    })));
+    const failed = results.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+  }
   async pendingDialogs(): Promise<ExtensionDialog[]> {
     const results = await Promise.allSettled([...this.remotePool.entries()].filter(([, slot]) => slot.client.connected)
       .map(async ([id, slot]) => (await slot.client.request<ExtensionDialog[]>("ui.pending"))
@@ -249,6 +258,7 @@ export class RemoteWorkspacePool {
         current: viewed ? { ...viewed, runtime: unavailable() } : undefined,
       };
     }
+    await this.syncPromptCustomization(slot.client);
     const [sessions, settings] = await Promise.all([
       slot.client.request("session.list"),
       slot.client.request<SettingsBundle>("settings.get"),
@@ -743,6 +753,7 @@ export class RemoteWorkspacePool {
   }
   /** Switches the view back to a pooled workspace without touching its host. */
   private async activatePooled(slot: RemoteSlot, request: number) {
+    await this.syncPromptCustomization(slot.client);
     const [sessions, settings] = await Promise.all([
       slot.client.request<SessionSummary[]>("session.list"),
       slot.client.request<SettingsBundle>("settings.get"),
@@ -780,6 +791,7 @@ export class RemoteWorkspacePool {
     }
     this.host.emit({ type: "remote.progress", payload: { stage: "loading" } });
     await this.attachModelBroker(client);
+    await this.syncPromptCustomization(client);
     const [sessions, settings] = await Promise.all([
       client.request<SessionSummary[]>("session.list"),
       client.request<SettingsBundle>("settings.get"),

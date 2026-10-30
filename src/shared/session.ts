@@ -3,12 +3,13 @@ import type {
   GraphEdge,
   GraphNode,
   NodeFooterState,
+  NodePromptOverride,
   RawSessionEntry,
   SessionProjection,
   SessionSummary,
   SessionSnapshot,
 } from "./types.js";
-import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE } from "./types.js";
+import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
 import { isSessionImage } from "./images.js";
 import { emptyAmount, sumAmount, usageRecordsOf } from "./usage.js";
@@ -342,6 +343,41 @@ export function projectSession(
   const ownedEntries = new Map<string, RawSessionEntry[]>();
   const contexts = new Map<string | null, { owner: string | null; depth: number; settings: SettingsState }>();
   contexts.set(null, { owner: null, depth: -1, settings: { model: null, thinkingLevel: "off" } });
+  // Override records resolve by ancestry: the nearest `pix.prompt-override`
+  // entry above a node is what that turn ran under, so forks inherit it.
+  const overrides = new Map<string, NodePromptOverride | null>();
+  for (const entry of entries)
+    if (entry.type === "custom" && entry.customType === PROMPT_OVERRIDE_CUSTOM_TYPE) {
+      const data = rec(entry.data);
+      const mode = data?.mode;
+      // Malformed records are skipped, not treated as off: ancestry keeps looking up.
+      if (data?.off === true) overrides.set(entry.id, null);
+      else if ((mode === "append" || mode === "replace" || mode === "strict")
+        && typeof data?.name === "string" && typeof data?.text === "string" && data.text.trim())
+        overrides.set(entry.id, { mode, name: data.name });
+    }
+  const overrideCache = new Map<string | null, NodePromptOverride | null | undefined>();
+  overrideCache.set(null, undefined);
+  const overrideOf = (id: string | null): NodePromptOverride | null | undefined => {
+    const path: RawSessionEntry[] = [];
+    const seen = new Set<string>();
+    let cursor = id;
+    while (cursor && !overrideCache.has(cursor) && !seen.has(cursor)) {
+      seen.add(cursor);
+      const entry = byId.get(cursor);
+      if (!entry) break;
+      path.push(entry);
+      cursor = entry.parentId;
+    }
+    let value = overrideCache.get(cursor);
+    // Ancestors resolve before descendants: reverse the leaf→root walk so an
+    // override record propagates down to every entry below it.
+    for (const entry of path.reverse()) {
+      if (overrides.has(entry.id)) value = overrides.get(entry.id)!;
+      overrideCache.set(entry.id, value);
+    }
+    return overrideCache.has(id) ? overrideCache.get(id) : undefined;
+  };
   // Resolve each ancestor once, including records supplied out of file order.
   const context = (id: string | null) => {
     const path: RawSessionEntry[] = [];
@@ -365,9 +401,11 @@ export function projectSession(
     return contexts.get(id) ?? contexts.get(null)!;
   };
   for (const e of entries) {
-    // Prompt-display records live between turns and are assigned explicitly
-    // below, so they never extend the previous turn's leaf by accident.
-    if (promptDisplays.markerIds.has(e.id)) continue;
+    // Override records live between turns: they belong to no turn, so a turn's
+    // leafEntryId never reaches past its own reply to the record — forking a
+    // node then copies its conversation without the persona switches that
+    // landed after it, while the ancestry still resolves them.
+    if (overrides.has(e.id) || promptDisplays.markerIds.has(e.id)) continue;
     const o = context(e.id).owner;
     if (!o) continue;
     owners.set(e.id, o);
@@ -396,11 +434,13 @@ export function projectSession(
       .filter((x) => x.type === "message" && role(x) === "assistant")
       .at(-1);
     const gitHead = gitHeadOf(e.parentId);
+    const promptOverride = overrideOf(e.parentId) ?? undefined;
     return {
       id: `turn:${e.id}`,
       userEntryId: e.id,
       ...(labels.has(e.id) ? { label: labels.get(e.id) } : {}),
       ...(gitHead ?? {}),
+      ...(promptOverride ? { promptOverride } : {}),
       parentId: ((p) => (p ? `turn:${p}` : null))(context(e.parentId).owner),
       title: clip(sessionEntryDisplayText(e, promptTexts), 58) || (images(e).length ? `🖼 × ${images(e).length}` : "Untitled prompt"),
       ...(images(e).length ? { imageCount: images(e).length } : {}),
@@ -518,6 +558,7 @@ export function projectSession(
     messages,
     leafId,
     activeNodeId: activeBranchNodeIds.at(-1) ?? nodes.at(-1)?.id ?? null,
+    ...(overrideOf(leafId) !== undefined ? { activePromptOverride: overrideOf(leafId)! } : {}),
   };
 }
 export function entryAnchorForNode(p: SessionProjection, nodeId: string) {

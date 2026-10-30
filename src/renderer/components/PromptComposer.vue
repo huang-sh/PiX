@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowUp, Brain, Check, ChevronDown, ChevronRight, CornerDownRight, FileText, ListEnd, Paperclip, Pencil, Square, Trash2, X } from "@lucide/vue";
+import { ArrowUp, Brain, Check, ChevronDown, ChevronRight, CornerDownRight, FileText, ListEnd, Paperclip, Pencil, Square, Trash2, VenetianMask, X } from "@lucide/vue";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -14,13 +14,14 @@ import { getActivePinia } from "pinia";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { APP_COMMANDS } from "../../shared/commands";
-import { THINKING_LEVELS, type PromptImage, type QueuedMessage, type RuntimeCommand, type RuntimeModel } from "../../shared/types";
+import { THINKING_LEVELS, type PersonaDefinition, type PromptImage, type PromptOverrideMode, type QueuedMessage, type RuntimeCommand, type RuntimeModel } from "../../shared/types";
 import { IMAGE_MIME_TYPES, MAX_IMAGE_BYTES, MAX_PROMPT_IMAGES, imageDataUrl, validatePromptImages } from "../../shared/images";
 import { useRunCommand } from "../features/commands/runCommand";
 import { createImeGuard, describeCommand, filterSlashCommands, matchSlashTrigger } from "../lib/slash";
 import { MAX_PROMPT_FILES, promptFilePath, type PromptFile } from "../lib/prompt-files";
 import { useLayoutStore } from "../stores/layout";
 import { useSessionStore } from "../stores/session";
+import type { NodePromptOverride } from "../../shared/types";
 import Button from "./ui/Button.vue";
 import SlashMenu from "./SlashMenu.vue";
 
@@ -33,6 +34,8 @@ export interface ComposerDraft {
   busy: boolean;
   readingImages: boolean;
   error: string;
+  /** undefined inherits the parent; null explicitly restores the default. */
+  promptOverride?: NodePromptOverride | null;
   queueEdit?: { id: string; text: string; saving: boolean; error: string };
 }
 const props = defineProps<{
@@ -53,6 +56,9 @@ const props = defineProps<{
   // explicit=true marks a user pick from the thinking menu; explicit=false marks a
   // model-driven adjustment so hosts can avoid persisting it as a user choice.
   onThinking: (level: string, explicit: boolean) => void;
+  // The inherited persona; explicit picks stay in the draft until submission.
+  personas?: PersonaDefinition[];
+  promptOverride?: NodePromptOverride | null;
   onSubmit: (text: string, images?: PromptImage[]) => Promise<boolean>;
   running?: boolean;
   onStop?: () => void;
@@ -109,6 +115,15 @@ const canSubmit = computed(() => props.runnable && !busy.value && !readingImages
   && hasContent.value && (!images.value.length || supportsImages.value));
 const thinkingLevels = computed(() => selectedModel.value?.thinkingLevels
   ?? (selectedModel.value?.reasoning === false ? ["off"] : [...THINKING_LEVELS]));
+const personaModes: PromptOverrideMode[] = ["replace", "append", "strict"];
+const selectedPromptOverride = computed(() => state.value.promptOverride === undefined ? props.promptOverride : state.value.promptOverride);
+// Mode picks persist across menu use so switching personas keeps the mode.
+const personaMode = ref<PromptOverrideMode>("replace");
+watch(() => selectedPromptOverride.value?.mode, mode => { if (mode) personaMode.value = mode; }, { immediate: true });
+function selectPersonaMode(mode: PromptOverrideMode) {
+  personaMode.value = mode;
+  if (selectedPromptOverride.value) state.value.promptOverride = { mode, name: selectedPromptOverride.value.name };
+}
 
 function providerName(value?: string) {
   if (!value) return "—";
@@ -155,6 +170,7 @@ async function submit() {
       : await deliver(prompt);
     if (delivered) {
       target.error = "";
+      delete target.promptOverride;
     } else {
       target.text = text;
       target.images = attachments;
@@ -583,6 +599,65 @@ defineExpose({ focus: focusEditor });
               <i v-else />
               <span>{{ level }}</span>
             </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenuPortal>
+      </DropdownMenuRoot>
+      <DropdownMenuRoot v-if="personas" :modal="false">
+        <DropdownMenuTrigger as-child :disabled="!runnable || busy || queueing">
+          <button
+            type="button"
+            class="node-footer-select node-persona-select"
+            :class="{ 'persona-active': selectedPromptOverride }"
+            :disabled="!runnable || busy || queueing"
+            :title="selectedPromptOverride ? `${selectedPromptOverride.name} · ${t(`draft.personaMode_${selectedPromptOverride.mode}`)}` : t('draft.personaOff')"
+            aria-label="Draft persona"
+          >
+            <VenetianMask :size="12" />
+            <span>{{ selectedPromptOverride?.name ?? t('draft.personaLabel') }}</span>
+            <ChevronDown :size="11" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuPortal>
+          <DropdownMenuContent class="menu-content node-thinking-menu" align="end" :side-offset="5">
+            <DropdownMenuItem class="menu-item node-model-option" @select="state.promptOverride = null">
+              <Check v-if="!selectedPromptOverride" :size="12" />
+              <i v-else />
+              <span>{{ t('draft.personaOff') }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="!personas?.length" class="menu-item node-persona-empty" disabled>
+              <i /><span>{{ t('draft.personaNone') }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              v-for="persona in personas"
+              :key="persona.name"
+              :data-persona-option="persona.name"
+              class="menu-item node-model-option"
+              @select="state.promptOverride = { mode: personaMode, name: persona.name }"
+            >
+              <Check v-if="selectedPromptOverride?.name === persona.name" :size="12" />
+              <i v-else />
+              <span>{{ persona.name }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger class="menu-item node-model-provider">
+                <span>{{ t('draft.personaMode') }}</span>
+                <ChevronRight :size="13" />
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuSubContent class="menu-content node-thinking-menu" :side-offset="4" :align-offset="-5">
+                  <DropdownMenuItem
+                    v-for="mode in personaModes"
+                    :key="mode"
+                    class="menu-item node-model-option"
+                    @select="selectPersonaMode(mode)"
+                  >
+                    <Check v-if="mode === personaMode" :size="12" />
+                    <i v-else />
+                    <span>{{ t(`draft.personaMode_${mode}`) }}</span>
+                  </DropdownMenuItem>
+                </DropdownMenuSubContent>
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
           </DropdownMenuContent>
         </DropdownMenuPortal>
       </DropdownMenuRoot>

@@ -5,6 +5,9 @@ import type {
   BranchMessage,
   ProjectGroup,
   ProjectInfo,
+  NodePromptOverride,
+  PromptOverrideInput,
+  SystemPromptPreview,
   RuntimeCommand,
   RuntimeModel,
   PromptImage,
@@ -78,6 +81,7 @@ export const useSessionStore = defineStore("session", {
     loading: true,
     creation: undefined as { request: number; status: "pending" | "ready" | "failed"; path?: string; error?: string } | undefined,
     viewRequest: 0,
+    promptPreviewRevision: 0,
     sessions: [] as SessionSummary[],
     projects: [] as ProjectGroup[],
     activeProjectId: "",
@@ -352,6 +356,12 @@ export const useSessionStore = defineStore("session", {
     async fetchCommands(): Promise<RuntimeCommand[]> {
       return desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
     },
+    promptOverrideAt(nodeId: string | null): NodePromptOverride | null {
+      const projection = this.current?.projection;
+      if (!nodeId || nodeId === projection?.activeNodeId)
+        return projection?.activePromptOverride ?? null;
+      return projection?.nodes.find(node => node.id === nodeId)?.promptOverride ?? null;
+    },
     // Refreshes the shared chat catalog: every path that can change
     // it (bootstrap, settings open, login/logout, catalog refresh, session
     // open) reloads through here so pickers never serve a stale list. The
@@ -377,6 +387,14 @@ export const useSessionStore = defineStore("session", {
       } catch (error) {
         useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
       }
+    },
+    // Errors surface in the settings section: a stale host or a rejected
+    // action must never look like an empty prompt.
+    async promptPreview(): Promise<SystemPromptPreview> {
+      const result = await desktop.invoke<SystemPromptPreview>("agent.control", { action: "systemPromptPreview" });
+      if (typeof result?.text !== "string" || typeof result.preamble !== "string" || !Array.isArray(result.sections))
+        throw new Error("Invalid system prompt preview; reconnect the host to update it");
+      return result;
     },
     async open(path: string, request?: number) {
       request ??= ++this.viewRequest;
@@ -418,6 +436,9 @@ export const useSessionStore = defineStore("session", {
       const abortLabel = this.abortLabel(input);
       const sendLabel = this.sendPromptLabel(input);
       const result = await desktop.invoke<T>("agent.control", input);
+      if (input.action === "reload" && project === this.activeProjectId
+        && path === this.current?.session.path && request === this.viewRequest)
+        this.promptPreviewRevision++;
       if (result && typeof result === "object" && "projection" in result) {
         const snapshot = result as unknown as SessionSnapshot;
         const graph = this.current?.graph;
@@ -566,10 +587,18 @@ export const useSessionStore = defineStore("session", {
     },
     // follow: false serves pinned chat columns: the submission starts on its
     // branch, but the primary column must keep showing the current selection.
-    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean; columnId?: string; requestId?: string }) {
+    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null }) {
       const current = this.current;
       const project = this.activeProjectId, request = this.viewRequest;
       if (!current || (!text.trim() && !images?.length)) return;
+      let promptOverride: PromptOverrideInput | undefined;
+      if (options?.promptOverride === null) promptOverride = { off: true };
+      else if (options?.promptOverride) {
+        const { name, mode } = options.promptOverride;
+        const persona = useLayoutStore().settings?.app.personas?.find(item => item.name === name);
+        if (!persona) throw new Error(`Unknown persona: ${name}`);
+        promptOverride = { name, mode, text: persona.text };
+      }
       if (current.graph) {
         const requestId = options?.requestId ?? crypto.randomUUID();
         const pending: PendingPrompt = {
@@ -585,7 +614,8 @@ export const useSessionStore = defineStore("session", {
         if (options?.follow !== false) this.focusedNode = pending.message.entryId;
         try {
           const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
-            provider: model?.provider, modelId: model?.id, thinkingLevel, images });
+            provider: model?.provider, modelId: model?.id, thinkingLevel, images,
+            ...(promptOverride ? { promptOverride } : {}) });
           if (project !== this.activeProjectId || current.session.path !== this.current?.session.path
             || current.graph.epoch !== this.current?.graph?.epoch) return;
           // Progress broadcasts may already be newer than this remote reply.
@@ -620,6 +650,7 @@ export const useSessionStore = defineStore("session", {
         await this.control({ action: "setModel", provider: model.provider, modelId: model.id });
       if (thinkingLevel && this.current?.runtime.thinkingLevel !== thinkingLevel)
         await this.control({ action: "setThinking", level: thinkingLevel });
+      if (promptOverride) await this.control({ action: "setPromptOverride", ...promptOverride });
       await this.prompt(text, nodeId, model, thinkingLevel, images);
       return this.current?.projection.activeNodeId ?? undefined;
     },

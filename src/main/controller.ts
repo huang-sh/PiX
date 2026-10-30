@@ -9,6 +9,7 @@ import type {
   LayoutState,
   ProjectGroup,
   ProjectInfo,
+  PromptCustomization,
   SessionSnapshot,
   SessionSummary,
   SettingsBundle,
@@ -86,6 +87,7 @@ export class MainController {
   private viewRequest = 0;
   private gitSwitches = new Set<string>();
   private pendingAgentControls = new Map<string, number>();
+  private readonly promptConfiguration: { customization?: PromptCustomization };
   get hasPendingWork() { return this.pendingAgentControls.size > 0; }
   listeners = new Set<(e: DesktopEvent) => void>();
   /** Progress baselines of background runs, replayed when their session returns to view. */
@@ -112,6 +114,7 @@ export class MainController {
     this.project = path ? { name: basename(path), path } : null;
     this.platform = platform;
     this.settings = new SettingsService(path);
+    this.promptConfiguration = owner?.promptConfiguration ?? {};
     this.library = new LibraryService();
     if (!owner) this.settings.applyInstallerLanguage();
     this.workspace = new WorkspaceService(path);
@@ -122,6 +125,7 @@ export class MainController {
       : null;
     this.files = new SessionFiles(path, dir);
     this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url), this.dialogs);
+    this.projectRuntime.getPromptCustomization = () => this.promptConfiguration.customization ?? this.settings.bundle().app.promptCustomization;
     const registryHost = {
       createRuntime: (entry: SessionEntry) => this.createSessionRuntime(entry),
       onEvent: (entry: SessionEntry, event: unknown) => this.routeSessionEvent(entry, event),
@@ -166,6 +170,7 @@ export class MainController {
     runtime.modelBroker = this.projectRuntime.modelBroker;
     runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
     runtime.brokerModels = [...this.projectRuntime.brokerModels];
+    runtime.getPromptCustomization = this.projectRuntime.getPromptCustomization;
     return runtime;
   }
   private routeSessionEvent(entry: SessionEntry, e: unknown) {
@@ -313,8 +318,14 @@ export class MainController {
     if (owner && /^(?:ssh|wsl):/u.test(owner)) throw new Error("Remote host is not connected");
     return { stopped: false };
   }
-  /** Routes a control action: model actions to the project runtime, everything else to the active session. */
+  /** Routes project defaults and catalogs independently of the selected session. */
   private async controlAgent(input: AgentControl, sessionPath?: string): Promise<{ result: unknown; entry?: SessionEntry }> {
+    if (input.action === "setPromptCustomization") {
+      // Remote desktops sync a host-wide default, including future sessions.
+      // Existing runtimes and workers read this same source before each run.
+      this.promptConfiguration.customization = input.customization;
+      return { result: { ok: true } };
+    }
     if (input.action === "newSession") {
       const entry = this.activeEntry();
       // A failed node deletion recovers by reusing the old close-and-create
@@ -344,6 +355,14 @@ export class MainController {
       if (input.action === "setBrokerProviders") await this.adoptProjectBroker();
       else if ((CATALOG_MUTATIONS as readonly string[]).includes(input.action)) await this.pushCatalogs(input);
       return { result };
+    }
+    // The prompt preview works with or without an open session: an open one
+    // answers with its live rendering, otherwise the project runtime builds a
+    // throwaway in-memory session so the settings page never goes blank.
+    if (input.action === "systemPromptPreview") {
+      const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
+      const result = await (entry?.runtime ?? this.projectRuntime).control(input);
+      return { result, entry };
     }
     const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
     if (!entry?.runtime) throw new Error("Open a session first");
@@ -765,7 +784,13 @@ export class MainController {
     if (this.wsl && route === "session.import")
       throw new Error("Importing sessions into a remote host is not available yet");
     if (route === "session.stop") return this.stopSession(String(v.path), v.projectId as string | undefined);
-    if (this.wsl && isProjectRoute(route)) return this.pool.invokeWsl(route, v, request);
+    if (this.wsl && isProjectRoute(route)) {
+      const result = await this.pool.invokeWsl(route, v, request);
+      if ((route === "settings.update" || route === "settings.reset") && v.scope === "app"
+        && (route === "settings.reset" || Object.hasOwn(v.patch as object, "promptCustomization")))
+        await this.pool.syncPromptCustomization();
+      return result;
+    }
     if (
       !this.project &&
       [
@@ -1107,6 +1132,8 @@ export class MainController {
                 v.scope as "global" | "project",
                 v.patch as Record<string, unknown>,
               );
+        if (v.scope === "app" && Object.hasOwn(v.patch as object, "promptCustomization"))
+          await this.pool.syncPromptCustomization();
         if (v.scope === "project" && this.project) {
           const project = this.project;
           const d = configuredSessionDir(project.path, b);
@@ -1124,10 +1151,12 @@ export class MainController {
         }
         return b;
       }
-      case "settings.reset":
-        return v.scope === "app"
-          ? this.settings.reset()
-          : await this.settings.resetPi(v.scope as "global" | "project");
+      case "settings.reset": {
+        if (v.scope !== "app") return this.settings.resetPi(v.scope as "global" | "project");
+        const bundle = this.settings.reset();
+        await this.pool.syncPromptCustomization();
+        return bundle;
+      }
       case "layout.save":
         this.settings.saveLayout(v.layout as LayoutState);
         return { ok: true };

@@ -9,6 +9,7 @@ import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
+import { PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 
 type PromptAt = Extract<AgentControl, { action: "promptAt" }> & { timestamp?: string };
 // Internal correlation only; the public agent.control validator intentionally
@@ -22,6 +23,40 @@ function pendingPrompt(request: BranchRecord["request"], parentNodeId: string | 
     : runtime.model;
   return { text: request.text, parentNodeId, images: request.images, timestamp: request.timestamp,
     model, thinkingLevel: request.thinkingLevel ?? runtime.thinkingLevel };
+}
+/** Persona switches land on the interturn tail after a node's last assistant
+ * reply. Forking rewinds to the node's own state, so those switches are dropped
+ * from the copied history and the chain re-links through them; switches from
+ * the node's ancestry stay, which is exactly the inherited persona at fork. */
+/** Reverse of `graph.canonical`: the branch-local id behind a canonical one. */
+function localIdOf(record: BranchRecord, canonicalId: string): string {
+  for (const [local, canonical] of Object.entries(record.inherited))
+    if (canonical === canonicalId) return local;
+  return canonicalId;
+}
+function trimInterturnOverrides(entries: RawSessionEntry[], node: { rawEntryIds: string[] } | undefined): RawSessionEntry[] {
+  if (!node) return entries;
+  const byId = new Map(entries.map(e => [e.id, e]));
+  let boundaryIndex = -1;
+  for (const id of node.rawEntryIds) {
+    const entry = byId.get(id);
+    if (!entry) continue;
+    const index = entries.indexOf(entry);
+    // The conversation body ends at the last assistant reply; a turn without
+    // one (failed or interrupted) still owns its tail from the user entry on.
+    if ((entry as { message?: { role?: string } }).message?.role === "assistant"
+      || (entry as { message?: { role?: string } }).message?.role === "user")
+      boundaryIndex = Math.max(boundaryIndex, index);
+  }
+  if (boundaryIndex === -1) return entries;
+  const removed = new Set(entries.slice(boundaryIndex + 1)
+    .filter(e => e.type === "custom" && e.customType === PROMPT_OVERRIDE_CUSTOM_TYPE).map(e => e.id));
+  if (!removed.size) return entries;
+  const resolve = (id: string | null): string | null => {
+    while (id && removed.has(id)) id = byId.get(id)?.parentId ?? null;
+    return id;
+  };
+  return entries.filter(e => !removed.has(e.id)).map(e => ({ ...e, parentId: resolve(e.parentId) }));
 }
 function snapshotParent(id: string, entries: Map<string, RawSessionEntry>): string | null {
   const seen = new Set<string>();
@@ -206,6 +241,7 @@ export class GraphRuntime extends PiRuntime {
     child.brokerProviders = new Set(this.brokerProviders);
     child.brokerModels = this.brokerModels;
     child.eventScope = { graphId: this.graph!.main, branchId: record.id, runId: record.runId };
+    child.getPromptCustomization = () => this.getPromptCustomization();
     return child;
   }
   private fileSnapshot(record: BranchRecord, data: SessionData): SessionSnapshot {
@@ -285,6 +321,13 @@ export class GraphRuntime extends PiRuntime {
       return Promise.reject(new Error("Reopen this session to recover the failed node deletion"));
     if (input.action === "deleteNode") return this.exclusive(() => this.deleteNode(input));
     if (input.action === "setLabel") return this.exclusive(() => this.setLabel(input));
+    if (input.action === "setPromptOverride") return this.exclusive(() => this.setPromptOverride(input));
+    if (input.action === "setPromptCustomization") {
+      // Workers resolve their graph owner's current defaults before each run.
+      this.promptCustomization = input.customization;
+      this.notify();
+      return Promise.resolve(this.snapshot());
+    }
     if (input.action === "newSession") return this.create();
     if (this.stopping && this.runtime && !["abort", "branchAbort"].includes(input.action))
       return Promise.reject(new Error("Session is closing"));
@@ -334,7 +377,7 @@ export class GraphRuntime extends PiRuntime {
     if (input.action === "exportBranchSession")
       return this.exclusive(async () => ({ work: this.exportBranch(input) })).then(({ work }) => work);
     if (input.action === "abort") this.preparations.get(this.rootRunId)?.abort(new Error("Session operation cancelled"));
-    if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands"].includes(input.action))
+    if (["abort", "abortBash", "abortCompaction", "abortRetry", "getModels", "getProviders", "commands", "systemPromptPreview"].includes(input.action))
       return super.control(input);
     // Prompt lifetime stays outside admission, so creating a sibling never waits for it.
     if (input.action === "prompt") return this.exclusive(async () => {
@@ -380,6 +423,20 @@ export class GraphRuntime extends PiRuntime {
       const data = this.persist(() => graph.seal(record, { header: manager.getHeader(), entries: manager.getEntries() }));
       worker.snapshot = this.fileSnapshot(record, data);
     }
+    this.notify();
+    return this.snapshot();
+  }
+  // The override lands on the active branch's tip: the next prompt on that
+  // branch runs under it, and forks inherit it from the ancestry.
+  private async setPromptOverride(input: Extract<AgentControl, { action: "setPromptOverride" }>) {
+    const graph = this.graph;
+    if (!graph || !this.runtime) throw new Error("Open a writable graph first");
+    if (this.mainWork || this.state().isStreaming)
+      throw new Error("Wait for this branch to finish before changing personas");
+    try { await super.control(input); }
+    catch (error) { this.failStorage(error); throw error; }
+    this.persist(() => graph.sealMain(this.data(this)));
+    this.persist(() => graph.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
     this.notify();
     return this.snapshot();
   }
@@ -547,8 +604,15 @@ export class GraphRuntime extends PiRuntime {
     // identity: the graph already gets inherited labels from their owning source.
     // The SDK places these records after the copied conversation, so omitting
     // them leaves all conversation parents and canonical IDs intact.
+    const copied = manager.getEntries().filter((entry: RawSessionEntry) => entry.type !== "label");
+    // Node ids are canonical in the graph projection; the copied entries carry
+    // this branch's local ids, so translate before locating the conversation
+    // boundary that bounds the interturn override records.
+    const localNode = node && parentRecord
+      ? { rawEntryIds: node.rawEntryIds.map(id => localIdOf(parentRecord, id)) }
+      : node;
     const data: SessionData = { header: { ...manager.getHeader(), parentSession: parent.session.path },
-      entries: manager.getEntries().filter((entry: RawSessionEntry) => entry.type !== "label") };
+      entries: trimInterturnOverrides(copied, localNode) };
     const inherited: Record<string, string> = {};
     const sourceIds = new Set(parent.entries.map(e => e.id));
     for (const entry of data.entries) {
@@ -605,6 +669,10 @@ export class GraphRuntime extends PiRuntime {
     }
     if (input.thinkingLevel) {
       await PiRuntime.prototype.control.call(pi, { action: "setThinking", level: input.thinkingLevel });
+      signal.throwIfAborted();
+    }
+    if (input.promptOverride) {
+      await PiRuntime.prototype.control.call(pi, { action: "setPromptOverride", ...input.promptOverride });
       signal.throwIfAborted();
     }
   }

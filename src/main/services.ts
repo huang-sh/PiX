@@ -264,6 +264,36 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     if (unbilled.length) out.usage = { unbilledProviders: unbilled };
     else drop("usage");
   }
+  if (out.personas !== undefined) {
+    const seen = new Set<string>();
+    const personas = (Array.isArray(out.personas) ? out.personas : []).flatMap(item => {
+      const persona = item as { name?: unknown; text?: unknown };
+      if (typeof persona?.name !== "string" || typeof persona?.text !== "string") return [];
+      const name = persona.name.trim().slice(0, 60);
+      const text = persona.text.slice(0, 100_000);
+      if (!name || !text.trim() || seen.has(name)) return [];
+      seen.add(name);
+      return [{ name, text }];
+    });
+    if (personas.length) out.personas = personas;
+    else drop("personas");
+  }
+  if (out.promptCustomization !== undefined) {
+    const raw = out.promptCustomization as Record<string, unknown>;
+    const section = (value: unknown): string | undefined =>
+      typeof value === "string" && value.trim() ? value.slice(0, 100_000) : undefined;
+    const preamble = section(raw?.preamble);
+    const preamblePersona = raw?.preamblePersona === null ? null
+      : typeof raw?.preamblePersona === "string" ? raw.preamblePersona.trim().slice(0, 60) || undefined : undefined;
+    const customization = {
+      ...(preamble !== undefined ? { preamble } : {}),
+      ...(preamble !== undefined && preamblePersona !== undefined ? { preamblePersona } : {}),
+      ...(section(raw?.rules) !== undefined ? { rules: section(raw.rules) } : {}),
+      ...(section(raw?.docs) !== undefined ? { docs: section(raw.docs) } : {}),
+    };
+    if (Object.keys(customization).length) out.promptCustomization = customization;
+    else drop("promptCustomization");
+  }
   return out;
 }
 
@@ -350,6 +380,9 @@ export class SettingsService {
       // This map is a complete set of overrides: merging would resurrect reset bindings.
       next.keyboardShortcuts = patch.keyboardShortcuts;
     }
+    // The editor sends a complete snapshot: omitted sections reset to dynamic
+    // content, and null provenance must survive the merge's deletion semantics.
+    if (Object.hasOwn(patch, "promptCustomization")) next.promptCustomization = patch.promptCustomization;
     // App writes persist only values the app can read back.
     atomic(this.appPath, normalizeAppSettings(next));
     return this.bundle();

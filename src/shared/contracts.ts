@@ -3,6 +3,7 @@ import type {
   DesktopRoute,
   LayoutState,
   PanelId,
+  PromptOverrideInput,
 } from "./types.js";
 import { CUSTOM_MODEL_APIS, PANEL_IDS, UTILITY_TABS } from "./types.js";
 import { INSTALLABLE_PACKAGE_SOURCES } from "./extensions.js";
@@ -23,6 +24,13 @@ const str = (
     throw new Error(`${name} must be a non-empty string`);
   return value;
 };
+function promptOverrideInput(value: unknown): PromptOverrideInput {
+  const v = obj(value);
+  if (v.off === true) return { off: true };
+  const mode = v.mode;
+  if (mode !== "append" && mode !== "replace" && mode !== "strict") throw new Error("Invalid persona override");
+  return { mode, name: str(v.name, "name")!, text: str(v.text, "text")! };
+}
 const externalUrl = (value: unknown) => {
   const url = new URL(str(value, "url")!);
   if (!["https:", "http:", "mailto:"].includes(url.protocol))
@@ -300,7 +308,8 @@ export function validateRouteInput(
         return { action, requestId, nodeId: v.nodeId === null ? null : str(v.nodeId, "nodeId"),
           text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
           provider: str(v.provider, "provider", true), modelId: str(v.modelId, "modelId", true),
-          thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true) };
+          thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),
+          ...(v.promptOverride !== undefined ? { promptOverride: promptOverrideInput(v.promptOverride) } : {}) };
       }
       if (action === "branchAbort") return { action, branchId: str(v.branchId, "branchId"), runId: str(v.runId, "runId") };
       const queueTarget = () => v.graphId !== undefined || v.branchId !== undefined || v.runId !== undefined
@@ -441,6 +450,25 @@ export function validateRouteInput(
           entryId: str(v.entryId, "entryId"),
           label: str(v.label, "label", true),
         };
+      if (action === "setPromptOverride") {
+        return { action, ...promptOverrideInput(v) };
+      }
+      if (action === "setPromptCustomization") {
+        const section = (value: unknown): string | undefined => {
+          const text = typeof value === "string" ? value.trim() && value : undefined;
+          return text || undefined;
+        };
+        const c = v.customization && typeof v.customization === "object" && !Array.isArray(v.customization)
+          ? v.customization as Record<string, unknown> : {};
+        const customization = {
+          ...(section(c.preamble) !== undefined ? { preamble: section(c.preamble)! } : {}),
+          ...(section(c.rules) !== undefined ? { rules: section(c.rules)! } : {}),
+          ...(section(c.docs) !== undefined ? { docs: section(c.docs)! } : {}),
+        };
+        return { action, customization };
+      }
+      if (action === "systemPromptPreview")
+        return { action };
       if (action === "navigateTree" || action === "fork")
         return { action, entryId: str(v.entryId, "entryId") };
       return { action };

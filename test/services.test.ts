@@ -391,6 +391,34 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     rmSync(temp, { recursive: true, force: true });
   }
 });
+test("prompt settings retain picker provenance across reads and drop it when the preamble resets", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-preamble-source-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = temp;
+  try {
+    const settings = new SettingsService(temp);
+    settings.update({ promptCustomization: { preamble: "Same body", preamblePersona: " second ", rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization,
+      { preamble: "Same body", preamblePersona: "second", rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamble: "Same body", preamblePersona: null, rules: "Keep rules" } });
+    settings.update({ theme: "dark" });
+    settings.update({ personas: [{ name: "other", text: "Same body" }] });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization,
+      { preamble: "Same body", preamblePersona: null, rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamblePersona: null, rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamblePersona: "second", rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamble: "Legacy text" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { preamble: "Legacy text" });
+    settings.update({ promptCustomization: { preamble: "Text", preamblePersona: { invalid: true } } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { preamble: "Text" });
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("pi settings writes go through the sdk: merge, replace, freeze, reset", async () => {
   const temp = mkdtempSync(join(tmpdir(), "pix-pi-settings-"));
   const previous = process.env.PIX_HOME;

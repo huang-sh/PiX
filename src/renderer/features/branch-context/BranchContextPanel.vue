@@ -183,7 +183,9 @@ function setComposerThinking(level: string, explicit: boolean) {
 async function submitComposer(text: string, images?: PromptImage[]) {
   return Boolean(await submitDraft(props.nodeId ?? panelNode.value?.id ?? null, text,
     composerModelValue.value, composerThinkingValue.value, images,
-    props.nodeId ? { follow: false, columnId: props.nodeId } : undefined));
+    props.nodeId || composerState.draft.promptOverride !== undefined
+      ? { ...(props.nodeId ? { follow: false, columnId: props.nodeId } : {}), ...(composerState.draft.promptOverride !== undefined ? { promptOverride: composerState.draft.promptOverride } : {}) }
+      : undefined));
 }
 
 // Drafts and submission callbacks must share the same state across a pinned
@@ -576,6 +578,8 @@ onBeforeUnmount(() => {
           :model="composerModelValue"
           :thinking-level="composerThinkingValue"
           :models="session.models"
+          :personas="layout.settings?.app.personas ?? []"
+          :prompt-override="session.promptOverrideAt(props.nodeId ?? panelNode?.id ?? null)"
           :placeholder="composerPlaceholder"
           :running="composerRunning"
           :on-model="setComposerModel"
