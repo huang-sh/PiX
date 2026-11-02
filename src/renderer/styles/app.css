@@ -476,11 +476,13 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .node-branch-controls::before { content: ""; position: absolute; inset: 29px 0; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 2px 8px rgba(28,36,48,.12); opacity: 0; transition: top 140ms ease, bottom 140ms ease, opacity 140ms ease; pointer-events: none; }
 .node-branch-controls.direction-up::before { top: 0; opacity: 1; }
 .node-branch-controls.direction-down::before { bottom: 0; opacity: 1; }
+.node-branch-controls.direction-right::before { right: -30px; opacity: 1; }
 .prompt-node:hover .node-branch-controls, .prompt-node.selected .node-branch-controls, .prompt-node:focus-within .node-branch-controls { pointer-events: auto; }
 .node-branch-controls .node-add { right: 2px; }
 .node-branch-arrow { position: absolute; left: 2px; display: grid; place-items: center; width: 30px; height: 27px; padding: 0; border: 0; background: none; color: var(--accent); opacity: 0; transition: opacity 120ms ease, background 120ms ease; }
 .node-branch-arrow[data-direction="up"] { top: 2px; border-radius: 15px 15px 5px 5px; }
 .node-branch-arrow[data-direction="down"] { bottom: 2px; border-radius: 5px 5px 15px 15px; }
+.node-branch-arrow[data-direction="right"] { left: 34px; top: 30px; border-radius: 5px 15px 15px 5px; }
 .node-branch-arrow.is-visible, .node-branch-arrow:focus-visible { opacity: 1; }
 .node-branch-arrow:hover { color: var(--accent-strong); background: color-mix(in srgb,var(--accent) 8%,var(--surface)); }
 .node-branch-arrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

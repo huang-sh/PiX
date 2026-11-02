@@ -552,7 +552,7 @@ export interface RuntimeExtension {
 export type AgentControl =
   | { action: "deleteNode"; nodeId: string; graphId: string }
   | { action: "exportBranchSession"; nodeId: string; graphId: string; direction?: "ancestors" | "descendants" }
-  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
+  | { action: "promptAt"; requestId: string; nodeId: string | null; forceFork?: boolean; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
   | { action: "branchAbort"; branchId: string; runId: string }
   | { action: "prompt"; text: string; images?: PromptImage[]; submittedAt?: string }
   | { action: "steer" | "followUp"; text: string; images?: PromptImage[]; graphId?: string; branchId?: string; runId?: string }

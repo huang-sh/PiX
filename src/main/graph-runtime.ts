@@ -542,11 +542,12 @@ export class GraphRuntime extends PiRuntime {
     const snapshot = this.snapshot();
     const node = input.nodeId ? snapshot.projection.nodes.find(n => n.id === input.nodeId) : undefined;
     if (input.nodeId && (!node || !node.forkable)) throw new Error("Choose a node that is not running to branch from");
+    if (input.forceFork && !node) throw new Error("Choose an existing node to create a branch");
     const limit = Math.min(64, Math.max(1, Number.parseInt(process.env.PIX_MAX_PARALLEL_RUNS ?? "8", 10) || 8));
     if ([...this.workers.values()].filter(w => w.work).length + (this.mainWork ? 1 : 0) >= limit)
       throw new Error(`${limit} branches are running. Stop one before starting another.`);
     const root = super.snapshot();
-    const onMain = !this.mainWork && !root.runtime.isStreaming && (input.nodeId === root.projection.activeNodeId || (!input.nodeId && !root.entries.some(e => e.type === "message")));
+    const onMain = !input.forceFork && !this.mainWork && !root.runtime.isStreaming && (input.nodeId === root.projection.activeNodeId || (!input.nodeId && !root.entries.some(e => e.type === "message")));
     if (onMain) {
       this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "prepared" }) + "\n"));
       this.rootRunId = randomUUID();
@@ -587,7 +588,7 @@ export class GraphRuntime extends PiRuntime {
     const parent = parentId === "main" ? root : this.workers.get(parentId)?.snapshot;
     if (!parent) throw new Error("Branch source is unavailable");
     const parentRecord = graph.records.get(parentId);
-    if (parentRecord && !parentRecord.error && !this.workers.get(parentId)?.work && parent.projection.activeNodeId
+    if (!input.forceFork && parentRecord && !parentRecord.error && !this.workers.get(parentId)?.work && parent.projection.activeNodeId
       && input.nodeId === `turn:${graph.canonical(parentRecord, parent.projection.activeNodeId.slice(5))}`) {
       parentRecord.requestId = input.requestId; parentRecord.request = input; parentRecord.runId = randomUUID();
       return this.launchBranch(parentRecord, input, node?.footer?.model ?? parent.runtime.model, node?.footer?.thinkingLevel ?? parent.runtime.thinkingLevel);

@@ -228,3 +228,43 @@ test("a cyclic parent chain cannot hang the manual layout", () => {
   assert.deepEqual({ x: nodes[1]!.x, y: nodes[1]!.y }, { x: 900, y: 600 });
   assert.deepEqual({ x: nodes[5]!.x, y: nodes[5]!.y }, { x: 1928, y: 80 });
 });
+
+
+test("explicit first branches reserve a continuation lane above or below the parent", () => {
+  for (const direction of [-1, 1]) {
+    const nodes = [{ id: "root", parentId: null, timestamp: "0", depth: 0 },
+      { id: "branch", parentId: "root", timestamp: "1", depth: 1 },
+      { id: "branch-next", parentId: "branch", timestamp: "2", depth: 2 }];
+    const order = new Map([["branch", direction]]);
+    const placed = layoutGraph({ nodes }, undefined, order).nodes;
+    const [root, branch, next] = placed;
+    assert.ok(direction * (branch!.y - root!.y) > 0);
+    assert.equal(next!.y, branch!.y);
+    const withMain = layoutGraph({ nodes: [...nodes,
+      { id: "main", parentId: "root", timestamp: "3", depth: 1 }] }, undefined, order).nodes;
+    assert.equal(withMain[0]!.y, withMain[3]!.y);
+    assert.ok(direction * (withMain[1]!.y - withMain[0]!.y) > 0);
+  }
+});
+
+test("nested branches each keep their own horizontal continuation with unequal card heights", () => {
+  for (const direction of [-1, 1]) {
+    const nodes = [
+      { id: "root", parentId: null, timestamp: "0", depth: 0 },
+      { id: "main", parentId: "root", timestamp: "1", depth: 1 },
+      { id: "branch", parentId: "root", timestamp: "2", depth: 1 },
+      { id: "branch-next", parentId: "branch", timestamp: "3", depth: 2 },
+      { id: "nested", parentId: "branch", timestamp: "4", depth: 2 },
+      { id: "nested-next", parentId: "nested", timestamp: "5", depth: 3 },
+    ];
+    const sizes = new Map(nodes.map((node, i) => [node.id, { width: 320, height: 100 + i * 70 }]));
+    const placed = layoutGraph({ nodes }, sizes, new Map([["branch", direction], ["nested", -direction]])).nodes;
+    const center = (id: string) => { const node = placed.find(n => n.id === id)!; return node.y + node.height / 2; };
+    for (const [parent, next] of [["root", "main"], ["branch", "branch-next"], ["nested", "nested-next"]])
+      assert.equal(center(parent!), center(next!));
+    assert.ok(direction * (center("branch") - center("root")) > 0);
+    assert.ok(-direction * (center("nested") - center("branch")) > 0);
+    for (const a of placed) for (const b of placed) if (a.id !== b.id && a.depth === b.depth)
+      assert.ok(a.y + a.height + 28 <= b.y || b.y + b.height + 28 <= a.y, `${a.id} overlaps ${b.id}`);
+  }
+});

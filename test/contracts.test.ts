@@ -197,3 +197,10 @@ test("node export preserves and validates the chosen direction across IPC", () =
     action: "exportBranchSession", nodeId: "turn:b", graphId: "/session.jsonl", direction: "sideways",
   }), /Invalid export direction/);
 });
+
+
+test("explicit branch intent survives IPC and rejects non-boolean flags", () => {
+  const input = { action: "promptAt", requestId: "branch-intent", nodeId: "turn:root", text: "branch", forceFork: true };
+  assert.equal((validateRouteInput("agent.control", input) as { forceFork?: boolean }).forceFork, true);
+  assert.throws(() => validateRouteInput("agent.control", { ...input, forceFork: "true" }), /forceFork/);
+});

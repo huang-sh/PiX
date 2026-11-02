@@ -1162,3 +1162,67 @@ test("branch export copies a node and all descendants into a standalone graph wi
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+
+test("explicit branches fork main and child tips while ordinary prompts keep continuing their branch", { timeout: 30000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-explicit-fork-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    async function turn(text: string, nodeId: string | null, forceFork = false) {
+      faux.setResponses([fauxAssistantMessage(`Answer ${text}`)]);
+      const input = { action: "promptAt" as const, requestId: text, text, nodeId, forceFork, provider: "faux", modelId: "test" };
+      await runtime.control(input);
+      await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+      const node = runtime.snapshot().projection.nodes.find(n => n.title === text)!;
+      await runtime.control(input);
+      assert.equal(runtime.snapshot().projection.nodes.filter(n => n.title === text).length, 1);
+      return node;
+    }
+    const root = await turn("root", null);
+    const mainBefore = readFileSync(runtime.graph!.main, "utf8");
+    const child = await turn("child", root.id, true);
+    assert.notEqual(child.branchId, "main");
+    assert.equal(child.parentId, root.id);
+    assert.equal(readFileSync(runtime.graph!.main, "utf8"), mainBefore);
+    const continuation = await turn("child-next", child.id);
+    assert.equal(continuation.branchId, child.branchId);
+    const childPath = runtime.graph!.path(child.branchId!);
+    const childBefore = readFileSync(childPath, "utf8");
+    const nested = await turn("nested", continuation.id, true);
+    assert.notEqual(nested.branchId, child.branchId);
+    assert.equal(nested.parentId, continuation.id);
+    assert.equal(runtime.graph!.records.get(nested.branchId!)!.parentId, child.branchId);
+    assert.equal(readFileSync(childPath, "utf8"), childBefore);
+    const childAfterFork = await turn("child-after-fork", continuation.id);
+    assert.equal(childAfterFork.branchId, child.branchId);
+    assert.equal(childAfterFork.parentId, continuation.id);
+    assert.equal(runtime.graph!.records.size, 2);
+    const mainNext = await turn("main-next", root.id);
+    assert.equal(mainNext.branchId, "main");
+    const graphId = runtime.graph!.main;
+    await runtime.close(); await runtime.open(graphId);
+    assert.equal(runtime.snapshot().projection.nodes.find(n => n.id === nested.id)!.branchId, nested.branchId);
+    const resumed = await turn("nested-next", nested.id);
+    assert.equal(resumed.branchId, nested.branchId);
+    assert.equal(resumed.parentId, nested.id);
+    const childResumed = await turn("child-after-restart", childAfterFork.id);
+    assert.equal(childResumed.branchId, child.branchId);
+    assert.equal(childResumed.parentId, childAfterFork.id);
+    assert.equal(runtime.graph!.records.size, 2);
+  } finally {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -218,6 +218,7 @@ describe("PromptNode branch action", () => {
     await add.trigger("click");
     await wrapper.get('[data-direction="up"]').trigger("click");
     await wrapper.get('[data-direction="down"]').trigger("click");
+    await wrapper.get('[data-direction="right"]').trigger("click");
     expect(onCompose).not.toHaveBeenCalled();
     await wrapper.setProps({ data: { ...data, runnable: true } });
     expect(wrapper.findAll(".node-add")).toHaveLength(1);
@@ -243,10 +244,28 @@ describe("PromptNode branch action", () => {
     expect(down.classes()).not.toContain("is-visible");
     expect(add.find(".lucide-plus").exists()).toBe(true);
     await add.trigger("click");
-    expect(onCompose.mock.calls).toEqual([["up"], ["down"], ["down"]]);
+    expect(onCompose.mock.calls).toEqual([["up"], ["down"], [undefined]]);
+    const right = wrapper.get('[data-direction="right"]');
+    await controls.trigger("mousemove", { clientY: 141 });
+    expect(right.classes()).toContain("is-visible");
+    expect(right.find(".lucide-arrow-right").exists()).toBe(true);
+    expect(up.classes()).not.toContain("is-visible");
+    expect(down.classes()).not.toContain("is-visible");
+    await right.trigger("click");
+    expect(onCompose).toHaveBeenLastCalledWith(undefined);
+    await add.trigger("keydown", { key: "ArrowRight" });
+    expect(right.classes()).toContain("is-visible");
     await add.trigger("keydown", { key: "ArrowUp" });
     await up.trigger("click");
     expect(onCompose).toHaveBeenLastCalledWith("up");
+    for (const zoom of [0.25, 0.5, 1, 2]) {
+      box.mockReturnValue({ top: 100, height: 88 * zoom } as DOMRect);
+      for (const [direction, y] of [["up", 15], ["right", 44], ["down", 73]] as const) {
+        await controls.trigger("mousemove", { clientY: 100 + y * zoom });
+        expect(wrapper.get(`[data-direction="${direction}"]`).classes(), `direction ${direction} at zoom ${zoom}`).toContain("is-visible");
+        expect(wrapper.findAll(".node-branch-arrow.is-visible")).toHaveLength(1);
+      }
+    }
     box.mockRestore();
     wrapper.unmount();
   });

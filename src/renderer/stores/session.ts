@@ -587,7 +587,7 @@ export const useSessionStore = defineStore("session", {
     },
     // follow: false serves pinned chat columns: the submission starts on its
     // branch, but the primary column must keep showing the current selection.
-    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null }) {
+    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { forceFork?: boolean; follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null }) {
       const current = this.current;
       const project = this.activeProjectId, request = this.viewRequest;
       if (!current || (!text.trim() && !images?.length)) return;
@@ -615,6 +615,7 @@ export const useSessionStore = defineStore("session", {
         try {
           const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
             provider: model?.provider, modelId: model?.id, thinkingLevel, images,
+            ...(options?.forceFork ? { forceFork: true } : {}),
             ...(promptOverride ? { promptOverride } : {}) });
           if (project !== this.activeProjectId || current.session.path !== this.current?.session.path
             || current.graph.epoch !== this.current?.graph?.epoch) return;

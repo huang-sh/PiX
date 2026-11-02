@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, ChevronRight, Clock, Coins, FolderOutput, GitBranch, Hash, Image, LoaderCircle, MessageSquare, PieChart, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { AlertCircle, ArrowDown, ArrowRight, ArrowUp, Brain, Check, ChevronRight, Clock, Coins, FolderOutput, GitBranch, Hash, Image, LoaderCircle, MessageSquare, PieChart, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -63,7 +63,7 @@ const optionalWidths = ref<number[]>([]);
 const preview = ref<HTMLElement>();
 const previewing = ref(false);
 const previewKind = ref<"content" | "info">("content");
-const branchDirection = ref<BranchDirection>();
+const branchDirection = ref<BranchDirection | "right">();
 const previewContent = ref<NodeContent>({ user: "", assistant: "" });
 const previewStyle = ref<CSSProperties>({ visibility: "hidden", left: "0px", top: "0px" });
 let openTimer: number | undefined;
@@ -260,7 +260,7 @@ function onPointerDown(event: PointerEvent) {
   if (!preview.value?.contains(event.target as Node)) suppressPreview();
 }
 
-function compose(direction: BranchDirection = "down") {
+function compose(direction?: BranchDirection) {
   suppressPreview();
   if (!props.data.runnable) return;
   props.data.onCompose(direction);
@@ -268,10 +268,11 @@ function compose(direction: BranchDirection = "down") {
 
 function pointBranch(event: MouseEvent) {
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  branchDirection.value = event.clientY < box.top + box.height / 2 ? "up" : "down";
+  branchDirection.value = event.clientY < box.top + box.height / 3 ? "up"
+    : event.clientY > box.top + box.height * 2 / 3 ? "down" : "right";
 }
 
-function focusBranch(direction: BranchDirection, event: KeyboardEvent) {
+function focusBranch(direction: BranchDirection | "right", event: KeyboardEvent) {
   branchDirection.value = direction;
   (event.currentTarget as HTMLElement).parentElement?.querySelector<HTMLButtonElement>(`[data-direction="${direction}"]`)?.focus();
 }
@@ -410,17 +411,18 @@ function relative(value: string) {
       @focus="suppressPreview"
       @keydown.up.prevent.stop="focusBranch('up', $event)"
       @keydown.down.prevent.stop="focusBranch('down', $event)"
+      @keydown.right.prevent.stop="focusBranch('right', $event)"
       @click.stop="compose()"
     ><Plus :size="15" /></button>
-    <button v-for="direction in (['up', 'down'] as const)" :key="direction"
+    <button v-for="direction in (['up', 'right', 'down'] as const)" :key="direction"
       type="button" class="node-branch-arrow" :data-direction="direction"
       :class="{ 'is-visible': branchDirection === direction }"
       :aria-disabled="!data.runnable"
       :title="data.runnable ? undefined : t(data.blockedReason)"
-      :aria-label="t(direction === 'up' ? 'graph.branchUp' : 'graph.branchDown')"
+      :aria-label="t(direction === 'up' ? 'graph.branchUp' : direction === 'down' ? 'graph.branchDown' : 'graph.continueMainline')"
       @focus="branchDirection = direction; suppressPreview()" @blur="branchDirection = undefined"
-      @click.stop="compose(direction)"
-    ><ArrowUp v-if="direction === 'up'" :size="18" :stroke-width="3" /><ArrowDown v-else :size="18" :stroke-width="3" /></button>
+      @click.stop="compose(direction === 'right' ? undefined : direction)"
+    ><ArrowUp v-if="direction === 'up'" :size="18" :stroke-width="3" /><ArrowDown v-else-if="direction === 'down'" :size="18" :stroke-width="3" /><ArrowRight v-else :size="18" :stroke-width="3" /></button>
     </div>
   </article>
   </ContextMenuTrigger>

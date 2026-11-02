@@ -333,6 +333,7 @@ export function validateRouteInput(
         if (!/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new Error("Invalid request ID");
         const images = v.images === undefined ? undefined : validatePromptImages(v.images);
         return { action, requestId, nodeId: v.nodeId === null ? null : str(v.nodeId, "nodeId"),
+          ...(v.forceFork !== undefined ? { forceFork: booleanField(v.forceFork, "forceFork") } : {}),
           text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
           provider: str(v.provider, "provider", true), modelId: str(v.modelId, "modelId", true),
           thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),

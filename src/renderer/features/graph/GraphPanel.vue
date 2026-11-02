@@ -255,9 +255,9 @@ function rebuild() {
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
     if (Array.isArray(saved)) for (const entry of saved) {
-      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] < 0) {
+      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] !== 0) {
         branchOrder.set(entry[0], entry[1]);
-        orderSequence = Math.max(orderSequence, -entry[1]);
+        orderSequence = Math.max(orderSequence, Math.abs(entry[1]));
       }
     }
     draftOrder = 0;
@@ -628,7 +628,7 @@ async function reopenSession() {
 async function compose(id: string, direction?: BranchDirection) {
   ++retryRequest;
   if (draftParent.value !== id) draftState.value = emptyDraft();
-  draftOrder = direction === "up" ? -++orderSequence : 0;
+  draftOrder = direction === "up" ? -++orderSequence : direction === "down" ? ++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
   draftParent.value = id;
   draftModel.value = node?.footer?.model ?? session.current?.runtime.model ?? null;
@@ -719,7 +719,7 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
     requestId || targetDraft.promptOverride !== undefined
-      ? { ...(requestId ? { requestId } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
+      ? { ...(requestId ? { requestId, forceFork: true } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
       : undefined,
   );
   if (!delivered) {
