@@ -4,7 +4,7 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, re
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type PromptImage, type PromptOverrideInput } from "../shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE, type RawSessionEntry, type PromptImage, type PromptOverrideInput } from "../shared/types.js";
 import { debugLog } from "./debug-log.js";
 import { projectSession, promptDisplayTextMap } from "../shared/session.js";
 
@@ -145,6 +145,7 @@ export class GraphFiles {
   private locked = false;
   private deltaEntries = new WeakMap<BranchRecord, WeakMap<RawSessionEntry, RawSessionEntry>>();
   readonly recoveryMessages: string[] = [];
+  readonly unavailableBranchMetadata: string[] = [];
   readonly recoveredInputs: Array<{ requestId: string; text: string; nodeId?: string | null; images?: PromptImage[] }> = [];
   constructor(readonly main: string) {
     this.dir = graphDir(main);
@@ -220,7 +221,16 @@ export class GraphFiles {
       }
       catch { this.recoveryMessages.push("Saved selection unavailable; using the session's last persisted entry"); }
     }
-    for (const name of readdirSync(this.dir).filter(n => n.endsWith(".jsonl.origin.json"))) {
+    this.unavailableBranchMetadata.length = 0;
+    const origins = new Set<string>();
+    for (const name of readdirSync(this.dir)) {
+      if (/\.jsonl\.origin\.json(?:\.bak)?$/.test(name)) origins.add(name.replace(/\.bak$/, ""));
+      // A source/checkpoint without its origin still represents a branch. It
+      // must not disappear from exports just because load cannot identify it.
+      if (/^[a-zA-Z0-9-]+\.jsonl(?:\.checkpoint)?$/.test(name) && !/^main-(?:damaged|legacy)-/.test(name))
+        origins.add(`${name.replace(/\.checkpoint$/, "")}.origin.json`);
+    }
+    for (const name of origins) {
       let record: BranchRecord;
       try {
         record = this.readJson(join(this.dir, name), readOnly);
@@ -229,7 +239,11 @@ export class GraphFiles {
           || !["prepared", "running", "idle", "interrupted"].includes(record.status)) throw new Error("Invalid branch origin");
         parseStrict(encodeSession({ header: record.header, entries: record.baseline }));
       }
-      catch { this.recoveryMessages.push(`Branch metadata unavailable; original session retained: ${name}`); continue; }
+      catch {
+        this.unavailableBranchMetadata.push(name);
+        this.recoveryMessages.push(`Branch metadata unavailable; original session retained: ${name}`);
+        continue;
+      }
       if (!readOnly && record.status === "prepared" && !existsSync(this.path(record.id))) {
         const initial = encodeSession({ header: record.header, entries: record.baseline });
         parseStrict(initial);
@@ -561,7 +575,7 @@ export class GraphFiles {
           const source = checkpoints ? checkpoints.get(id)! : readStrict(this.checkpointPath(id));
           if (source instanceof Error) throw source;
           delta = this.delta(record, source);
-          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", PROMPT_DISPLAY_CUSTOM_TYPE, "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
+          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE, "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
             || e.type === "custom_message")) throw new Error("Extension state needs a compatible export adapter; source retained");
         } catch (error) {
           throw new Error(`Cannot export branch ${id}: ${String(error)}`);

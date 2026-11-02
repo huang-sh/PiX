@@ -8,6 +8,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord } from "../src/main/graph-files.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
+import { projectSession } from "../src/shared/session.js";
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(r => setTimeout(r, 20)); }
@@ -946,7 +947,7 @@ test("independent branches persist without merging; export during a run preserve
     rmSync(home, { recursive: true, force: true });
   }
 });
-test("branch export copies a root-to-node path into a standalone session without touching the graph", { timeout: 30000 }, async () => {
+test("branch export copies a node and all descendants into a standalone graph without touching the source", { timeout: 60000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-export-branch-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
@@ -966,13 +967,14 @@ test("branch export copies a root-to-node path into a standalone session without
     await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
     async function turn(requestId: string, nodeId: string | null, text: string, answer: string) {
       faux.setResponses([fauxAssistantMessage(answer)]);
-      await runtime.control({ action: "promptAt", requestId, nodeId, text, provider: "faux", modelId: "test" });
+      await runtime.control({ action: "promptAt", requestId, nodeId, text, provider: "faux", modelId: "test",
+        ...(requestId === "a" ? { promptOverride: { mode: "append" as const, name: "reviewer", text: "Review carefully" } } : {}) });
       await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
       return runtime.snapshot().projection.nodes.find(node => node.title === text)!.id;
     }
     const root = await turn("root", null, "root prompt", "root answer");
     // Advance main past the root so prompts at the historical root fork parallel branches.
-    await turn("main", root, "main question", "main answer");
+    const main = await turn("main", root, "main question", "main answer");
     const a = await turn("a", root, "A question", "A answer");
     const a2 = await turn("a-next", a, "A next question", "A next answer");
     const b = await turn("b", a, "B question", "B answer");
@@ -983,27 +985,45 @@ test("branch export copies a root-to-node path into a standalone session without
 
     await assert.rejects(runtime.control({ action: "exportBranchSession", graphId: "other", nodeId: a2 }), /same graph/);
     await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: "turn:gone" }), /no longer exists/);
-    // Any node exports its root-to-node path; the turns after it stay behind.
+    // The selected node becomes the root; every following branch stays connected.
     const midExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a }) as { path: string };
     const midRaw = readFileSync(midExport.path, "utf8");
-    assert.ok(midRaw.includes("root prompt") && midRaw.includes("A answer"));
-    for (const text of ["A next question", "B question", "main question"]) assert.ok(!midRaw.includes(text), text);
+    for (const text of ["A question", "A answer", "A next question", "B question"]) assert.ok(midRaw.includes(text), text);
+    for (const text of ["root prompt", "root answer", "main question"]) assert.ok(!midRaw.includes(text), text);
+    const midData = parseStrict(midRaw);
+    const midProjection = projectSession(midData.entries, midData.entries.at(-1)!.id);
+    assert.equal(midProjection.nodes.find(node => node.title === "A question")!.parentId, null);
+    assert.equal(midProjection.nodes.find(node => node.title === "A question")!.promptOverride?.name, "reviewer");
+    for (const title of ["A next question", "B question"])
+      assert.equal(midProjection.nodes.find(node => node.title === title)!.parentId, a);
+    const beforeExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    const beforeData = parseStrict(readFileSync(beforeExport.path, "utf8"));
+    const beforeManager = SessionManager.inMemory(cwd, undefined, [beforeData.header, ...beforeData.entries] as any);
+    assert.deepEqual(projectSession(beforeData.entries, beforeManager.getLeafId()).nodes.map(n => n.title), ["root prompt", "A question"]);
+    const afterManager = SessionManager.inMemory(cwd, undefined, [midData.header, ...midData.entries] as any);
+    assert.equal(projectSession(beforeData.entries, beforeManager.getLeafId()).nodes.at(-1)!.promptOverride?.name, "reviewer");
+    assert.match(beforeManager.getSessionName()!, /^↑ [a-f0-9]{6} · A question$/);
+    assert.match(afterManager.getSessionName()!, /^↓ [a-f0-9]{6} · A question$/);
+    const repeatExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    assert.notEqual(SessionManager.open(repeatExport.path).getSessionName()!.slice(0, 8), beforeManager.getSessionName()!.slice(0, 8),
+      "repeated exports remain distinguishable when the session list truncates long titles");
+
     const rootExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: root }) as { path: string };
     const rootRaw = readFileSync(rootExport.path, "utf8");
     assert.ok(rootRaw.includes("root answer"));
-    assert.ok(!rootRaw.includes("A question") && !rootRaw.includes("main question"));
+    for (const text of ["A question", "A next question", "B question", "main question"]) assert.ok(rootRaw.includes(text), text);
 
     const exported = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a2 }) as { path: string };
     const raw = readFileSync(exported.path, "utf8");
     assert.ok(exported.path.startsWith(sessions), "the exported session lands in the session directory");
-    for (const text of ["root prompt", "root answer", "A question", "A answer", "A next question", "A next answer"])
+    for (const text of ["A next question", "A next answer"])
       assert.ok(raw.includes(text), text);
-    for (const text of ["main question", "B question", "B answer"]) assert.ok(!raw.includes(text), text);
+    for (const text of ["root prompt", "root answer", "A question", "A answer", "main question", "B question", "B answer"]) assert.ok(!raw.includes(text), text);
     const parsed = parseStrict(raw);
     assert.notEqual(parsed.header.id, parseStrict(graphBefore).header.id);
     assert.equal(parsed.header.parentSession, graphId);
     const manager = SessionManager.inMemory(cwd, undefined, [parsed.header, ...parsed.entries] as any);
-    assert.equal(manager.getTree().length, 1, "the exported path is one linear branch");
+    assert.equal(manager.getTree().length, 1, "the exported leaf is a standalone turn");
     assert.equal(readFileSync(graphId, "utf8"), graphBefore);
     assert.equal(runtime.graph!.records.size, recordsBefore);
     assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.id).sort(), nodesBefore);
@@ -1011,7 +1031,7 @@ test("branch export copies a root-to-node path into a standalone session without
     const exportedB = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
     const rawB = readFileSync(exportedB.path, "utf8");
     assert.ok(rawB.includes("B answer"));
-    assert.ok(!rawB.includes("A next question"));
+    for (const text of ["root prompt", "A question", "A next question"]) assert.ok(!rawB.includes(text), text);
 
     faux.setResponses([async () => { await new Promise<void>(r => { releaseHeld = r; }); return fauxAssistantMessage("held answer"); }]);
     await runtime.control({ action: "promptAt", requestId: "held", nodeId: a2, text: "held question", provider: "faux", modelId: "test" });
@@ -1020,21 +1040,121 @@ test("branch export copies a root-to-node path into a standalone session without
       return run?.status === "running" && Boolean(run.nodeId);
     });
     const held = runtime.snapshot().graph!.runs.find(r => r.requestId === "held")!;
-    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /Wait for this turn/);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /Wait for all turns/);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: a }), /Wait for all turns/);
+    const beforeWhileRunning = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    assert.ok(!readFileSync(beforeWhileRunning.path, "utf8").includes("held question"), "running descendants do not block exporting earlier history");
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId!, direction: "ancestors" }), /Wait for all turns/);
     releaseHeld();
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
 
+    // A process exit can leave an interrupted run with an intact transcript.
+    const aRecord = runtime.graph!.records.get(runtime.snapshot().projection.nodes.find(node => node.id === a)!.branchId!)!;
+    aRecord.status = "running";
+    runtime.graph!.save(aRecord);
+    await runtime.close(); await runtime.open(graphId);
+    assert.match(runtime.graph!.records.get(aRecord.id)!.error!, /Execution interrupted/);
+    const interruptedExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
+    assert.ok(readFileSync(interruptedExport.path, "utf8").includes("B answer"), "an interrupted ancestor with intact data remains exportable");
+
+    // An unrelated damaged branch must not block a healthy path. The damaged
+    // branch's recovered preview must never be mistaken for its full source.
+    const bRecord = runtime.graph!.records.get(runtime.snapshot().projection.nodes.find(node => node.id === b)!.branchId!)!;
+    const bPath = runtime.graph!.path(bRecord.id);
+    const bOriginal = readFileSync(bPath, "utf8");
+    await runtime.close();
+    durableWrite(bPath, bOriginal + '{"type":"message"');
+    await runtime.open(graphId);
+    assert.ok(runtime.graph!.recoveryMessages.length);
+    const healthyExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a2 }) as { path: string };
+    const healthyRaw = readFileSync(healthyExport.path, "utf8");
+    assert.ok(healthyRaw.includes("A next answer"));
+    assert.ok(!healthyRaw.includes("B question"));
+    const healthyBefore = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    const healthyBeforeData = parseStrict(readFileSync(healthyBefore.path, "utf8"));
+    assert.deepEqual(projectSession(healthyBeforeData.entries, healthyBeforeData.entries.at(-1)!.id).nodes.map(n => n.title), ["root prompt", "A question"]);
+    const healthyMain = await runtime.control({ action: "exportBranchSession", graphId, nodeId: main }) as { path: string };
+    assert.ok(readFileSync(healthyMain.path, "utf8").includes("main answer"));
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: root }), /Invalid session JSON/);
+    const filesBefore = readdirSync(sessions).sort();
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: b }), /Invalid session JSON/);
+    assert.deepEqual(readdirSync(sessions).sort(), filesBefore, "failed validation produces no export or temporary output");
+    assert.equal(readFileSync(bPath, "utf8"), bOriginal + '{"type":"message"');
+    await assert.rejects(runtime.control({ action: "exportJsonl" }), /source data needs recovery/);
+
+    // A descendant that cannot even be displayed is still a required source.
+    const bCheckpoint = runtime.graph!.checkpointPath(bRecord.id);
+    await runtime.close();
+    rmSync(bPath); rmSync(bCheckpoint);
+    await runtime.open(graphId);
+    assert.ok(!runtime.snapshot().projection.nodes.some(node => node.id === b));
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: a }), /Branch source unavailable/);
+
+    // Successfully recovered cursor metadata does not make conversation data invalid.
+    await runtime.close();
+    durableWrite(bPath, bOriginal);
+    durableWrite(bCheckpoint, bOriginal);
+    durableWrite(join(`${graphId}.pix-tree`, "cursor.json"), "broken");
+    await runtime.open(graphId);
+    assert.ok(runtime.graph!.recoveryMessages.some(message => message.includes("Recovered metadata")));
+    // Origin parentId is provenance; deletion may have reparented the path.
+    const selectedRecord = runtime.graph!.records.get(bRecord.id)!;
+    selectedRecord.parentId = "removed-original-parent";
+    const recoveredExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
+    assert.ok(readFileSync(recoveredExport.path, "utf8").includes("B answer"));
+    selectedRecord.parentId = bRecord.parentId;
+    // Unreadable origin metadata hides the entire descendant from records and
+    // projection. Export must not silently succeed with that branch omitted.
+    const bOrigin = `${bPath}.origin.json`;
+    await runtime.close();
+    const originBefore = readFileSync(bOrigin, "utf8");
+    durableWrite(bOrigin, "broken");
+    rmSync(`${bOrigin}.bak`, { force: true });
+    await runtime.open(graphId);
+    assert.equal(runtime.graph!.records.has(bRecord.id), false);
+    const beforeMissingMetadataExport = readdirSync(sessions).sort();
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: a }), /Branch metadata unavailable/);
+    assert.deepEqual(readdirSync(sessions).sort(), beforeMissingMetadataExport);
+    await runtime.close();
+    durableWrite(bOrigin, originBefore);
+    await runtime.open(graphId);
+    const aPath = runtime.graph!.path(aRecord.id);
+    await runtime.close();
+    durableWrite(aPath, readFileSync(aPath, "utf8") + '{"type":"message"');
+    await runtime.open(graphId);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: b }), /Invalid session JSON/,
+      "a damaged ancestor cannot be replaced with its recovered preview");
+
     // The export is a live, standalone session: it reopens and continues on its own.
     await runtime.close();
-    await runtime.open(exported.path);
-    assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.title),
-      ["root prompt", "A question", "A next question"]);
+    await runtime.open(midExport.path);
+    assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.title).sort(),
+      ["A next question", "A question", "B question"]);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === a)!.parentId, null);
+    for (const id of [a2, b]) assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === id)!.parentId, a);
     await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
     faux.setResponses([fauxAssistantMessage("exported continuation")]);
     await runtime.control({ action: "prompt", text: "continue exported" });
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
     assert.equal(runtime.snapshot().projection.nodes.length, 4);
     assert.equal(runtime.snapshot().projection.nodes.at(-1)!.title, "continue exported");
+    assert.equal(runtime.snapshot().projection.nodes.at(-1)!.promptOverride?.name, "reviewer");
+    const fork = await turn("export-fork", a, "new fork after export", "new fork answer");
+    assert.equal(runtime.snapshot().projection.nodes.find(n => n.id === fork)!.parentId, a);
+    const reopenedGraph = runtime.graph!.main;
+    const sourceBeforeRepeat = readFileSync(reopenedGraph, "utf8");
+    for (const direction of ["ancestors", "descendants"] as const) {
+      const repeated = await runtime.control({ action: "exportBranchSession", graphId: reopenedGraph, nodeId: fork, direction }) as { path: string };
+      const data = parseStrict(readFileSync(repeated.path, "utf8"));
+      const manager = SessionManager.open(repeated.path);
+      assert.deepEqual(projectSession(data.entries, manager.getLeafId()).nodes.map(n => n.title),
+        direction === "ancestors" ? ["A question", "new fork after export"] : ["new fork after export"]);
+      const context = JSON.stringify(manager.buildSessionContext().messages);
+      assert.ok(context.includes("new fork answer"));
+      assert.equal(context.includes("A answer"), direction === "ancestors");
+      assert.ok(!context.includes("B answer") && !context.includes("root answer"));
+    }
+    assert.equal(readFileSync(reopenedGraph, "utf8"), sourceBeforeRepeat);
   } finally {
     releaseHeld?.(); await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;

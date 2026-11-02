@@ -322,6 +322,34 @@ test("restart restores prepared branches and unfinished inputs without replaying
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("missing branch origins recover from backup or remain explicitly unavailable instead of disappearing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-missing-origin-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    graph.create(a, { header: a.header, entries: [...initial.entries, user("child", "root")] });
+    graph.save(a);
+    const origin = `${graph.path("A")}.origin.json`;
+    rmSync(origin);
+    const recovered = new GraphFiles(graph.main);
+    recovered.load();
+    assert.equal(recovered.records.has("A"), true);
+    assert.deepEqual(recovered.unavailableBranchMetadata, []);
+    assert.ok(existsSync(origin));
+
+    rmSync(origin); rmSync(`${origin}.bak`);
+    for (const checkpointOnly of [false, true]) {
+      if (checkpointOnly) rmSync(graph.path("A"));
+      const unavailable = new GraphFiles(graph.main);
+      unavailable.load({ readOnly: true });
+      assert.equal(unavailable.records.has("A"), false);
+      assert.deepEqual(unavailable.unavailableBranchMetadata, ["A.jsonl.origin.json"]);
+      assert.ok(existsSync(graph.checkpointPath("A")));
+    }
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("main tail recovery and SDK legacy migration retain originals; structural damage is refused", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-main-recovery-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));

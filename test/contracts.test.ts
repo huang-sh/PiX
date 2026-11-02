@@ -187,3 +187,13 @@ test("extension installs and removals are limited to recommended sources", () =>
       );
   }
 });
+
+test("node export preserves and validates the chosen direction across IPC", () => {
+  for (const direction of ["ancestors", "descendants"] as const) {
+    const input = { action: "exportBranchSession", nodeId: "turn:b", graphId: "/session.jsonl", direction };
+    assert.deepEqual(validateRouteInput("agent.control", input), input);
+  }
+  assert.throws(() => validateRouteInput("agent.control", {
+    action: "exportBranchSession", nodeId: "turn:b", graphId: "/session.jsonl", direction: "sideways",
+  }), /Invalid export direction/);
+});

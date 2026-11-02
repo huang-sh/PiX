@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Clock, Coins, FolderOutput, GitBranch, Hash, Image, LoaderCircle, MessageSquare, PieChart, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
-import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
+import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, ChevronRight, Clock, Coins, FolderOutput, GitBranch, Hash, Image, LoaderCircle, MessageSquare, PieChart, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -42,8 +42,8 @@ export interface PromptNodeData {
   onOpenPanel?: () => void;
   /** Present only on failed turns: reopens the prompt as an editable draft. */
   onRetry?: () => void;
-  /** Copies the root-to-node path into a new standalone session; graph sessions only. */
-  onExportSession?: () => void;
+  /** Copies the conversation before or after this node into a standalone graph. */
+  onExportSession?: (direction: "ancestors" | "descendants") => void;
   /** Live id of the node the chat panel shows; focus moves do not re-render cards. */
   viewedNodeId?: () => string | null;
   exportBlockedReason?: string;
@@ -442,14 +442,24 @@ function relative(value: string) {
         :title="t('graph.retryTurnHint')"
         @select="data.onRetry?.()"
       ><RotateCcw :size="14" />{{ t('graph.retryTurn') }}</ContextMenuItem>
-      <ContextMenuItem
-        v-if="data.onExportSession"
-        class="menu-item"
-        data-action="node-export-session"
-        :disabled="Boolean(exportBlocked)"
-        :title="exportBlocked || t('graph.exportBranchHint')"
-        @select="data.onExportSession()"
-      ><FolderOutput :size="14" />{{ t('graph.exportBranch') }}</ContextMenuItem>
+      <ContextMenuSub v-if="data.onExportSession">
+        <ContextMenuSubTrigger
+          class="menu-item"
+          data-action="node-export-session"
+          :disabled="Boolean(exportBlocked)"
+          :title="exportBlocked"
+        ><FolderOutput :size="14" />{{ t('graph.exportBranch') }}<ChevronRight :size="14" /></ContextMenuSubTrigger>
+        <ContextMenuPortal>
+          <ContextMenuSubContent class="menu-content" :side-offset="2">
+            <ContextMenuItem class="menu-item" data-action="node-export-ancestors"
+              :title="t('graph.exportAncestorsHint')" @select="data.onExportSession('ancestors')"
+            ><ArrowUp :size="14" />{{ t('graph.exportAncestors') }}</ContextMenuItem>
+            <ContextMenuItem class="menu-item" data-action="node-export-descendants"
+              :title="t('graph.exportDescendantsHint')" @select="data.onExportSession('descendants')"
+            ><ArrowDown :size="14" />{{ t('graph.exportDescendants') }}</ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuPortal>
+      </ContextMenuSub>
       <ContextMenuItem
         class="menu-item danger"
         data-action="node-delete"

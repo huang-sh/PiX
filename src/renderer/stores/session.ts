@@ -538,12 +538,12 @@ export const useSessionStore = defineStore("session", {
         }
       } finally { this.deletingNode = false; }
     },
-    // Copies the root-to-node path into a new standalone session; the source
+    // Copies the chosen conversation range into a new standalone graph; the source
     // graph is untouched, so the list only gains one entry.
-    async exportBranchSession(id: string) {
+    async exportBranchSession(id: string, direction: "ancestors" | "descendants") {
       const graphId = this.current?.graph?.id;
       if (!graphId) return;
-      const result = await this.control<{ path: string }>({ action: "exportBranchSession", nodeId: id, graphId });
+      const result = await this.control<{ path: string }>({ action: "exportBranchSession", nodeId: id, graphId, direction });
       await this.refresh();
       return result;
     },

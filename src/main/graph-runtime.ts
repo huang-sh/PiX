@@ -6,7 +6,8 @@ import { sessionModifiedAt } from "./graph-files.js";
 import { PiRuntime, type QueuedInput, type QueuedInputState } from "./pi-runtime.js";
 import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
-import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "./graph-files.js";
+import { descendantIds } from "./graph-export.js";
+import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, type BranchRecord, type SessionData } from "./graph-files.js";
 import { projectSession } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
@@ -703,13 +704,13 @@ export class GraphRuntime extends PiRuntime {
   }
   // Capture completed SDK entries in one synchronous turn. Streaming partial
   // tokens are not session records yet. No runtime is closed or source rewritten.
-  private exportSources() {
-    return [...this.graph!.records.values()].map(record => {
+  private exportSources(records: Iterable<BranchRecord> = this.graph!.records.values()) {
+    return [...records].map(record => {
       const worker = this.workers.get(record.id);
       if (!worker?.snapshot) throw new Error(`Branch source unavailable: ${record.id}`);
-      return { record, data: worker.pi.runtime ? this.data(worker.pi) : {
-        header: record.header, entries: worker.snapshot.entries,
-      } };
+      // An idle snapshot can be a recovered prefix or checkpoint. Export only
+      // the strictly validated source, never silently substitute that preview.
+      return { record, data: worker.pi.runtime ? this.data(worker.pi) : readStrict(this.graph!.path(record.id)) };
     });
   }
   private runExportWorker(workerData: Record<string, unknown>) {
@@ -737,23 +738,58 @@ export class GraphRuntime extends PiRuntime {
     return this.runExportWorker({ main: graph.main, data: this.data(this), branches,
       leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: input.action === "exportHtml" });
   }
-  /** Copy the root-to-node path into a new standalone session; the graph itself stays untouched. */
+  /** Copy the selected conversation range into a new standalone graph. */
   private exportBranch(input: Extract<AgentControl, { action: "exportBranchSession" }>) {
     const graph = this.graph;
     if (!graph || !this.runtime) throw new Error("Open a session before exporting");
     if (input.graphId !== graph.main) throw new Error("Open the same graph before exporting");
-    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
-      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
     const snapshot = this.snapshot();
     const node = snapshot.projection.nodes.find(n => n.id === input.nodeId);
     if (!node) throw new Error("Node no longer exists");
-    // The exported session ends at the selected node; anything after it stays
-    // behind in the original graph. A running turn has no complete records yet.
-    if (node.running) throw new Error("Wait for this turn to finish before exporting it");
+    const direction = input.direction ?? "descendants";
+    // Without origin metadata we cannot determine whether the hidden branch
+    // belongs to this subtree. Refuse rather than export an incomplete graph.
+    if (direction === "descendants" && graph.unavailableBranchMetadata.length)
+      throw new Error(`Branch metadata unavailable; export cancelled to avoid omitting descendants: ${graph.unavailableBranchMetadata.join(", ")}`);
+    const descendants = direction === "descendants" ? descendantIds(snapshot.projection.nodes, node.id) : new Set([node.id]);
+    if (snapshot.projection.nodes.some(node => descendants.has(node.id) && node.running)
+      || direction === "descendants" && snapshot.graph?.runs.some(run => run.status === "running" && run.pending?.parentNodeId
+        && descendants.has(run.pending.parentNodeId)))
+      throw new Error("Wait for all turns in this subtree to finish before exporting it");
+    // Compose only contributing sources, then cut the selected range in the
+    // worker. Unrelated branch errors do not veto this export.
+    const records = new Map<string, BranchRecord>();
+    const nodes = new Map(snapshot.projection.nodes.map(node => [node.id, node]));
+    const visited = new Set<string>();
+    for (const descendant of snapshot.projection.nodes) if (descendants.has(descendant.id) && descendant.branchId !== "main") {
+      const record = graph.records.get(descendant.branchId!);
+      if (record) records.set(record.id, record);
+    }
+    // A damaged descendant can be absent from the projection. Its fork still
+    // identifies it as required, so exportSources must refuse a missing source.
+    const rawDescendants = direction === "descendants" ? descendantIds(snapshot.entries, node.userEntryId) : new Set<string>();
+    for (const record of graph.records.values())
+      if (rawDescendants.has(record.forkEntryId)) records.set(record.id, record);
+    // Follow the current conversation path: deletion can reparent a branch
+    // while its origin record still names the original parent session.
+    for (let id: string | null = node.id; id;) {
+      const ancestor = nodes.get(id);
+      if (!ancestor || visited.has(id)) throw new Error(`Missing or cyclic export ancestor: ${id}`);
+      visited.add(id);
+      if (ancestor.branchId && ancestor.branchId !== "main") {
+        const record = graph.records.get(ancestor.branchId);
+        if (!record) throw new Error(`Branch source unavailable: ${ancestor.branchId}`);
+        records.set(record.id, record);
+      }
+      id = ancestor.parentId;
+    }
+    const branches = this.exportSources(records.values());
     const outputPath = join(this.dir ?? dirname(graph.main), `pix-branch-${randomUUID()}.jsonl`);
     if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
-    return this.runExportWorker({ main: graph.main, data: this.data(this), branches: this.exportSources(),
-      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: false, targetLeafId: node.leafEntryId });
+    return this.runExportWorker({ main: graph.main, data: this.data(this), branches,
+      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: false,
+      ...(direction === "ancestors" ? { targetLeafId: node.leafEntryId } : { rootEntryId: node.userEntryId }),
+      exportTitle: node.label || node.title });
   }
   override close(): Promise<void> {
     this.stopping = true;
