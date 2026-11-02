@@ -14,9 +14,11 @@ import {
   PIX_REMOTE_PROTOCOL,
   MAX_REMOTE_PAYLOAD,
   isProjectRoute,
+  hasHostWork,
   type ClientMessage,
   type HostMessage,
   type HostRequest,
+  type HostActivity,
 } from "../shared/remote-protocol.js";
 import type { DesktopEvent } from "../shared/types.js";
 import { brokerOptions, BrokerModelStream } from "../main/model-broker.js";
@@ -117,7 +119,18 @@ async function serve() {
     for (const client of wss.clients) send(client, message);
   }, true);
   let shuttingDown = false;
-  const shutdown = async () => {
+  const activity = async (): Promise<HostActivity> => {
+    const revision = controller.shell.terminalRevision;
+    const inspected = await controller.shell.terminalWork();
+    // Even an empty scan yields: another frame can create or write a
+    // terminal before this snapshot is used to admit shutdown.
+    const terminal = revision === controller.shell.terminalRevision
+      ? inspected : { commands: 0, unknown: controller.shell.terminals.size };
+    return { running: controller.registry.runningPaths().size, pending: controller.hasPendingWork,
+      commands: controller.shell.running.size + terminal.commands,
+      terminals: controller.shell.terminals.size, terminalUnknown: terminal.unknown };
+  };
+  const shutdown = async (acknowledge?: () => Promise<void>) => {
     if (shuttingDown) return;
     shuttingDown = true;
     stopEvents();
@@ -129,11 +142,13 @@ async function serve() {
       // response is appended. Drain it before disposing or exiting.
       await controller.closeAll();
       await closeHttpProxy();
+      await acknowledge?.();
     } catch (error) {
       process.stderr.write(`Remote shutdown failed: ${String(error)}\n`);
       process.exitCode = 1;
     } finally {
       controller.dispose();
+      for (const socket of wss.clients) socket.close();
       wss.close(() => { clearTimeout(timeout); process.exit(process.exitCode ?? 0); });
     }
   };
@@ -142,6 +157,7 @@ async function serve() {
     // ws emits 'error' right before 'close'; without a listener the event
     // throws and kills the host. The 'close' handler below does the cleanup.
     socket.on("error", () => {});
+    if (shuttingDown) { socket.close(); return; }
     lastLive = Date.now();
     const modelStreams = new Map<string, BrokerModelStream>();
     brokerOwner = socket;
@@ -185,6 +201,8 @@ async function serve() {
       arch: process.arch,
       cwd,
       allowCredentialDeploy,
+      workActivity: true,
+      shutdownAck: true,
     });
     socket.on("message", async (data) => {
       let request: HostRequest | undefined;
@@ -199,10 +217,10 @@ async function serve() {
           return;
         }
         if (message.type === "shutdown") {
-          // The desktop's intentional teardown: drain and exit now instead of
-          // waiting out the linger window.
+          // Admission can race the desktop's idle probe. Keep live or unverified
+          // work running even when the desktop has already decided to disconnect.
           socket.close();
-          setImmediate(shutdown);
+          if (!hasHostWork(await activity())) void shutdown();
           return;
         }
         request = message;
@@ -226,7 +244,23 @@ async function serve() {
           !allowCredentialDeploy
         )
           throw new Error("Model credentials are desktop-only");
-        const result = await controller.invoke(request.route, request.input);
+        if (shuttingDown) throw new Error("Remote host is shutting down");
+        if (request.route === "host.shutdown") {
+          const work = await activity();
+          if (shuttingDown) throw new Error("Remote host is shutting down");
+          if (hasHostWork(work)) {
+            send(socket, { type: "response", id: request.id, ok: true, result: { stopped: false } });
+          } else {
+            // Commit shutdown after the live check; acknowledge only after
+            // locks and sessions have been released so replacement is safe.
+            await shutdown(() => new Promise<void>((resolve, reject) => {
+              socket.send(JSON.stringify({ type: "response", id: request!.id, ok: true, result: { stopped: true } }),
+                error => error ? reject(error) : resolve());
+            }));
+          }
+          return;
+        }
+        const result = request.route === "host.activity" ? await activity() : await controller.invoke(request.route, request.input);
         send(socket, {
           type: "response",
           id: request.id,
@@ -278,8 +312,7 @@ async function serve() {
     }
     void (async () => {
       try {
-        const sessions = await controller.invoke("session.list") as { running?: boolean }[];
-        if (sessions.some((session) => session.running)) lastLive = Date.now();
+        if (hasHostWork(await activity()) || wss.clients.size > 0) lastLive = Date.now();
         else if (Date.now() - lastLive >= lingerMs) {
           clearInterval(idleCheck);
           await shutdown();
@@ -309,8 +342,8 @@ async function serve() {
     cleanup.unref();
     sweepStaleReadyFiles(readyFile);
   }
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }
 
 /**

@@ -64,8 +64,9 @@ async function open() {
   return evaluate;
 }
 async function close(evaluate) {
+  const before = await evaluate("window.pix.invoke('app.hostStatus')");
   const exited = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Desktop did not quit normally')), 15000);
+    const timer = setTimeout(() => reject(new Error(`Desktop did not quit normally; initial host state: ${JSON.stringify(before)}`)), 15000);
     desktop.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
   });
   await evaluate("void window.pix.invoke('app.quit'); true");

@@ -96,7 +96,7 @@ Grab the installer for your platform from [GitHub Releases](https://github.com/h
 - **macOS**: choose the installer that matches your Mac's chip (check ** → About This Mac**):
   - **Apple silicon** (M1, M2, M3, M4, etc.): `PiX-x.y.z-arm64.dmg`.
   - **Intel processor**: `PiX-x.y.z-x64.dmg`.
-  - Open the DMG, double-click PiX and choose “Install and Open”; installation checks tasks and closes the previous host before replacing the app.
+  - Open the DMG and double-click PiX. Installation proceeds normally when idle; only running tasks trigger cancellation, recheck, and confirmed interruption options.
   - Zip archives are also available; choose `arm64` for Apple silicon or `x64` for Intel.
 - **Linux**: `PiX-x.y.z-x86_64.AppImage` (portable), `PiX-x.y.z-amd64.deb`, `PiX-x.y.z-x86_64.rpm`, plus tar.gz. x64.
 

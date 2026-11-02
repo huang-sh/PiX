@@ -176,10 +176,13 @@ portable:
 
 # Debian/RPM hooks extend the builder's installed templates at build time.
 deb:
+  fpm:
+    - "--before-install=build/generated/before-install.sh"
   afterInstall: build/generated/after-install.tpl
   afterRemove: build/generated/after-remove.tpl
 rpm:
   fpm:
+    - "--before-install=build/generated/before-install.sh"
     - "--rpm-posttrans=build/generated/rpm-posttrans.sh"
   afterInstall: build/generated/after-install.tpl
   afterRemove: build/generated/after-remove.tpl

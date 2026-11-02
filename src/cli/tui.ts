@@ -461,6 +461,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
   editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, cwd));
   const unsubscribe = client.onEvent(event => {
     if (closed) return;
+    if (event.type === "host.shutdown") { close(); return; }
     if (event.type === "ui.dismiss" && (event.payload as { id?: string }).id === dialogId) dismissDialog?.();
     if (event.type !== "sessions") return;
     const current = (event.payload as { current?: SessionSnapshot }).current;
@@ -468,7 +469,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     snapshot = current; treePanel?.update(current);
     if (!busy) loadHistory(); else renderStatus();
   });
-  const disconnected = client.onDisconnect(error => { notice(error.message + " · /exit to detach and reconnect"); });
+  const disconnected = client.onDisconnect(error => { if (!closed) notice(error.message + " · /exit to detach and reconnect"); });
   ui.addInputListener(data => {
     if (matchesKey(data, "ctrl+d") && !panelCancel && !editor.getText()) { close(); return { consume: true }; }
     if (matchesKey(data, "ctrl+c")) {

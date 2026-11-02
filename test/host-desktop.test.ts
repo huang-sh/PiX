@@ -1,6 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -10,7 +10,8 @@ import { createHash } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { HostClient, localHostStatus, stopLocalHost } from "../src/host/client.js";
 import { desktopClientId, DesktopHostController } from "../src/host/desktop.js";
-import { headlessPlatform, serveLocalHost } from "../src/host/local-host.js";
+import { quitWithHost } from "../src/main/host-quit.js";
+import { headlessPlatform, hostAddressFile, serveLocalHost } from "../src/host/local-host.js";
 import { MainController, type Platform } from "../src/main/controller.js";
 import { projectId, type DesktopEvent, type ProjectInfo, type RawSessionEntry, type SessionSnapshot } from "../src/shared/types.js";
 import { projectSession } from "../src/shared/session.js";
@@ -81,6 +82,77 @@ test("full quit closes peer desktops without letting their reconnect loops resta
   await host.shutdown();
 });
 
+test("a shutdown received before desktop subscriptions prevents bootstrap and reconnection", async t => {
+  const { host } = await fixture(t);
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  let invokes = 0, quits = 0;
+  server.on("connection", socket => socket.on("message", data => {
+    const request = JSON.parse(String(data));
+    if (request.method === "invoke") invokes++;
+    socket.send(JSON.stringify({ type: "reply", id: request.id, result: {} }));
+    if (request.method === "attach") socket.send(JSON.stringify({
+      type: "event", sequence: 1, event: { type: "host.shutdown", payload: {} },
+    }));
+  }));
+  await once(server, "listening");
+  writeFileSync(hostAddressFile(), JSON.stringify({ ...host.address, port: (server.address() as { port: number }).port }));
+  const connect = HostClient.connect;
+  t.mock.method(HostClient, "connect", async (...args: Parameters<typeof connect>) => {
+    const client = await connect(...args);
+    // The ordered reply proves the earlier shutdown arrived before bind().
+    await client.request({ method: "status" });
+    return client;
+  });
+  const desktop = DesktopHostController.create(null, { ...headlessPlatform, quit() { quits++; } });
+  const events: DesktopEvent[] = [];
+  desktop.onEvent(event => events.push(event));
+  try {
+    await assert.rejects(desktop.invoke("app.bootstrap"), /quitting/);
+    assert.equal(desktop.hostShutdownRequested, true);
+    assert.equal(quits, 1);
+    assert.equal(invokes, 0, "a window asked to quit must not continue bootstrap");
+    assert.equal(events.some(event => event.type === "host.connection" && (event.payload as { connected: boolean }).connected), false);
+    await desktop.resumeAfterCancelledQuit();
+    assert.equal(Reflect.get(desktop, "reconnecting"), undefined);
+  } finally {
+    desktop.dispose();
+    writeFileSync(hostAddressFile(), JSON.stringify(host.address));
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+for (const kind of ["current", "older", "newer", "protocol", "migration"] as const)
+test(`shutdown and immediate close during the handshake still quit the desktop (${kind})`, async t => {
+  const { host } = await fixture(t);
+  const upgrade = t.mock.method(HostClient, "stopOutdated");
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  server.on("connection", socket => {
+    socket.send(JSON.stringify({ type: "event", sequence: 1, event: { type: "host.shutdown", payload: {} } }));
+    socket.close();
+  });
+  await once(server, "listening");
+  writeFileSync(hostAddressFile(), JSON.stringify({ ...host.address, port: (server.address() as { port: number }).port,
+    ...(kind === "older" ? { version: "0.0.31" } : kind === "newer" ? { version: "999.0.0" }
+      : kind === "protocol" ? { protocol: host.address.protocol + 1 }
+        : kind === "migration" ? { desktopViewMigration: false } : {}),
+  }));
+  let quits = 0;
+  const desktop = DesktopHostController.create(null, { ...headlessPlatform, quit() { quits++; } },
+    "quitting-desktop", kind === "migration" ? "previous-desktop" : undefined);
+  try {
+    await assert.rejects(desktop.invoke("app.bootstrap"), /quitting/);
+    assert.equal(desktop.hostShutdownRequested, true);
+    assert.equal(quits, 1);
+    assert.equal(upgrade.mock.callCount(), 0, "a quit notification must not trigger an upgrade attempt");
+  } finally {
+    desktop.dispose();
+    writeFileSync(hostAddressFile(), JSON.stringify(host.address));
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("a failed full quit can resume the same desktop view", async t => {
   const { cwd, connectDesktop } = await fixture(t);
   const desktop = await connectDesktop();
@@ -90,6 +162,144 @@ test("a failed full quit can resume the same desktop view", async t => {
   await desktop.resumeAfterCancelledQuit();
   const restored = await desktop.invoke("app.bootstrap");
   assert.equal(restored.project.path, realpathSync(cwd));
+});
+
+test("a peer-requested quit cannot be undone by a late cancelled-quit recovery", async t => {
+  const { connectDesktop } = await fixture(t);
+  const desktop = await connectDesktop();
+  desktop.prepareForInstallQuit();
+  const reconnect = t.mock.method(desktop as any, "reconnect", async () => {});
+  await desktop.resumeAfterCancelledQuit();
+  assert.equal(reconnect.mock.callCount(), 0);
+  await assert.rejects(desktop.invoke("app.bootstrap"), /quitting/);
+});
+
+for (const peer of [false, true])
+test(`quit cancels recovery waiting for the host startup lock (peer=${peer})`, async t => {
+  const { host, connectDesktop } = await fixture(t);
+  const desktop = await connectDesktop();
+  await desktop.disconnectForQuit();
+  const file = hostAddressFile();
+  const lock = join(file, "../starting");
+  mkdirSync(lock);
+  writeFileSync(join(lock, "pid"), String(process.pid));
+  rmSync(file);
+  const connecting = t.mock.method(HostClient, "connect");
+  const recovery = desktop.resumeAfterCancelledQuit();
+  void recovery.catch(() => {});
+  try {
+    await until(() => Boolean(Reflect.get(desktop, "reconnecting")));
+    if (peer) desktop.prepareForInstallQuit();
+    else await desktop.disconnectForQuit();
+    writeFileSync(file, JSON.stringify(host.address));
+    rmSync(lock, { recursive: true, force: true });
+    await recovery;
+    assert.equal(connecting.mock.callCount(), 0, "an abandoned recovery must not attach or start a host after the lock opens");
+    if (peer) await assert.rejects(desktop.invoke("app.bootstrap"), /quitting/);
+    else {
+      await desktop.resumeAfterCancelledQuit();
+      assert.ok(await desktop.invoke("app.bootstrap"), "cancelling an ordinary quit still restores the desktop");
+    }
+  } finally {
+    writeFileSync(file, JSON.stringify(host.address));
+    rmSync(lock, { recursive: true, force: true });
+    await recovery.catch(() => {});
+  }
+});
+
+test("a quit received during bootstrap cannot publish a successful recovery afterwards", async t => {
+  const { connectDesktop } = await fixture(t);
+  const desktop = await connectDesktop();
+  await desktop.disconnectForQuit();
+  let started!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const invoke = MainController.prototype.invoke;
+  t.mock.method(MainController.prototype, "invoke", async function(this: MainController, ...args: Parameters<MainController["invoke"]>) {
+    if (args[0] === "app.bootstrap") { started(); await gate; }
+    return invoke.apply(this, args);
+  });
+  const events: DesktopEvent[] = [];
+  desktop.onEvent(event => events.push(event));
+  const recovery = desktop.resumeAfterCancelledQuit();
+  void recovery.catch(() => {});
+  try {
+    await ready;
+    desktop.prepareForInstallQuit();
+    release();
+    await recovery;
+    assert.equal(events.some(event => event.type === "host.connection" && (event.payload as { connected: boolean }).connected), false);
+  } finally { release(); await recovery.catch(() => {}); }
+});
+
+test("a peer-requested quit also rejects manual host restart", async t => {
+  const { connectDesktop } = await fixture(t);
+  const desktop = await connectDesktop();
+  desktop.prepareForInstallQuit();
+  await assert.rejects(desktop.invoke("app.hostRestart", { id: "previous-host", force: true }), /quitting/);
+});
+
+test("a peer-requested quit cancels a manual restart waiting for the startup lock", async t => {
+  const { connectDesktop } = await fixture(t);
+  const desktop = await connectDesktop();
+  const state = await localHostStatus();
+  const lock = join(hostAddressFile(), "../starting");
+  mkdirSync(lock);
+  writeFileSync(join(lock, "pid"), String(process.pid));
+  const opening = t.mock.method(HostClient, "open", async () => { throw new Error("late restart executed"); });
+  const restart = desktop.invoke("app.hostRestart", { id: state.host!.id, force: false });
+  void restart.catch(() => {});
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    desktop.prepareForInstallQuit();
+    rmSync(lock, { recursive: true, force: true });
+    await assert.rejects(restart, /quitting/);
+    assert.equal(opening.mock.callCount(), 0, "an abandoned restart must not stop or reconnect the host");
+  } finally { rmSync(lock, { recursive: true, force: true }); await restart.catch(() => {}); }
+});
+
+test("quit during a manual host restart waits for publication and stops the replacement", async t => {
+  const { cwd } = await fixture(t);
+  const entry = join(cwd, "delayed-host.mjs"), marker = join(cwd, "starting"), gate = join(cwd, "continue");
+  writeFileSync(entry, `
+    import { existsSync, writeFileSync } from 'node:fs';
+    import { serveLocalHost } from ${JSON.stringify(new URL("../src/host/local-host.js", import.meta.url).href)};
+    writeFileSync(${JSON.stringify(marker)}, 'started');
+    while (!existsSync(${JSON.stringify(gate)})) await new Promise(resolve => setTimeout(resolve, 10));
+    await serveLocalHost();
+  `);
+  const previousEntry = process.env.PIX_HOST_ENTRY;
+  process.env.PIX_HOST_ENTRY = entry;
+  const desktop = DesktopHostController.create(cwd, headlessPlatform);
+  const state = await localHostStatus();
+  const restart = desktop.invoke("app.hostRestart", { id: state.host!.id, force: false });
+  void restart.catch(() => {});
+  try {
+    await until(() => existsSync(marker));
+    assert.equal((await localHostStatus()).host, undefined);
+    const prompts: string[] = [];
+    const quit = await quitWithHost({
+      zh: false, status: () => desktop.invoke("app.hostStatus"),
+      disconnect: () => {
+        const disconnected = desktop.disconnectForQuit();
+        writeFileSync(gate, "ready");
+        return disconnected;
+      },
+      resume: () => desktop.resumeAfterCancelledQuit(),
+      show: async options => { prompts.push(options.message); return { response: 0 }; },
+    });
+    assert.equal(quit, true, JSON.stringify(prompts));
+    assert.deepEqual(prompts, []);
+    await assert.rejects(restart, /quitting/);
+    assert.equal((await localHostStatus()).host, undefined);
+  } finally {
+    writeFileSync(gate, "ready");
+    await restart.catch(() => {});
+    await desktop.detach();
+    const current = await localHostStatus();
+    if (current.host) await stopLocalHost(current.host.id, true, true);
+    if (previousEntry === undefined) delete process.env.PIX_HOST_ENTRY; else process.env.PIX_HOST_ENTRY = previousEntry;
+  }
 });
 
 test("a failed quit whose connection cannot resume opens host recovery", async t => {
@@ -654,6 +864,10 @@ for (const kind of ["ssh", "wsl"] as const) test(`desktop ${recovery} retains ${
   const events = new EventEmitter();
   const remote = {
     connected: true,
+    async activity() {
+      return { running: Number(running), pending: false, commands: 0, terminals: 0, terminalUnknown: 0 };
+    },
+    async shutdownIfIdle() { return !running; },
     async request(route: string) {
       assert.notEqual(route, "session.image", "old remote hosts do not need to implement image reads");
       if (route === "session.list") return [{ path, running }];

@@ -12,6 +12,7 @@ import {
   type HostMessage,
   type HostModelRequest,
   type ProjectRoute,
+  type HostActivity,
 } from "../shared/remote-protocol.js";
 import type { DesktopEvent, WslDistribution } from "../shared/types.js";
 import { brokerEvent } from "./model-broker.js";
@@ -121,6 +122,8 @@ export class WslHostClient {
   private readonly disconnectListeners = new Set<(error: Error) => void>();
   private disconnectError?: Error;
   private intentionalDisconnect = false;
+  private shutdownConfirmed = false;
+  private shutdownPending?: Promise<boolean>;
   private stopping?: Promise<void>;
   private stderrTail = "";
   private readonly heartbeat: ReturnType<typeof setInterval>;
@@ -629,6 +632,32 @@ export class WslHostClient {
     return !this.disconnectError && this.socket.readyState === WebSocket.OPEN;
   }
 
+  async activity(): Promise<HostActivity | undefined> {
+    if (!this.hello.workActivity) return;
+    const activity = await this.request<HostActivity>("host.activity", undefined, 2000);
+    if (!activity || typeof activity.pending !== "boolean"
+      || ![activity.running, activity.commands, activity.terminals, activity.terminalUnknown]
+        .every(value => Number.isSafeInteger(value) && value >= 0))
+      throw new Error("Remote host returned invalid work activity");
+    return activity;
+  }
+
+  /** False leaves a busy or unsupported host connected for a later retry. */
+  async shutdownIfIdle(): Promise<boolean> {
+    if (this.shutdownConfirmed) return true;
+    if (this.shutdownPending) return this.shutdownPending;
+    if (!this.hello.shutdownAck || !this.connected) return false;
+    // Cancellation and pool cleanup can overlap. Keep the link alive until
+    // their shared shutdown decision has been acknowledged.
+    this.shutdownPending = this.request<{ stopped: boolean }>("host.shutdown", undefined, 10_000).then(result => {
+      if (typeof result?.stopped !== "boolean") throw new Error("Remote host returned an invalid shutdown confirmation");
+      this.shutdownConfirmed = result.stopped;
+      return this.shutdownConfirmed;
+    });
+    try { return await this.shutdownPending; }
+    finally { this.shutdownPending = undefined; }
+  }
+
   onDisconnect(listener: (error: Error) => void) {
     this.disconnectListeners.add(listener);
     if (this.disconnectError) listener(this.disconnectError);
@@ -717,21 +746,28 @@ export class WslHostClient {
     this.pending.clear();
   }
 
-  /** Intentional teardown: tells a lingering host to shut down now. */
+  /** Closes the connection; true confirms the host released its workspace resources. */
   async dispose() {
     // Cleanup after a failure must not relabel that failure as a requested exit.
     if (!this.disconnectError) this.intentionalDisconnect = true;
-    if (!this.disconnectError && this.socket.readyState === WebSocket.OPEN) {
-      // Wait for the frame to leave before the close below can end the link.
-      await new Promise<void>((resolve) => {
-        try { this.socket.send(JSON.stringify({ type: "shutdown" }), () => resolve()); }
-        catch { resolve(); }
-      });
-    }
+    try {
+      if (!this.disconnectError && this.socket.readyState === WebSocket.OPEN) {
+        if (this.hello.shutdownAck) await this.shutdownIfIdle();
+        else {
+          // Legacy shutdown has no acknowledgement. Its handle must survive
+          // even when the frame was sent successfully.
+          await new Promise<void>(resolve => {
+            try { this.socket.send(JSON.stringify({ type: "shutdown" }), () => resolve()); }
+            catch { resolve(); }
+          });
+        }
+      }
+    } catch (error) { debugLog("remote client: shutdown not confirmed", error); }
     this.disconnected(new Error("Remote host client disposed"));
     await this.stopping;
     this.listeners.clear();
     this.disconnectListeners.clear();
+    return this.shutdownConfirmed;
   }
 
   /** Ends the link but leaves a lingering host running for a later reattach. */

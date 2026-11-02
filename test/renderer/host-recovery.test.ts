@@ -8,6 +8,37 @@ const state: HostConnectionState = { connected: false, version: "0.0.32",
   host: { id: "old-host", version: "0.0.31", verified: true, clients: 1, running: 2, remoteConnections: 1 } };
 afterEach(() => vi.useRealTimers());
 
+it.each([
+  ["remoteRunning", "Running remote tasks"],
+  ["terminalUnknown", "Terminals with unverified activity"],
+  ["remoteUnknown", "Remote connections with unverified activity"],
+] as const)("shows %s instead of presenting an unexplained all-zero status", (field, label) => {
+  i18n.global.locale.value = "en";
+  const wrapper = mount(HostRecovery, { props: { busy: false, state: { ...state,
+    host: { ...state.host!, running: 0, clients: 0, remoteConnections: 0, [field]: 2 } } }, global: { plugins: [i18n] } });
+  try {
+    const row = wrapper.findAll("dl > div").find(row => row.find("dt").text() === label);
+    expect(row?.find("dd").text()).toBe("2");
+    if (field !== "remoteRunning") expect(wrapper.text()).toContain("could not verify");
+  } finally { wrapper.unmount(); }
+});
+
+it("does not claim idle cleanup will interrupt running tasks", async () => {
+  i18n.global.locale.value = "en";
+  const idle: HostConnectionState = { connected: false, version: "0.0.32",
+    host: { id: "idle-host", version: "0.0.32", verified: true, stopping: true,
+      running: 0, clients: 0, remoteConnections: 0, commands: 0, terminals: 0 } };
+  const wrapper = mount(HostRecovery, { props: { state: idle, busy: false }, global: { plugins: [i18n] } });
+  try {
+    expect(wrapper.get('[data-action="host-force"]').text()).not.toContain("Stop tasks");
+    await wrapper.get('[data-action="host-force"]').trigger("click");
+    expect(wrapper.get('[role="alertdialog"]').text()).not.toContain("tasks and terminal commands");
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain("cleanup");
+    await wrapper.get('[data-action="host-force-confirm"]').trigger("click");
+    expect(wrapper.emitted("restart")).toEqual([["idle-host"]]);
+  } finally { wrapper.unmount(); }
+});
+
 it("keeps confirmed force recovery available while a verified host is cleaning up", async () => {
   i18n.global.locale.value = "en";
   const wrapper = mount(HostRecovery, { props: { state: { ...state, host: { ...state.host!, stopping: true } }, busy: false }, global: { plugins: [i18n] } });

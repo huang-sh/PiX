@@ -19,8 +19,11 @@ export interface HostConnectionState {
     pending?: boolean;
     stopping?: boolean;
     remoteConnections?: number;
+    remoteRunning?: number;
+    remoteUnknown?: number;
     commands?: number;
     terminals?: number;
+    terminalUnknown?: number;
   };
 }
 export type LocalRequest = {
@@ -30,6 +33,8 @@ export type LocalRequest = {
   force?: boolean;
   /** An explicit full quit also closes connected desktop clients. */
   quitClients?: boolean;
+  /** Installer shutdown ignores idle connections, but still refuses live work. */
+  install?: boolean;
   cwd?: string | null;
   route?: DesktopRoute;
   input?: unknown;

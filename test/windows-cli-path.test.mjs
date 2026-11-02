@@ -61,3 +61,62 @@ test('NSIS wires installation and removal to the same PATH helper and scope', ()
   assert.match(source, /-Action uninstall -Directory/);
   assert.equal(source.match(/\$installMode == "all"/g).length, 2);
 });
+
+test('NSIS reserves installation only after uninstall elevation and before modifying installed files', () => {
+  const source = readFileSync(new URL('../build/installer.nsh', import.meta.url), 'utf8');
+  const builder = readFileSync(new URL('../node_modules/app-builder-lib/templates/nsis/uninstaller.nsh', import.meta.url), 'utf8');
+  // Silent uninstall calls this hook before initMultiUser can launch the UAC child.
+  assert.ok(builder.indexOf('call un.checkAppRunning') < builder.indexOf('!insertmacro initMultiUser'));
+  const check = /!macro customCheckAppRunning\b([\s\S]*?)!macroend/.exec(source)[1];
+  assert.doesNotMatch(check, /!insertmacro pixPrepareInstall/);
+  const uninstall = /!macro customUnInstall\b([\s\S]*?)!macroend/.exec(source)[1];
+  assert.match(uninstall, /\$\{IfNot\} \$\{isUpdated\}\s+!insertmacro pixPrepareInstall\s+\$\{EndIf\}/);
+  assert.ok(uninstall.indexOf('!insertmacro pixPrepareInstall') < uninstall.indexOf('-Action uninstall'));
+  assert.ok(builder.indexOf('!insertmacro customUnInstall') < builder.indexOf('# delete the installed files'));
+});
+
+test('Windows installer helper parses natively and releases only matching installation reservations', { skip: process.platform !== 'win32' }, async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const helper = fileURLToPath(new URL('../build/installer-helper.ps1', import.meta.url));
+  const home = mkdtempSync(join(tmpdir(), 'pix-installer-receipt-'));
+  const lock = join(home, '.pix/run/starting');
+  const receipt = join(home, 'receipt.json');
+  const run = args => spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', ...args], { encoding: 'utf8' });
+  try {
+    const parsed = run(['-Command', `$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('${helper.replaceAll("'", "''")}',[ref]$null,[ref]$e); if($e.Count){$e | Out-String | Write-Error; exit 1}`]);
+    assert.equal(parsed.status, 0, parsed.stderr || parsed.stdout);
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'pid'), String(process.pid));
+    writeFileSync(join(lock, 'installer'), 'real-reservation');
+    for (const token of ['different-installer', 'real-reservation']) {
+      writeFileSync(receipt, JSON.stringify({ownerPid: process.pid, reservations: [{home, ownerPid: process.pid, token}]}));
+      const result = run(['-File', helper, '-Action', 'finish', '-Receipt', receipt]);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(existsSync(lock), token !== 'real-reservation');
+      assert.equal(existsSync(receipt), false);
+    }
+    const blockedHome = join(home, 'blocked');
+    const blockedLock = join(blockedHome, '.pix/run/starting');
+    mkdirSync(join(blockedLock, 'installer'), { recursive: true });
+    writeFileSync(join(blockedLock, 'pid'), String(process.pid));
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'pid'), String(process.pid));
+    writeFileSync(join(lock, 'installer'), 'real-reservation');
+    writeFileSync(receipt, JSON.stringify({ ownerPid: process.pid, reservations: [
+      { home: blockedHome, ownerPid: process.pid, token: 'blocked-reservation' },
+      { home, ownerPid: process.pid, token: 'real-reservation' },
+    ] }));
+    const failed = run(['-File', helper, '-Action', 'finish', '-Receipt', receipt]);
+    assert.notEqual(failed.status, 0);
+    assert.equal(existsSync(lock), false, 'a malformed marker must not stop cleanup of other profiles');
+    assert.equal(existsSync(receipt), true, 'failed cleanup retains the receipt for retry');
+    rmSync(join(blockedLock, 'installer'), { recursive: true });
+    writeFileSync(join(blockedLock, 'installer'), 'blocked-reservation');
+    const retried = run(['-File', helper, '-Action', 'finish', '-Receipt', receipt]);
+    assert.equal(retried.status, 0, retried.stderr || retried.stdout);
+    assert.equal(existsSync(blockedLock), false);
+    assert.equal(existsSync(receipt), false);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});

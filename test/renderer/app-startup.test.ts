@@ -6,6 +6,7 @@ import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
 import type { SettingsBundle } from "../../src/shared/types";
+import type { HostConnectionState } from "../../src/shared/host-protocol";
 
 const settings: SettingsBundle = {
   app: { language: "en", theme: "system", density: "comfortable", confirmDestructiveActions: true,
@@ -15,7 +16,111 @@ const settings: SettingsBundle = {
 };
 
 describe("app startup welcome", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.useRealTimers(); });
+
+  it("shows failed transport recovery without immediately retrying the same connection", async () => {
+    let emit!: (event: import("../../src/shared/types").DesktopEvent) => void;
+    let boots = 0;
+    vi.spyOn(window.pix!, "onEvent").mockImplementation(listener => { emit = listener; return () => {}; });
+    vi.spyOn(window.pix!, "invoke").mockImplementation(async route => {
+      if (route === "app.bootstrap") {
+        if (++boots > 1) throw new Error("cleanup timed out");
+        return { project: null, sessions: [], projects: [], settings };
+      }
+      if (route === "app.hostStatus") return { connected: false, version: "0.0.32", error: "cleanup timed out",
+        host: { id: "stopping-host", version: "0.0.32", verified: true, stopping: true } };
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const wrapper = shallowMount(App, { global: { plugins: [pinia, i18n], stubs: { HostRecovery: false, Button: false, Primitive: false } } });
+    try {
+      await flushPromises();
+      emit({ type: "host.connection", payload: { connected: false } });
+      await flushPromises();
+      expect(boots).toBe(1);
+      expect(wrapper.find("[data-host-recovery]").exists()).toBe(true);
+      expect(wrapper.get('[data-action="host-force"]').attributes("disabled")).toBeUndefined();
+    } finally { wrapper.unmount(); }
+  });
+
+  it("polls cleanup without a blocking reconnect and continues when the old host disappears", async () => {
+    vi.useFakeTimers();
+    let cleaning = true, boots = 0;
+    const invoke = vi.spyOn(window.pix!, "invoke").mockImplementation(async route => {
+      if (route === "app.bootstrap") {
+        boots++;
+        if (cleaning) throw new Error("cleanup timed out");
+        return { project: null, sessions: [], projects: [], settings };
+      }
+      if (route === "app.hostStatus") return { connected: false, version: "0.0.32", ...(cleaning
+        ? { host: { id: "stopping-host", version: "0.0.32", verified: true, stopping: true } } : {}) };
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const wrapper = shallowMount(App, { global: { plugins: [pinia, i18n], stubs: { HostRecovery: false, Button: false, Primitive: false } } });
+    try {
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(5000);
+      await flushPromises();
+      expect(boots).toBe(1);
+      expect(invoke.mock.calls.filter(([route]) => route === "app.hostStatus")).toHaveLength(2);
+      expect(wrapper.get('[data-action="host-force"]').attributes("disabled")).toBeUndefined();
+      cleaning = false;
+      await vi.advanceTimersByTimeAsync(5000);
+      await flushPromises();
+      expect(boots).toBe(2);
+      expect(wrapper.find("[data-host-recovery]").exists()).toBe(false);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("ignores a late disconnected status after the transport has recovered", async () => {
+    let emit!: (event: import("../../src/shared/types").DesktopEvent) => void;
+    let resolveStatus!: (state: HostConnectionState) => void;
+    const status = new Promise<HostConnectionState>(resolve => { resolveStatus = resolve; });
+    let boots = 0;
+    vi.spyOn(window.pix!, "onEvent").mockImplementation(listener => { emit = listener; return () => {}; });
+    vi.spyOn(window.pix!, "invoke").mockImplementation(async route => {
+      if (route === "app.bootstrap") {
+        if (++boots > 1) throw new Error("disconnected");
+        return { project: null, sessions: [], projects: [], settings };
+      }
+      if (route === "app.hostStatus") return status;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const wrapper = shallowMount(App, { global: { plugins: [pinia, i18n], stubs: { HostRecovery: false, Button: false } } });
+    try {
+      await flushPromises();
+      emit({ type: "host.connection", payload: { connected: false } });
+      await flushPromises();
+      emit({ type: "host.connection", payload: { connected: true } });
+      resolveStatus({ connected: false, version: "0.0.32", host: { id: "old-host", version: "0.0.32", verified: true } });
+      await flushPromises();
+      expect(wrapper.find("[data-host-recovery]").exists()).toBe(false);
+      expect(boots).toBe(1);
+    } finally { wrapper.unmount(); useLayoutStore().dismissNotice(); }
+  });
+
+  it("leaves recovery if a failed manual restart nevertheless restores the transport", async () => {
+    let connected = false;
+    vi.spyOn(window.pix!, "invoke").mockImplementation(async route => {
+      if (route === "app.bootstrap") throw new Error("host unavailable");
+      if (route === "app.hostStatus") return { connected, version: "0.0.32",
+        host: { id: "host", version: "0.0.32", verified: true } };
+      if (route === "app.hostRestart") { connected = true; throw new Error("restart response lost"); }
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const wrapper = shallowMount(App, { global: { plugins: [pinia, i18n], stubs: { HostRecovery: false, Button: false } } });
+    try {
+      await flushPromises();
+      await wrapper.get('[data-action="host-force"]').trigger("click");
+      await wrapper.get('[data-action="host-force-confirm"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find("[data-host-recovery]").exists()).toBe(false);
+      expect(useLayoutStore().notice?.message).toBe("restart response lost");
+    } finally { wrapper.unmount(); useLayoutStore().dismissNotice(); }
+  });
 
   it("does not reset the workspace layout on a transparent transport reconnect", async () => {
     let emit!: (event: import("../../src/shared/types").DesktopEvent) => void;

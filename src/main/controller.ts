@@ -88,9 +88,11 @@ export class MainController {
   private viewRequest = 0;
   private gitSwitches = new Set<string>();
   private pendingAgentControls = new Map<string, number>();
+  // Includes approval and remote forwarding before a shell process exists.
+  private pendingShellRuns = new Set<symbol>();
   private readonly promptConfiguration: { customization?: PromptCustomization };
   private readonly providerBalances: ProviderBalanceService;
-  get hasPendingWork() { return this.pendingAgentControls.size > 0; }
+  get hasPendingWork() { return this.pendingAgentControls.size > 0 || this.pendingShellRuns.size > 0 || this.gitSwitches.size > 0; }
   listeners = new Set<(e: DesktopEvent) => void>();
   /** Progress baselines of background runs, replayed when their session returns to view. */
   readonly progress = new ProgressLedger({
@@ -110,6 +112,7 @@ export class MainController {
     if (owner) {
       this.gitSwitches = owner.gitSwitches;
       this.pendingAgentControls = owner.pendingAgentControls;
+      this.pendingShellRuns = owner.pendingShellRuns;
     }
     path = path ? resolve(path) : null;
     this.localProjectPath = path;
@@ -603,7 +606,13 @@ export class MainController {
     if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
     return { ...snapshot, ...cache.view(snapshot, new Set()) };
   }
-  async invoke(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
+  invoke(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
+    if (route !== "shell.run") return this.invokeRoute(route, raw, sessionPath);
+    const pending = Symbol();
+    this.pendingShellRuns.add(pending);
+    return this.invokeRoute(route, raw, sessionPath).finally(() => { this.pendingShellRuns.delete(pending); });
+  }
+  private async invokeRoute(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
     const v = validateRouteInput(route, raw);
     if (route === "ui.respond") {
       if (v.projectId) {
@@ -755,16 +764,28 @@ export class MainController {
       if (this.project && id === projectId(this.project))
         throw new Error("The open project cannot be removed from the list");
       const slot = this.pool.slot(id);
+      const revision = slot?.activityRevision;
       if (slot && slot.client.connected && await this.pool.slotBusy(slot))
-        throw new Error("Stop the running sessions before removing this project");
+        throw new Error("Stop the running sessions and shell commands or disconnect the remote workspace before removing this project");
+      if (request !== this.viewRequest || this.pool.slot(id) !== slot || slot?.activityRevision !== revision)
+        throw new Error("Remote workspace activity changed. Retry removing this project.");
       if (this.registry.hasBusy(id))
         throw new Error("Stop the running sessions before removing this project");
       // Pooled hosts and live entries would write the forgotten project back
       // into the history through their events; they go with the entry.
-      if (slot) await this.pool.dropSlot(slot, true);
-      // Removing the project also gives up on any lingering host it left.
-      this.pool.forgetHost(id);
+      if (slot) {
+        const connected = slot.client.connected;
+        const stopped = await this.pool.dropIdleSlot(slot);
+        if (connected && !stopped)
+          throw new Error("The remote workspace did not confirm shutdown. Reconnect or disconnect it before removing this project.");
+      }
+      if (request !== this.viewRequest || this.pool.slot(id))
+        throw new Error("Remote workspace changed. Retry removing this project.");
       await this.registry.disposeProject(id);
+      if (request !== this.viewRequest || this.pool.slot(id))
+        throw new Error("Remote workspace changed. Retry removing this project.");
+      // Explicit removal also gives up on any previously disconnected host.
+      this.pool.forgetHost(id);
       this.settings.forgetProject(id);
       return this.projectGroups();
     }

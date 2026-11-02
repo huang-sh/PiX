@@ -21,6 +21,8 @@ export class DesktopHostController {
   private sessionPath?: string;
   private disposed = false;
   private reconnecting?: Promise<void>;
+  private restarting?: Promise<void>;
+  private connectionAbort = new AbortController();
   private connectionError?: string;
   private quitting = false;
   hostShutdownRequested = false;
@@ -38,9 +40,7 @@ export class DesktopHostController {
   private bind(client: HostClient) {
     client.onEvent(event => {
       if (event.type === "host.shutdown") {
-        this.hostShutdownRequested = true;
-        this.quitting = true;
-        this.emit(event);
+        this.prepareForInstallQuit();
         void Promise.resolve(this.platform.quit()).catch(error => debugLog("desktop: host requested quit", error));
         return;
       }
@@ -54,37 +54,45 @@ export class DesktopHostController {
       const recovery = this.reconnect();
       this.emit({ type: "host.connection", payload: { connected: false, reconnecting: true } });
       void recovery.catch(failure => {
+        if (this.disposed || this.quitting || this.hostShutdownRequested) return;
         this.emit({ type: "notice", payload: { level: "error", message: String(failure) } });
         this.emit({ type: "host.connection", payload: { connected: false } });
       });
     });
   }
   private reconnect() {
-    return this.reconnecting ??= (async () => {
+    if (this.reconnecting) return this.reconnecting;
+    if (this.disposed || this.quitting || this.hostShutdownRequested) return Promise.resolve();
+    const abort = this.connectionAbort;
+    return this.reconnecting = (async () => {
       // Restore subscriptions and snapshots; never replay an execution command.
       const restore = Boolean(this.client);
-      const client = await connectLocalHost(this.settings.project, this.platform, true, this.clientId, true, this.legacyClientId);
+      const client = await connectLocalHost(this.settings.project, this.platform, true, this.clientId, true, this.legacyClientId, undefined, abort.signal);
       if (this.disposed || this.quitting) { await client.close(); return; }
       this.client = client;
       this.legacyClientId = undefined;
       this.connectionError = undefined;
       this.bind(client);
+      if (client.shutdownRequested) return;
       if (!restore) {
         this.emit({ type: "host.connection", payload: { connected: true } });
         return;
       }
       const path = this.sessionPath;
       const restored = await client.invoke<any>("app.bootstrap");
+      abort.signal.throwIfAborted();
       this.settings.setProject(restored.project?.remote ? null : restored.project?.path ?? null);
       if (restored.current || path) {
         const current = restored.current ?? await client.invoke<SessionSnapshot>("session.open", { path });
+        abort.signal.throwIfAborted();
         this.sessionPath = current.session.path;
         this.emit({ type: "sessions", payload: { current, resync: true } });
         await client.invoke("session.snapshot");
+        abort.signal.throwIfAborted();
       }
       this.emit({ type: "host.connection", payload: { connected: true } });
     })().catch(error => {
-      this.connectionError = error instanceof Error ? error.message : String(error);
+      if (!abort.signal.aborted) this.connectionError = error instanceof Error ? error.message : String(error);
       throw error;
     }).finally(() => { this.reconnecting = undefined; });
   }
@@ -104,15 +112,17 @@ export class DesktopHostController {
       return { ...state, connected: Boolean(this.client?.connected), language: this.settings.bundle().app.language,
         error: this.connectionError ?? state.error };
     }
+    if (this.disposed || this.quitting) throw new Error("PiX is quitting");
     if (route === "app.hostRestart") {
       const { id, force } = input as { id?: unknown; force?: unknown } ?? {};
       if (typeof id !== "string" || typeof force !== "boolean") throw new Error("Review the host status before restarting it");
-      const replacement = await restartLocalHost(id, force);
-      await replacement.close();
+      await (this.restarting ??= restartLocalHost(id, force, this.connectionAbort.signal)
+        .then(replacement => replacement.close())
+        .finally(() => { this.restarting = undefined; }));
       return { stopped: true };
     }
-    if (this.quitting) throw new Error("PiX is quitting");
     if (!this.client?.connected) await this.reconnect();
+    if (this.disposed || this.quitting) throw new Error("PiX is quitting");
     const result = await this.client!.invoke<any>(route, input);
     if (result && "project" in Object(result)) {
       this.settings.setProject(result.project?.remote ? null : result.project?.path ?? null);
@@ -134,20 +144,42 @@ export class DesktopHostController {
   }
   async detach() {
     this.disposed = true;
+    this.connectionAbort.abort(new Error("PiX is quitting"));
     await Promise.all([this.client?.close(), this.releaseKeepAwake()]);
+  }
+  prepareForInstallQuit() {
+    if (this.hostShutdownRequested) return;
+    this.hostShutdownRequested = true;
+    this.quitting = true;
+    this.connectionAbort.abort(new Error("PiX is quitting"));
+    this.emit({ type: "host.shutdown", payload: {} });
+    void this.client?.close();
   }
   async disconnectForQuit() {
     this.quitting = true;
-    await Promise.all([this.client?.close(), this.releaseKeepAwake()]);
+    this.connectionAbort.abort(new Error("PiX is quitting"));
+    // A spawned host must publish its address before Quit inspects it again.
+    await Promise.all([this.client?.close(), this.releaseKeepAwake(),
+      this.reconnecting?.catch(() => {}), this.restarting?.catch(() => {})]);
   }
   async resumeAfterCancelledQuit() {
+    if (this.disposed || this.hostShutdownRequested) return;
+    await Promise.all([this.reconnecting?.catch(() => {}), this.restarting?.catch(() => {})]);
+    if (this.disposed || this.hostShutdownRequested) return;
+    this.connectionAbort = new AbortController();
     this.quitting = false;
-    if (this.disposed) return;
     try { await this.reconnect(); }
     catch (error) {
+      if (this.disposed || this.quitting || this.hostShutdownRequested) return;
       this.emit({ type: "host.connection", payload: { connected: false } });
       throw error;
     }
   }
-  dispose() { this.disposed = true; this.client?.close(); void this.releaseKeepAwake(); this.listeners.clear(); }
+  dispose() {
+    this.disposed = true;
+    this.connectionAbort.abort(new Error("PiX is quitting"));
+    this.client?.close();
+    void this.releaseKeepAwake();
+    this.listeners.clear();
+  }
 }

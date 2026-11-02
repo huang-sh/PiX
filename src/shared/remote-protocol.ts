@@ -36,7 +36,9 @@ export const PROJECT_ROUTES = [
   "settings.get",
   "settings.update",
   "settings.reset",
-] as const satisfies readonly DesktopRoute[];
+  "host.activity",
+  "host.shutdown",
+] as const satisfies readonly (DesktopRoute | "host.activity" | "host.shutdown")[];
 
 export type ProjectRoute = (typeof PROJECT_ROUTES)[number];
 
@@ -71,6 +73,22 @@ export interface HostHello {
   cwd: string;
   /** Whether the desktop may deploy its model credentials to this host. */
   allowCredentialDeploy?: boolean;
+  /** Task and terminal child-process checks before shutting down busy hosts. */
+  workActivity?: boolean;
+  /** Acknowledges idle shutdown only after workspace resources have been released. */
+  shutdownAck?: boolean;
+}
+
+export interface HostActivity {
+  running: number;
+  pending: boolean;
+  commands: number;
+  terminals: number;
+  terminalUnknown: number;
+}
+
+export function hasHostWork(activity: HostActivity) {
+  return Boolean(activity.running || activity.pending || activity.commands || activity.terminalUnknown);
 }
 
 export interface HostEvent {
@@ -107,7 +125,7 @@ export interface HostModelCancel {
   id: string;
 }
 
-/** Tells a lingering host the desktop is done with it; it shuts down now. */
+/** Closes the link; idle hosts shut down, while live or unverified work lingers. */
 export interface ClientShutdown {
   type: "shutdown";
 }

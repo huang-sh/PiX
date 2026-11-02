@@ -56,6 +56,11 @@ test('Linux installation hooks preserve builder behavior and only remove the own
     assert.equal(readFileSync(join(stage, 'usr/bin/pix'), 'utf8'), 'CLI');
     assert.equal(run(customRemove).status, 0);
     assert.equal(existsSync(join(stage, 'usr/bin/pix')), false);
+    // Older builder scripts used a direct GUI symlink without update-alternatives.
+    symlinkSync(join(stage, 'opt/PiX/pix'), join(stage, 'usr/bin/pix'));
+    assert.equal(run(customInstall).status, 0, 'migrate the owned legacy GUI link, including dangling links');
+    assert.equal(readFileSync(join(stage, 'usr/bin/pix'), 'utf8'), 'CLI');
+    assert.equal(run(customRemove).status, 0);
     writeFileSync(join(stage, 'usr/bin/pix'), 'foreign command');
     assert.notEqual(run(customInstall).status, 0);
     assert.equal(run(customRemove).status, 0);

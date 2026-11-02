@@ -26,6 +26,7 @@ async function until(check, timeout = 20000) {
   throw new Error('Timed out waiting for native quit fixture');
 }
 let child;
+let reopenedPid;
 try {
   execFileSync('/usr/bin/ditto', [join(root, 'node_modules/electron/dist/Electron.app'), appPath]);
   renameSync(join(appPath, 'Contents/MacOS/Electron'), join(appPath, 'Contents/MacOS/PiX'));
@@ -36,6 +37,7 @@ try {
   writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'pix-native-quit-fixture', version: '1.0.0', main: 'main.cjs' }));
   writeFileSync(join(source, 'main.cjs'), `
     const { app } = require('electron');
+    app.setPath('userData', ${JSON.stringify(join(home, 'fixture-user-data'))});
     let waiting = false;
     app.on('before-quit', event => {
       require('node:fs').writeFileSync(${JSON.stringify(quitRequested)}, 'requested');
@@ -72,8 +74,23 @@ try {
   await responsive.quit();
   assert.equal(existsSync(quitRequested), true);
   await until(() => !alive(child.pid));
-  console.log(JSON.stringify({ passed: true, normalQuitPreservesUnresponsiveWindow: true, explicitForceClosesUnresponsiveWindow: true, normalQuitClosesResponsiveWindow: true, installerLockCannotDeadlockWindowQuit: true }));
+  rmSync(ready);
+  child = spawn(join(appPath, 'Contents/MacOS/PiX'), ['--allow-quit', `--user-data-dir=${join(home, 'rollback-user-data')}`], { stdio: ['ignore', 'ignore', 'ignore'] });
+  await until(() => existsSync(ready));
+  const rollback = await installedMacWindows([appPath]);
+  // The host can close its clients before stopLocalHost fails, so the
+  // installer's explicit windows.quit() may never have been reached.
+  child.kill('SIGTERM');
+  await until(() => !alive(child.pid));
+  rmSync(ready);
+  await rollback.reopen();
+  await until(() => existsSync(ready));
+  reopenedPid = Number(readFileSync(ready, 'utf8'));
+  assert.equal(alive(reopenedPid), true, 'rollback must restore a window closed by the host');
+  console.log(JSON.stringify({ passed: true, normalQuitPreservesUnresponsiveWindow: true, explicitForceClosesUnresponsiveWindow: true, normalQuitClosesResponsiveWindow: true, installerLockCannotDeadlockWindowQuit: true, rollbackRestoresHostClosedWindow: true }));
 } finally {
+  if (reopenedPid && alive(reopenedPid)) process.kill(reopenedPid, 'SIGKILL');
+  if (reopenedPid) await until(() => !alive(reopenedPid), 5000).catch(() => {});
   if (child && alive(child.pid)) child.kill('SIGKILL');
   if (child) await until(() => !alive(child.pid), 5000).catch(() => {});
   rmSync(home, { recursive: true, force: true });

@@ -13,8 +13,9 @@ interface HostQuitOptions {
 }
 
 export function handleDesktopClose(event: { preventDefault(): void }, options: {
-  platform: string; quitting: boolean; closeToTray: boolean; hide(): void; quit(): void;
+  platform: string; quitting: boolean; closeToTray: boolean; installing?: boolean; hide(): void; quit(): void;
 }) {
+  if (!options.quitting && options.installing) { event.preventDefault(); options.quit(); return; }
   if (options.quitting || options.platform === "darwin") return;
   // Keep the window alive until Quit's confirmation succeeds.
   event.preventDefault();
@@ -26,10 +27,16 @@ export function handleDesktopClose(event: { preventDefault(): void }, options: {
 export async function quitWithHost(options: HostQuitOptions): Promise<boolean> {
   const { zh } = options;
   let disconnected = false;
+  const restoreDesktop = async () => {
+    if (!disconnected || options.alreadyStopping?.()) return;
+    disconnected = false;
+    try { await options.resume(); } catch { /* The recovery view handles an unavailable host. */ }
+  };
   while (true) {
     try {
       if (options.alreadyStopping?.()) return true;
       const state = await options.status();
+      if (options.alreadyStopping?.()) return true;
       const host = state.host;
       if (host && !host.verified) throw new Error(state.error ?? (zh ? "无法验证后台，请稍后重试。" : "Cannot verify the host. Try again later."));
       let force = false;
@@ -41,26 +48,42 @@ export async function quitWithHost(options: HostQuitOptions): Promise<boolean> {
             : `${host.stopping ? "The host is shutting down; cleanup has not finished.\n" : ""}Running tasks: ${host.running ?? 0}\nPending work: ${host.pending ? "Yes" : "No"}\nShell commands: ${host.commands ?? 0}\nTerminals: ${host.terminals ?? 0}\nOther clients: ${others}\nRemote connections: ${host.remoteConnections ?? 0}\n\nQuitting stops the local host, interrupts local tasks and terminal commands, closes other PiX windows and disconnects clients. Saved sessions are retained; unsaved work may be lost. Remote tasks may continue running.\n\nCancel to let tasks finish, then quit again.`,
           buttons: zh ? ["取消", "终止并退出"] : ["Cancel", "Interrupt and Quit"], defaultId: 0, cancelId: 0, noLink: true });
         if (options.alreadyStopping?.()) return true;
-        if (response.response !== 1) return false;
+        if (response.response !== 1) {
+          await restoreDesktop();
+          return options.alreadyStopping?.() === true;
+        }
         force = true;
       }
-      await options.disconnect();
-      disconnected = true;
+      if (!disconnected) {
+        await options.disconnect();
+        disconnected = true;
+        // Initial startup can publish a host while disconnection settles.
+        // Inspect that host and its work before deciding whether to stop it.
+        if (!host) continue;
+      }
+      if (options.alreadyStopping?.()) return true;
       if (options.stop && host) await options.stop(host.id, force, true);
       else await withStoppedLocalHost(host?.id, force, async () => {}, true);
       return true;
     } catch (error) {
       if (options.alreadyStopping?.()) return true;
-      if (disconnected) {
-        disconnected = false;
-        try { await options.resume(); } catch { /* The normal recovery view handles a host that remains unavailable. */ }
+      let retry: boolean;
+      try {
+        const response = await options.show({ type: "warning", title: "PiX",
+          message: zh ? "后台尚未完全退出" : "The background host has not stopped",
+          detail: error instanceof Error ? error.message : String(error),
+          buttons: zh ? ["取消退出", "重试"] : ["Cancel Quit", "Retry"], defaultId: 0, cancelId: 0, noLink: true });
+        retry = response.response === 1;
+      } catch (error) {
+        await restoreDesktop();
+        if (options.alreadyStopping?.()) return true;
+        throw error;
       }
-      const response = await options.show({ type: "warning", title: "PiX",
-        message: zh ? "后台尚未完全退出" : "The background host has not stopped",
-        detail: error instanceof Error ? error.message : String(error),
-        buttons: zh ? ["取消退出", "重试"] : ["Cancel Quit", "Retry"], defaultId: 0, cancelId: 0, noLink: true });
       if (options.alreadyStopping?.()) return true;
-      if (response.response !== 1) return false;
+      if (!retry) {
+        await restoreDesktop();
+        return options.alreadyStopping?.() === true;
+      }
     }
   }
 }

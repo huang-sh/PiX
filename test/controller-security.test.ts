@@ -176,6 +176,53 @@ test("shell commands require main-process approval", async () => {
   assert.equal(ran, false);
 });
 
+test("shell confirmations remain pending across views until every request settles", async t => {
+  const project = mkdtempSync(join(home, "pending-shell-"));
+  const approvals: Array<{ resolve(value: boolean): void; reject(error: Error): void }> = [];
+  const platform = { ...denied, confirm: () => new Promise<boolean>((resolve, reject) => { approvals.push({ resolve, reject }); }) };
+  const owner = new MainController(project, platform);
+  const first = new MainController(project, platform, owner);
+  const second = new MainController(project, platform, owner);
+  t.after(async () => {
+    await Promise.all([first, second, owner].map(controller => controller.closeAll()));
+    for (const controller of [first, second, owner]) { controller.projectRuntime.dispose(); controller.shell.dispose(); }
+  });
+  for (const controller of [first, second])
+    t.mock.method(controller.shell, "run", async () => { throw new Error("an unapproved command must not start"); });
+  const cancelled = first.invoke("shell.run", { command: "first" });
+  const rejected = second.invoke("shell.run", { command: "second" });
+  assert.equal(approvals.length, 2);
+  assert.ok([owner, first, second].every(controller => controller.hasPendingWork));
+  approvals[0]!.resolve(false);
+  assert.equal((await cancelled as { cancelled: boolean }).cancelled, true);
+  assert.equal(owner.hasPendingWork, true, "another view's confirmation is still pending");
+  const failure = assert.rejects(rejected, /confirmation failed/);
+  approvals[1]!.reject(new Error("confirmation failed"));
+  await failure;
+  assert.ok([owner, first, second].every(controller => !controller.hasPendingWork));
+});
+
+test("shell execution and startup failures release pending work", async t => {
+  const project = mkdtempSync(join(home, "shell-lifecycle-"));
+  const controller = new MainController(project, { ...denied, confirm: async () => true });
+  t.after(async () => { await controller.closeAll(); controller.projectRuntime.dispose(); controller.shell.dispose(); });
+  const result = { id: "command", command: "fixture", output: "done", exitCode: 0, cancelled: false, truncated: false };
+  let finish!: (value: typeof result) => void;
+  let started!: () => void;
+  const running = new Promise<void>(resolve => { started = resolve; });
+  t.mock.method(controller.shell, "run", () => new Promise<typeof result>(resolve => { finish = resolve; started(); }));
+  const command = controller.invoke("shell.run", { command: "fixture" });
+  assert.equal(controller.hasPendingWork, true);
+  await running;
+  assert.equal(controller.hasPendingWork, true);
+  finish(result);
+  assert.deepEqual(await command, result);
+  assert.equal(controller.hasPendingWork, false);
+  t.mock.method(controller.shell, "run", () => { throw new Error("could not spawn"); });
+  await assert.rejects(controller.invoke("shell.run", { command: "fixture" }), /could not spawn/);
+  assert.equal(controller.hasPendingWork, false);
+});
+
 test("interactive terminals open without a second confirmation", async () => {
   const controller = new MainController(root, denied);
   let ran = false;
@@ -390,11 +437,14 @@ test("WSL shell commands keep the local main-process approval boundary", async (
     calls.push(route);
     return [];
   }, { defaultProjectTrust: "ask" });
-  const result = (await controller.invoke("shell.run", {
+  const command = controller.invoke("shell.run", {
     command: "uname -a",
-  })) as { cancelled: boolean };
+  });
+  assert.equal(controller.hasPendingWork, true, "forwarded commands count while local approval is pending");
+  const result = await command as { cancelled: boolean };
   assert.equal(result.cancelled, true);
   assert.deepEqual(calls, []);
+  assert.equal(controller.hasPendingWork, false);
 });
 
 test("remote interactive terminals open without a second confirmation", async () => {

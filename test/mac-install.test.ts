@@ -8,7 +8,7 @@ const idle = (): HostConnectionState => ({ connected: false, version: "0.0.32",
 function fixture(state = idle(), answers: number[] = [0]) {
   const calls: string[] = [];
   return { calls, deps: {
-    zh: true, version: "0.0.32", status: async () => { calls.push("status"); return state; },
+    zh: true, status: async () => { calls.push("status"); return state; },
     show: async (options: { defaultId?: number; cancelId?: number }) => {
       assert.equal(options.defaultId, 0); assert.ok(options.cancelId === 0 || options.cancelId === 2);
       calls.push("dialog"); return { response: answers.shift() ?? 0 };
@@ -28,22 +28,14 @@ test("installation is offered only for packaged macOS disk-image or translocated
     assert.equal(isMacInstallSource(platform, packaged, path), false);
 });
 
-test("open-only and cancellation do not inspect, stop or replace the installed app", async () => {
-  for (const [answer, expected] of [[1, "open"], [2, "quit"]] as const) {
-    const { calls, deps } = fixture(idle(), [answer]);
-    assert.equal(await offerMacInstall(deps), expected);
-    assert.deepEqual(calls, ["dialog"]);
-  }
-});
-
-test("idle installation closes windows and stops the verified host before replacement", async () => {
+test("idle installation has no extra UI and stops the host before closing windows and replacing the app", async () => {
   const { calls, deps } = fixture();
   assert.equal(await offerMacInstall(deps), "quit");
-  assert.deepEqual(calls, ["dialog", "status", "quit-windows", "status", "stop:old-host:false:true", "move"]);
+  assert.deepEqual(calls, ["status", "stop:old-host:false:true", "quit-windows", "move"]);
 });
 
 test("busy installation never stops work when cancelled at either confirmation", async () => {
-  for (const answers of [[0, 0], [0, 2, 0]]) {
+  for (const answers of [[0], [2, 0]]) {
     const state = idle(); state.host!.commands = 1;
     const { calls, deps } = fixture(state, answers);
     assert.equal(await offerMacInstall(deps), "quit");
@@ -52,23 +44,24 @@ test("busy installation never stops work when cancelled at either confirmation",
   }
 });
 
-test("unfinished host cleanup requires explicit confirmation before installation", async () => {
+test("idle windows, terminals, remote connections and cleanup do not trigger task confirmation", async () => {
   const state = idle(); state.host!.stopping = true;
-  const { calls, deps } = fixture(state, [0, 0]);
+  Object.assign(state.host!, { clients: 3, terminals: 2, remoteConnections: 2 });
+  const { calls, deps } = fixture(state);
   assert.equal(await offerMacInstall(deps), "quit");
-  assert.deepEqual(calls, ["dialog", "status", "dialog"]);
+  assert.deepEqual(calls, ["status", "stop:old-host:false:true", "quit-windows", "move"]);
 });
 
 test("explicit forced installation holds the lock while closing older clients and replacing the app", async () => {
-  const state = idle(); state.host!.clients = 1;
-  const { calls, deps } = fixture(state, [0, 2, 1]);
+  const state = idle(); state.host!.commands = 1;
+  const { calls, deps } = fixture(state, [2, 1]);
   assert.equal(await offerMacInstall(deps), "quit");
-  assert.deepEqual(calls, ["dialog", "status", "dialog", "dialog", "stop:old-host:true:true", "quit-windows", "move"]);
+  assert.deepEqual(calls, ["status", "dialog", "dialog", "stop:old-host:true:true", "quit-windows", "move"]);
 });
 
 test("confirmed force installation can close an unattached window blocked by the installer lock", async () => {
-  const state = idle(); state.host!.clients = 1;
-  const { calls, deps } = fixture(state, [0, 2, 1]);
+  const state = idle(); state.host!.commands = 1;
+  const { calls, deps } = fixture(state, [2, 1]);
   deps.windows = async () => ({
     quit: async (force?: boolean) => {
       if (!force) throw new Error("unattached desktop quit is waiting for the installer's startup lock");
@@ -82,16 +75,15 @@ test("confirmed force installation can close an unattached window blocked by the
 });
 
 test("a failed native move restores old windows and leaves replacement to an explicit retry", async () => {
-  const { calls, deps } = fixture(idle(), [0, 0]);
+  const { calls, deps } = fixture(idle(), [0]);
   deps.move = () => { calls.push("move-failed"); return false; };
   assert.equal(await offerMacInstall(deps), "quit");
-  assert.deepEqual(calls, ["dialog", "status", "quit-windows", "status", "stop:old-host:false:true", "move-failed", "reopen", "dialog"]);
+  assert.deepEqual(calls, ["status", "stop:old-host:false:true", "quit-windows", "move-failed", "reopen", "status", "dialog"]);
 });
 
-test("a new host appearing during window close cannot inherit the previous confirmation", async () => {
+test("a host identity change detected by the guard aborts before native replacement", async () => {
   const { calls, deps } = fixture(idle(), [0, 0]);
-  let probes = 0;
-  deps.status = async () => { probes++; return probes === 1 ? idle() : { ...idle(), host: { ...idle().host!, id: "new-host" } }; };
+  deps.install = async () => { throw new Error("The host changed"); };
   assert.equal(await offerMacInstall(deps), "quit");
   assert.ok(!calls.includes("move"));
   assert.ok(!calls.some(call => call.startsWith("stop:")));
@@ -104,5 +96,5 @@ test("failure to reopen a previous window is reported without crashing the insta
   deps.windows = async () => ({ quit: async () => {}, reopen: async () => { throw new Error("missing application"); } });
   deps.show = async options => { calls.push("dialog"); return { response: 0 }; };
   assert.equal(await offerMacInstall(deps), "quit");
-  assert.equal(calls.filter(call => call === "dialog").length, 2);
+  assert.equal(calls.filter(call => call === "dialog").length, 1);
 });

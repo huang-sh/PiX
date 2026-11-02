@@ -11,11 +11,17 @@ const { t } = useI18n();
 const confirming = ref(false);
 const cancelButton = ref<HTMLButtonElement>();
 let timer: ReturnType<typeof setTimeout> | undefined;
+const hasWork = computed(() => {
+  const host = props.state.host;
+  return Boolean(host && (host.running || host.pending || host.commands || host.remoteRunning
+    || host.terminalUnknown || host.remoteUnknown));
+});
 const reason = computed(() => {
   const host = props.state.host;
   if (!host?.verified) return "hostRecovery.unavailable";
   if (host.stopping) return "hostRecovery.stopping";
-  if (host.running || host.pending || host.commands || host.terminals) return "hostRecovery.tasksActive";
+  if (host.terminalUnknown || host.remoteUnknown) return "hostRecovery.activityUnknown";
+  if (hasWork.value) return "hostRecovery.tasksActive";
   if (host.clients) return "hostRecovery.clientsActive";
   if (host.remoteConnections) return "hostRecovery.remoteActive";
   return "hostRecovery.versionConflict";
@@ -47,9 +53,12 @@ function restart() {
       <dl v-if="state.host" class="host-recovery-status" aria-live="polite">
         <div><dt>{{ t("hostRecovery.backgroundVersion") }}</dt><dd>{{ state.host.version }}</dd></div>
         <div v-if="state.host.running !== undefined"><dt>{{ t("hostRecovery.runningTasks") }}</dt><dd>{{ state.host.running }}</dd></div>
+        <div v-if="state.host.remoteRunning"><dt>{{ t("hostRecovery.remoteRunningTasks") }}</dt><dd>{{ state.host.remoteRunning }}</dd></div>
         <div v-if="state.host.pending"><dt>{{ t("hostRecovery.pendingTasks") }}</dt><dd>{{ t("hostRecovery.yes") }}</dd></div>
         <div v-if="state.host.commands"><dt>{{ t("hostRecovery.commands") }}</dt><dd>{{ state.host.commands }}</dd></div>
         <div v-if="state.host.terminals"><dt>{{ t("hostRecovery.terminals") }}</dt><dd>{{ state.host.terminals }}</dd></div>
+        <div v-if="state.host.terminalUnknown"><dt>{{ t("hostRecovery.terminalUnknown") }}</dt><dd>{{ state.host.terminalUnknown }}</dd></div>
+        <div v-if="state.host.remoteUnknown"><dt>{{ t("hostRecovery.remoteUnknown") }}</dt><dd>{{ state.host.remoteUnknown }}</dd></div>
         <div v-if="state.host.clients !== undefined"><dt>{{ t("hostRecovery.otherClients") }}</dt><dd>{{ state.host.clients }}</dd></div>
         <div v-if="state.host.remoteConnections !== undefined"><dt>{{ t("hostRecovery.remoteConnections") }}</dt><dd>{{ state.host.remoteConnections }}</dd></div>
       </dl>
@@ -57,15 +66,15 @@ function restart() {
         <p class="host-recovery-hint">{{ t(state.host?.verified ? "hostRecovery.autoRetry" : "hostRecovery.unverifiedHint") }}</p>
         <div class="host-recovery-actions">
           <Button data-action="host-retry" :disabled="busy" @click="emit('retry')"><RefreshCw :size="15" :class="{ 'host-recovery-spin': busy }" />{{ t(busy ? "hostRecovery.connecting" : "hostRecovery.retry") }}</Button>
-          <Button data-action="host-force" variant="outline" :disabled="busy || !state.host?.verified" @click="confirmRestart">{{ t("hostRecovery.restart") }}</Button>
+          <Button data-action="host-force" variant="outline" :disabled="busy || !state.host?.verified" @click="confirmRestart">{{ t(hasWork ? "hostRecovery.restart" : "hostRecovery.idleRestart") }}</Button>
         </div>
       </template>
       <div v-else class="host-recovery-confirm" role="alertdialog" aria-labelledby="host-force-title" aria-describedby="host-force-description" @keydown.esc="!busy && (confirming = false)">
-        <h2 id="host-force-title"><TriangleAlert :size="18" />{{ t("hostRecovery.confirmTitle") }}</h2>
-        <p id="host-force-description">{{ t("hostRecovery.confirmBody") }}</p>
+        <h2 id="host-force-title"><TriangleAlert :size="18" />{{ t(hasWork ? "hostRecovery.confirmTitle" : "hostRecovery.idleConfirmTitle") }}</h2>
+        <p id="host-force-description">{{ t(hasWork ? "hostRecovery.confirmBody" : "hostRecovery.idleConfirmBody") }}</p>
         <div class="host-recovery-actions">
           <button ref="cancelButton" type="button" class="host-recovery-cancel" data-action="host-force-cancel" :disabled="busy" @click="confirming = false">{{ t("common.cancel") }}</button>
-          <Button data-action="host-force-confirm" variant="danger" :disabled="busy" @click="restart">{{ t(busy ? "hostRecovery.restarting" : "hostRecovery.confirmRestart") }}</Button>
+          <Button data-action="host-force-confirm" variant="danger" :disabled="busy" @click="restart">{{ t(busy ? "hostRecovery.restarting" : hasWork ? "hostRecovery.confirmRestart" : "hostRecovery.idleConfirmRestart") }}</Button>
         </div>
       </div>
       <details v-if="state.error" class="host-recovery-details"><summary>{{ t("hostRecovery.details") }}</summary><pre>{{ state.error }}</pre></details>

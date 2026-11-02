@@ -18,7 +18,7 @@ import type {
   TerminalSession,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
-import type { HostHandle, ProjectRoute } from "../shared/remote-protocol.js";
+import { hasHostWork, type HostHandle, type ProjectRoute } from "../shared/remote-protocol.js";
 import { WslHostClient, RemoteHostUnreachable, HostStarted } from "./wsl-host-client.js";
 import { brokerModelKey, brokerOptions } from "./model-broker.js";
 import { piSdkVersion, type PiRuntime } from "./pi-runtime.js";
@@ -53,6 +53,10 @@ export interface RemoteSlot {
   stopEvents: () => void;
   stopDisconnect: () => void;
   lastActivity: number;
+  activityRevision: number;
+  activationRequest?: number;
+  /** Selection waits for an already-admitted idle shutdown to settle. */
+  closing?: Promise<boolean>;
 }
 /** A connect attempt between the client handshake and the committed slot. */
 export interface PendingRemote {
@@ -107,7 +111,11 @@ export interface StoredHostHandle extends HostHandle {
 
 export class RemoteWorkspacePool {
   private readonly remotePool = new Map<string, RemoteSlot>();
+  activityRevision = 0;
   get hasConnections() { return this.remotePool.size > 0; }
+  get hasConnectedClients() {
+    return [...this.remotePool.values()].some(slot => slot.client.connected) || Boolean(this.pendingRemote?.client.connected);
+  }
   private remoteRecycleTimer?: NodeJS.Timeout;
   private remoteAttempt?: AbortController;
   private pendingRemote?: PendingRemote;
@@ -143,7 +151,10 @@ export class RemoteWorkspacePool {
     this.hostHandles.set(id, { ...handle, path, pushedProviders: previous?.pushedProviders });
     this.storeHandles();
   }
-  private forgetHandle(id: string) {
+  private forgetHandle(id: string, expected?: HostHandle) {
+    const current = this.hostHandles.get(id);
+    if (expected && (current?.pid !== expected.pid || current?.token !== expected.token || current?.port !== expected.port
+      || current?.kind !== expected.kind || current?.target !== expected.target)) return;
     if (!this.hostHandles.delete(id)) return;
     this.storeHandles();
   }
@@ -166,6 +177,28 @@ export class RemoteWorkspacePool {
   }
   slot(id: string): RemoteSlot | undefined {
     return this.remotePool.get(id);
+  }
+  private touch(slot: RemoteSlot) {
+    slot.lastActivity = Date.now();
+    slot.activityRevision++;
+    this.activityRevision++;
+  }
+  async activity() {
+    const connections = () => new Map([...this.remotePool.values(), ...(this.pendingRemote ? [this.pendingRemote] : [])]
+      .filter(connection => connection.client.connected).map(connection => [connection.client, connection] as const));
+    const inspected = new Map(await Promise.all([...connections()].map(async ([client, connection]) => {
+      const revision = "activityRevision" in connection ? connection.activityRevision : 0;
+      const activity = await client.activity().catch(() => undefined);
+      return [client, { connection, revision, activity }] as const;
+    })));
+    return [...connections()].reduce((counts, [client, connection]) => {
+      const sample = inspected.get(client);
+      const revision = "activityRevision" in connection ? connection.activityRevision : 0;
+      const activity = sample?.connection === connection ? sample.activity : undefined;
+      return { running: counts.running + (activity ? activity.running + Number(activity.pending) : 0),
+        commands: counts.commands + (activity?.commands ?? 0),
+        unknown: counts.unknown + (activity ? Math.max(activity.terminalUnknown, Number(sample?.revision !== revision)) : 1) };
+    }, { running: 0, commands: 0, unknown: 0 });
   }
   async syncPromptCustomization(client?: WslHostClient) {
     const clients = client ? [client] : [...this.remotePool.values()].filter(slot => slot.client.connected).map(slot => slot.client);
@@ -265,7 +298,7 @@ export class RemoteWorkspacePool {
     ]);
     if (!this.host.view.isCurrent(request) || slot !== this.active()) throw new Error("Project selection changed");
     slot.settings = settings;
-    slot.lastActivity = Date.now();
+    this.touch(slot);
     const projects = this.host.rememberProject(sessions as SessionSummary[], slot.project);
     // A window reload lands here while the host may still be running the
     // session this workspace last showed; restore it like a reactivation.
@@ -418,14 +451,15 @@ export class RemoteWorkspacePool {
     const previous = this.remotePool.get(id);
     // The replacement keeps the previous slot's handle entry (its deployed
     // credentials ride along) and its last viewed session.
-    if (previous && previous.client !== client) void this.dropSlot(previous, true, true);
-    const slot: RemoteSlot = { client, project, settings, activePath: previous?.activePath ?? "", lastActivity: Date.now(), stopEvents: () => {}, stopDisconnect: () => {} };
+    if (previous) void this.dropSlot(previous, previous.client !== client, true);
+    const slot: RemoteSlot = { client, project, settings, activePath: previous?.activePath ?? "", lastActivity: Date.now(), activityRevision: 0, stopEvents: () => {}, stopDisconnect: () => {} };
     slot.stopEvents = client.onEvent(event => {
-      slot.lastActivity = Date.now();
+      this.touch(slot);
       if (this.remotePool.get(id) === slot) this.remoteEvent(event, slot.project);
     });
     slot.stopDisconnect = client.onDisconnect(error => {
       if (this.remotePool.get(id) !== slot) return;
+      this.touch(slot);
       // The slot stays until replaced or recycled so a degraded bootstrap can
       // still present the project's remembered rows while recovery runs.
       const project = this.host.view.project();
@@ -439,6 +473,7 @@ export class RemoteWorkspacePool {
       if (viewed) this.scheduleReconnect(slot);
     });
     this.remotePool.set(id, slot);
+    this.activityRevision++;
     this.scheduleRemoteRecycle();
     return slot;
   }
@@ -449,15 +484,16 @@ export class RemoteWorkspacePool {
       .filter(([, pooled]) => pooled === slot)
       .map(([id]) => id);
     for (const id of ids) this.remotePool.delete(id);
+    if (ids.length) this.activityRevision++;
     if (dispose) {
-      // A shutdown order only goes out over a live link. Dropping a
-      // disconnected slot leaves a lingering host running work; its handle
-      // must survive so the next session reattaches instead of tripping its
-      // graph lock with a second host.
-      const ordered = slot.client.connected;
-      await slot.client.dispose().catch(() => {});
-      if (!keepHandle && ordered) for (const id of ids) this.forgetHandle(id);
+      // Closing a link does not prove the host stopped. Retain its handle
+      // unless cleanup was acknowledged, and never erase a replacement's handle.
+      const stopped = await slot.client.dispose().catch(() => false);
+      if (!keepHandle && stopped && slot.client.handle)
+        for (const id of ids) this.forgetHandle(id, slot.client.handle);
+      return stopped;
     }
+    return false;
   }
   /** Drops a remembered host handle (a project removed from the list). */
   forgetHost(id: string) {
@@ -522,16 +558,37 @@ export class RemoteWorkspacePool {
     const slot = this.active();
     if (slot) await this.dropSlot(slot, true);
   }
+  async dropIdleSlot(slot: RemoteSlot) {
+    if (slot.closing) return slot.closing;
+    const closing = (async () => {
+      if (slot.client.connected) {
+        try {
+          // Work can start after the idle sample. Keep its broker connected
+          // unless the remote host atomically confirms it has stopped.
+          if (!await slot.client.shutdownIfIdle()) return false;
+        } catch (error) {
+          debugLog("remote-pool: idle shutdown not confirmed", error);
+          return false;
+        }
+      }
+      return this.dropSlot(slot, true);
+    })();
+    slot.closing = closing;
+    try { return await closing; }
+    finally { if (slot.closing === closing) delete slot.closing; }
+  }
   /** Release finished remote work while a desktop is absent, preserving its live model broker. */
   async closeIdleRemote(keepOpen = () => false): Promise<void> {
     for (const slot of [...this.remotePool.values()]) {
       if (keepOpen()) return;
+      const revision = slot.activityRevision;
       if (slot.client.connected && await this.slotBusy(slot)) continue;
       if (keepOpen()) return;
-      if (this.remotePool.get(projectId(slot.project)) === slot) await this.dropSlot(slot, true);
+      if (slot.activityRevision !== revision) continue;
+      if (this.remotePool.get(projectId(slot.project)) === slot) await this.dropIdleSlot(slot);
     }
   }
-  /** Quit-time teardown: idle hosts are stopped; hosts mid-run linger for a reattach. */
+  /** Quit-time teardown: idle hosts are stopped; live or unverified work lingers for a reattach. */
   async closeAllRemote(): Promise<void> {
     if (this.remoteRecycleTimer) {
       clearTimeout(this.remoteRecycleTimer);
@@ -539,8 +596,8 @@ export class RemoteWorkspacePool {
     }
     await this.cancelRemote();
     for (const slot of [...this.remotePool.values()]) {
-      // A host mid-run survives the quit: abandoning it (instead of ordering
-      // a shutdown) lets the work finish and the next session reattach.
+      // Abandoning a host with live or unverified work lets the work finish
+      // and the next session reattach, without sending a shutdown order.
       if (slot.client.connected && await this.slotBusy(slot)) await this.parkSlot(slot);
       else await this.dropSlot(slot, true);
     }
@@ -549,7 +606,10 @@ export class RemoteWorkspacePool {
   private async parkSlot(slot: RemoteSlot) {
     slot.stopEvents();
     slot.stopDisconnect();
-    for (const [id, pooled] of this.remotePool) if (pooled === slot) this.remotePool.delete(id);
+    for (const [id, pooled] of this.remotePool) if (pooled === slot) {
+      this.remotePool.delete(id);
+      this.activityRevision++;
+    }
     await slot.client.abandon().catch(() => {});
   }
   private get maxRemoteConnections(): number {
@@ -582,20 +642,26 @@ export class RemoteWorkspacePool {
       index >= this.maxRemoteConnections || !slot.client.connected
       || Date.now() - slot.lastActivity >= this.remoteIdleMs);
     for (const slot of victims) {
+      const revision = slot.activityRevision;
+      const busy = slot.client.connected && await this.slotBusy(slot);
+      // Selection, replacement and new events can invalidate an idle sample.
+      if (this.remotePool.get(projectId(slot.project)) !== slot || this.active() === slot
+        || slot.activityRevision !== revision) continue;
       // Confirmed running work counts as activity: the next liveness probe
       // waits a full idle window instead of firing every tick.
-      if (slot.client.connected && await this.slotBusy(slot)) {
+      if (busy) {
         slot.lastActivity = Date.now();
         continue;
       }
-      await this.dropSlot(slot, true);
+      await this.dropIdleSlot(slot);
     }
     this.scheduleRemoteRecycle();
   }
   async slotBusy(slot: RemoteSlot): Promise<boolean> {
+    if (slot.activationRequest !== undefined && this.host.view.isCurrent(slot.activationRequest)) return true;
     try {
-      const sessions = await slot.client.request<SessionSummary[]>("session.list");
-      return Boolean(sessions.some(session => session.running));
+      const activity = await slot.client.activity();
+      return !activity || hasHostWork(activity);
     } catch {
       return true;   // cannot prove the host is idle
     }
@@ -616,6 +682,7 @@ export class RemoteWorkspacePool {
     const pending = this.pendingRemote;
     this.remoteAttempt = undefined;
     this.pendingRemote = undefined;
+    if (pending) this.activityRevision++;
     attempt?.abort(new Error("Remote connection cancelled"));
     if (!pending) return { cancelled: true };
     // A lingering host a candidate reattached to keeps running; only hosts
@@ -623,16 +690,11 @@ export class RemoteWorkspacePool {
     await (pending.client.reattached ? pending.client.abandon() : pending.client.dispose());
     return { cancelled: true };
   }
-  private async connectRemote(remote: NonNullable<ProjectInfo["remote"]>, cwd: string, browse: boolean) {
+  private async connectRemote(remote: NonNullable<ProjectInfo["remote"]>, cwd: string, browse: boolean): Promise<{
+    project: ProjectInfo; sessions?: SessionSummary[]; projects?: ProjectGroup[];
+    settings?: SettingsBundle; layout?: ReturnType<SettingsService["layout"]>; current?: SessionSnapshot;
+  }> {
     const request = browse ? undefined : this.host.view.nextRequest();
-    // A pooled workspace for this project is reused: spawning a second host
-    // would trip the graph ownership lock the first one still holds. Browsing
-    // keeps going through the connect flow — the user may pick another folder.
-    const pooled = this.remotePool.get(projectId({ name: "", path: cwd, remote }));
-    if (!browse && pooled?.client.connected) {
-      await this.cancelRemote();
-      return this.activatePooled(pooled, request!);
-    }
     // Install the new attempt synchronously, so overlapping requests cannot
     // finish out of order and replace a newer connection.
     const cancelled = this.cancelRemote();
@@ -642,6 +704,13 @@ export class RemoteWorkspacePool {
     try {
       await cancelled;
       abort.signal.throwIfAborted();
+      // Pooled selection owns the same cancellation lifecycle as a new link.
+      // Browsing still connects separately so the user can choose another folder.
+      const pooled = this.remotePool.get(projectId({ name: "", path: cwd, remote }));
+      if (!browse && pooled?.client.connected) {
+        try { return await this.activatePooled(pooled, request!, abort); }
+        finally { if (this.remoteAttempt === abort) this.remoteAttempt = undefined; }
+      }
       const options = {
         signal: abort.signal,
         // The setting gates both the spawn-time authorization and the push.
@@ -674,29 +743,20 @@ export class RemoteWorkspacePool {
       }
       const piVersion = client ? await piSdkVersion() : undefined;
       if (remembered && client && client.hello.piVersion !== piVersion) {
-        // An older host can still own a running graph. Only replace it when
-        // session.list proves it idle; otherwise keep the link until the next
-        // reconnect rather than racing a second host against its graph lock.
-        let idle = false;
+        // The host must atomically admit shutdown and release its resources
+        // before a replacement can start. An idle snapshot alone cannot do that.
+        let stopped = false;
         try {
-          idle = !(await client.request<SessionSummary[]>("session.list"))
-            .some(session => session.running);
+          stopped = await client.shutdownIfIdle();
         } catch (error) { debugLog("remote-pool: check host before upgrade", error); }
         abort.signal.throwIfAborted();
-        if (idle) {
-          // A failed shutdown must not start a competing host. Keep the
-          // remembered handle so the next attempt can reattach safely.
-          try { await client.dispose(); }
-          catch (error) {
-            await client.abandon().catch(() => {});
-            client = undefined;
-            throw error;
-          }
+        if (stopped) {
+          await client.dispose();
           client = undefined;
-          this.forgetHandle(remembered.key);
+          this.forgetHandle(remembered.key, remembered.handle);
         } else {
           this.host.emit({ type: "notice", payload: { level: "warning",
-            message: `The remote host is still running Pi ${client.hello.piVersion ?? "unknown"}. After its tasks finish, close and reopen the remote workspace to upgrade it to Pi ${piVersion}.`,
+            message: `The remote host is still running Pi ${client.hello.piVersion ?? "unknown"}. After its tasks finish, close and reopen the remote workspace to upgrade it to Pi ${piVersion}. If it cannot confirm a safe shutdown, quit the older remote host first.`,
           } });
         }
       }
@@ -728,6 +788,7 @@ export class RemoteWorkspacePool {
         remote,
       } };
       this.pendingRemote = candidate;
+      this.activityRevision++;
       if (browse) return { project: candidate.project };
       return await this.commitRemote(candidate, request!);
     } catch (error) {
@@ -735,15 +796,17 @@ export class RemoteWorkspacePool {
       if (this.remoteAttempt === abort) {
         this.remoteAttempt = undefined;
         this.pendingRemote = undefined;
+        this.activityRevision++;
       }
       throw error;
     }
   }
   /** Reopens the session this workspace last showed; empty when it is gone. */
-  private async restoreSlotSession(slot: RemoteSlot, request: number): Promise<SessionSnapshot | undefined> {
+  private async restoreSlotSession(slot: RemoteSlot, request: number, signal?: AbortSignal): Promise<SessionSnapshot | undefined> {
     if (!slot.activePath) return undefined;
     try {
       const current = await slot.client.request("session.open", { path: slot.activePath }) as SessionSnapshot;
+      signal?.throwIfAborted();
       if (this.host.view.isCurrent(request)) this.host.view.setCurrent(current);
       return current;
     } catch (error) {
@@ -751,27 +814,46 @@ export class RemoteWorkspacePool {
       return undefined;
     }
   }
-  /** Switches the view back to a pooled workspace without touching its host. */
-  private async activatePooled(slot: RemoteSlot, request: number) {
-    await this.syncPromptCustomization(slot.client);
-    const [sessions, settings] = await Promise.all([
-      slot.client.request<SessionSummary[]>("session.list"),
-      slot.client.request<SettingsBundle>("settings.get"),
-    ]);
+  /** Adopts a pooled workspace, reconnecting if an admitted shutdown stopped it. */
+  private async activatePooled(slot: RemoteSlot, request: number, abort: AbortController) {
+    abort.signal.throwIfAborted();
     if (!this.host.view.isCurrent(request)) throw new Error("Project selection changed");
-    slot.settings = settings;
-    this.host.settings.rememberProject(slot.project, sessions);
-    slot.lastActivity = Date.now();
-    this.host.view.enterEmpty(slot.project);
-    // Restore the session this workspace last showed, mirroring the local
-    // registry's per-project restore.
-    const current = await this.restoreSlotSession(slot, request);
-    if (!this.host.view.isCurrent(request)) throw new Error("Project selection changed");
-    return {
-      project: slot.project, sessions, projects: this.host.projectGroups(),
-      settings: this.mergedWslSettings(slot.settings),
-      layout: this.host.settings.layout(), current,
-    };
+    if (slot.closing) {
+      // Once shutdown was requested it cannot be withdrawn. Resolve its
+      // outcome before reusing the connection or starting a replacement.
+      await slot.closing;
+      abort.signal.throwIfAborted();
+      if (!this.host.view.isCurrent(request)) throw new Error("Project selection changed");
+      return this.connectRemote(slot.project.remote!, slot.project.path, false);
+    }
+    this.touch(slot);
+    slot.activationRequest = request;
+    try {
+      await this.syncPromptCustomization(slot.client);
+      abort.signal.throwIfAborted();
+      const [sessions, settings] = await Promise.all([
+        slot.client.request<SessionSummary[]>("session.list"),
+        slot.client.request<SettingsBundle>("settings.get"),
+      ]);
+      abort.signal.throwIfAborted();
+      if (!this.host.view.isCurrent(request)) throw new Error("Project selection changed");
+      slot.settings = settings;
+      this.host.settings.rememberProject(slot.project, sessions);
+      slot.lastActivity = Date.now();
+      this.host.view.enterEmpty(slot.project);
+      // Restore the session this workspace last showed, mirroring the local
+      // registry's per-project restore.
+      const current = await this.restoreSlotSession(slot, request, abort.signal);
+      abort.signal.throwIfAborted();
+      if (!this.host.view.isCurrent(request)) throw new Error("Project selection changed");
+      return {
+        project: slot.project, sessions, projects: this.host.projectGroups(),
+        settings: this.mergedWslSettings(slot.settings),
+        layout: this.host.settings.layout(), current,
+      };
+    } finally {
+      if (slot.activationRequest === request) delete slot.activationRequest;
+    }
   }
   private async commitRemote(candidate: PendingRemote, request: number) {
     const { client, abort, project } = candidate;
@@ -785,9 +867,12 @@ export class RemoteWorkspacePool {
       // Never shut a reattached host down here: the pooled client may be
       // talking to the very same process.
       await (client.reattached ? client.abandon() : client.dispose());
+      abort.signal.throwIfAborted();
+      if (!this.host.view.isCurrent(request)) throw new Error("Project selection changed");
       this.pendingRemote = undefined;
-      this.remoteAttempt = undefined;
-      return this.activatePooled(pooled, request);
+      this.activityRevision++;
+      try { return await this.activatePooled(pooled, request, abort); }
+      finally { if (this.remoteAttempt === abort) this.remoteAttempt = undefined; }
     }
     this.host.emit({ type: "remote.progress", payload: { stage: "loading" } });
     await this.attachModelBroker(client);
@@ -801,6 +886,7 @@ export class RemoteWorkspacePool {
     if (!client.connected) throw new Error("Remote host disconnected before the workspace was ready");
     this.host.settings.rememberProject(project, sessions);
     this.pendingRemote = undefined;
+    this.activityRevision++;
     this.remoteAttempt = undefined;
     // The previously active client stays pooled: its host keeps serving its
     // project's background runs.
@@ -838,7 +924,7 @@ export class RemoteWorkspacePool {
     const slot = this.active();
     if (!slot) throw new Error("Remote host is not connected");
     const { client, project } = slot;
-    slot.lastActivity = Date.now();
+    this.touch(slot);
     const remoteSettings = async () => {
       const settings = await client.request<SettingsBundle>(route, v);
       slot.settings = settings;

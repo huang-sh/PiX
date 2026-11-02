@@ -742,6 +742,33 @@ export class ShellService {
   root: string | null;
   running = new Map<string, any>();
   terminals = new Map<string, IPty>();
+  terminalRevision = 0;
+  /** Like a terminal close warning, this checks child processes, not shell input. */
+  async terminalWork() {
+    const revision = this.terminalRevision;
+    const pids = [...this.terminals.values()].map(terminal => terminal.pid);
+    const valid = pids.filter(pid => Number.isSafeInteger(pid) && pid > 0);
+    const unknown = pids.length - valid.length;
+    if (!valid.length) return { commands: 0, unknown };
+    const win = process.platform === "win32";
+    const args = win
+      ? ["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -Filter '" +
+        valid.map(pid => `ParentProcessId=${pid}`).join(" OR ") +
+        "' | Where-Object { $_.Name -notin @('conhost.exe', 'OpenConsole.exe') } | Select-Object -ExpandProperty ParentProcessId"]
+      : ["-A", "-o", "ppid=", "-o", "stat="];
+    try {
+      const { stdout } = await promisify(execFile)(win ? "powershell.exe" : "ps", args,
+        { encoding: "utf8", windowsHide: true, timeout: 1500 });
+      if (revision !== this.terminalRevision) return { commands: 0, unknown: this.terminals.size };
+      const parents = new Set(stdout.trim().split(/\r?\n/).flatMap(line => {
+        const [parent, state] = line.trim().split(/\s+/);
+        // Exited background jobs can remain as zombies until the next shell prompt.
+        return state?.startsWith("Z") ? [] : [Number(parent)];
+      }));
+      return { commands: valid.filter(pid => parents.has(pid)).length, unknown };
+    } catch { return { commands: 0, unknown: this.terminals.size }; }
+  }
   emit: (e: unknown) => void;
   constructor(p: string | null, emit: (e: unknown) => void) {
     this.root = p;
@@ -768,11 +795,13 @@ export class ShellService {
       ...(win ? { useConpty: true } : {}),
     });
     this.terminals.set(id, terminal);
+    this.terminalRevision++;
     terminal.onData((data) =>
       this.emit({ type: "terminal", payload: { id, data } }),
     );
     terminal.onExit(({ exitCode }) => {
       this.terminals.delete(id);
+      this.terminalRevision++;
       this.emit({ type: "terminal", payload: { id, exitCode } });
     });
     return { id };
@@ -780,6 +809,7 @@ export class ShellService {
   writeTerminal(id: string, data: string) {
     const terminal = this.terminals.get(id);
     if (!terminal) throw new Error("Terminal session not found");
+    this.terminalRevision++;
     terminal.write(data);
   }
   resizeTerminal(id: string, cols: number, rows: number) {
@@ -791,6 +821,7 @@ export class ShellService {
     const terminal = this.terminals.get(id);
     if (!terminal) return false;
     this.terminals.delete(id);
+    this.terminalRevision++;
     terminal.kill();
     return true;
   }
