@@ -270,6 +270,33 @@ describe("PromptNode branch action", () => {
     wrapper.unmount();
   });
 
+  it("offers only explicit branch arrows off the mainline", async () => {
+    const onCompose = vi.fn();
+    const data = nodeData({ current: false, continuable: false, onCompose });
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data },
+      global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
+    });
+    const controls = wrapper.get(".node-branch-controls");
+    const up = wrapper.get('[data-direction="up"]');
+    const down = wrapper.get('[data-direction="down"]');
+    expect(wrapper.find('[data-direction="right"]').exists()).toBe(false);
+    const box = vi.spyOn(controls.element, "getBoundingClientRect").mockReturnValue({ top: 100, height: 90 } as DOMRect);
+    // The three-way split collapses to halves: the middle points down, never right.
+    await controls.trigger("mousemove", { clientY: 145 });
+    expect(down.classes()).toContain("is-visible");
+    expect(up.classes()).not.toContain("is-visible");
+    expect(controls.classes()).not.toContain("direction-right");
+    await wrapper.get(".node-add").trigger("click");
+    expect(onCompose).toHaveBeenLastCalledWith("down");
+    await wrapper.get(".node-add").trigger("keydown", { key: "ArrowRight" });
+    expect(controls.classes()).not.toContain("direction-right");
+    await up.trigger("click");
+    expect(onCompose).toHaveBeenLastCalledWith("up");
+    box.mockRestore();
+    wrapper.unmount();
+  });
+
   it("chooses model and thinking for the draft", async () => {
     const onModel = vi.fn();
     const onThinking = vi.fn();

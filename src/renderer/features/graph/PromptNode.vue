@@ -28,6 +28,9 @@ export interface PromptNodeData {
   current: boolean;
   runnable: boolean;
   blockedReason: string;
+  /** False on graph nodes that cannot continue their branch in place: they
+   * offer the explicit branch arrows alone, never the horizontal one. */
+  continuable?: boolean;
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
   compacting?: () => boolean;
@@ -263,16 +266,25 @@ function onPointerDown(event: PointerEvent) {
 function compose(direction?: BranchDirection) {
   suppressPreview();
   if (!props.data.runnable) return;
-  props.data.onCompose(direction);
+  // A directionless compose keeps the mainline lane on continuation tips; other
+  // nodes open below, matching the arrows they offer.
+  props.data.onCompose(direction ?? (props.data.continuable === false ? "down" : undefined));
 }
+
+const arrowDirections = computed(() => props.data.continuable !== false
+  ? (["up", "right", "down"] as const)
+  : (["up", "down"] as const));
 
 function pointBranch(event: MouseEvent) {
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  branchDirection.value = event.clientY < box.top + box.height / 3 ? "up"
-    : event.clientY > box.top + box.height * 2 / 3 ? "down" : "right";
+  const offset = (event.clientY - box.top) / box.height;
+  const thirds = props.data.continuable !== false;
+  const edge = thirds ? 1 / 3 : 1 / 2;
+  branchDirection.value = offset < edge ? "up" : offset > 1 - edge || !thirds ? "down" : "right";
 }
 
 function focusBranch(direction: BranchDirection | "right", event: KeyboardEvent) {
+  if (direction === "right" && props.data.continuable === false) return;
   branchDirection.value = direction;
   (event.currentTarget as HTMLElement).parentElement?.querySelector<HTMLButtonElement>(`[data-direction="${direction}"]`)?.focus();
 }
@@ -414,7 +426,7 @@ function relative(value: string) {
       @keydown.right.prevent.stop="focusBranch('right', $event)"
       @click.stop="compose()"
     ><Plus :size="15" /></button>
-    <button v-for="direction in (['up', 'right', 'down'] as const)" :key="direction"
+    <button v-for="direction in arrowDirections" :key="direction"
       type="button" class="node-branch-arrow" :data-direction="direction"
       :class="{ 'is-visible': branchDirection === direction }"
       :aria-disabled="!data.runnable"
