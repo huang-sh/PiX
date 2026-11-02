@@ -28,6 +28,7 @@ import { applyLinuxImeWorkaround } from "./linux-ime.js";
 import { createKeepAwake } from "./power-save.js";
 import { isMacInstallSource, offerMacInstall } from "./mac-install.js";
 import { handleDesktopClose, quitWithHost } from "./host-quit.js";
+import { localHostInstallInProgress } from "../host/client.js";
 import { SettingsService } from "./services.js";
 import type { HostConnectionState } from "../shared/host-protocol.js";
 import { installHttpProxy } from "./http-proxy.js";
@@ -218,6 +219,7 @@ async function create() {
   created.on("close", (e: { preventDefault(): void }) => {
     handleDesktopClose(e, {
       platform: process.platform, quitting: isQuitting,
+      installing: localHostInstallInProgress(),
       closeToTray: controller.settings.bundle().app.closeToTray !== false,
       hide() { created.hide(); ensureTray(); }, quit() { app.quit(); },
     });
@@ -233,13 +235,13 @@ async function create() {
 app.whenReady().then(async () => {
   if (isMacInstallSource(process.platform, app.isPackaged, app.getPath("exe"))) {
     const language = new SettingsService(null).bundle().app.language;
-    const result = await offerMacInstall({
-      zh: language === "zh-CN" || (language === "system" && app.getLocale().startsWith("zh")), version: app.getVersion(),
+    await offerMacInstall({
+      zh: language === "zh-CN" || (language === "system" && app.getLocale().startsWith("zh")),
       show: options => dialog.showMessageBox(options),
       // A running destination must never focus the old version and quit this installer.
       move: () => app.moveToApplicationsFolder({ conflictHandler: conflict => conflict === "exists" }),
     });
-    if (result === "quit") { app.quit(); return; }
+    app.quit(); return;
   }
   if (app.isPackaged) {
     try { registerDesktopCommand(join(process.resourcesPath, "cli", process.platform === "win32" ? "pix.cmd" : "pix")); }
@@ -439,7 +441,12 @@ app.whenReady().then(async () => {
 });
 let clientDetached = false;
 let detachingClient = false;
+if (process.platform === "linux") process.on("SIGTERM", () => {
+  if (localHostInstallInProgress()) app.quit();
+  else app.exit(143);
+});
 app.on("before-quit", (event) => {
+  if (controller && localHostInstallInProgress()) controller.prepareForInstallQuit();
   if (!clientDetached && controller) {
     event.preventDefault();
     if (!detachingClient) {

@@ -65,10 +65,30 @@ export async function serveLocalHost() {
   });
   const controllers = new Set<MainController>();
   const attached = new Set<WebSocket>();
-  const shellActivity = () => [...controllers, owner].reduce((counts, controller) => ({
-    commands: counts.commands + controller.shell.running.size,
-    terminals: counts.terminals + controller.shell.terminals.size,
-  }), { commands: 0, terminals: 0 });
+  const workActivity = async (includeRemote = true) => {
+    const inspected = new Map(await Promise.all([...controllers, owner].map(async controller => {
+      const terminalRevision = controller.shell.terminalRevision;
+      const remoteRevision = controller.pool.activityRevision;
+      const [terminal, remote] = await Promise.all([controller.shell.terminalWork(),
+        includeRemote && controller !== owner ? controller.pool.activity() : undefined]);
+      return [controller, { terminalRevision, remoteRevision, terminal, remote }] as const;
+    })));
+    return [...controllers, owner].reduce((counts, controller) => {
+      const sample = inspected.get(controller);
+      const terminal = sample?.terminalRevision === controller.shell.terminalRevision
+        ? sample.terminal : { commands: 0, unknown: controller.shell.terminals.size };
+      const hasRemote = includeRemote && controller !== owner && controller.pool.hasConnectedClients;
+      const remote = hasRemote
+        ? sample?.remote ?? { running: 0, commands: 0, unknown: 0 }
+        : { running: 0, commands: 0, unknown: 0 };
+      const remoteUnknown = hasRemote && sample?.remoteRevision !== controller.pool.activityRevision
+        ? Math.max(remote.unknown, 1) : remote.unknown;
+      return { commands: counts.commands + controller.shell.running.size + terminal.commands + remote.commands,
+        terminals: counts.terminals + controller.shell.terminals.size,
+        terminalUnknown: counts.terminalUnknown + terminal.unknown,
+        remoteRunning: counts.remoteRunning + remote.running, remoteUnknown: counts.remoteUnknown + remoteUnknown };
+    }, { commands: 0, terminals: 0, terminalUnknown: 0, remoteRunning: 0, remoteUnknown: 0 });
+  };
   let sequence = 0;
   let lastLive = Date.now();
   let stopping = false;
@@ -234,26 +254,35 @@ export async function serveLocalHost() {
             result = await invoked;
             break;
           }
-          case "status":
+          case "status": {
+            const work = await workActivity();
             result = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION, pid: process.pid,
+              installGuard: true, terminalActivity: true, remoteActivity: true,
               clients: [...wss.clients].filter(client => client.readyState === WebSocket.OPEN && (client === socket || attached.has(client))).length,
               sessions: owner.registry.liveEntries().length,
               running: [...owner.registry.runningPaths()], pending: owner.hasPendingWork, stopping,
-              ...shellActivity(),
-              remoteConnections: [...controllers].filter(c => c.pool.hasConnections).length };
+              ...work, remoteConnections: [...controllers].filter(c => c.pool.hasConnections || c.pool.hasConnectedClients).length };
             break;
-          case "shutdown":
-            if (!stopping && request.force !== true && (owner.hasPendingWork || owner.registry.runningPaths().size || [...controllers].some(c => c.pool.hasConnections)))
+          }
+          case "shutdown": {
+            const work = !stopping && request.force !== true ? await workActivity(request.install === true) : undefined;
+            if (!stopping && request.force !== true && (owner.hasPendingWork || owner.registry.runningPaths().size || work?.remoteRunning
+              || (request.install !== true && [...controllers].some(c => c.pool.hasConnections || c.pool.hasConnectedClients))))
               throw new Error("Stop running tasks and disconnect remote workspaces before stopping the host");
-            if (!stopping && request.force !== true && (shellActivity().commands || shellActivity().terminals))
+            if (!stopping && request.force !== true && (work?.commands || (request.install !== true && work?.terminals)))
               throw new Error("Stop shell commands and close terminals before stopping the host");
-            if (!stopping && request.force !== true && [...attached].some(client => client !== socket && client.readyState === WebSocket.OPEN))
+            if (!stopping && request.force !== true && work?.remoteUnknown)
+              throw new Error("PiX cannot verify work in a remote workspace. Finish its commands and close unverified terminals, or disconnect the workspace before retrying installation. Older remote hosts must be upgraded before their work can be verified.");
+            if (!stopping && request.force !== true && request.install === true && work?.terminalUnknown)
+              throw new Error("PiX cannot check terminal child processes. Close its terminals, then retry installation.");
+            if (!stopping && request.force !== true && request.install !== true && [...attached].some(client => client !== socket && client.readyState === WebSocket.OPEN))
               throw new Error("Close other PiX windows and terminal clients before stopping the host");
             result = { stopped: true };
             send(socket, { type: "reply", id: request.id, result });
             if (request.quitClients === true) broadcast({ type: "host.shutdown", payload: {} });
             void shutdown();
             return;
+          }
           default: throw new Error("Unknown host method");
         }
         send(socket, { type: "reply", id: request.id,

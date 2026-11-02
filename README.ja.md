@@ -96,7 +96,7 @@ pix tree --session <セッションIDまたはパス>
 - **macOS**：Mac のチップに合ったインストーラーを選んでください（** → この Mac について** で確認できます）：
   - **Apple シリコン**（M1、M2、M3、M4 など）：`PiX-x.y.z-arm64.dmg`。
   - **Intel プロセッサ**：`PiX-x.y.z-x64.dmg`。
-  - DMG 内の PiX をダブルクリックして「Install and Open」を選ぶと、タスクを確認し、旧 Host を閉じてからインストールします。
+  - DMG 内の PiX をダブルクリックすると、実行中のタスクがなければそのままインストールします。タスクの実行中のみ、キャンセル・再確認・中断の確認を表示します。
   - zip アーカイブもあります。Apple シリコンは `arm64`、Intel は `x64` を選んでください。
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（ポータブル版）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`、および tar.gz。x64。
 

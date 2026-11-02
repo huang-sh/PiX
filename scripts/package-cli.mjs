@@ -1,10 +1,15 @@
-import { chmodSync, mkdirSync, writeFileSync, copyFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildInstallGuard } from './install-guard-bundle.mjs';
 
 // Launch the CLI with the application's embedded runtime, never system Node.
 export function writePackagedCli(resources, platform, executableName = 'PiX') {
   const dir = join(resources, 'cli');
   mkdirSync(dir, { recursive: true });
+  const guard = new URL('../build/generated/install-guard.cjs', import.meta.url);
+  if (existsSync(guard)) copyFileSync(guard, join(dir, 'install-guard.cjs'));
+  else buildInstallGuard(dir);
+  copyFileSync(new URL('../build/installer-helper.ps1', import.meta.url), join(dir, 'installer-helper.ps1'));
   if (platform === 'win32') {
     const path = join(dir, 'pix.cmd');
     writeFileSync(path, `@echo off\r\nsetlocal\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"%~dp0..\\..\\${executableName}.exe" "%~dp0..\\app.asar\\out\\main\\pix-cli.js" %*\r\nexit /b %errorlevel%\r\n`);

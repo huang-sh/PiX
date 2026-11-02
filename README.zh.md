@@ -96,7 +96,7 @@ pix tree --session <会话ID或路径>
 - **macOS**：根据 Mac 的芯片选择安装包（点击 ** → 关于本机** 查看）：
   - **Apple 芯片**（M1、M2、M3、M4 等）：`PiX-x.y.z-arm64.dmg`。
   - **Intel 处理器**：`PiX-x.y.z-x64.dmg`。
-  - 打开 DMG 后双击 PiX，选择“安装并打开”；更新前会检查任务并关闭旧后台。
+  - 打开 DMG 后双击 PiX；无任务时直接安装，仅在任务仍在进行时提供取消、重新检查及确认终止后安装。
   - 另提供 zip 包，同样按芯片选择：Apple 芯片选 `arm64`，Intel 选 `x64`。
 - **Linux**：`PiX-x.y.z-x86_64.AppImage`（免安装）、`PiX-x.y.z-amd64.deb`、`PiX-x.y.z-x86_64.rpm`，另提供 tar.gz，x64。
 

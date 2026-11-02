@@ -14,7 +14,7 @@ import { WslHostClient, RemoteHostUnreachable, HostStarted, launcherScript } fro
 import { logFile } from "../src/main/debug-log.js";
 import { MainController } from "../src/main/controller.js";
 import { PiRuntime } from "../src/main/pi-runtime.js";
-import { PIX_REMOTE_PROTOCOL } from "../src/shared/remote-protocol.js";
+import { PIX_REMOTE_PROTOCOL, hasHostWork } from "../src/shared/remote-protocol.js";
 import { projectId, type ProjectInfo } from "../src/shared/types.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 import { projectSession } from "../src/shared/session.js";
@@ -57,6 +57,67 @@ function transport(t: TestContext) {
   t.after(async () => { child.exitCode = 0; child.emit("exit", 0); await client.dispose(); });
   return { client, child, socket };
 }
+
+test("remote activity requires an advertised capability and validates its response", async t => {
+  const { client, socket } = transport(t);
+  assert.equal(await client.activity(), undefined);
+  assert.equal(socket.sent.length, 0, "older hosts must not receive unsupported requests");
+  client.hello.workActivity = true;
+  const reading = client.activity();
+  const request = socket.sent.at(-1)!;
+  assert.equal(request.route, "host.activity");
+  socket.emit("message", JSON.stringify({ type: "response", id: request.id, ok: true,
+    result: { running: 0, pending: false, commands: 1, terminals: 1, terminalUnknown: 0 } }));
+  assert.equal((await reading)?.commands, 1);
+  const invalid = client.activity();
+  socket.emit("message", JSON.stringify({ type: "response", id: socket.sent.at(-1)!.id, ok: true, result: [] }));
+  await assert.rejects(invalid, /invalid work activity/);
+});
+
+test("shutdown confirmation distinguishes a busy host from released workspace resources", async t => {
+  const { client, socket, child } = transport(t);
+  assert.equal(await client.shutdownIfIdle(), false);
+  assert.equal(socket.sent.length, 0, "older hosts cannot confirm shutdown");
+  assert.equal(client.connected, true);
+  client.hello.shutdownAck = true;
+  const busy = client.shutdownIfIdle();
+  assert.equal(socket.sent.at(-1)?.route, "host.shutdown");
+  socket.emit("message", JSON.stringify({ type: "response", id: socket.sent.at(-1)!.id, ok: true, result: { stopped: false } }));
+  assert.equal(await busy, false);
+  assert.equal(client.connected, true, "a deferred upgrade keeps its existing connection");
+  const idle = client.shutdownIfIdle();
+  socket.emit("message", JSON.stringify({ type: "response", id: socket.sent.at(-1)!.id, ok: true, result: { stopped: true } }));
+  assert.equal(await idle, true);
+  child.exitCode = 0;
+  socket.terminate();
+  assert.equal(await client.dispose(), true, "confirmation survives the socket closing");
+});
+
+test("a lost shutdown acknowledgement does not report the host stopped", async t => {
+  const { client, socket } = transport(t);
+  client.hello.shutdownAck = true;
+  const closing = client.dispose();
+  assert.equal(socket.sent.at(-1)?.route, "host.shutdown");
+  socket.terminate();
+  assert.equal(await closing, false);
+});
+
+for (const operation of ["dispose", "shutdownIfIdle"] as const)
+test(`overlapping remote ${operation} calls wait for the same shutdown acknowledgement`, async t => {
+  const { client, socket, child } = transport(t);
+  client.hello.shutdownAck = true;
+  child.exitCode = 0;
+  const first = client.shutdownIfIdle();
+  const second = client[operation]();
+  try {
+    assert.equal(socket.sent.length, 1, "cancellation and cleanup must not issue competing shutdown requests");
+    assert.equal(client.connected, true, "the acknowledgement must arrive before cleanup closes the link");
+  } finally {
+    for (const request of socket.sent)
+      socket.emit("message", JSON.stringify({ type: "response", id: request.id, ok: true, result: { stopped: true } }));
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  }
+});
 
 test("remote transport reconstructs session deltas and requests a checkpoint after a gap", async t => {
   const { client, socket } = transport(t);
@@ -361,6 +422,15 @@ function candidate(controller: MainController) {
     hello: { cwd: "/new", piVersion: PI_VERSION } as { cwd: string } & Record<string, unknown>, connected: true, disposed: false, abandoned: false, reattached: false,
     handle: undefined as any,
     calls: [] as any[],
+    async activity() {
+      const sessions = await this.request("session.list");
+      return { running: sessions.filter((session: { running?: boolean }) => session.running).length,
+        pending: false, commands: 0, terminals: 0, terminalUnknown: 0 };
+    },
+    async shutdownIfIdle() {
+      const activity = await this.activity();
+      return Boolean(activity && !hasHostWork(activity));
+    },
     async request(route: string, input?: any): Promise<any> {
       this.calls.push([route, input]);
       if (route === "settings.get") return controller.settings.bundle();
@@ -372,7 +442,7 @@ function candidate(controller: MainController) {
     onEvent(listener: (event: any) => void) { events.on("event", listener); return () => events.off("event", listener); },
     emit(event: unknown) { events.emit("event", event); },
     onDisconnect(listener: (error: Error) => void) { events.on("disconnect", listener); return () => events.off("disconnect", listener); },
-    async dispose() { this.disposed = true; this.connected = false; },
+    async dispose() { this.disposed = true; this.connected = false; return true; },
     async abandon() { this.abandoned = true; this.connected = false; },
     disconnect() { this.connected = false; events.emit("disconnect", new Error("network lost")); },
   };
@@ -808,7 +878,7 @@ test("the SSH launcher stays alive after READY until its input closes", {
 test("dispose orders a lingering host to shut down; abandon leaves it running", async (t) => {
   const disposed = transport(t);
   disposed.child.exitCode = 0;
-  await disposed.client.dispose();
+  assert.equal(await disposed.client.dispose(), false, "legacy shutdown cannot confirm that the host stopped");
   assert.equal(disposed.socket.sent.filter((message: any) => message.type === "shutdown").length, 1,
     "an intentional teardown tells the host to exit now");
   const child = new FakeChild();
@@ -869,6 +939,31 @@ test("a remembered lingering host is reattached instead of spawned", async (t) =
   assert.equal((result as { project: ProjectInfo }).project.path, "/old");
 });
 
+test("disconnect without shutdown confirmation retains discovery across controller restart", async t => {
+  const { controller, old, project } = controllerFixture(t, seedLingeringHost);
+  old.handle = seededHandle;
+  old.dispose = async () => { old.connected = false; old.disposed = true; return false; };
+  await controller.closeWsl();
+  const file = join(process.env.PIX_HOME!, ".pix", "remote-hosts.json");
+  assert.equal(JSON.parse(readFileSync(file, "utf8"))[projectId(project)].pid, seededHandle.pid);
+  const reopened = new MainController(controller.localProjectPath, controller.platform);
+  reopened.projectRuntime.control = async () => [];
+  const fresh = candidate(reopened);
+  fresh.hello.cwd = "/old";
+  fresh.reattached = true;
+  fresh.handle = seededHandle;
+  const reattach = t.mock.method(WslHostClient, "reattach", async () => fresh as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must reattach"); });
+  try {
+    await reopened.connectSsh("old", "/old");
+    assert.equal(reattach.mock.callCount(), 1);
+    assert.equal(spawn.mock.callCount(), 0);
+    assert.equal(reopened.wsl, fresh);
+  } finally {
+    await reopened.closeWsl(); reopened.projectRuntime.dispose(); reopened.shell.dispose();
+  }
+});
+
 test("an idle host using the old Pi is stopped before the upgraded host starts", async (t) => {
   const { controller, old } = controllerFixture(t, seedLingeringHost);
   old.connected = false;
@@ -887,6 +982,45 @@ test("an idle host using the old Pi is stopped before the upgraded host starts",
   await controller.connectSsh("old", "/old");
   assert.equal(spawn.mock.callCount(), 1);
   assert.equal(controller.wsl, fresh);
+});
+
+for (const work of [{ commands: 1 }, { pending: true }, { terminalUnknown: 1 }])
+test(`SDK upgrade preserves shell work and uncertainty: ${JSON.stringify(work)}`, async t => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;
+  const obsolete = candidate(controller);
+  obsolete.hello = { cwd: "/old", piVersion: "1.0.0" };
+  obsolete.handle = seededHandle;
+  obsolete.reattached = true;
+  obsolete.activity = async () => ({ running: 0, pending: false, commands: 0, terminals: 1, terminalUnknown: 0, ...work });
+  t.mock.method(WslHostClient, "reattach", async () => obsolete as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not spawn"); });
+  await controller.connectSsh("old", "/old");
+  assert.equal(controller.wsl, obsolete);
+  assert.equal(obsolete.connected, true);
+  assert.equal(obsolete.disposed, false);
+  assert.equal(spawn.mock.callCount(), 0);
+  const saved = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.equal(saved[projectId(controller.project!)].pid, seededHandle.pid);
+});
+
+for (const fails of [false, true])
+test(`SDK upgrade cannot replace an idle host without shutdown confirmation (failure=${fails})`, async t => {
+  const { controller, old } = controllerFixture(t, seedLingeringHost);
+  old.connected = false;
+  const obsolete = candidate(controller);
+  obsolete.hello = { cwd: "/old", piVersion: "1.0.0" };
+  obsolete.handle = seededHandle;
+  obsolete.reattached = true;
+  obsolete.shutdownIfIdle = async () => { if (fails) throw new Error("confirmation lost"); return false; };
+  t.mock.method(WslHostClient, "reattach", async () => obsolete as any);
+  const spawn = t.mock.method(WslHostClient, "connectSsh", async () => { throw new Error("must not spawn"); });
+  await controller.connectSsh("old", "/old");
+  assert.equal(controller.wsl, obsolete);
+  assert.equal(obsolete.disposed, false);
+  assert.equal(spawn.mock.callCount(), 0);
+  const saved = JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  assert.equal(saved[projectId(controller.project!)].pid, seededHandle.pid);
 });
 
 test("a running host using the old Pi remains attached until a later reconnect", async (t) => {
@@ -1051,6 +1185,157 @@ test("an absent desktop releases finished remote connections and preserves live 
   assert.equal(controller.pool.hasConnections, false);
 });
 
+for (const work of [{ commands: 1 }, { terminalUnknown: 1 }, { pending: true }])
+test(`remote cleanup preserves shell work and uncertainty: ${JSON.stringify(work)}`, async t => {
+  const { controller, old } = controllerFixture(t);
+  old.activity = async () => ({ running: 0, pending: false, commands: 0, terminals: 1, terminalUnknown: 0, ...work });
+  const activity = await controller.pool.activity();
+  assert.equal(activity.commands, work.commands ?? 0);
+  assert.equal(activity.unknown, work.terminalUnknown ?? 0);
+  assert.equal(activity.running, work.pending ? 1 : 0);
+  await controller.pool.closeIdleRemote();
+  assert.equal(old.disposed, false);
+  assert.equal(old.abandoned, false);
+  await controller.pool.closeAllRemote();
+  assert.equal(old.disposed, false);
+  assert.equal(old.abandoned, true);
+});
+
+test("older remote hosts remain running when their shell activity cannot be verified", async t => {
+  const { controller, old } = controllerFixture(t);
+  old.activity = async () => undefined as never;
+  assert.equal((await controller.pool.activity()).unknown, 1);
+  await controller.pool.closeAllRemote();
+  assert.equal(old.disposed, false);
+  assert.equal(old.abandoned, true);
+});
+
+for (const change of ["added", "replaced", "removed", "new activity", "running activity"] as const)
+test(`remote activity ignores stale samples when a connection is ${change} during inspection`, async t => {
+  const { controller, old, project } = controllerFixture(t);
+  let inspected!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { inspected = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  old.activity = async () => {
+    inspected(); await gate;
+    return { running: Number(change === "running activity"), pending: false, commands: Number(change === "running activity"),
+      terminals: 0, terminalUnknown: change === "removed" ? 1 : 0 };
+  };
+  const reading = controller.pool.activity();
+  try {
+    await started;
+    if (change === "added") {
+      controller.installSlot(candidate(controller) as never,
+        { name: "added", path: "/added", remote: { kind: "ssh", host: "added" } }, controller.settings.bundle());
+    } else if (change === "replaced") {
+      controller.installSlot(candidate(controller) as never, project, controller.settings.bundle());
+    } else if (change === "removed") {
+      await controller.closeWsl();
+    } else {
+      old.emit({ type: "terminal", payload: { id: "live", data: "new work" } });
+    }
+    release();
+    assert.deepEqual(await reading, { running: Number(change === "running activity"), commands: Number(change === "running activity"),
+      unknown: change === "removed" ? 0 : 1 });
+  } finally { release(); await reading; }
+});
+
+for (const source of ["shell", "terminal", "queued shell", "queued terminal"] as const)
+test(`remote shutdown atomically preserves a live ${source} command without a running Agent`, { timeout: 30000 }, async t => {
+  const { controller, old } = controllerFixture(t);
+  old.connected = false;
+  const home = mkdtempSync(join(tmpdir(), "pix-remote-work-"));
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../src/server/index.js", import.meta.url)),
+    "serve", "--cwd", home], { env: { ...process.env, HOME: home, ZDOTDIR: home, PIX_HOME: home,
+    PI_CODING_AGENT_DIR: join(home, "agent"), PI_OFFLINE: "1" }, stdio: "pipe" });
+  const clients: WslHostClient[] = [];
+  t.after(async () => {
+    await Promise.all(clients.map(client => client.dispose()));
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(resolve => child.once("exit", resolve));
+      child.kill("SIGTERM"); await exited;
+    }
+    rmSync(home, { recursive: true, force: true });
+  });
+  const ready = await (WslHostClient as any).waitForReady(child, 15_000);
+  const handle = { ...ready, kind: "ssh", target: "fixture" };
+  const connect = async (reattached = false) => {
+    const { socket, hello } = await (WslHostClient as any).openSocket(ready, 15_000);
+    // The real SSH launcher has already exited; the lingering host is not
+    // the transport child that a disconnected client is allowed to terminate.
+    const client = Reflect.construct(WslHostClient, [undefined, socket, hello, handle, false, reattached]) as WslHostClient;
+    clients.push(client); return client;
+  };
+  const wait = async (check: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 500; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
+    throw new Error("Timed out waiting for remote work state");
+  };
+  const spawning = t.mock.method(WslHostClient, "connectSsh", () => connect());
+  const attaching = t.mock.method(WslHostClient, "reattach", async (saved: typeof handle) => {
+    assert.equal(saved.pid, ready.pid);
+    assert.equal(saved.token, ready.token);
+    const client = await connect(true);
+    client.hello.piVersion = "1.0.0";
+    return client;
+  });
+  await controller.connectSsh("fixture", home);
+  const client = controller.wsl!;
+  const cwd = controller.project!.path;
+  const key = projectId(controller.project!);
+  const saved = () => JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"));
+  let id = "";
+  const command = process.platform === "win32" ? "ping.exe -n 60 127.0.0.1" : "sleep 60";
+  const terminal = source === "terminal" || source === "queued terminal";
+  if (terminal) {
+    const transport = Reflect.get(client.socket, "_socket") as { cork(): void; uncork(): void };
+    if (source === "queued terminal") transport.cork();
+    let stopping: Promise<boolean> | undefined;
+    let creating: Promise<{ id: string }>;
+    try {
+      if (source === "queued terminal") stopping = client.shutdownIfIdle();
+      creating = client.request<{ id: string }>("terminal.create", { cols: 80, rows: 24 });
+    } finally { if (source === "queued terminal") transport.uncork(); }
+    ({ id } = await creating);
+    if (stopping) assert.equal(await stopping, false, "a terminal created after the activity snapshot must invalidate idle shutdown");
+    await wait(async () => (await client.activity())?.terminalUnknown === 0);
+    await client.request("terminal.write", { id, data: command + "\r" });
+  } else {
+    client.onEvent(event => { if (event.type === "shell") id = (event.payload as { id: string }).id; });
+    // Batch the frames so shutdown is inspected while shell.run is still
+    // awaiting its default trust confirmation, before a process exists.
+    const transport = Reflect.get(Reflect.get(client, "socket"), "_socket") as { cork(): void; uncork(): void };
+    if (source === "queued shell") transport.cork();
+    let stopping: Promise<boolean> | undefined;
+    try {
+      void client.request("shell.run", { command: (process.platform === "win32" ? "Write-Output started; " : "printf started; ") + command }).catch(() => {});
+      if (source === "queued shell") stopping = client.shutdownIfIdle();
+    } finally { if (source === "queued shell") transport.uncork(); }
+    if (stopping) assert.equal(await stopping, false, "accepted shell work must block shutdown before it starts");
+  }
+  await wait(async () => (await client.activity())?.commands === 1 && Boolean(id));
+  assert.equal((await client.request<Array<{ running?: boolean }>>("session.list")).some(session => session.running), false);
+  assert.equal(await client.shutdownIfIdle(), false, "an SDK upgrade cannot stop shell work");
+  assert.equal(client.connected, true);
+  // Exercise normal disconnect and persisted discovery, rather than reconnecting
+  // directly with a ready-file token the desktop might already have forgotten.
+  await controller.closeWsl();
+  assert.equal(saved()[key].pid, ready.pid);
+  assert.equal(child.exitCode, null);
+  await controller.connectSsh("fixture", cwd);
+  const reattached = controller.wsl!;
+  assert.equal(attaching.mock.callCount(), 1);
+  assert.equal(spawning.mock.callCount(), 1, "SDK mismatch must not start another host while commands run");
+  assert.equal(saved()[key].pid, ready.pid);
+  assert.equal((await reattached.activity())?.commands, 1, "disconnect must preserve the command");
+  await reattached.request(terminal ? "terminal.kill" : "shell.abort", { id });
+  await wait(async () => (await reattached.activity())?.commands === 0);
+  assert.equal(await reattached.shutdownIfIdle(), true);
+  await controller.closeWsl();
+  assert.equal(saved()[key], undefined, "only confirmed cleanup can delete discovery information");
+  await wait(() => child.exitCode !== null);
+  assert.equal(child.exitCode, 0, "an idle host still shuts down normally");
+});
+
 test("idle remote cleanup does not dispose a desktop that reconnected during the liveness probe", async t => {
   const { controller, old } = controllerFixture(t);
   let connected = false;
@@ -1058,6 +1343,154 @@ test("idle remote cleanup does not dispose a desktop that reconnected during the
   await controller.pool.closeIdleRemote(() => connected);
   assert.equal(old.disposed, false);
   assert.equal(controller.pool.hasConnections, true);
+});
+
+test("idle remote cleanup preserves activity received during its liveness probe", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  controller.pool.slot(projectId(project))!.lastActivity = now;
+  old.activity = async () => {
+    old.emit({ type: "terminal", payload: { id: "active-terminal", data: "new output" } });
+    return { running: 0, pending: false, commands: 0, terminals: 0, terminalUnknown: 0 };
+  };
+  await controller.pool.closeIdleRemote();
+  assert.equal(old.disposed, false, "fresh activity invalidates the earlier idle sample");
+  assert.equal(controller.pool.hasConnections, true);
+});
+
+for (const cleanup of ["closeIdleRemote", "recycleRemote", "forgetProject"] as const)
+for (const outcome of ["busy", "unverified"] as const)
+test(`${cleanup} preserves the live transport when atomic shutdown is ${outcome}`, async t => {
+  const { controller, project } = controllerFixture(t);
+  const { client, socket, child } = transport(t);
+  child.exitCode = 0;
+  client.hello.workActivity = true;
+  client.hello.shutdownAck = true;
+  controller.installSlot(client, project, controller.settings.bundle());
+  controller.configure(controller.localProjectPath);
+  const id = projectId(project);
+  controller.pool.slot(id)!.lastActivity = 0;
+  let allowShutdown = false;
+  let shutdownChecks = 0;
+  t.mock.method(socket, "send", (raw: string, callback?: (error?: Error) => void) => {
+    const request = JSON.parse(raw);
+    socket.sent.push(request);
+    callback?.();
+    queueMicrotask(() => {
+      if (request.route === "host.activity") socket.emit("message", JSON.stringify({
+        type: "response", id: request.id, ok: true,
+        result: { running: 0, pending: false, commands: 0, terminals: 0, terminalUnknown: 0 },
+      }));
+      else if (request.route === "host.shutdown") {
+        shutdownChecks++;
+        socket.emit("message", JSON.stringify(!allowShutdown && outcome === "unverified"
+          ? { type: "response", id: request.id, ok: false, error: { message: "Cannot verify current work" } }
+          : { type: "response", id: request.id, ok: true, result: { stopped: allowShutdown } }));
+      }
+    });
+  });
+  const run = () => cleanup === "closeIdleRemote" ? controller.pool.closeIdleRemote()
+    : cleanup === "forgetProject" ? controller.invoke("app.forgetProject", { id })
+    : Reflect.get(controller.pool, "recycleRemote").call(controller.pool) as Promise<void>;
+  try {
+    if (cleanup === "forgetProject") await assert.rejects(run(), /confirm.*shutdown/i);
+    else await run();
+    assert.equal(shutdownChecks, 1, "the remote host must atomically confirm shutdown after the idle sample");
+    assert.equal(client.connected, true, "unconfirmed cleanup must keep the model broker and terminal link alive");
+    assert.equal(controller.pool.slot(id)?.client, client);
+    if (cleanup === "forgetProject") assert.ok(controller.projectGroups().some(group => projectId(group.project) === id));
+    allowShutdown = true;
+    await run();
+    assert.equal(client.connected, false, "confirmed idle hosts are still recycled");
+    assert.equal(controller.pool.slot(id), undefined);
+    if (cleanup === "forgetProject") assert.ok(!controller.projectGroups().some(group => projectId(group.project) === id));
+  } finally { socket.terminate(); }
+});
+
+for (const cleanup of ["closeIdleRemote", "recycleRemote"] as const)
+for (const outcome of ["busy", "stopped", "cancel", "quit", "changed", "early cancel", "early quit", "browse"] as const)
+test(`${cleanup} serializes workspace selection with pending shutdown (${outcome})`, async t => {
+  const { controller, old, project } = controllerFixture(t);
+  controller.configure(controller.localProjectPath);
+  controller.pool.slot(projectId(project))!.lastActivity = 0;
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const shuttingDown = new Promise<void>(resolve => { started = resolve; });
+  old.shutdownIfIdle = async () => { started(); await gate; return outcome !== "busy"; };
+  const fresh = candidate(controller); fresh.hello.cwd = outcome === "browse" ? "/browse" : project.path;
+  const connect = t.mock.method(WslHostClient, "connectSsh", async () => fresh as any);
+  const cleaning = cleanup === "closeIdleRemote" ? controller.pool.closeIdleRemote()
+    : Reflect.get(controller.pool, "recycleRemote").call(controller.pool) as Promise<void>;
+  let selecting: Promise<unknown> | undefined;
+  try {
+    await shuttingDown;
+    const before = old.calls.length;
+    selecting = controller.connectSsh("old", "/old");
+    void selecting.catch(() => {});
+    if (outcome === "early cancel") await controller.pool.cancelRemote();
+    const quitting = outcome === "early quit" ? controller.pool.closeAllRemote() : undefined;
+    const browsing = outcome === "browse" ? controller.connectSsh("new", "/browse", true) : undefined;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (outcome !== "early quit") assert.equal(old.calls.length, before, "selection must wait instead of using a host that may already be shutting down");
+    if (outcome === "cancel") await controller.pool.cancelRemote();
+    if (outcome === "quit") await controller.pool.closeAllRemote();
+    if (outcome === "changed") controller.configure(controller.localProjectPath);
+    await quitting; await browsing;
+    release(); await cleaning;
+    if (["cancel", "quit", "changed", "early cancel", "early quit", "browse"].includes(outcome)) {
+      await assert.rejects(selecting, /cancel|changed/i);
+      assert.equal(connect.mock.callCount(), outcome === "browse" ? 1 : 0, "obsolete selection and Quit cannot start a replacement host");
+      assert.equal(controller.project?.remote, undefined);
+      if (outcome === "browse") assert.equal((await controller.pool.browseDirectories({ path: "/browse" }) as { path: string }).path, "/browse");
+    } else {
+      const result = await selecting as { project: ProjectInfo };
+      assert.equal(result.project.path, project.path);
+      assert.equal(controller.wsl, outcome === "busy" ? old : fresh);
+      assert.equal(controller.wsl?.connected, true);
+      assert.equal(connect.mock.callCount(), outcome === "busy" ? 0 : 1);
+    }
+  } finally { release(); await Promise.allSettled([cleaning, selecting]); }
+});
+
+test("cancelled pooled selection does not apply a late session snapshot", async t => {
+  const { controller, old, project } = controllerFixture(t);
+  controller.configure(controller.localProjectPath);
+  controller.pool.slot(projectId(project))!.activePath = "/old/session.jsonl";
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const opening = new Promise<void>(resolve => { started = resolve; });
+  const request = old.request.bind(old);
+  old.request = async (route, input) => {
+    if (route === "session.open") { started(); await gate; return remoteSnapshot(); }
+    return request(route, input);
+  };
+  const selecting = controller.connectSsh("old", "/old");
+  void selecting.catch(() => {});
+  try {
+    await opening;
+    await controller.pool.cancelRemote();
+    release();
+    await assert.rejects(selecting, /cancel/i);
+    assert.equal(controller.current, undefined);
+    assert.equal(old.connected, true, "cancelling selection must preserve the pooled host");
+  } finally { release(); await selecting.catch(() => {}); }
+});
+
+for (const stopped of [false, true])
+test(`overlapping idle cleanup shares one shutdown decision (stopped=${stopped})`, async t => {
+  const { controller, old, project } = controllerFixture(t);
+  const slot = controller.pool.slot(projectId(project))!;
+  let release!: () => void, checks = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  old.shutdownIfIdle = async () => { checks++; await gate; return stopped; };
+  const first = controller.pool.dropIdleSlot(slot), second = controller.pool.dropIdleSlot(slot);
+  try {
+    assert.equal(checks, 1);
+    release();
+    assert.deepEqual(await Promise.all([first, second]), [stopped, stopped]);
+    assert.equal(old.disposed, stopped);
+  } finally { release(); await Promise.allSettled([first, second]); }
 });
 
 test("quitting stops idle hosts but parks hosts mid-run for a reattach", async (t) => {
@@ -1116,6 +1549,51 @@ test("recycling keeps hosts with running work and disposes idle ones", async (t)
   assert.equal(old.disposed, true, "an idle host beyond the pool cap is recycled");
 });
 
+for (const change of ["selected", "selection pending", "registered again", "active again"] as const)
+test(`remote recycling preserves a workspace ${change} during its idle check`, async t => {
+  const { controller, old, project } = controllerFixture(t);
+  controller.configure(controller.localProjectPath);
+  const id = projectId(project);
+  controller.pool.slot(id)!.lastActivity = 0;
+  let scanned!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { scanned = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  old.activity = async () => {
+    scanned(); await gate;
+    return { running: 0, pending: false, commands: 0, terminals: 0, terminalUnknown: 0 };
+  };
+  const recycling = Reflect.get(controller.pool, "recycleRemote").call(controller.pool) as Promise<void>;
+  let selection: Promise<unknown> | undefined;
+  let resumeSelection = () => {};
+  try {
+    await started;
+    if (change === "selected") await controller.connectSsh("old", "/old");
+    else if (change === "selection pending") {
+      let selecting!: () => void;
+      const selectingStarted = new Promise<void>(resolve => { selecting = resolve; });
+      const selectionGate = new Promise<void>(resolve => { resumeSelection = resolve; });
+      const request = old.request.bind(old);
+      old.request = async (route, input) => {
+        if (route === "settings.get") { selecting(); await selectionGate; }
+        return request(route, input);
+      };
+      selection = controller.connectSsh("old", "/old");
+      await selectingStarted;
+    }
+    else if (change === "registered again") controller.installSlot(old as never, project, controller.settings.bundle());
+    else old.emit({ type: "terminal", payload: { id: "active-terminal", data: "new output" } });
+    release();
+    await recycling;
+    if (change === "selection pending") {
+      controller.pool.slot(id)!.lastActivity = 0;
+      await Reflect.get(controller.pool, "recycleRemote").call(controller.pool);
+    }
+    assert.equal(old.disposed, false, "a stale idle sample must not disconnect a workspace that changed");
+    assert.equal(controller.pool.slot(id)?.client, old);
+    if (change === "selected") assert.equal(controller.wsl, old);
+  } finally { release(); resumeSelection(); await selection; await recycling; }
+});
+
 test("quitting disposes every pooled host, running or not", async (t) => {
   const { controller, old } = controllerFixture(t);
   const spare = candidate(controller);
@@ -1130,6 +1608,67 @@ test("quitting disposes every pooled host, running or not", async (t) => {
   assert.equal(old.disposed, true, "a parked host is disposed on quit");
   assert.equal(spare.disposed, true, "a pooled host is disposed on quit");
   assert.equal(next.disposed, true, "the active host is disposed on quit");
+});
+
+test("forgetting a remote project rejects an idle result invalidated by new terminal activity", async t => {
+  const { controller } = controllerFixture(t);
+  const spare = candidate(controller);
+  const project: ProjectInfo = { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } };
+  controller.installSlot(spare as never, project, controller.settings.bundle());
+  controller.settings.rememberProject(project, []);
+  let release!: () => void, scanning!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const scanned = new Promise<void>(resolve => { scanning = resolve; });
+  spare.activity = async () => { scanning(); await gate; return { running: 0, pending: false, commands: 0, terminals: 1, terminalUnknown: 0 }; };
+  const removing = controller.invoke("app.forgetProject", { id: projectId(project) });
+  try {
+    await scanned;
+    spare.emit({ type: "terminal", payload: { id: "new-command", data: "working" } });
+    release();
+    await assert.rejects(removing, /changed|Retry/i);
+    assert.equal(spare.disposed, false);
+    assert.ok(controller.settings.projectHistory().some(record => record.id === projectId(project)));
+  } finally { release(); await removing.catch(() => {}); }
+});
+
+test("forgetting a project retains its history and handle when remote shutdown is not confirmed", async t => {
+  const project: ProjectInfo = { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } };
+  const id = projectId(project);
+  const handle = { kind: "ssh", target: "spare", port: 41001, token: "keep-running-host", pid: 4242, path: "/spare" };
+  const { controller } = controllerFixture(t, home => {
+    mkdirSync(join(home, ".pix"), { recursive: true });
+    writeFileSync(join(home, ".pix", "remote-hosts.json"), JSON.stringify({ [id]: handle }));
+  });
+  const spare = candidate(controller);
+  spare.handle = handle;
+  spare.dispose = async () => { spare.disposed = true; spare.connected = false; return false; };
+  controller.installSlot(spare as never, project, controller.settings.bundle());
+  controller.settings.rememberProject(project, []);
+  await assert.rejects(controller.invoke("app.forgetProject", { id }), /confirm.*shutdown/i);
+  assert.ok(controller.settings.projectHistory().some(record => record.id === id));
+  assert.equal(JSON.parse(readFileSync(join(process.env.PIX_HOME!, ".pix", "remote-hosts.json"), "utf8"))[id].token, handle.token);
+});
+
+test("forgetting a project cannot remove a replacement slot admitted during remote cleanup", async t => {
+  const { controller } = controllerFixture(t);
+  const project: ProjectInfo = { name: "spare", path: "/spare", remote: { kind: "ssh", host: "spare" } };
+  const spare = candidate(controller), replacement = candidate(controller);
+  controller.installSlot(spare as never, project, controller.settings.bundle());
+  controller.settings.rememberProject(project, []);
+  let release!: () => void, closing!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { closing = resolve; });
+  spare.dispose = async () => { closing(); await gate; spare.disposed = true; spare.connected = false; return true; };
+  const removing = controller.invoke("app.forgetProject", { id: projectId(project) });
+  try {
+    await started;
+    controller.installSlot(replacement as never, project, controller.settings.bundle());
+    release();
+    await assert.rejects(removing, /changed|Retry/i);
+    assert.equal(controller.pool.slot(projectId(project))?.client, replacement);
+    assert.equal(replacement.disposed, false);
+    assert.ok(controller.settings.projectHistory().some(record => record.id === projectId(project)));
+  } finally { release(); await removing.catch(() => {}); }
 });
 
 test("forgetting a project disposes its pooled host and refuses while it runs", async (t) => {

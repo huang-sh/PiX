@@ -92,6 +92,7 @@ const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | 
 const updateNotice = ref<{ version: string; url: string } | null>(null);
 const hostRecovery = ref<HostConnectionState | null>(null);
 const hostBusy = ref(false);
+let hostStatusRequest = 0;
 
 // macOS keeps a small titlebar inset when fullscreen hides the traffic lights
 // and has no right-side window controls (see .platform-darwin in app.css).
@@ -135,11 +136,35 @@ async function hydrate(data: BootstrapData, openFirst = false, request = ++sessi
   if (request === session.viewRequest) session.loading = false;
 }
 
+async function refreshHostRecovery(error?: unknown) {
+  const request = ++hostStatusRequest;
+  const view = session.viewRequest;
+  let state: HostConnectionState;
+  try { state = await desktop.invoke<HostConnectionState>("app.hostStatus"); }
+  catch (error) {
+    if (request !== hostStatusRequest || view !== session.viewRequest) return;
+    throw error;
+  }
+  if (request !== hostStatusRequest || view !== session.viewRequest) return;
+  if (state.connected === false) {
+    if (state.language) locale.value = state.language === "system" ? navigator.language.startsWith("zh") ? "zh-CN" : "en" : state.language;
+    hostRecovery.value = { ...state, error: state.error ?? (error === undefined
+      ? hostRecovery.value?.error : error instanceof Error ? error.message : String(error)) };
+    session.loading = false;
+  } else if (state.connected === true) hostRecovery.value = null;
+  return state;
+}
+
 async function bootstrap() {
   if (hostBusy.value) return;
   hostBusy.value = true;
+  hostStatusRequest++;
   const request = ++session.viewRequest;
   try {
+    if (hostRecovery.value?.host?.stopping) {
+      const state = await refreshHostRecovery();
+      if (!state || (state.connected === false && state.host?.stopping)) return;
+    }
     const data = await desktop.invoke<BootstrapData>("app.bootstrap");
     hostRecovery.value = null;
     await hydrate(data, data.settings.app.openLastSessionOnStartup, request);
@@ -147,13 +172,8 @@ async function bootstrap() {
     if (request !== session.viewRequest) return;
     session.loading = false;
     try {
-      const state = await desktop.invoke<HostConnectionState>("app.hostStatus");
-      if (state.connected === false) {
-        if (state.language) locale.value = state.language === "system" ? navigator.language.startsWith("zh") ? "zh-CN" : "en" : state.language;
-        hostRecovery.value = { ...state, error: state.error ?? (error instanceof Error ? error.message : String(error)) };
-        return;
-      }
-      if (state.connected === true) hostRecovery.value = null;
+      const state = await refreshHostRecovery(error);
+      if (!state || state.connected === false) return;
     } catch { /* A non-host bootstrap failure still uses the regular notice. */ }
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
   } finally { hostBusy.value = false; }
@@ -162,13 +182,14 @@ async function bootstrap() {
 async function restartHost(id: string) {
   if (hostBusy.value) return;
   hostBusy.value = true;
+  hostStatusRequest++;
   try {
     await desktop.invoke("app.hostRestart", { id, force: true });
   } catch (error) {
     if (hostRecovery.value) hostRecovery.value.error = error instanceof Error ? error.message : String(error);
     try {
-      const state = await desktop.invoke<HostConnectionState>("app.hostStatus");
-      hostRecovery.value = { ...state, error: hostRecovery.value?.error ?? state.error };
+      const state = await refreshHostRecovery(error);
+      if (state?.connected) layout.showNotice(error instanceof Error ? error.message : String(error), "error");
     } catch {}
     return;
   } finally { hostBusy.value = false; }
@@ -509,10 +530,15 @@ function onEvent(wireEvent: DesktopEvent) {
   const event = decodeSessionEvent(wireEvent);
   if (!event) return;
   if (event.type === "host.connection") {
+    hostStatusRequest++;
     const { connected, reconnecting } = event.payload as { connected: boolean; reconnecting?: boolean };
     // Normal transport recovery restores its own view. Rehydrating here would
     // reset open panels and drafts after an otherwise transparent reconnect.
-    if (!reconnecting && (!connected || hostRecovery.value)) void bootstrap();
+    if (!reconnecting && !connected) {
+      void refreshHostRecovery().then(state => {
+        if (state?.connected && state.error) layout.showNotice(state.error, "error");
+      }).catch(error => layout.showNotice(error instanceof Error ? error.message : String(error), "error"));
+    } else if (!reconnecting && hostRecovery.value) void bootstrap();
     return;
   }
   if (event.type === "remote.progress") {
@@ -640,6 +666,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  hostStatusRequest++;
   unsubscribe?.();
   window.removeEventListener("keydown", keydown);
 });

@@ -1,16 +1,18 @@
 安装 / 更新 PiX
 
-请双击此磁盘映像中的 PiX，然后选择“安装并打开”。
-PiX 会检查运行中的任务，正常关闭旧窗口和后台后再替换应用。
-有任务或其他连接时，可取消安装、稍后重新检查，或确认终止并安装。
+请双击此磁盘映像中的 PiX。
+没有运行中或等待中的任务时，会正常关闭旧窗口和后台并直接安装。
+仅在任务仍在进行时，可取消安装、重新检查，或明确确认终止并安装。
+仅有空闲窗口、终端会话或连接，不会额外要求确认。
 取消或安装失败时，会尝试重新打开此前的 PiX 窗口。
 不要先在 Finder 中覆盖正在运行的 PiX。
 
 Install / Update PiX
 
-Double-click PiX in this disk image, then choose “Install and Open”.
-PiX checks running work and closes the previous windows and background host
-before replacing the app. If work or other connections remain, you can cancel,
-check again later, or explicitly confirm interruption and installation.
+Double-click PiX in this disk image.
+When no work is running or pending, PiX closes the previous windows and host
+and installs normally. Only active work prompts you to cancel, check again,
+or explicitly confirm interruption and installation. Idle windows, terminal
+sessions, and connections do not trigger an extra confirmation.
 On cancellation or installation failure, PiX tries to reopen the previous windows.
 Do not overwrite a running PiX app in Finder first.

@@ -1,6 +1,6 @@
 {
   "name": "pix",
-  "version": "0.0.32",
+  "version": "0.0.33",
   "private": true,
   "license": "MPL-2.0",
   "desktopName": "pix",
@@ -52,7 +52,7 @@
     "test:cli:real": "npm run build:cli && node test/cli-real-agent-test.mjs",
     "test:cli:tui:real": "npm run build:cli && node test/cli-tui-real-test.mjs",
     "test:cli:package": "npm run build:cli && node test/cli-package-test.mjs",
-    "test:installation": "node --test test/packaged-cli-test.mjs test/windows-cli-path.test.mjs test/prune-dev-artifacts.test.mjs"
+    "test:installation": "node --test test/packaged-cli-test.mjs test/linux-install-hooks.test.mjs test/windows-cli-path.test.mjs test/prune-dev-artifacts.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.4.0",
@@ -91,6 +91,7 @@
     "electron": "^44.4.4",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "esbuild": "0.25.12",
     "jsdom": "^30.0.1",
     "tailwindcss": "^4.3.3",
     "typescript": "5.8.3",
