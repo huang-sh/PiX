@@ -12,7 +12,8 @@ import { offerMacInstall, installedMacWindows } from '../out-test/src/main/mac-i
 import { HostClient, localHostStatus, localHostInstallInProgress, stopLocalHost } from '../out-test/src/host/client.js';
 
 if (process.platform !== 'darwin') throw new Error('Run this test on macOS');
-const dmg = resolve(process.argv[2] ?? 'release/install-validation/PiX-0.0.32-x64.dmg');
+const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const dmg = resolve(process.argv[2] ?? `release/install-validation/PiX-${version}-x64.dmg`);
 const root = mkdtempSync('/private/tmp/pix-packaged-install-');
 const mount = join(root, 'image'), home = join(root, 'home'), workspace = join(root, 'workspace');
 const installed = join(root, 'Applications', 'PiX.app');
