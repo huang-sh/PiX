@@ -314,11 +314,6 @@ function rebuild() {
     ...dragged.get(node.id),
   })) };
   const active = new Set(value.activeBranchNodeIds);
-  // An idle run's tip is the only node that continues its branch in place;
-  // composing anywhere else forks, so those nodes offer branch arrows alone.
-  const continuable = new Set<string>();
-  for (const run of session.current?.graph?.runs ?? [])
-    if (run.nodeId && run.status === "idle" && !run.error) continuable.add(run.nodeId);
   const children = new Map<string, typeof placed.nodes>();
   for (const node of placed.nodes) {
     if (!node.parentId) continue;
@@ -338,7 +333,6 @@ function rebuild() {
       active: active.has(node.id),
       current: value.activeNodeId === node.id,
       runnable: Boolean(session.current?.runtime.available && !busy && node.forkable !== false),
-      continuable: !session.current?.graph || continuable.has(node.id),
       running: node.running,
       compacting: () => Boolean(session.current?.graph ? session.runFor(node.id)?.runtime?.isCompacting : session.current?.runtime.isCompacting),
       blockedReason: busy
@@ -671,6 +665,9 @@ async function retryTurn(id: string) {
   const parentNode = projection.value?.nodes.find((item) => item.id === parent);
   resetDraft();
   draftParent.value = parent;
+  // A retry continues the branch only from its tip; anywhere else it opens as
+  // an explicit branch below, not an unmarked fork in the mainline row.
+  draftOrder = parentNode?.continuable === false ? ++orderSequence : 0;
   draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
   draftThinking.value = undefined;
   draftState.value = { ...emptyDraft(), text: content.user, images };

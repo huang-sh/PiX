@@ -9,16 +9,21 @@ import type { SessionSnapshot } from "../../src/shared/types";
 
 enableAutoUnmount(afterEach);
 
-function snapshot(runs: NonNullable<SessionSnapshot["graph"]>["runs"]): SessionSnapshot {
+function snapshot(graph: boolean): SessionSnapshot {
   const entries = [["root", null], ["mid", "root"], ["tip", "mid"]]
     .map(([id, parentId], index) => ({ type: "message", id: id!, parentId, timestamp: String(index),
       message: { role: "user", content: id! } }));
-  return {
+  const value = {
     session: { id: "continue", path: "C:/tmp/continue.jsonl" },
     entries, projection: projectSession(entries, "tip"),
-    graph: { id: "C:/tmp/continue.jsonl", revision: 1, runs },
     runtime: { available: true },
   } as unknown as SessionSnapshot;
+  if (graph) {
+    value.graph = { id: "C:/tmp/continue.jsonl", revision: 1, runs: [] };
+    // What GraphRuntime delivers: only the branch tip continues in place.
+    for (const node of value.projection.nodes) if (node.id !== "turn:tip") node.continuable = false;
+  }
+  return value;
 }
 
 describe("graph continuation arrows", () => {
@@ -35,10 +40,10 @@ describe("graph continuation arrows", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it("offers the horizontal arrow on the idle tip alone", async () => {
+  it("offers the horizontal arrow on the tip alone of a graph session", async () => {
     const pinia = createPinia(); setActivePinia(pinia);
     const session = useSessionStore();
-    session.current = snapshot([{ branchId: "main", runId: "r1", nodeId: "turn:tip", status: "idle" }]);
+    session.current = snapshot(true);
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
     expect(wrapper.find('[data-id="turn:tip"] [data-direction="right"]').exists()).toBe(true);
@@ -50,24 +55,10 @@ describe("graph continuation arrows", () => {
     }
   });
 
-  it.each([
-    ["a running branch", [{ branchId: "main", runId: "r1", nodeId: "turn:tip", status: "running" }]],
-    ["a failed branch", [{ branchId: "main", runId: "r1", nodeId: "turn:tip", status: "idle", error: "boom" }]],
-  ])("hides the horizontal arrow on the tip of %s", async (_name, runs) => {
-    const pinia = createPinia(); setActivePinia(pinia);
-    const session = useSessionStore();
-    session.current = snapshot(runs);
-    const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
-    await flushPromises();
-    expect(wrapper.find('[data-direction="right"]').exists()).toBe(false);
-  });
-
   it("keeps the horizontal arrow on every node of a plain session", async () => {
     const pinia = createPinia(); setActivePinia(pinia);
     const session = useSessionStore();
-    const plain = snapshot([]);
-    delete plain.graph;
-    session.current = plain;
+    session.current = snapshot(false);
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
     expect(wrapper.findAll('[data-direction="right"]')).toHaveLength(3);

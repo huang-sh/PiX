@@ -272,11 +272,14 @@ describe("PromptNode branch action", () => {
 
   it("offers only explicit branch arrows off the mainline", async () => {
     const onCompose = vi.fn();
-    const data = nodeData({ current: false, continuable: false, onCompose });
+    const data = nodeData({ current: false, onCompose });
+    data.node.continuable = false;
     const wrapper = mount(PromptNode, {
       props: { id: "turn:1", data },
       global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
     });
+    const add = wrapper.get(".node-add");
+    expect(add.attributes("aria-label")).toBe(i18n.global.t("graph.branchDown"));
     const controls = wrapper.get(".node-branch-controls");
     const up = wrapper.get('[data-direction="up"]');
     const down = wrapper.get('[data-direction="down"]');

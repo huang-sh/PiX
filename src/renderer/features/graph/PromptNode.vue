@@ -28,9 +28,6 @@ export interface PromptNodeData {
   current: boolean;
   runnable: boolean;
   blockedReason: string;
-  /** False on graph nodes that cannot continue their branch in place: they
-   * offer the explicit branch arrows alone, never the horizontal one. */
-  continuable?: boolean;
   /** True while the submitted prompt is still being processed by the agent. */
   running?: boolean;
   compacting?: () => boolean;
@@ -268,23 +265,23 @@ function compose(direction?: BranchDirection) {
   if (!props.data.runnable) return;
   // A directionless compose keeps the mainline lane on continuation tips; other
   // nodes open below, matching the arrows they offer.
-  props.data.onCompose(direction ?? (props.data.continuable === false ? "down" : undefined));
+  props.data.onCompose(direction ?? (props.data.node.continuable === false ? "down" : undefined));
 }
 
-const arrowDirections = computed(() => props.data.continuable !== false
+const arrowDirections = computed(() => props.data.node.continuable !== false
   ? (["up", "right", "down"] as const)
   : (["up", "down"] as const));
 
 function pointBranch(event: MouseEvent) {
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
   const offset = (event.clientY - box.top) / box.height;
-  const thirds = props.data.continuable !== false;
+  const thirds = props.data.node.continuable !== false;
   const edge = thirds ? 1 / 3 : 1 / 2;
   branchDirection.value = offset < edge ? "up" : offset > 1 - edge || !thirds ? "down" : "right";
 }
 
 function focusBranch(direction: BranchDirection | "right", event: KeyboardEvent) {
-  if (direction === "right" && props.data.continuable === false) return;
+  if (direction === "right" && props.data.node.continuable === false) return;
   branchDirection.value = direction;
   (event.currentTarget as HTMLElement).parentElement?.querySelector<HTMLButtonElement>(`[data-direction="${direction}"]`)?.focus();
 }
@@ -419,7 +416,7 @@ function relative(value: string) {
       class="node-add nodrag nowheel"
       :aria-disabled="!data.runnable"
       :title="data.runnable ? undefined : t(data.blockedReason)"
-      :aria-label="data.runnable ? t('graph.continueFromTurn') : t(data.blockedReason)"
+      :aria-label="data.runnable ? t(data.node.continuable === false ? 'graph.branchDown' : 'graph.continueFromTurn') : t(data.blockedReason)"
       @focus="suppressPreview"
       @keydown.up.prevent.stop="focusBranch('up', $event)"
       @keydown.down.prevent.stop="focusBranch('down', $event)"

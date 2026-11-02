@@ -191,6 +191,9 @@ export interface GraphNode {
   branchId?: string;
   running?: boolean;
   forkable?: boolean;
+  /** False when this node cannot continue its branch in place — composing
+   * there always forks. Plain sessions leave it unset: they continue anywhere. */
+  continuable?: boolean;
 }
 export type GraphFilter = "all" | "labeled" | "running" | "errors";
 export interface GraphEdge {

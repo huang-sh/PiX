@@ -297,7 +297,12 @@ export class GraphRuntime extends PiRuntime {
         status: running ? "running" : record.status === "interrupted" ? "interrupted" : "idle",
         error: record.error, runtime: snap.runtime });
     }
-    const { entries: values, projection } = this.snapshotCache.view(main, active);
+    // Tips of idle branches are the only nodes that continue in place — every
+    // other compose forks. The projection carries this so the renderer never
+    // re-derives it from run states.
+    const continuable = new Set<string>();
+    for (const run of runs) if (run.nodeId && run.status === "idle" && !run.error) continuable.add(run.nodeId);
+    const { entries: values, projection } = this.snapshotCache.view(main, active, continuable);
     // The SDK appends the user entry after pre-prompt compaction. Keep the
     // admission clock through that handoff until the completion footer saves it.
     const timings = new Map(runs.filter(run => run.status === "running" && run.nodeId).map(run => {

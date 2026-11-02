@@ -1219,6 +1219,12 @@ test("explicit branches fork main and child tips while ordinary prompts keep con
     assert.equal(childResumed.branchId, child.branchId);
     assert.equal(childResumed.parentId, childAfterFork.id);
     assert.equal(runtime.graph!.records.size, 2);
+    const flag = (id: string) => runtime.snapshot().projection.nodes.find(node => node.id === id)?.continuable;
+    assert.equal(flag(root.id), false, "a passed-over main tip loses in-place continuation");
+    assert.notEqual(flag(mainNext.id), false, "the main tip keeps it");
+    assert.equal(flag(child.id), false);
+    assert.notEqual(flag(childResumed.id), false, "a branch tip keeps it");
+    assert.equal(flag(nested.id), false);
   } finally {
     await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
