@@ -1,4 +1,4 @@
-import { themeColors, type ThemeId } from "../../../shared/theme";
+import { themeColors, themeSchemes, type ThemeId } from "../../../shared/theme";
 
 const ansiColors = {
   light: {
@@ -30,7 +30,7 @@ const ansiColors = {
 export function terminalTheme(theme: ThemeId) {
   const colors = themeColors[theme];
   return {
-    ...ansiColors[theme === "dark" ? "dark" : "light"],
+    ...ansiColors[themeSchemes[theme]],
     background: colors.surface, foreground: colors.text, cursor: colors.text,
     selectionBackground: colors["accent-soft"],
   };

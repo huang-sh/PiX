@@ -35,6 +35,7 @@ import NavigatorMenu from "./NavigatorMenu.vue";
 import { useSessionStore } from "../../stores/session";
 import { useLayoutStore } from "../../stores/layout";
 import { desktop } from "../../api";
+import { relativeTimeUnit } from "../../lib/relative-time";
 
 const emit = defineEmits<{
   pickProject: [];
@@ -69,11 +70,8 @@ watch(
 );
 
 function relative(value: string) {
-  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
-  if (elapsed < 60_000) return t("time.now");
-  if (elapsed < 3_600_000) return t("time.minutes", { n: Math.floor(elapsed / 60_000) });
-  if (elapsed < 86_400_000) return t("time.hours", { n: Math.floor(elapsed / 3_600_000) });
-  return t("time.days", { n: Math.floor(elapsed / 86_400_000) });
+  const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
+  return t(`time.${unit}`, { n });
 }
 
 function visible(record: ProjectGroup) {
@@ -140,10 +138,10 @@ async function revealSession(record: ProjectGroup, path: string) {
       <Button class="grow justify-start" variant="ghost" @click="session.create()">
         <Plus :size="16" />{{ t("nav.newSession") }}
       </Button>
-      <Button variant="ghost" size="icon" :title="t('nav.importSession')" @click="session.importSession()">
+      <Button variant="ghost" size="icon" :title="t('nav.importSession')" :disabled="!session.activeProjectId" @click="session.importSession()">
         <Upload :size="16" />
       </Button>
-      <Button variant="ghost" size="icon" :title="t('nav.refreshSessions')" @click="session.refresh()">
+      <Button variant="ghost" size="icon" :title="t('nav.refreshSessions')" :disabled="!session.activeProjectId" @click="session.refresh()">
         <RefreshCw :size="16" />
       </Button>
     </div>

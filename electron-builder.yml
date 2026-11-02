@@ -9,10 +9,17 @@ directories:
 files:
   - out/**
   - resources/**
+  # Dev artifacts inside node_modules only: sourcemaps are read by DevTools
+  # and type declarations by the TypeScript compiler — nothing in the
+  # packaged app resolves either. Scoped to node_modules so the out/
+  # sourcemaps of PiX's own code stay in the asar for crash debugging.
+  - "!node_modules/**/*.map"
+  - "!node_modules/**/*.d.ts"
+  - "!node_modules/**/*.d.mts"
+  - "!node_modules/**/*.d.cts"
 
-# Cross-platform binary pruning (esbuild ships ~230MB of other-platform
-# binaries via pi's chord dependency).
-afterPack: scripts/strip-cross-platform-binaries.mjs
+# Prune bundled extension dev artifacts and verify the finished package.
+afterPack: scripts/prune-packaged-files.mjs
 
 # node-pty ships NAPI prebuilds for every platform (node_modules/node-pty/
 # prebuilds), so skip the electron rebuild entirely.
@@ -100,10 +107,25 @@ mac:
     - target: dmg
     - target: zip
 
+dmg:
+  title: PiX ${version}
+  backgroundColor: "#f7f7f7"
+  # Launch the app to check/stop its host before replacement; Finder drag-copy
+  # cannot run a pre-install hook.
+  contents:
+    - x: 180
+      y: 150
+      type: file
+    - x: 380
+      y: 150
+      type: file
+      path: build/Install PiX.txt
+      name: 安装说明 - Install PiX.txt
+
 linux:
   icon: build/icon.png
   category: Development
-  executableName: pix
+  executableName: pix-desktop
   syncDesktopName: true
   maintainer: PiX <pix@earendil.works>
   synopsis: Graph-first workbench for Pi Agent
@@ -151,3 +173,16 @@ nsis:
 
 portable:
   artifactName: PiX-Portable-${version}-${arch}.exe
+
+# Debian/RPM hooks extend the builder's installed templates at build time.
+deb:
+  fpm:
+    - "--before-install=build/generated/before-install.sh"
+  afterInstall: build/generated/after-install.tpl
+  afterRemove: build/generated/after-remove.tpl
+rpm:
+  fpm:
+    - "--before-install=build/generated/before-install.sh"
+    - "--rpm-posttrans=build/generated/rpm-posttrans.sh"
+  afterInstall: build/generated/after-install.tpl
+  afterRemove: build/generated/after-remove.tpl

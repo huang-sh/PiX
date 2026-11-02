@@ -1,10 +1,10 @@
 // Smoke test for a packaged PiX build (release/win-unpacked/PiX.exe, the
-// portable exe, release/linux-unpacked/pix, or release/mac*/PiX.app on macOS).
+// portable exe, release/linux-unpacked/pix-desktop, or release/mac*/PiX.app on macOS).
 // Drives the packaged app over the Chrome DevTools protocol like
 // test/gui-test.mjs, so the asar layout, preload, IPC, and the node-pty
 // native binary are all exercised in their packaged form.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,7 +16,7 @@ const defaultTarget =
   process.platform === "darwin"
     ? join(root, "release", "mac", "PiX.app", "Contents", "MacOS", "PiX")
     : process.platform === "linux"
-      ? join(root, "release", "linux-unpacked", "pix")
+      ? join(root, "release", "linux-unpacked", "pix-desktop")
       : join(root, "release", "win-unpacked", "PiX.exe");
 const target = exe || defaultTarget;
 if (!existsSync(target))
@@ -177,6 +177,13 @@ try {
     );
     if (!ready) throw new Error(`Renderer is not ready\n${stderr}`);
   });
+  // The v0.0.20 incident was "alive but invisible": renderer fully loaded
+  // while the window never showed. The DOM check above cannot tell those
+  // apart; only visibility can (a hidden window reports "hidden").
+  await retry(async () => {
+    if ((await cdp.evaluate("document.visibilityState")) !== "visible")
+      throw new Error(`Packaged PiX window never became visible\n${stderr}`);
+  });
   const session = await retry(async () => {
     const value = await cdp.evaluate(
       "({ sessions: window.__pixTest.state().sessions.length, current: Boolean(window.__pixTest.state().current) })",
@@ -293,17 +300,41 @@ try {
   console.log(JSON.stringify(result, null, 2));
 } finally {
   await cdp?.close();
+  // Shut down only this test profile, including its GUI-created terminal.
+  // SIGTERM alone would leave the desktop waiting on its quit confirmation.
+  const addressFile = join(testHome, ".pix", "run", "host.json");
+  let cleanupError;
+  try { if (existsSync(addressFile)) {
+    const address = JSON.parse(readFileSync(addressFile, "utf8"));
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/?token=${encodeURIComponent(address.token)}`);
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Test host cleanup timed out")), 10000);
+        const finish = error => { clearTimeout(timer); error ? reject(error) : resolve(); };
+        socket.addEventListener("error", () => finish(new Error("Test host cleanup failed")), { once: true });
+        socket.addEventListener("open", () => socket.send(JSON.stringify({
+          type: "request", id: "cleanup", method: "shutdown", force: true, quitClients: true,
+        })), { once: true });
+        socket.addEventListener("message", event => {
+          const reply = JSON.parse(String(event.data));
+          if (reply.type === "reply" && reply.id === "cleanup")
+            finish(reply.result?.stopped === true ? undefined : new Error(reply.error ?? "Test host refused cleanup"));
+        });
+      });
+    } finally { socket.close(); }
+  } } catch (error) { cleanupError = error; }
   if (process.platform === "win32" && child.pid)
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore",
     });
-  else child.kill("SIGTERM");
   if (child.exitCode === null)
     await Promise.race([
       new Promise((resolve) => child.once("close", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 1_000)),
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
     ]);
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.unref();
+  if (cleanupError) throw cleanupError;
 }

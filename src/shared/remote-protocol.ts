@@ -1,21 +1,21 @@
 import type { DesktopEvent, DesktopRoute } from "./types.js";
 
-// session.stop is a new project route: a host from before it rejects the
-// request as invalid, so the protocol moves to force reinstalling such hosts.
-// The product version stays with the release chore: installers compare both,
-// so a protocol change alone also triggers the reinstall.
-export const PIX_REMOTE_PROTOCOL = 12;
-export const PIX_HOST_VERSION = "0.0.20";
+// Installers compare protocol and product version so outdated hosts are upgraded.
+export const PIX_REMOTE_PROTOCOL = 17;
+export const PIX_HOST_VERSION = "0.0.33";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
 export const PROJECT_ROUTES = [
+  "ui.respond",
+  "ui.pending",
   "session.list",
   "session.snapshot",
   "session.open",
   "session.stop",
   "session.rename",
   "session.delete",
+  "usage.overview",
   "agent.control",
   "workspace.tree",
   "workspace.directories",
@@ -23,6 +23,8 @@ export const PROJECT_ROUTES = [
   "workspace.read",
   "workspace.write",
   "git.status",
+  "git.branches",
+  "git.switch",
   "git.diff",
   "changes.read",
   "shell.run",
@@ -34,7 +36,9 @@ export const PROJECT_ROUTES = [
   "settings.get",
   "settings.update",
   "settings.reset",
-] as const satisfies readonly DesktopRoute[];
+  "host.activity",
+  "host.shutdown",
+] as const satisfies readonly (DesktopRoute | "host.activity" | "host.shutdown")[];
 
 export type ProjectRoute = (typeof PROJECT_ROUTES)[number];
 
@@ -65,7 +69,26 @@ export interface HostHello {
   piVersion: string;
   platform: string;
   arch: string;
+  /** Absolute real directory path, with the same spelling as workspace.directories. */
   cwd: string;
+  /** Whether the desktop may deploy its model credentials to this host. */
+  allowCredentialDeploy?: boolean;
+  /** Task and terminal child-process checks before shutting down busy hosts. */
+  workActivity?: boolean;
+  /** Acknowledges idle shutdown only after workspace resources have been released. */
+  shutdownAck?: boolean;
+}
+
+export interface HostActivity {
+  running: number;
+  pending: boolean;
+  commands: number;
+  terminals: number;
+  terminalUnknown: number;
+}
+
+export function hasHostWork(activity: HostActivity) {
+  return Boolean(activity.running || activity.pending || activity.commands || activity.terminalUnknown);
 }
 
 export interface HostEvent {
@@ -74,11 +97,13 @@ export interface HostEvent {
   event: DesktopEvent;
 }
 
+export type ModelOperation = "stream" | "streamSimple" | "generateImages" | "classify";
 export interface HostModelRequest {
   type: "model.request";
   id: string;
   provider: string;
   modelId: string;
+  operation?: ModelOperation;
   context: unknown;
   options: Record<string, unknown>;
 }
@@ -100,6 +125,22 @@ export interface HostModelCancel {
   id: string;
 }
 
+/** Closes the link; idle hosts shut down, while live or unverified work lingers. */
+export interface ClientShutdown {
+  type: "shutdown";
+}
+
+/** Identifies a lingering host across desktop sessions, for reattachment. */
+export interface HostHandle {
+  kind: "ssh" | "wsl";
+  /** SSH host alias or WSL distribution naming the machine. */
+  target: string;
+  /** Loopback port and auth token of the running host, plus its pid. */
+  port: number;
+  token: string;
+  pid: number;
+}
+
 export type HostMessage =
   | HostHello
   | HostResponse
@@ -109,4 +150,5 @@ export type HostMessage =
 export type ClientMessage =
   | HostRequest
   | ClientModelEvent
-  | ClientModelFailure;
+  | ClientModelFailure
+  | ClientShutdown;

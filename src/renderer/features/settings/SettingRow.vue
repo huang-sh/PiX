@@ -13,6 +13,9 @@ const { value, setValue, rowHint, optionLabel } = useSettingsDraftContext();
     <span><strong>{{ t(row.label) }}</strong><small>{{ rowHint(row) }}</small></span>
     <input v-if="row.type === 'check'" class="switch" type="checkbox" :checked="Boolean(value(row))" @change="setValue(row, $event)" />
     <select v-else-if="row.type === 'select'" :value="String(value(row))" :disabled="disabled" @change="setValue(row, $event)">
+      <option v-if="!row.options?.includes(String(value(row)))" :value="String(value(row))" disabled>
+        {{ t('settings.unavailableOption', { name: String(value(row)) }) }}
+      </option>
       <option v-for="option in row.options" :key="option" :value="option">{{ optionLabel(option) }}</option>
     </select>
     <input v-else :type="row.type ?? 'text'" :value="String(value(row))" :placeholder="row.placeholder" :min="row.min" :max="row.max" @change="setValue(row, $event)" />

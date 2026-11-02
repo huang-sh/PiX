@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, dirname, posix, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, parse, posix, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { debugLog, logFile } from "./debug-log.js";
 import type {
   AgentControl,
@@ -8,29 +9,38 @@ import type {
   LayoutState,
   ProjectGroup,
   ProjectInfo,
+  PromptCustomization,
   SessionSnapshot,
   SessionSummary,
   SettingsBundle,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
+import { isPromptImage } from "../shared/images.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
-import { canonicalPath } from "./paths.js";
+import { canonicalPath, pixHome } from "./paths.js";
+import { ProviderBalanceService } from "./provider-balances.js";
+import { createHash } from "node:crypto";
 import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { PixieRuntime, pixieWorkspace } from "./pixie-runtime.js";
+import { ExtensionDialogs } from "./extension-dialogs.js";
 import { GraphRuntime } from "./graph-runtime.js";
+import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { ProgressLedger } from "./progress-ledger.js";
 import { RemoteWorkspacePool, migratesSession, unavailable, type RemoteSlot } from "./remote-pool.js";
 import { SessionRegistry, type SessionEntry } from "./session-registry.js";
 import { LibraryService } from "./library.js";
 import { readFileChange } from "./file-changes.js";
 import { WslHostClient } from "./wsl-host-client.js";
+import { GraphFiles, sessionModifiedAt } from "./graph-files.js";
 import { listSshHosts } from "./ssh-host-installer.js";
 import {
   configuredSessionDir,
   GitService,
+  historySessionDir,
   managedSessionFile,
   SessionFiles,
   SettingsService,
@@ -42,12 +52,24 @@ export interface Platform {
   pickSession(): Promise<string | undefined>;
   confirm(message: string, detail?: string): Promise<boolean>;
   openExternal(url: string): Promise<void>;
-  showItemInFolder(path: string): void;
-  quit(): void;
+  /** Chromium's system proxy/PAC decision for the independent execution host. */
+  resolveProxy?(url: string): Promise<string>;
+  /** Desktop power assertion; the execution host aggregates task activity. */
+  setKeepAwake?(active: boolean, keepScreenOn?: boolean): void | Promise<void>;
+  openPath(path: string): Promise<void>;
+  /** Windows opens the system Open With dialog; macOS a native app picker. */
+  openWith(path: string): Promise<void>;
+  /** Linux lists .desktop applications registered for the file's MIME type. */
+  openWithApps(path: string): Promise<{ id: string; name: string }[]>;
+  /** Launches one of the openWithApps entries on Linux. */
+  openWithApp(path: string, appId: string): Promise<void>;
+  showItemInFolder(path: string): void | Promise<void>;
+  quit(): void | Promise<void>;
 }
 /** Model actions whose catalog or credential change must reach open sessions. */
-const CATALOG_MUTATIONS = ["addCustomModel", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
+const CATALOG_MUTATIONS = ["addCustomModel", "addCustomModels", "updateCustomModel", "refreshModels", "loginApiKey", "loginOAuth", "logout"];
 export class MainController {
+  readonly dialogs: ExtensionDialogs;
   project: ProjectInfo | null;
   settings: SettingsService;
   library: LibraryService;
@@ -67,6 +89,13 @@ export class MainController {
   /** Pooled remote workspaces: slots, connections, recycling, and routing. */
   pool: RemoteWorkspacePool;
   private viewRequest = 0;
+  private gitSwitches = new Set<string>();
+  private pendingAgentControls = new Map<string, number>();
+  // Includes approval and remote forwarding before a shell process exists.
+  private pendingShellRuns = new Set<symbol>();
+  private readonly promptConfiguration: { customization?: PromptCustomization };
+  private readonly providerBalances: ProviderBalanceService;
+  get hasPendingWork() { return this.pixie.busy || this.pendingAgentControls.size > 0 || this.pendingShellRuns.size > 0 || this.gitSwitches.size > 0; }
   listeners = new Set<(e: DesktopEvent) => void>();
   /** Progress baselines of background runs, replayed when their session returns to view. */
   readonly progress = new ProgressLedger({
@@ -81,14 +110,22 @@ export class MainController {
     const slot = this.pool.active();
     return (slot && this.pool.brokerModelsFor(slot.client)) ?? new Set<string>();
   }
-  constructor(path: string | null, platform: Platform) {
+  constructor(path: string | null, platform: Platform, private readonly owner?: MainController) {
+    this.dialogs = owner?.dialogs ?? new ExtensionDialogs(event => this.emit(event));
+    if (owner) {
+      this.gitSwitches = owner.gitSwitches;
+      this.pendingAgentControls = owner.pendingAgentControls;
+      this.pendingShellRuns = owner.pendingShellRuns;
+    }
     path = path ? resolve(path) : null;
     this.localProjectPath = path;
     this.project = path ? { name: basename(path), path } : null;
     this.platform = platform;
     this.settings = new SettingsService(path);
+    this.promptConfiguration = owner?.promptConfiguration ?? {};
+    this.providerBalances = owner?.providerBalances ?? new ProviderBalanceService(join(pixHome(), ".pix", "provider-balances.json"));
     this.library = new LibraryService();
-    this.settings.applyInstallerLanguage();
+    if (!owner) this.settings.applyInstallerLanguage();
     this.workspace = new WorkspaceService(path);
     this.git = new GitService(path);
     this.shell = new ShellService(path, (e) => this.emit(e as DesktopEvent));
@@ -96,12 +133,14 @@ export class MainController {
       ? configuredSessionDir(path, this.settings.bundle())
       : null;
     this.files = new SessionFiles(path, dir);
-    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url));
-    this.pixie = new PixieRuntime((e) => this.emit(e), () => this.settings.bundle().app.pixie ?? {});
-    this.registry = new SessionRegistry({
-      createRuntime: entry => this.createSessionRuntime(entry),
-      onEvent: (entry, event) => this.routeSessionEvent(entry, event),
-    });
+    this.projectRuntime = new PiRuntime(path, dir, (e) => this.emit(e as DesktopEvent), (url) => this.platform.openExternal(url), this.dialogs);
+    this.projectRuntime.getPromptCustomization = () => this.promptConfiguration.customization ?? this.settings.bundle().app.promptCustomization;
+    const registryHost = {
+      createRuntime: (entry: SessionEntry) => this.createSessionRuntime(entry),
+      onEvent: (entry: SessionEntry, event: unknown) => this.routeSessionEvent(entry, event),
+    };
+    this.registry = owner ? owner.registry.fork(registryHost) : new SessionRegistry(registryHost);
+    this.pixie = owner?.pixie ?? new PixieRuntime((e) => this.emit(e), () => this.settings.bundle().app.pixie ?? {});
     this.pool = new RemoteWorkspacePool({
       emit: e => this.emit(e),
       platform,
@@ -137,10 +176,11 @@ export class MainController {
    * created after a remote host connects streaming through the desktop broker.
    */
   createSessionRuntime(entry: SessionEntry): GraphRuntime {
-    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url));
+    const runtime = new GraphRuntime(entry.project.path, entry.dir, () => {}, (url) => this.platform.openExternal(url), this.dialogs);
     runtime.modelBroker = this.projectRuntime.modelBroker;
     runtime.brokerProviders = new Set(this.projectRuntime.brokerProviders);
     runtime.brokerModels = [...this.projectRuntime.brokerModels];
+    runtime.getPromptCustomization = this.projectRuntime.getPromptCustomization;
     return runtime;
   }
   private routeSessionEvent(entry: SessionEntry, e: unknown) {
@@ -184,8 +224,10 @@ export class MainController {
       !childEvent &&
       entry.runtime &&
       [
+        "agent_start",
         "message_end",
         "agent_settled",
+        "queue_update",
         "entry_appended",
         "session_info_changed",
         "compaction_start",
@@ -269,6 +311,7 @@ export class MainController {
       // while the other runs' aborts are already in flight.
       await Promise.allSettled(runs.map(run => runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId })));
       this.scheduleBackgroundRefresh(entry);
+      if (runtime.needsReopen) throw new Error(runtime.snapshot().graph?.storageError ?? "Session storage needs recovery");
       return { stopped: Boolean(runs.length) };
     }
     const slot = owner ? this.pool.slot(owner) : this.pool.active();
@@ -285,14 +328,20 @@ export class MainController {
     if (owner && /^(?:ssh|wsl):/u.test(owner)) throw new Error("Remote host is not connected");
     return { stopped: false };
   }
-  /** Routes a control action: model actions to the project runtime, everything else to the active session. */
-  private async controlAgent(input: AgentControl): Promise<{ result: unknown; entry?: SessionEntry }> {
+  /** Routes project defaults and catalogs independently of the selected session. */
+  private async controlAgent(input: AgentControl, sessionPath?: string): Promise<{ result: unknown; entry?: SessionEntry }> {
+    if (input.action === "setPromptCustomization") {
+      // Remote desktops sync a host-wide default, including future sessions.
+      // Existing runtimes and workers read this same source before each run.
+      this.promptConfiguration.customization = input.customization;
+      return { result: { ok: true } };
+    }
     if (input.action === "newSession") {
       const entry = this.activeEntry();
       // A failed node deletion recovers by reusing the old close-and-create
       // semantics on the same runtime; otherwise a new session is a new entry
       // and the previous one keeps running in the background.
-      if (entry?.runtime?.recovering) {
+      if (entry?.runtime?.recovering && !this.owner) {
         const result = await entry.runtime.control(input);
         this.followRuntimeFile(entry);
         return { result, entry };
@@ -317,8 +366,22 @@ export class MainController {
       else if ((CATALOG_MUTATIONS as readonly string[]).includes(input.action)) await this.pushCatalogs(input);
       return { result };
     }
-    const entry = this.activeEntry();
+    // The prompt preview works with or without an open session: an open one
+    // answers with its live rendering, otherwise the project runtime builds a
+    // throwaway in-memory session so the settings page never goes blank.
+    if (input.action === "systemPromptPreview") {
+      const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
+      const result = await (entry?.runtime ?? this.projectRuntime).control(input);
+      return { result, entry };
+    }
+    const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
     if (!entry?.runtime) throw new Error("Open a session first");
+    if (this.owner && (input.action === "fork" || input.action === "clone")) {
+      const runtime = entry.runtime;
+      const result = await this.registry.create(entry.project, entry.dir,
+        () => runtime.copySession(input.action === "fork" ? input.entryId : undefined));
+      return { result, entry: this.registry.entry(result.session.path) };
+    }
     const result = await entry.runtime.control(input);
     // Fork and clone move this runtime to the new session file they created;
     // the entry's key must follow it or the old row would serve the new file.
@@ -329,16 +392,6 @@ export class MainController {
   private async adoptProjectBroker() {
     for (const entry of this.registry.liveEntries())
       await entry.runtime?.adoptBroker(this.projectRuntime);
-  }
-  /**
-   * Boots the Pixie subprocess and the model catalog ahead of first use, so
-   * the first message skips the whole cold-start chain. Failures stay in the
-   * debug log: ensure() is single-flight and retryable, so a failed prewarm
-   * just falls back to the lazy boot on first use.
-   */
-  prewarmPixie(): void {
-    void this.pixie.ensure().catch(e => debugLog("prewarm: pixie", e));
-    void this.projectRuntime.control({ action: "getModels" }).catch(e => debugLog("prewarm: models", e));
   }
   /** Re-reads the project runtime's catalog change into every open session. */
   private async pushCatalogs(input: AgentControl) {
@@ -456,6 +509,39 @@ export class MainController {
       ...old.filter((session) => session.path !== snapshot.session.path),
     ]);
   }
+  /**
+   * Session directories behind the usage panel's all-projects scope: every
+   * local project in the history, the project in view first. Remote projects
+   * stay on their hosts, which answer the same route with their own scans.
+   */
+  private usageScans(bundle: SettingsBundle): Array<{ project: { id: string; name: string; path: string }; dir: string }> {
+    const current = this.project && !this.project.remote ? this.project : null;
+    const projects = [
+      ...(current ? [current] : []),
+      ...this.settings
+        .projectHistory()
+        .filter((record) => !record.project.remote && record.project.path !== current?.path)
+        .map((record) => record.project),
+    ];
+    // Two history entries can resolve to one directory (case variants, or a
+    // shared custom sessionDir); scanning it twice would double every number.
+    // The project in view wins the attribution. Windows paths compare
+    // case-insensitively: realpath keeps the caller's spelling.
+    const seenDirs = new Set<string>();
+    const dirKey = (dir: string) =>
+      process.platform === "win32" ? canonicalPath(dir).toLowerCase() : canonicalPath(dir);
+    return projects
+      .map((project) => ({
+        project: { id: projectId(project), name: project.name, path: project.path },
+        dir: historySessionDir(project, bundle),
+      }))
+      .filter((scan) => {
+        const key = dirKey(scan.dir);
+        if (seenDirs.has(key) || !existsSync(scan.dir)) return false;
+        seenDirs.add(key);
+        return true;
+      });
+  }
   async sessions() {
     const files = this.files;
     const running = this.registry.runningPaths();
@@ -477,27 +563,86 @@ export class MainController {
       return decorate(files.list());
     }
   }
-  fallback(path: string, files = this.files): SessionSnapshot {
+  fallback(path: string, files = this.files, warn?: (message: string) => void): SessionSnapshot {
     const x = files.read(path),
       summary = files.list().find((s) => s.path === resolve(path)) ?? {
         id: String(x.header?.id ?? path),
         path: resolve(path),
         cwd: String(x.header?.cwd ?? files.cwd ?? path),
         created: String(x.header?.timestamp ?? new Date().toISOString()),
-        modified: new Date().toISOString(),
+        modified: sessionModifiedAt(resolve(path), new Date().toISOString()),
         messageCount: x.entries.filter((e) => e.type === "message").length,
         firstMessage: "",
       },
       leaf = x.entries.at(-1)?.id ?? null;
-    return {
+    // An owned graph can still be viewed in full. Read its sidecar without
+    // acquiring ownership or running recovery against another process's files.
+    const graph = new GraphFiles(summary.path);
+    try { graph.load({ readOnly: true }); }
+    catch (error) {
+      debugLog("controller: read-only graph metadata", error);
+      graph.recoveryMessages.push(`Branch metadata unavailable: ${String(error)}`);
+    }
+    const selectedLeaf = graph.hasSavedLeaf && (graph.leafId === null || x.entries.some(entry => entry.id === graph.leafId))
+      ? graph.leafId : leaf;
+    const snapshot: SessionSnapshot = {
       session: summary,
       entries: x.entries,
-      projection: projectSession(x.entries, leaf),
+      projection: projectSession(x.entries, selectedLeaf),
       runtime: unavailable(),
     };
+    const branches = new Map<string, { snapshot: SessionSnapshot }>();
+    for (const record of graph.records.values()) {
+      try {
+        const data = graph.readBranch(record, { readOnly: true });
+        branches.set(record.id, { snapshot: { ...snapshot, entries: data.entries,
+          projection: projectSession(data.entries, data.entries.at(-1)?.id ?? null) } });
+      } catch (error) {
+        debugLog(`controller: read-only branch ${record.id}`, error);
+        graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${String(error)}`);
+      }
+    }
+    const cache = new GraphSnapshotCache();
+    cache.update(graph, snapshot, branches);
+    for (const record of graph.records.values()) {
+      const error = cache.error(record.id);
+      if (error) graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${error}`);
+    }
+    if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
+    return { ...snapshot, ...cache.view(snapshot, new Set()) };
   }
-  async invoke(route: DesktopRoute, raw?: unknown): Promise<unknown> {
+  invoke(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
+    if (route !== "shell.run") return this.invokeRoute(route, raw, sessionPath);
+    const pending = Symbol();
+    this.pendingShellRuns.add(pending);
+    return this.invokeRoute(route, raw, sessionPath).finally(() => { this.pendingShellRuns.delete(pending); });
+  }
+  private async invokeRoute(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
     const v = validateRouteInput(route, raw);
+    if (route === "ui.respond") {
+      if (v.projectId) {
+        const slot = this.pool.slot(String(v.projectId));
+        if (!slot) throw new Error("Remote host is not connected");
+        return slot.client.request(route, { id: v.id, value: v.value });
+      }
+      return this.dialogs.respond(String(v.id), v.value as string | undefined);
+    }
+    if (route === "ui.pending") return [...this.dialogs.list(), ...await this.pool.pendingDialogs()];
+    if (route === "session.image") {
+      // Read only already-opened snapshots, including cached remote images.
+      // Look up the entry by ID so deletion cannot make an old index show a different image.
+      const current = this.current?.session.path === v.session ? this.current : undefined;
+      const entry = current ? undefined : this.entryFor(String(v.session))?.entry;
+      const snapshot = current ?? (entry ? this.registry.snapshotOf(entry) : undefined);
+      if (!snapshot) throw new Error("Image unavailable; reopen the session and try again");
+      if (v.epoch && snapshot.graph?.epoch !== v.epoch) throw new Error("Session changed; reopen the image");
+      const message = snapshot.entries.find(entry => entry.id === v.entryId)?.message as { content?: unknown } | undefined;
+      const image = Array.isArray(message?.content) ? message.content[Number(v.index)] : undefined;
+      if (!isPromptImage(image)) throw new Error("Image unavailable; reopen the session and try again");
+      if (v.digest && v.digest !== createHash("sha256").update(image.mimeType).update("\0").update(image.data).digest("hex"))
+        throw new Error("Image changed; reopen the image");
+      return image;
+    }
     const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
       ? ++this.viewRequest : this.viewRequest;
     if (route === "app.revealSession") {
@@ -514,7 +659,68 @@ export class MainController {
       } else {
         path = resolve(path);
       }
-      this.platform.showItemInFolder(path);
+      await this.platform.showItemInFolder(path);
+      return;
+    }
+    if (route === "app.openPath" || route === "app.openFileLink") {
+      // Local-side only: remote workspace files have no local filesystem path.
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      if (route === "app.openPath") {
+        await this.platform.openPath(this.workspace.safe(String(v.path)));
+        return;
+      }
+      const href = String(v.href);
+      let decoded: string;
+      try { decoded = decodeURIComponent(href); } catch { decoded = href; }
+      let url: URL | undefined;
+      if (!/^[a-zA-Z]:[\\/]/.test(decoded)) {
+        try { url = new URL(href); } catch { /* A relative or absolute filesystem path. */ }
+      }
+      if (url && url.protocol !== "file:") throw new Error("Expected a file link or filesystem path");
+      let path = url ? fileURLToPath(url) : decoded;
+      const resolvePath = (input: string) => {
+        if (!isAbsolute(input)) return this.workspace.safe(input);
+        const path = resolve(input);
+        // file: URLs are explicitly absolute, including when their file is
+        // missing. Never substitute a project file with the same name.
+        if (url || existsSync(path) || (dirname(path) !== parse(path).root && existsSync(dirname(path)))) return path;
+        // Preserve chat's /README.md project shorthand when no absolute target
+        // exists; a real absolute target always takes precedence.
+        try {
+          const relative = this.workspace.safe(input.replace(/^[/\\]+/, ""));
+          if (existsSync(relative)) return relative;
+        } catch { /* No project-relative alternative; keep the absolute path. */ }
+        return path;
+      };
+      // Parse before decoding so an encoded colon remains a filename character.
+      const suffix = /:([1-9]\d*)$/.exec(url?.pathname ?? href);
+      if (suffix && Number.isSafeInteger(Number(suffix[1]))) {
+        // Markdown line references are not OS paths. POSIX also allows literal
+        // :digits filenames; Windows must never probe alternate data streams.
+        if (process.platform === "win32") path = path.slice(0, -suffix[0].length);
+        else {
+          try { statSync(resolvePath(path)); }
+          catch (error) {
+            if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+            path = path.slice(0, -suffix[0].length);
+          }
+        }
+      }
+      await this.platform.openPath(resolvePath(path));
+      return;
+    }
+    if (route === "app.openWith") {
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      await this.platform.openWith(this.workspace.safe(String(v.path ?? "")));
+      return;
+    }
+    if (route === "app.openWithApps") {
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      return this.platform.openWithApps(this.workspace.safe(String(v.path ?? "")));
+    }
+    if (route === "app.openWithApp") {
+      if (this.project?.remote) throw new Error("Remote files cannot be opened with local applications");
+      await this.platform.openWithApp(this.workspace.safe(String(v.path ?? "")), String(v.appId ?? ""));
       return;
     }
     if (route === "wsl.list") return WslHostClient.distributions();
@@ -542,6 +748,8 @@ export class MainController {
     if (route === "pixie.reload") return this.pixie.reload();
     if (route === "remote.cancel") return this.pool.cancelRemote();
     if (route === "remote.directories") return this.pool.browseDirectories(v);
+    if (route === "remote.deployed") return this.pool.deployedWorkspaces();
+    if (route === "remote.revoke") return this.pool.revokeDeployedCredentials(String(v.id));
     if (route === "wsl.connect")
       return this.pool.connectWsl(String(v.distro), String(v.cwd), Boolean(v.browse));
     if (route === "ssh.connect")
@@ -573,7 +781,7 @@ export class MainController {
       mkdirSync(dirname(file), { recursive: true });
       // Revealing the file itself points a bug report at what to send; before
       // the first failure there is only the empty folder to show.
-      this.platform.showItemInFolder(existsSync(file) ? file : dirname(file));
+      await this.platform.showItemInFolder(existsSync(file) ? file : dirname(file));
       return;
     }
     if (route === "app.forgetProject") {
@@ -581,14 +789,28 @@ export class MainController {
       if (this.project && id === projectId(this.project))
         throw new Error("The open project cannot be removed from the list");
       const slot = this.pool.slot(id);
+      const revision = slot?.activityRevision;
       if (slot && slot.client.connected && await this.pool.slotBusy(slot))
-        throw new Error("Stop the running sessions before removing this project");
+        throw new Error("Stop the running sessions and shell commands or disconnect the remote workspace before removing this project");
+      if (request !== this.viewRequest || this.pool.slot(id) !== slot || slot?.activityRevision !== revision)
+        throw new Error("Remote workspace activity changed. Retry removing this project.");
       if (this.registry.hasBusy(id))
         throw new Error("Stop the running sessions before removing this project");
       // Pooled hosts and live entries would write the forgotten project back
       // into the history through their events; they go with the entry.
-      if (slot) await this.pool.dropSlot(slot, true);
+      if (slot) {
+        const connected = slot.client.connected;
+        const stopped = await this.pool.dropIdleSlot(slot);
+        if (connected && !stopped)
+          throw new Error("The remote workspace did not confirm shutdown. Reconnect or disconnect it before removing this project.");
+      }
+      if (request !== this.viewRequest || this.pool.slot(id))
+        throw new Error("Remote workspace changed. Retry removing this project.");
       await this.registry.disposeProject(id);
+      if (request !== this.viewRequest || this.pool.slot(id))
+        throw new Error("Remote workspace changed. Retry removing this project.");
+      // Explicit removal also gives up on any previously disconnected host.
+      this.pool.forgetHost(id);
       this.settings.forgetProject(id);
       return this.projectGroups();
     }
@@ -611,7 +833,13 @@ export class MainController {
     if (this.wsl && route === "session.import")
       throw new Error("Importing sessions into a remote host is not available yet");
     if (route === "session.stop") return this.stopSession(String(v.path), v.projectId as string | undefined);
-    if (this.wsl && isProjectRoute(route)) return this.pool.invokeWsl(route, v, request);
+    if (this.wsl && isProjectRoute(route)) {
+      const result = await this.pool.invokeWsl(route, v, request);
+      if ((route === "settings.update" || route === "settings.reset") && v.scope === "app"
+        && (route === "settings.reset" || Object.hasOwn(v.patch as object, "promptCustomization")))
+        await this.pool.syncPromptCustomization();
+      return result;
+    }
     if (
       !this.project &&
       [
@@ -620,10 +848,13 @@ export class MainController {
         "session.import",
         "session.rename",
         "session.delete",
+        "usage.overview",
         "workspace.tree",
         "workspace.read",
         "workspace.write",
         "git.status",
+        "git.branches",
+        "git.switch",
         "git.diff",
         "changes.read",
         "shell.run",
@@ -637,6 +868,10 @@ export class MainController {
       throw new Error("Open a project first");
     switch (route) {
       case "app.bootstrap": {
+        if (this.project?.remote && !this.wsl) {
+          const { path, remote } = this.project;
+          return remote.kind === "ssh" ? this.pool.connectSsh(remote.host, path) : this.pool.connectWsl(remote.distro, path);
+        }
         if (this.wsl) return this.pool.wslBootstrap();
         const last = this.settings.bundle().app.lastProject;
         if (last && existsSync(last) && resolve(last) !== this.project?.path)
@@ -675,7 +910,7 @@ export class MainController {
         await this.platform.openExternal(String(v.url));
         return { ok: true };
       case "app.quit":
-        this.platform.quit();
+        await this.platform.quit();
         return { ok: true };
       case "session.list":
         return this.sessions().then((sessions) => {
@@ -683,13 +918,14 @@ export class MainController {
           return sessions;
         });
       case "session.snapshot": {
-        const entry = this.activeEntry();
-        const current = entry?.runtime ? entry.runtime.snapshot() : this.current;
-        if (current) {
+        const entry = sessionPath ? this.entryFor(sessionPath)?.entry : this.activeEntry();
+        const current = entry?.runtime ? entry.runtime.snapshot() : sessionPath ? undefined : this.current;
+        if (current && (!sessionPath || (entry && this.registry.isActive(entry)))) {
           this.current = current;
           this.emit({ type: "sessions", payload: { current, resync: true } });
           // Replay only the session in view; other buckets wait for their turn.
-          for (const progress of this.progress.replay(current.graph?.id)) this.emit(progress);
+          const ledger = this.owner && this.registry.entry(current.graph?.id ?? "") ? this.owner.progress : this.progress;
+          for (const progress of ledger.replay(current.graph?.id)) this.emit(progress);
         }
         return current;
       }
@@ -702,14 +938,11 @@ export class MainController {
           files.dir,
           p,
           error => {
-            if (request === this.viewRequest) this.emit({
-              type: "notice",
-              payload: {
-                level: "warning",
-                message: `Read-only session: ${error instanceof Error ? error.message : String(error)}`,
-              },
-            });
-            return this.fallback(p, files);
+            const warn = (message: string) => {
+              if (request === this.viewRequest) this.emit({ type: "notice", payload: { level: "warning", message } });
+            };
+            warn(`Read-only session: ${error instanceof Error ? error.message : String(error)}`);
+            return this.fallback(p, files, warn);
           },
         );
         // The registry refuses a snapshot for an entry it no longer owns, and a
@@ -798,6 +1031,43 @@ export class MainController {
         this.emit({ type: "sessions", payload: { deletedPath: deletingCurrent ? currentPath : String(v.path), sessions } });
         return { sessions };
       }
+      // Like the provider catalog/login UI, balances use this desktop's
+      // credentials even while the selected project runs on SSH or WSL.
+      case "usage.balances": {
+        const queries = this.settings.bundle().app.usage?.balanceQueries ?? {};
+        const runtime = await this.projectRuntime.modelRuntime();
+        const providers = runtime.getProviders().filter((p: { id: string }) => !v.provider || p.id === v.provider);
+        const balances = await Promise.all(providers.map(async (p: { id: string; name: string; baseUrl?: string }) => {
+          const signal = AbortSignal.timeout(8000);
+          try { if (!await runtime.checkAuth(p.id, { signal })) return undefined; }
+          catch { return { provider: p.id, name: p.name, amounts: [], error: signal.aborted ? "timeout" : "credentials" }; }
+          const model = runtime.getAllModels(p.id)[0];
+          return this.providerBalances.read({ provider: p.id, name: p.name, baseUrl: model?.baseUrl ?? p.baseUrl,
+            query: queries[p.id], auth: async signal => (await runtime.getAuth(model ?? p.id, { signal }))?.auth }, v.refresh === true, signal);
+        }));
+        return balances.filter(Boolean);
+      }
+      case "usage.overview": {
+        const bundle = this.settings.bundle();
+        const scans =
+          v.scope === "all"
+            ? this.usageScans(bundle)
+            : this.project && !this.project.remote && this.files.dir
+              ? [{
+                  project: {
+                    id: projectId(this.project),
+                    name: this.project.name,
+                    path: this.project.path,
+                  },
+                  dir: this.files.dir,
+                }]
+              : undefined;
+        return this.projectRuntime.usageOverview(
+          v.range as UsageRange,
+          bundle.app.usage?.unbilledProviders ?? [],
+          scans,
+        );
+      }
       case "library.pin":
       case "library.archiveSession":
       case "library.archiveProject": {
@@ -813,18 +1083,32 @@ export class MainController {
         };
       }
       case "agent.control": {
-        const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl);
-        if (request === this.viewRequest && r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
-          this.current = r as SessionSnapshot;
-          // Mutating actions append entries after the last agent event (e.g.
-          // the node-footer usage record written when a prompt settles), and
-          // the invoke reply only reaches the page that started the action —
-          // a page reloaded mid-run loses it. Broadcast so every attached
-          // renderer converges on the settled state. A background run's reply
-          // carries its own snapshot and never drives the view.
-          this.emit({ type: "sessions", payload: { current: this.current } });
+        const target = sessionPath ? this.entryFor(sessionPath)?.entry : undefined;
+        if (sessionPath && !target) throw new Error("Target session is not open");
+        const owner = target ? projectId(target.project) : this.project ? projectId(this.project) : "";
+        const startsWork = ["prompt", "promptAt", "steer", "followUp", "bash", "compact"].includes(String(v.action));
+        if (startsWork && this.gitSwitches.has(owner)) throw new Error("Wait for the Git branch switch to finish");
+        if (startsWork) this.pendingAgentControls.set(owner, (this.pendingAgentControls.get(owner) ?? 0) + 1);
+        try {
+          const { result: r, entry } = await this.controlAgent(v as unknown as AgentControl, sessionPath);
+          if (request === this.viewRequest && r && typeof r === "object" && "projection" in r && entry && this.registry.isActive(entry)) {
+            this.current = r as SessionSnapshot;
+            // Mutating actions append entries after the last agent event (e.g.
+            // the node-footer usage record written when a prompt settles), and
+            // the invoke reply only reaches the page that started the action —
+            // a page reloaded mid-run loses it. Broadcast so every attached
+            // renderer converges on the settled state. A background run's reply
+            // carries its own snapshot and never drives the view.
+            this.emit({ type: "sessions", payload: { current: this.current } });
+          }
+          return r;
+        } finally {
+          if (startsWork) {
+            const remaining = this.pendingAgentControls.get(owner)! - 1;
+            if (remaining) this.pendingAgentControls.set(owner, remaining);
+            else this.pendingAgentControls.delete(owner);
+          }
         }
-        return r;
       }
       case "workspace.tree":
         return this.workspace.tree(String(v.path ?? ""));
@@ -841,6 +1125,20 @@ export class MainController {
         return this.workspace.write(String(v.path), String(v.content));
       case "git.status":
         return this.git.status();
+      case "git.branches":
+        return this.git.branches();
+      case "git.switch": {
+        const project = this.project!;
+        if (v.cwd !== project.path) throw new Error("Project changed; choose the Git branch again");
+        const owner = projectId(project);
+        if (this.gitSwitches.has(owner)) throw new Error("Wait for the Git branch switch to finish");
+        if (this.registry.hasBusy(owner) || this.pendingAgentControls.has(owner))
+          throw new Error("Stop running tasks in this project before switching Git branches");
+        this.gitSwitches.add(owner);
+        try {
+          return await new GitService(project.path).switchBranch(String(v.branch));
+        } finally { this.gitSwitches.delete(owner); }
+      }
       case "git.diff":
         return this.git.diff(v.path as string | undefined, Boolean(v.staged));
       case "changes.read": {
@@ -899,6 +1197,8 @@ export class MainController {
                 v.scope as "global" | "project",
                 v.patch as Record<string, unknown>,
               );
+        if (v.scope === "app" && Object.hasOwn(v.patch as object, "promptCustomization"))
+          await this.pool.syncPromptCustomization();
         if (v.scope === "project" && this.project) {
           const project = this.project;
           const d = configuredSessionDir(project.path, b);
@@ -916,10 +1216,12 @@ export class MainController {
         }
         return b;
       }
-      case "settings.reset":
-        return v.scope === "app"
-          ? this.settings.reset()
-          : await this.settings.resetPi(v.scope as "global" | "project");
+      case "settings.reset": {
+        if (v.scope !== "app") return this.settings.resetPi(v.scope as "global" | "project");
+        const bundle = this.settings.reset();
+        await this.pool.syncPromptCustomization();
+        return bundle;
+      }
       case "layout.save":
         this.settings.saveLayout(v.layout as LayoutState);
         return { ok: true };
@@ -930,8 +1232,21 @@ export class MainController {
     this.flushBackgroundRefresh();
     return this.registry.disposeAll();
   }
+  /** Release desktop UI resources while preserving its selection and ongoing work. */
+  suspend() {
+    this.flushBackgroundRefresh();
+    this.listeners.clear();
+    this.shell.dispose();
+  }
+  /** Permanently removes a client view from the shared registry. */
+  detach() {
+    this.suspend();
+    this.registry.detach();
+    this.progress.clear();
+  }
   /** Full shutdown: local sessions, Pixie, and every pooled host, awaited together. */
   closeAll(): Promise<void> {
+    this.dialogs.cancel();
     return Promise.all([this.closeSessions(), this.pixie.close(), this.pool.closeAllRemote()]).then(() => {});
   }
   dispose() {

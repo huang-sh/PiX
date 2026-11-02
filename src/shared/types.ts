@@ -1,9 +1,21 @@
-import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { AnyModel, Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ShortcutOverrides } from "./shortcuts.js";
 import type { FileChange } from "./file-changes.js";
 import type { ThemePreference } from "./theme.js";
+import type { NodeCardField } from "./node-card.js";
+import type { UsageAmount } from "./usage.js";
+import type { BalanceQuery } from "./provider-balances.js";
+import type { CompactionRecord, RunTiming } from "./run-timing.js";
 
 export type PromptImage = ImageContent;
+export interface ImageReference {
+  session: string;
+  entryId: string;
+  index: number;
+  epoch?: string;
+  digest?: string;
+}
+export type SessionImage = PromptImage | { type: "image"; mimeType: string; reference: ImageReference };
 
 export const CUSTOM_MODEL_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
 export interface CustomModelInput {
@@ -18,7 +30,20 @@ export interface CustomModelInput {
   reasoning: boolean;
   imageInput: boolean;
 }
-export type BrokerModel = Pick<Model<Api>, "provider" | "id" | "name" | "api" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost">;
+export type CustomProviderInput = Pick<CustomModelInput, "provider" | "baseUrl" | "api" | "apiKey">;
+export type CustomModelsInput = Omit<CustomModelInput, "modelId" | "name"> & {
+  models: Array<{ modelId: string; name?: string }>;
+};
+export interface DiscoveredModel {
+  id: string;
+  name?: string;
+  exists?: boolean;
+}
+type BrokerFields = "provider" | "id" | "name" | "api" | "input" | "cost";
+export type BrokerModel =
+  | (Pick<Model<Api>, BrokerFields | "reasoning" | "thinkingLevelMap" | "contextWindow" | "maxTokens"> & { type?: "chat" })
+  | Pick<Extract<AnyModel, { type: "image" }>, BrokerFields | "type" | "output">
+  | Pick<Extract<AnyModel, { type: "classifier" }>, BrokerFields | "type" | "contextWindow">;
 
 /** Panels whose collapse flag persists; the layout validation and the
  *  PanelId union both derive from this list. */
@@ -79,6 +104,48 @@ export interface RawSessionEntry {
   [key: string]: unknown;
 }
 export const NODE_FOOTER_CUSTOM_TYPE = "pix.node-footer";
+export const PROMPT_DISPLAY_CUSTOM_TYPE = "pix.prompt-display";
+export const GIT_BRANCH_CUSTOM_TYPE = "pix.git-branch";
+export const PROMPT_OVERRIDE_CUSTOM_TYPE = "pix.prompt-override";
+export type PromptOverrideMode = "append" | "replace" | "strict";
+/** Data of a `pix.prompt-override` entry: the persona snapshot in force from
+ * the entry onward on that branch. `off` restores the desktop's defaults. */
+export interface PromptOverrideRecord {
+  mode: PromptOverrideMode;
+  /** Persona display name; absent on `off` records. */
+  name?: string;
+  /** Persona contents captured when applied, preserving history after edits. */
+  text?: string;
+  off?: true;
+}
+/** The override a node ran under, resolved by ancestry (absent = defaults). */
+export interface NodePromptOverride {
+  mode: PromptOverrideMode;
+  name: string;
+}
+/** A named system prompt (persona) managed on the settings page. The text is
+ * snapshotted into the session record when applied, so history stays accurate
+ * and remote hosts need no persona definitions of their own. */
+export interface PersonaDefinition {
+  name: string;
+  text: string;
+}
+/** Desktop-level overrides for pi's stock prompt sections. Absent or empty
+ * sections keep their dynamically generated content; remote hosts receive the
+ * text through a runtime sync, so they need no settings of their own. */
+export interface PromptCustomization {
+  preamble?: string;
+  /** Desktop picker provenance: null means explicitly custom; absent is legacy. */
+  preamblePersona?: string | null;
+  rules?: string;
+  docs?: string;
+}
+export type PromptOverrideInput = { off: true } | { mode: PromptOverrideMode; name: string; text: string };
+export interface SystemPromptPreview {
+  text: string;
+  preamble: string;
+  sections: Array<{ name: string; content: string }>;
+}
 export interface ContextUsageSnapshot {
   tokens: number | null;
   contextWindow: number;
@@ -90,6 +157,14 @@ export interface NodeFooterState {
   thinkingLevel: string;
 }
 export interface GraphNode {
+  /** User bookmark stored as a native Pi label on this turn's user entry. */
+  label?: string;
+  /** Git branch at turn start, recorded as the pix.git-branch entry the user message hangs off. */
+  gitBranch?: string;
+  /** Full HEAD commit SHA at turn start; absent for unborn branches and legacy records. */
+  gitCommit?: string;
+  /** System-prompt override this turn ran under, resolved by ancestry. */
+  promptOverride?: NodePromptOverride;
   fileChanges?: FileChange[];
   id: string;
   userEntryId: string;
@@ -104,27 +179,42 @@ export interface GraphNode {
   depth: number;
   imageCount?: number;
   footer?: NodeFooterState;
+  metrics?: Partial<RunTiming> & {
+    usage?: UsageAmount;
+    /** Saved SDK costs by provider; null means that some costs are missing. */
+    costs?: Record<string, number | null>;
+    /** Submission to completion, including preparation and compaction. */
+    durationMs?: number;
+    compactionDurationMs?: number;
+    agentDurationMs?: number;
+  };
   branchId?: string;
   running?: boolean;
   forkable?: boolean;
 }
+export type GraphFilter = "all" | "labeled" | "running" | "errors";
 export interface GraphEdge {
   id: string;
   source: string;
   target: string;
 }
 export interface BranchMessage {
+  compaction?: CompactionRecord;
   entryId: string;
   turnId: string;
   role: "user" | "assistant" | "tool" | "system";
   text: string;
-  images?: PromptImage[];
+  images?: SessionImage[];
   thinking?: string;
   timestamp: string;
   toolName?: string;
   toolInput?: string;
+  durationMs?: number;
+  nestedCalls?: Array<{ id: string; name: string; input: string; status: string; error?: string; durationMs?: number }>;
+  nestedCallsComplete?: boolean;
   isError?: boolean;
   errorMessage?: string;
+  contextStatus?: "excluded" | "modified";
 }
 export interface AgentActivityItem {
   id: string;
@@ -133,7 +223,10 @@ export interface AgentActivityItem {
   thinking?: string;
   title?: string;
   input?: string;
-  timestamp: string;
+  parentToolCallId?: string;
+  images?: SessionImage[];
+  timestamp?: string;
+  durationMs?: number;
   status: "running" | "complete" | "error";
   pass: number;
   errorMessage?: string;
@@ -155,8 +248,11 @@ export interface SessionProjection {
   messages: BranchMessage[];
   leafId: string | null;
   activeNodeId: string | null;
+  /** Override in force at the active leaf, null once an `off` record is set, undefined before any record. */
+  activePromptOverride?: NodePromptOverride | null;
 }
 export interface RuntimeModel {
+  type?: "chat" | "image" | "classifier";
   provider: string;
   id: string;
   name?: string;
@@ -170,10 +266,20 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export interface RuntimeProvider {
   id: string;
   name: string;
+  modelTypes?: Array<NonNullable<RuntimeModel["type"]>>;
   authTypes: Array<"api_key" | "oauth">;
   status?: { type: "api_key" | "oauth"; source?: string };
 }
+export interface QueuedMessage {
+  id: string;
+  kind: "steer" | "followUp";
+  text: string;
+  imageCount: number;
+  delivering?: boolean;
+  error?: string;
+}
 export interface RuntimeState {
+  timing?: RunTiming;
   available: boolean;
   model: RuntimeModel | null;
   thinkingLevel: string;
@@ -189,6 +295,7 @@ export interface RuntimeState {
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
   pendingMessageCount: number;
+  queuedMessages?: QueuedMessage[];
 }
 export interface SessionSnapshot {
   session: SessionSummary;
@@ -204,7 +311,10 @@ export interface SessionSnapshot {
       runId: string;
       requestId?: string;
       nodeId: string | null;
-      pending?: { text: string; parentNodeId: string | null; images?: PromptImage[] };
+      pending?: {
+        text: string; parentNodeId: string | null; images?: PromptImage[];
+        timestamp?: string; model?: RuntimeModel | null; thinkingLevel?: string;
+      };
       status: "running" | "idle" | "interrupted";
       error?: string;
       runtime?: RuntimeState;
@@ -360,14 +470,35 @@ export interface AppSettings {
   enterToSend: boolean;
   openLinksInApp: boolean;
   closeToTray: boolean;
+  preventSleepDuringTasks: boolean;
+  keepScreenOnDuringTasks: boolean;
   canvasDotGrid: boolean;
   canvasDotGridSpacing: number;
   canvasDotGridDotSize: number;
+  /** Optional footer fields in priority order; model and thinking always appear. */
+  nodeCardFields?: NodeCardField[];
+  /** Show a short commit SHA beside the branch in node footers; defaults to true. */
+  nodeCardShowCommit?: boolean;
+  /**
+   * Deploys this desktop's model API keys and custom models to remote hosts,
+   * so remote work runs without the desktop. Off by default; the host only
+   * accepts them when started with this authorization.
+   */
+  deployModelCredentialsToRemote: boolean;
   /** Experimental features are opt-in, default off, and may change or disappear. */
   experimentalHistory: boolean;
   pixie?: PixieSettings;
   /** Latest release the user chose to stop being notified about. */
   updateSkippedVersion?: string;
+  usage?: {
+    /** Flat subscriptions whose per-token costs should not count as billed. */
+    unbilledProviders?: string[];
+    balanceQueries?: Record<string, BalanceQuery>;
+  };
+  /** Named system prompts offered in the composer's persona picker. */
+  personas?: PersonaDefinition[];
+  /** Overrides for pi's stock prompt sections; empty sections stay dynamic. */
+  promptCustomization?: PromptCustomization;
 }
 export interface SettingsBundle {
   app: AppSettings;
@@ -435,13 +566,17 @@ export interface RuntimeExtension {
 export type AgentControl =
   | { action: "deleteNode"; nodeId: string; graphId: string }
   | { action: "exportBranchSession"; nodeId: string; graphId: string }
-  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }
+  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
   | { action: "branchAbort"; branchId: string; runId: string }
-  | { action: "prompt" | "steer" | "followUp"; text: string; images?: PromptImage[] }
+  | { action: "prompt"; text: string; images?: PromptImage[]; submittedAt?: string }
+  | { action: "steer" | "followUp"; text: string; images?: PromptImage[]; graphId?: string; branchId?: string; runId?: string }
+  | { action: "clearQueue"; graphId?: string; branchId?: string; runId?: string }
+  | ({ action: "updateQueuedMessage"; id: string; graphId?: string; branchId?: string; runId?: string } & (
+      { operation: "steer" | "remove" } | { operation: "edit"; text: string }
+    ))
   | {
       action:
         | "abort"
-        | "clearQueue"
         | "getState"
         | "refreshModels"
         | "cycleModel"
@@ -487,7 +622,7 @@ export type AgentControl =
     }
   | { action: "deleteSkill"; path: string }
   | { action: "setSkillManualOnly"; path: string; manualOnly: boolean }
-  | { action: "getModels"; broker?: boolean }
+  | { action: "getModels"; broker?: boolean; allTypes?: boolean }
   | { action: "getExtensions"; reload?: boolean }
   | { action: "installExtension" | "removeExtension"; source: string }
   | { action: "setModel"; provider: string; modelId: string; persist?: boolean }
@@ -505,12 +640,19 @@ export type AgentControl =
   | { action: "setTools"; names: string[] }
   | { action: "setBrokerProviders"; providers: string[]; models?: BrokerModel[] }
   | ({ action: "addCustomModel" | "updateCustomModel" } & CustomModelInput)
+  | ({ action: "addCustomModels" } & CustomModelsInput)
+  | ({ action: "discoverModels" } & CustomProviderInput)
   | { action: "loginApiKey"; provider: string; apiKey: string }
   | { action: "loginOAuth"; provider: string; method: "browser" | "device-code" }
   | { action: "logout"; provider: string }
   | { action: "setLabel"; entryId: string; label?: string }
+  | ({ action: "setPromptOverride" } & PromptOverrideInput)
+  | { action: "setPromptCustomization"; customization: PromptCustomization }
+  | { action: "systemPromptPreview" }
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
+  | "ui.respond"
+  | "ui.pending"
   | "app.bootstrap"
   | "pixie.ensure"
   | "pixie.send"
@@ -519,11 +661,18 @@ export type DesktopRoute =
   | "pixie.clearHistory"
   | "pixie.reveal"
   | "pixie.reload"
+  | "app.hostStatus"
+  | "app.hostRestart"
   | "app.pickProject"
   | "app.openProject"
   | "app.revealLogs"
   | "app.forgetProject"
   | "app.openExternal"
+  | "app.openPath"
+  | "app.openFileLink"
+  | "app.openWith"
+  | "app.openWithApps"
+  | "app.openWithApp"
   | "app.revealSession"
   | "app.quit"
   | "wsl.list"
@@ -536,13 +685,18 @@ export type DesktopRoute =
   | "remote.cancel"
   | "remote.directories"
   | "remote.openProject"
+  | "remote.deployed"
+  | "remote.revoke"
   | "session.list"
+  | "session.image"
   | "session.snapshot"
   | "session.open"
   | "session.stop"
   | "session.import"
   | "session.rename"
   | "session.delete"
+  | "usage.overview"
+  | "usage.balances"
   | "library.pin"
   | "library.archiveSession"
   | "library.archiveProject"
@@ -553,6 +707,8 @@ export type DesktopRoute =
   | "workspace.read"
   | "workspace.write"
   | "git.status"
+  | "git.branches"
+  | "git.switch"
   | "git.diff"
   | "changes.read"
   | "shell.run"
@@ -566,8 +722,21 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "pixie" | "shell" | "terminal" | "sessions" | "notice" | "remote.progress" | "remote.connection" | "update.available";
+  type: "agent" | "pixie" | "shell" | "terminal" | "sessions" | "notice" | "host.connection" | "host.shutdown" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
   payload: unknown;
+}
+export interface ExtensionDialog {
+  /** Execution file, used to route terminal input to the correct run. */
+  sessionPath?: string;
+  id: string;
+  title: string;
+  source: string;
+  kind: "select" | "input" | "confirm" | "oauth";
+  options?: string[];
+  placeholder?: string;
+  message?: string;
+  /** Assigned by the desktop when the request comes from a remote host. */
+  projectId?: string;
 }
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";
 export interface DesktopApi {

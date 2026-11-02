@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   GitService,
-  MAX_IMAGE_PREVIEW_BYTES,
+  MAX_BINARY_PREVIEW_BYTES,
   SessionFiles,
   SettingsService,
   ShellService,
@@ -22,6 +22,7 @@ import {
   bootstrapPixProfile,
 } from "../src/main/services.js";
 import { projectId } from "../src/shared/types.js";
+import { PiRuntime } from "../src/main/pi-runtime.js";
 const root = resolve(process.cwd(), "test", "workspace");
 test("workspace reads real files and blocks traversal", () => {
   const w = new WorkspaceService(root);
@@ -79,11 +80,25 @@ test("workspace drops oversized image previews instead of encoding them", () => 
   const temp = mkdtempSync(join(tmpdir(), "pix-big-image-"));
   try {
     const path = join(temp, "big.png");
-    writeFileSync(path, Buffer.alloc(MAX_IMAGE_PREVIEW_BYTES + 1, 0x42));
+    writeFileSync(path, Buffer.alloc(MAX_BINARY_PREVIEW_BYTES + 1, 0x42));
     const doc = new WorkspaceService(temp).read("big.png");
     assert.equal(doc.language, "image");
     assert.equal(doc.truncated, true);
     assert.equal(doc.dataUrl, undefined);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("workspace returns pdf documents as base64 previews", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-pdf-"));
+  try {
+    const bytes = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
+    writeFileSync(join(temp, "paper.pdf"), bytes);
+    const doc = new WorkspaceService(temp).read("paper.pdf");
+    assert.equal(doc.language, "pdf");
+    assert.equal(doc.readonly, true);
+    assert.equal(doc.content, "");
+    assert.equal(doc.dataUrl, `data:application/pdf;base64,${bytes.toString("base64")}`);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -217,6 +232,75 @@ test("bootstrap copies the pi agent profile once", () => {
     rmSync(temp, { recursive: true, force: true });
   }
 });
+test("bootstrap migrates legacy Azure auth and model preferences without re-creating logged-out keys", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-azure-migration-"));
+  try {
+    const agent = join(temp, ".pix", "agent");
+    mkdirSync(agent, { recursive: true });
+    const authPath = join(agent, "auth.json");
+    const settingsPath = join(agent, "settings.json");
+    const modelsPath = join(agent, "models.json");
+    const key = { type: "api_key", key: "fixture-secret" };
+    writeFileSync(authPath, JSON.stringify({ "azure-openai-responses": key, other: { type: "api_key", key: "keep" } }));
+    writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "azure-openai-responses", defaultModel: "gpt-4o",
+      enabledModels: ["azure-openai-responses/gpt-4o", "other/*"] }));
+    writeFileSync(modelsPath, JSON.stringify({ providers: { "azure-openai-responses": { baseUrl: "https://example.invalid" } } }));
+
+    bootstrapPixProfile(temp);
+    assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), { azure: key, other: { type: "api_key", key: "keep" } });
+    assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), { defaultProvider: "azure", defaultModel: "gpt-4o",
+      enabledModels: ["azure/gpt-4o", "other/*"] });
+    assert.deepEqual(JSON.parse(readFileSync(modelsPath, "utf8")), { providers: { azure: { baseUrl: "https://example.invalid" } } });
+    writeFileSync(authPath, JSON.stringify({ other: { type: "api_key", key: "keep" } }));
+    const cli = join(temp, ".pi", "agent");
+    mkdirSync(cli, { recursive: true });
+    writeFileSync(join(cli, "auth.json"), JSON.stringify({ "azure-openai-responses": key }));
+    bootstrapPixProfile(temp);
+    assert.ok(!Object.hasOwn(JSON.parse(readFileSync(authPath, "utf8")), "azure"), "logout stays logged out");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("migrated Azure credentials expose models through the Pi runtime", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-azure-runtime-"));
+  const previousHome = process.env.PIX_HOME;
+  const previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = temp;
+  const agent = join(temp, ".pix", "agent");
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(join(agent, "auth.json"), JSON.stringify({ "azure-openai-responses": {
+    type: "api_key", key: "fixture-only",
+  } }));
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  try {
+    bootstrapPixProfile(temp);
+    const models = await runtime.control({ action: "getModels" });
+    assert.ok(Array.isArray(models) && models.some(model => model.provider === "azure"));
+  } finally {
+    await runtime.close();
+    if (previousHome === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previousHome;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("Azure migration preserves existing new credentials and malformed files", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-azure-collision-"));
+  try {
+    const agent = join(temp, ".pix", "agent");
+    mkdirSync(agent, { recursive: true });
+    const authPath = join(agent, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ azure: { type: "api_key", key: "new" },
+      "azure-openai-responses": { type: "api_key", key: "old" } }));
+    const settingsPath = join(agent, "settings.json");
+    writeFileSync(settingsPath, "{malformed");
+    bootstrapPixProfile(temp);
+    assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), { azure: { type: "api_key", key: "new" } });
+    assert.equal(readFileSync(settingsPath, "utf8"), "{malformed");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
 test("bootstrap parks a corrupt gui settings file instead of losing it", () => {
   const temp = mkdtempSync(join(tmpdir(), "pix-bootstrap-corrupt-"));
   try {
@@ -246,9 +330,13 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
       density: 3,
       theme: "purple",
       closeToTray: "false",
+      preventSleepDuringTasks: "false",
+      keepScreenOnDuringTasks: "true",
       enterToSend: "yes",
       canvasDotGridSpacing: "24",
       canvasDotGridDotSize: 99,
+      nodeCardFields: ["cost", "unknown", "model", "tokens", "thinking", "cost", 42],
+      nodeCardShowCommit: "false",
       browserHome: 42,
       futureKey: { keep: true },
     }));
@@ -258,9 +346,13 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(app.density, "comfortable");
     assert.equal(app.theme, "light");
     assert.equal(app.closeToTray, true);
+    assert.equal(app.preventSleepDuringTasks, true);
+    assert.equal(app.keepScreenOnDuringTasks, false);
     assert.equal(app.enterToSend, true);
     assert.equal(app.canvasDotGridSpacing, 24);
     assert.equal(app.canvasDotGridDotSize, 4);
+    assert.deepEqual(app.nodeCardFields, ["cost", "tokens"]);
+    assert.equal(app.nodeCardShowCommit, true);
     assert.equal(app.browserHome, "https://pi.dev");
     // Unknown keys from a newer version must survive normalization.
     assert.deepEqual((app as unknown as Record<string, unknown>).futureKey, { keep: true });
@@ -272,6 +364,24 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     assert.equal(persisted.canvasDotGridDotSize, undefined);
     assert.deepEqual(persisted.futureKey, { keep: true });
 
+    const service = new SettingsService(temp);
+    service.update({ preventSleepDuringTasks: false });
+    assert.equal(new SettingsService(temp).bundle().app.preventSleepDuringTasks, false);
+    service.update({ preventSleepDuringTasks: null });
+    assert.equal(service.bundle().app.preventSleepDuringTasks, true);
+    service.update({ keepScreenOnDuringTasks: true });
+    assert.equal(new SettingsService(temp).bundle().app.keepScreenOnDuringTasks, true);
+    service.update({ keepScreenOnDuringTasks: null });
+    assert.equal(service.bundle().app.keepScreenOnDuringTasks, false);
+    service.update({ nodeCardFields: [] });
+    assert.deepEqual(service.bundle().app.nodeCardFields, []);
+    service.update({ nodeCardFields: "invalid" });
+    assert.deepEqual(service.bundle().app.nodeCardFields, ["branch", "context"]);
+    service.update({ nodeCardShowCommit: false });
+    assert.equal(new SettingsService(temp).bundle().app.nodeCardShowCommit, false);
+    service.update({ nodeCardShowCommit: null });
+    assert.equal(service.bundle().app.nodeCardShowCommit, true);
+
     // Settings-form removals ride as null; the merge drops the key.
     new SettingsService(temp).update({ futureKey: null });
     assert.equal(JSON.parse(readFileSync(appPath, "utf8")).futureKey, undefined);
@@ -281,6 +391,34 @@ test("settings tolerate wrong-typed values by falling back per key", () => {
     rmSync(temp, { recursive: true, force: true });
   }
 });
+test("prompt settings retain picker provenance across reads and drop it when the preamble resets", () => {
+  const temp = mkdtempSync(join(tmpdir(), "pix-preamble-source-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = temp;
+  try {
+    const settings = new SettingsService(temp);
+    settings.update({ promptCustomization: { preamble: "Same body", preamblePersona: " second ", rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization,
+      { preamble: "Same body", preamblePersona: "second", rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamble: "Same body", preamblePersona: null, rules: "Keep rules" } });
+    settings.update({ theme: "dark" });
+    settings.update({ personas: [{ name: "other", text: "Same body" }] });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization,
+      { preamble: "Same body", preamblePersona: null, rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamblePersona: null, rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamblePersona: "second", rules: "Keep rules" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { rules: "Keep rules" });
+    settings.update({ promptCustomization: { preamble: "Legacy text" } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { preamble: "Legacy text" });
+    settings.update({ promptCustomization: { preamble: "Text", preamblePersona: { invalid: true } } });
+    assert.deepEqual(new SettingsService(temp).bundle().app.promptCustomization, { preamble: "Text" });
+  } finally {
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("pi settings writes go through the sdk: merge, replace, freeze, reset", async () => {
   const temp = mkdtempSync(join(tmpdir(), "pix-pi-settings-"));
   const previous = process.env.PIX_HOME;
@@ -334,6 +472,28 @@ test("shell service executes in active project", async () => {
     );
   assert.equal(r.exitCode, 0);
   assert.match(r.output, /pix-shell/);
+});
+for (const action of ["abort", "dispose"] as const)
+test(`shell ${action} stops child commands and closes their output pipes`, { timeout: 15000 }, async t => {
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  let id = "";
+  const shell = new ShellService(root, event => {
+    const payload = (event as { payload: { id: string; chunk: string } }).payload;
+    id = payload.id;
+    if (payload.chunk) started();
+  });
+  t.after(() => shell.dispose());
+  // Keep the shell alive after its child so shells cannot optimize it into exec.
+  const running = shell.run(process.platform === "win32"
+    ? "ping.exe -n 60 127.0.0.1; Write-Output finished"
+    : "sleep 60 & printf started; wait; printf finished");
+  await ready;
+  if (action === "abort") assert.equal(shell.abort(id), true);
+  else shell.dispose();
+  const result = await running;
+  assert.equal(result.cancelled, true);
+  assert.equal(shell.running.size, 0);
 });
 test("terminal service runs an interactive PTY", async () => {
   let output = "";

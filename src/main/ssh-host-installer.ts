@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RemoteConnectStage } from "../shared/types.js";
 import { debugLog } from "./debug-log.js";
+import { piSdkVersion } from "./pi-runtime.js";
 import {
   PIX_HOST_VERSION,
   PIX_REMOTE_PROTOCOL,
@@ -13,6 +15,8 @@ import {
 export interface RemoteConnectOptions {
   signal?: AbortSignal;
   onProgress?: (stage: RemoteConnectStage) => void;
+  /** Starts the host so it accepts desktop credential deployment. */
+  deployCredentials?: boolean;
 }
 
 export function validateSshHost(host: string) {
@@ -73,6 +77,7 @@ function run(
   args: string[],
   timeoutMs = 120_000,
   signal?: AbortSignal,
+  env?: NodeJS.ProcessEnv,
 ): Promise<string> {
   signal?.throwIfAborted();
   return new Promise((accept, reject) => {
@@ -80,6 +85,7 @@ function run(
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       signal,
+      env,
     });
     let stdout = "";
     let stderr = "";
@@ -121,12 +127,29 @@ export async function ensureSshHostInstalled(hostInput: string, force = false, o
   const host = validateSshHost(hostInput);
   return ensureHostInstalled({
     exec: (command, timeoutMs) => run("ssh", sshArgs(host, command), timeoutMs, options.signal),
-    upload: async (source, stage) => {
-      await run("scp", ["-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-        ...HOST_BUNDLE_ENTRIES.map((path) => resolve(source, path)),
-        `${host}:${stage}/`], 120_000, options.signal);
-    },
+    upload: (source, stage) => uploadSshHostBundle(host, source, stage, options.signal),
   }, force, options);
+}
+
+/** One archive avoids an SFTP round trip for every file on high-latency links. */
+export async function uploadSshHostBundle(host: string, source: string, stage: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const temp = await mkdtemp(join(tmpdir(), "pix-host-upload-"));
+  const name = "host-bundle.tar.gz";
+  const archive = join(temp, name);
+  try {
+    await run("tar", ["--no-xattrs", "-czf", archive, ...HOST_BUNDLE_ENTRIES.flatMap(entry => {
+      const path = resolve(source, entry);
+      return ["-C", dirname(path), basename(path)];
+    })], 120_000, signal, { ...process.env, COPYFILE_DISABLE: "1" });
+    await run("scp", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+      archive, `${host}:${stage}/${name}`], 120_000, signal);
+    await run("ssh", sshArgs(host,
+      `tar -xzf ${quote(`${stage}/${name}`)} -C ${quote(stage)} && rm -f -- ${quote(`${stage}/${name}`)}`,
+    ), 120_000, signal);
+  } finally {
+    await rm(temp, { recursive: true, force: true }).catch(error => debugLog("ssh-host-installer: clean upload archive", error));
+  }
 }
 
 export async function ensureWslHostInstalled(distro: string, force = false, options: RemoteConnectOptions = {}) {
@@ -142,7 +165,13 @@ export async function ensureWslHostInstalled(distro: string, force = false, opti
   }, force, options);
 }
 
-async function ensureHostInstalled(transport: {
+export function hostIsCurrent(version: { version?: string; protocol?: number; piVersion?: string }, piVersion: string) {
+  return version.version === PIX_HOST_VERSION
+    && version.protocol === PIX_REMOTE_PROTOCOL
+    && version.piVersion === piVersion;
+}
+
+export async function ensureHostInstalled(transport: {
   exec(command: string, timeoutMs?: number): Promise<string>;
   upload(source: string, stage: string): Promise<void>;
 }, force: boolean, options: RemoteConnectOptions) {
@@ -156,11 +185,7 @@ async function ensureHostInstalled(transport: {
       30_000,
     );
     const version = JSON.parse(output) as { version?: string; protocol?: number };
-    if (
-      version.version === PIX_HOST_VERSION &&
-      version.protocol === PIX_REMOTE_PROTOCOL
-    )
-      return;
+    if (hostIsCurrent(version, await piSdkVersion())) return;
   } catch (error) {
     signal?.throwIfAborted();
     // Authentication and network failures will not be fixed by installing a host.

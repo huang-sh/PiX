@@ -29,10 +29,13 @@ import { createRunCommand, runCommandKey } from "./features/commands/runCommand"
 import PixieOverlay from "./features/pixie/PixieOverlay.vue";
 import PixieSprite from "./features/pixie/PixieSprite.vue";
 import ImagePreview from "./components/ImagePreview.vue";
+import ExtensionDialogHost from "./components/ExtensionDialogHost.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import { shortcutForEvent, shortcutsBlocked } from "./keyboard-shortcuts";
 import AppTitlebar from "./features/workbench/AppTitlebar.vue";
 import WelcomeScreen from "./features/workbench/WelcomeScreen.vue";
+import HostRecovery from "./features/workbench/HostRecovery.vue";
+import type { HostConnectionState } from "../shared/host-protocol";
 import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
@@ -64,6 +67,13 @@ const wslBusy = ref(false);
 const wslError = ref("");
 const remoteStages = ref<RemoteConnectStage[]>([]);
 const remoteDisconnected = ref(false);
+const remoteReconnecting = ref(false);
+const remoteDisconnectNotice = ref("");
+// The disconnect message can carry a host stack trace; only its first line fits a notice.
+function remoteLostText(message?: string) {
+  const detail = (message?.split("\n")[0] ?? "").slice(0, 160).trim();
+  return detail ? `${t("remote.connectionLost")} — ${detail}` : t("remote.connectionLost");
+}
 let remoteUiAttempt = 0;
 const wslDistributions = ref<WslDistribution[]>([]);
 const wslNamesLoading = ref(false);
@@ -84,10 +94,12 @@ const compactBusy = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<{ record: ProjectGroup; path: string; name: string } | null>(null);
 const updateNotice = ref<{ version: string; url: string } | null>(null);
+const hostRecovery = ref<HostConnectionState | null>(null);
+const hostBusy = ref(false);
+let hostStatusRequest = 0;
 
-// The custom titlebar needs platform knowledge only for the macOS traffic
-// lights (see .platform-darwin in app.css); the sandboxed renderer gets it
-// from the user agent instead of a preload addition.
+// macOS keeps a small titlebar inset when fullscreen hides the traffic lights
+// and has no right-side window controls (see .platform-darwin in app.css).
 const isDarwin = /Macintosh/i.test(navigator.userAgent);
 
 function applyLanguage(settings: SettingsBundle) {
@@ -107,6 +119,10 @@ async function hydrate(data: BootstrapData, openFirst = false, request = ++sessi
   session.hydrate(data.project, data.sessions ?? [], data.projects ?? [], data.current, request);
   remoteDisconnected.value = Boolean(data.project?.remote &&
     !data.projects?.find((record) => record.id === session.activeProjectId)?.connected);
+  // A degraded remote bootstrap means the main process is already retrying the
+  // connection; the banner reflects that instead of asking for a manual click.
+  remoteReconnecting.value = remoteDisconnected.value;
+  remoteDisconnectNotice.value = "";
   if (remoteDisconnected.value) {
     session.loading = false;
     return;
@@ -124,22 +140,71 @@ async function hydrate(data: BootstrapData, openFirst = false, request = ++sessi
   if (request === session.viewRequest) session.loading = false;
 }
 
+async function refreshHostRecovery(error?: unknown) {
+  const request = ++hostStatusRequest;
+  const view = session.viewRequest;
+  let state: HostConnectionState;
+  try { state = await desktop.invoke<HostConnectionState>("app.hostStatus"); }
+  catch (error) {
+    if (request !== hostStatusRequest || view !== session.viewRequest) return;
+    throw error;
+  }
+  if (request !== hostStatusRequest || view !== session.viewRequest) return;
+  if (state.connected === false) {
+    if (state.language) locale.value = state.language === "system" ? navigator.language.startsWith("zh") ? "zh-CN" : "en" : state.language;
+    hostRecovery.value = { ...state, error: state.error ?? (error === undefined
+      ? hostRecovery.value?.error : error instanceof Error ? error.message : String(error)) };
+    session.loading = false;
+  } else if (state.connected === true) hostRecovery.value = null;
+  return state;
+}
+
 async function bootstrap() {
+  if (hostBusy.value) return;
+  hostBusy.value = true;
+  hostStatusRequest++;
   const request = ++session.viewRequest;
   try {
+    if (hostRecovery.value?.host?.stopping) {
+      const state = await refreshHostRecovery();
+      if (!state || (state.connected === false && state.host?.stopping)) return;
+    }
     const data = await desktop.invoke<BootstrapData>("app.bootstrap");
+    hostRecovery.value = null;
     await hydrate(data, data.settings.app.openLastSessionOnStartup, request);
   } catch (error) {
     if (request !== session.viewRequest) return;
     session.loading = false;
+    try {
+      const state = await refreshHostRecovery(error);
+      if (!state || state.connected === false) return;
+    } catch { /* A non-host bootstrap failure still uses the regular notice. */ }
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
-  }
+  } finally { hostBusy.value = false; }
+}
+
+async function restartHost(id: string) {
+  if (hostBusy.value) return;
+  hostBusy.value = true;
+  hostStatusRequest++;
+  try {
+    await desktop.invoke("app.hostRestart", { id, force: true });
+  } catch (error) {
+    if (hostRecovery.value) hostRecovery.value.error = error instanceof Error ? error.message : String(error);
+    try {
+      const state = await refreshHostRecovery(error);
+      if (state?.connected) layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+    } catch {}
+    return;
+  } finally { hostBusy.value = false; }
+  await bootstrap();
 }
 
 async function pickProject() {
-  const request = ++session.viewRequest;
+  // A cancelled native picker does not navigate away from an in-flight creation.
+  const request = session.viewRequest;
   const data = await desktop.invoke<BootstrapData | null>("app.pickProject");
-  if (data) await hydrate(data, false, request);
+  if (data && request === session.viewRequest) await hydrate(data, false, ++session.viewRequest);
 }
 
 // wsl.exe can stall for its full timeout while the WSL service cold-starts,
@@ -316,9 +381,13 @@ async function disconnectRemote() {
   }
 }
 
-async function activateProject(record: ProjectGroup, request = ++session.viewRequest) {
+async function activateProject(record: ProjectGroup, request?: number) {
+  // Staying in the connected project does not replace the current view. Let a
+  // pending session.open finish in both the renderer and the main process.
+  if (record.id === session.activeProjectId && record.connected)
+    return request === undefined || request === session.viewRequest;
+  request ??= ++session.viewRequest;
   if (request !== session.viewRequest) return false;
-  if (record.id === session.activeProjectId && record.connected && !session.loading) return true;
   session.loading = true;
   try {
     const remote = record.project.remote;
@@ -353,8 +422,9 @@ async function reconnectRemote() {
   const record = session.projects.find((item) => item.id === session.activeProjectId);
   if (!record || session.loading) return;
   const path = session.current?.session.path;
+  const creationDraft = session.creating || session.creation?.status === "failed";
   if (await activateProject(record)) {
-    if (path) {
+    if (path && !creationDraft) {
       try { await session.open(path); }
       catch (error) { layout.showNotice(String(error), "error"); }
     }
@@ -362,7 +432,8 @@ async function reconnectRemote() {
 }
 
 async function inProject(record: ProjectGroup, action: () => Promise<void>) {
-  const request = ++session.viewRequest;
+  const request = record.id === session.activeProjectId && record.connected
+    ? session.viewRequest : ++session.viewRequest;
   if (!(await activateProject(record, request)) || request !== session.viewRequest) return;
   try {
     await action();
@@ -468,6 +539,18 @@ function onEvent(wireEvent: DesktopEvent) {
   }
   const event = decodeSessionEvent(wireEvent);
   if (!event) return;
+  if (event.type === "host.connection") {
+    hostStatusRequest++;
+    const { connected, reconnecting } = event.payload as { connected: boolean; reconnecting?: boolean };
+    // Normal transport recovery restores its own view. Rehydrating here would
+    // reset open panels and drafts after an otherwise transparent reconnect.
+    if (!reconnecting && !connected) {
+      void refreshHostRecovery().then(state => {
+        if (state?.connected && state.error) layout.showNotice(state.error, "error");
+      }).catch(error => layout.showNotice(error instanceof Error ? error.message : String(error), "error"));
+    } else if (!reconnecting && hostRecovery.value) void bootstrap();
+    return;
+  }
   if (event.type === "remote.progress") {
     if (wslOpen.value && wslBusy.value) {
       const { stage } = event.payload as { stage: RemoteConnectStage };
@@ -476,13 +559,23 @@ function onEvent(wireEvent: DesktopEvent) {
     return;
   }
   if (event.type === "remote.connection") {
-    const payload = event.payload as { projectId: string; connected: boolean; message?: string };
+    const payload = event.payload as { projectId: string; connected: boolean; reconnecting?: boolean; message?: string };
     if (!payload.connected) {
       session.disconnected(payload.projectId);
       if (payload.projectId === session.activeProjectId) {
         remoteDisconnected.value = true;
-        layout.showNotice(t("remote.connectionLost"), "error");
+        remoteReconnecting.value = Boolean(payload.reconnecting);
+        if (payload.reconnecting) {
+          remoteDisconnectNotice.value = "";
+        } else {
+          remoteDisconnectNotice.value = remoteLostText(payload.message);
+          layout.showNotice(remoteDisconnectNotice.value, "error");
+        }
       }
+    } else if (payload.projectId === session.activeProjectId && remoteDisconnected.value) {
+      // The main process restored the transport; rehydrate through the pooled
+      // host and reopen the session the workspace was showing.
+      void reconnectRemote();
     }
     return;
   }
@@ -521,9 +614,12 @@ function openReleaseNotes() {
 }
 
 function keydown(event: KeyboardEvent) {
+  if (hostRecovery.value) return;
   if (shortcutsBlocked(event)) return;
   if (handleHistoryKeys(event)) return;
   const action = shortcutForEvent(event, layout.settings?.app.keyboardShortcuts);
+  // The graph owns label editing and its selected-node / writable-branch guards.
+  if (action === "editLabel") return;
   // A disabled experimental module's shortcut must fall through untouched, not
   // be preventDefault-ed into silence.
   if (action === "history" && !historyEnabled.value) return;
@@ -548,6 +644,7 @@ onMounted(() => {
     __pixTest: {
       state: () => JSON.parse(JSON.stringify({
         loading: session.loading,
+        hostRecovery: hostRecovery.value,
         project: workspace.project,
         welcome: !workspace.project,
         sessions: session.sessions,
@@ -561,6 +658,11 @@ onMounted(() => {
         remoteBrowseRoot: remoteBrowseRoot.value,
       })),
       openSession: session.open,
+      renameSession: (path: string) => {
+        const record = session.projects.find(item => item.id === session.activeProjectId);
+        if (!record) throw new Error("No active project");
+        return renameProjectSession(record, path, "");
+      },
       selectNode: session.selectNode,
       openChatColumn: layout.openChatColumn,
       closeChatColumn: layout.closeChatColumn,
@@ -575,6 +677,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  hostStatusRequest++;
   unsubscribe?.();
   window.removeEventListener("keydown", keydown);
 });
@@ -582,31 +685,35 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-frame" :class="{ 'platform-darwin': isDarwin }">
-    <AppTitlebar
+    <header v-if="hostRecovery" class="app-titlebar"><span class="window-controls-spacer left" /><span class="justify-self-center">PiX</span></header>
+    <AppTitlebar v-else
       @pick-project="pickProject"
       @connect-remote="openRemote"
       @disconnect-remote="disconnectRemote"
     />
     <div class="app-content">
-      <SettingsPage v-if="layout.screen === 'settings'" ref="settingsPage" />
-      <KeepAlive>
-        <Workbench
-          v-if="layout.hydrated && layout.screen === 'workbench'"
-          @settings="layout.screen = 'settings'"
-          @pick-project="pickProject"
-          @new-session="session.create"
-          @activate-project="activateProject"
-          @create-project-session="createProjectSession"
-          @open-project-session="openProjectSession"
-          @rename="renameProjectSession"
-          @remove-project-session="removeProjectSession"
-          @forget-project="forgetProject"
+      <HostRecovery v-if="hostRecovery" :state="hostRecovery" :busy="hostBusy" @retry="bootstrap" @restart="restartHost" @logs="desktop.invoke('app.revealLogs')" @quit="desktop.invoke('app.quit')" />
+      <div v-show="!hostRecovery" class="contents">
+        <SettingsPage v-if="layout.screen === 'settings'" ref="settingsPage" />
+        <KeepAlive>
+          <Workbench
+            v-if="layout.hydrated && layout.screen === 'workbench'"
+            @settings="layout.screen = 'settings'"
+            @pick-project="pickProject"
+            @new-session="session.create"
+            @activate-project="activateProject"
+            @create-project-session="createProjectSession"
+            @open-project-session="openProjectSession"
+            @rename="renameProjectSession"
+            @remove-project-session="removeProjectSession"
+            @forget-project="forgetProject"
+          />
+        </KeepAlive>
+        <WelcomeScreen
+          v-if="!layout.hydrated && layout.screen === 'workbench' && !workspace.project"
+          @open-project="pickProject"
         />
-      </KeepAlive>
-      <WelcomeScreen
-        v-if="layout.screen === 'workbench' && !workspace.project"
-        @open-project="pickProject"
-      />
+      </div>
     </div>
   </div>
   <CommandPalette @run="runCommand" />
@@ -622,12 +729,14 @@ onBeforeUnmount(() => {
     </Button>
   </div>
   <div v-if="remoteDisconnected" class="remote-disconnected" role="alert">
-    <span>{{ t("remote.connectionLost") }}</span>
+    <span v-if="remoteReconnecting">{{ t("remote.reconnecting") }}</span>
+    <span v-else>{{ remoteDisconnectNotice || t("remote.connectionLost") }}</span>
     <Button data-action="remote-reconnect" variant="outline" :disabled="session.loading" @click="reconnectRemote">
       {{ session.loading ? t("remote.connecting") : t("remote.reconnect") }}
     </Button>
   </div>
   <ImagePreview />
+  <ExtensionDialogHost />
   <DialogRoot :open="renameOpen" @update:open="renameOpen = $event">
     <DialogPortal>
       <DialogOverlay class="dialog-overlay" />

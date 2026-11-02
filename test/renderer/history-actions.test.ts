@@ -123,6 +123,22 @@ describe("history instrumentation of management actions", () => {
     expect(lib).toHaveBeenCalledWith("session.delete", { path: "new.jsonl", confirmed: true, pristineOnly: true });
   });
 
+  it("reusing an empty session does not add a creation history entry", async () => {
+    const { history, store, workspace } = await boot();
+    workspace.hydrate(project);
+    const empty = snapshot("empty.jsonl");
+    empty.session.messageCount = 0;
+    empty.entries = [];
+    empty.projection = projectSession([], null);
+    store.applySnapshot(empty);
+    store.loading = false;
+
+    await store.create();
+
+    expect(history.history.entries).toHaveLength(0);
+    expect(lib).not.toHaveBeenCalled();
+  });
+
   it("create undo refuses when the backend reports the file is no longer pristine", async () => {
     const { history, store, workspace } = await boot();
     workspace.hydrate(project);

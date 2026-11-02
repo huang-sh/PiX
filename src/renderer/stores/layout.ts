@@ -1,10 +1,11 @@
 import { defineStore } from "pinia";
 import { toRaw } from "vue";
+import type { ComposerDraft } from "../components/PromptComposer.vue";
 import type { LayoutState, PanelId, SessionSnapshot, SettingsBundle } from "../../shared/types";
 import { desktop } from "../api";
 import { i18n } from "../i18n";
-import type { PromptImage } from "../../shared/types";
-import { imageDataUrl } from "../../shared/images";
+import type { SessionImage } from "../../shared/types";
+import { sessionImageUrl } from "../lib/session-images";
 import { applyAppearance, applyTheme } from "../theme";
 import type { ThemePreference } from "../../shared/theme";
 
@@ -51,14 +52,12 @@ export const useLayoutStore = defineStore("layout", {
     // own, so the last frame that showed the run in flight is remembered to
     // revert a failed column to the node the prompt was submitted from.
     chatColumnParents: {} as Record<string, string>,
-    // Composer expansion per pinned column. A pinned column remounts when its
-    // node advances, so the flag lives here to survive that remount — fresh
-    // pins and every new session start collapsed. The primary column never
-    // remounts and keeps its expansion in component state.
-    chatColumnComposers: {} as Record<string, boolean>,
+    // A pinned column remounts when its node advances. Keep its editor state
+    // here so an in-flight submission can restore its draft after a failure.
+    chatColumnComposers: {} as Record<string, { open: boolean; draft: ComposerDraft }>,
     commandOpen: false,
     commandQuery: "",
-    imagePreview: undefined as { src: string; alt: string } | undefined,
+    imagePreview: undefined as { src: string; alt: string; error?: string } | undefined,
     notice: undefined as { level: string; message: string } | undefined,
   }),
   actions: {
@@ -94,8 +93,15 @@ export const useLayoutStore = defineStore("layout", {
         this.themeSaving = false;
       }
     },
-    previewImage(image: PromptImage, alt: string) {
-      this.imagePreview = { src: imageDataUrl(image), alt };
+    async previewImage(image: SessionImage, alt: string) {
+      this.imagePreview = { src: "", alt };
+      const preview = this.imagePreview;
+      try {
+        const src = await sessionImageUrl(image);
+        if (this.imagePreview === preview) preview.src = src;
+      } catch {
+        if (this.imagePreview === preview) preview.error = i18n.global.t("draft.imageLoadError");
+      }
     },
     hydrate(settings: SettingsBundle, layout?: LayoutState) {
       this.applySettings(settings);
@@ -225,8 +231,8 @@ export const useLayoutStore = defineStore("layout", {
     advanceChatColumn(from: string, to: string) {
       if (!this.chatColumns.includes(from) || from === to) return;
       delete this.chatColumnParents[from];
-      // The composer expansion follows the column across its remount; a merge
-      // onto an already-pinned node keeps that column's own expansion.
+      // The editor follows the column across its remount; a merge onto an
+      // already-pinned node keeps that column's own draft and expansion.
       const composer = this.chatColumnComposers[from];
       delete this.chatColumnComposers[from];
       if (composer !== undefined && !(to in this.chatColumnComposers)) this.chatColumnComposers[to] = composer;

@@ -85,6 +85,8 @@ export class PixieRuntime {
   /** The in-flight turn's timing: prompt dispatch → first delta → settle. */
   private turnTiming?: { promptAt: number; firstDeltaAt?: number };
 
+  get busy(): boolean { return Boolean(this.starting || this.turnTiming); }
+
   constructor(
     private readonly emit: (event: DesktopEvent) => void,
     private readonly settings: () => PixieSettings,
@@ -95,6 +97,7 @@ export class PixieRuntime {
     this.rpc.onEvent(event => this.onWireEvent(event));
     // A dead subprocess must fail the in-flight turn, not hang its waiters.
     this.rpc.onExit(error => {
+      this.turnTiming = undefined;
       for (const waiter of this.idleWaiters) waiter.reject(error);
       this.idleWaiters.clear();
     });
@@ -112,7 +115,7 @@ export class PixieRuntime {
     } else if (event.type === "agent_settled" || event.type === "agent_start") {
       this.parts.clear();
     } else if (event.type === "extension_ui_request") {
-      // PiX renders no extension dialogs yet; answer immediately so an
+      // Pixie does not render extension dialogs; answer immediately so an
       // extension fails fast with a visible reason instead of hanging.
       this.rpc.write({ type: "extension_ui_response", id: String(event.id), cancelled: true });
       const title = typeof event.title === "string" ? event.title : typeof event.message === "string" ? event.message : "";
@@ -274,6 +277,7 @@ export class PixieRuntime {
     } catch (error) {
       // The turn never started; its idle waiter must not outlive the send.
       this.idleWaiters.clear();
+      this.turnTiming = undefined;
       throw error;
     }
     await idle;
@@ -322,8 +326,12 @@ export class PixieRuntime {
     if (resume) await this.rpc.request({ type: "switch_session", sessionPath: resume });
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
+    await this.starting?.catch(() => {});
     this.rpc.write({ type: "abort" });
-    return this.rpc.stop();
+    await this.rpc.stop();
+    this.turnTiming = undefined;
+    for (const waiter of this.idleWaiters) waiter.reject(new Error("Pixie was stopped"));
+    this.idleWaiters.clear();
   }
 }

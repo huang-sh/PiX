@@ -1,8 +1,11 @@
 import type {
   CustomModelInput,
+  CustomModelsInput,
+  CustomProviderInput,
   DesktopRoute,
   LayoutState,
   PanelId,
+  PromptOverrideInput,
 } from "./types.js";
 import { CUSTOM_MODEL_APIS, PANEL_IDS, UTILITY_TABS } from "./types.js";
 import { INSTALLABLE_PACKAGE_SOURCES } from "./extensions.js";
@@ -23,6 +26,13 @@ const str = (
     throw new Error(`${name} must be a non-empty string`);
   return value;
 };
+function promptOverrideInput(value: unknown): PromptOverrideInput {
+  const v = obj(value);
+  if (v.off === true) return { off: true };
+  const mode = v.mode;
+  if (mode !== "append" && mode !== "replace" && mode !== "strict") throw new Error("Invalid persona override");
+  return { mode, name: str(v.name, "name")!, text: str(v.text, "text")! };
+}
 const externalUrl = (value: unknown) => {
   const url = new URL(str(value, "url")!);
   if (!["https:", "http:", "mailto:"].includes(url.protocol))
@@ -49,9 +59,7 @@ const objectField = (value: unknown, name: string): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 
-/** Validates a custom model form submission; shared by the agent.control
- *  route and models.json writes in custom-models.ts. */
-export function customModelInput(value: unknown): CustomModelInput {
+export function customProviderInput(value: unknown): CustomProviderInput {
   const v = obj(value);
   const provider = str(v.provider, "provider")!.trim();
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provider) || ["__proto__", "constructor", "prototype"].includes(provider))
@@ -66,14 +74,36 @@ export function customModelInput(value: unknown): CustomModelInput {
     provider,
     baseUrl,
     api,
+    apiKey: str(v.apiKey, "apiKey", true)?.trim(),
+  };
+}
+
+/** Shared by agent.control and models.json writes. */
+export function customModelInput(value: unknown): CustomModelInput {
+  const v = obj(value);
+  return {
+    ...customProviderInput(v),
     modelId: str(v.modelId, "modelId")!.trim(),
     name: str(v.name, "name", true)?.trim(),
-    apiKey: str(v.apiKey, "apiKey", true)?.trim(),
     contextWindow: integer(v.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
     maxTokens: integer(v.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
     reasoning: v.reasoning === true,
     imageInput: v.imageInput === true,
   };
+}
+
+export function customModelsInput(value: unknown): CustomModelsInput {
+  const v = obj(value);
+  if (!Array.isArray(v.models) || !v.models.length || v.models.length > 10000)
+    throw new Error("Choose between 1 and 10000 models");
+  const models = v.models.map((model) => {
+    const m = obj(model);
+    return customModelInput({ ...v, modelId: m.modelId, name: m.name });
+  });
+  if (new Set(models.map(model => model.modelId)).size !== models.length)
+    throw new Error("Duplicate model IDs");
+  const { modelId, name, ...common } = models[0]!;
+  return { ...common, models: models.map(({ modelId, name }) => ({ modelId, name })) };
 }
 
 /** The persisted workbench layout arrives as one opaque renderer object;
@@ -162,6 +192,10 @@ export function validateRouteInput(
         thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),
       };
     }
+    case "ui.pending":
+      return {};
+    case "ui.respond":
+      return { id: str(v.id, "id"), value: str(v.value, "value", true), projectId: str(v.projectId, "projectId", true) };
     case "wsl.connect":
       return {
         distro: str(v.distro, "distro"),
@@ -179,8 +213,22 @@ export function validateRouteInput(
     case "workspace.directories":
     case "workspace.open":
       return { path: str(v.path, "path") };
+    case "remote.deployed":
+      return {};
+    case "remote.revoke":
+      return { id: str(v.id, "id") };
     case "app.openExternal":
       return { url: externalUrl(v.url) };
+    case "app.openPath":
+      return { path: str(v.path, "path") };
+    case "app.openFileLink":
+      return { href: str(v.href, "href") };
+    case "app.openWith":
+      return { path: str(v.path, "path") };
+    case "app.openWithApps":
+      return { path: str(v.path, "path") };
+    case "app.openWithApp":
+      return { path: str(v.path, "path"), appId: str(v.appId, "appId") };
     case "app.revealSession":
       return { id: str(v.id, "id"), path: str(v.path, "path") };
     case "app.openProject":
@@ -208,6 +256,16 @@ export function validateRouteInput(
         // grew message entries behind the journal's back.
         ...(v.pristineOnly === true ? { pristineOnly: true } : {}),
       };
+    case "usage.overview":
+      return {
+        range:
+          v.range === "today" || v.range === "7d" || v.range === "30d" || v.range === "all"
+            ? v.range
+            : "30d",
+        scope: v.scope === "all" ? "all" : "project",
+      };
+    case "usage.balances":
+      return { provider: str(v.provider, "provider", true), refresh: v.refresh === true };
     case "library.pin":
       return { path: str(v.path, "path"), pinned: v.pinned === true };
     case "library.archiveSession":
@@ -225,6 +283,14 @@ export function validateRouteInput(
       };
     case "git.diff":
       return { path: str(v.path, "path", true), staged: v.staged === true };
+    case "git.switch":
+      return { branch: str(v.branch, "branch"), cwd: str(v.cwd, "cwd") };
+    case "session.image": {
+      const digest = str(v.digest, "digest", true);
+      if (digest !== undefined && !/^[a-f0-9]{64}$/.test(digest)) throw new Error("Invalid image digest");
+      return { session: str(v.session, "session"), entryId: str(v.entryId, "entryId"),
+        index: integer(v.index, "index", 0, Number.MAX_SAFE_INTEGER), epoch: str(v.epoch, "epoch", true), digest, thumbnail: v.thumbnail === true };
+    }
     case "changes.read":
       return { session: str(v.session, "session"), ref: str(v.ref, "ref") };
     case "shell.run":
@@ -252,8 +318,8 @@ export function validateRouteInput(
     case "settings.update": {
       const patch = obj(v.patch);
       if (v.scope !== "project" && v.scope !== "global" && Object.hasOwn(patch, "theme") &&
-          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach")
-        throw new Error("theme must be light, dark, teal, peach or system");
+          patch.theme !== "light" && patch.theme !== "dark" && patch.theme !== "system" && patch.theme !== "teal" && patch.theme !== "peach" && patch.theme !== "paper" && patch.theme !== "graphite")
+        throw new Error("theme must be light, dark, teal, peach, paper, graphite or system");
       return {
         scope:
           v.scope === "project"
@@ -277,6 +343,8 @@ export function validateRouteInput(
       return { layout: layoutState(v.layout) };
     case "agent.control": {
       const action = str(v.action, "action")!;
+      if (action === "getModels")
+        return { action, ...(v.allTypes === undefined ? {} : { allTypes: booleanField(v.allTypes, "allTypes") }) };
       if (action === "deleteNode")
         return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId") };
       if (action === "exportBranchSession")
@@ -288,12 +356,25 @@ export function validateRouteInput(
         return { action, requestId, nodeId: v.nodeId === null ? null : str(v.nodeId, "nodeId"),
           text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
           provider: str(v.provider, "provider", true), modelId: str(v.modelId, "modelId", true),
-          thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true) };
+          thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),
+          ...(v.promptOverride !== undefined ? { promptOverride: promptOverrideInput(v.promptOverride) } : {}) };
       }
       if (action === "branchAbort") return { action, branchId: str(v.branchId, "branchId"), runId: str(v.runId, "runId") };
+      const queueTarget = () => v.graphId !== undefined || v.branchId !== undefined || v.runId !== undefined
+        ? { graphId: str(v.graphId, "graphId"), branchId: str(v.branchId, "branchId"), runId: str(v.runId, "runId") } : {};
+      if (action === "clearQueue") return { action, ...queueTarget() };
+      if (action === "updateQueuedMessage") {
+        if (v.operation === "edit") {
+          if (typeof v.text !== "string") throw new Error("text must be a string");
+          return { action, id: str(v.id, "id"), operation: v.operation, text: v.text, ...queueTarget() };
+        }
+        if (v.operation !== "steer" && v.operation !== "remove") throw new Error("Invalid queued message operation");
+        return { action, id: str(v.id, "id"), operation: v.operation, ...queueTarget() };
+      }
       if (["prompt", "steer", "followUp"].includes(action)) {
         const images = v.images === undefined ? undefined : validatePromptImages(v.images);
-        return { action, text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}) };
+        return { action, text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
+          ...(action === "prompt" ? {} : queueTarget()) };
       }
       if (action === "setModel")
         return {
@@ -304,6 +385,10 @@ export function validateRouteInput(
         };
       if (action === "addCustomModel" || action === "updateCustomModel")
         return { action, ...customModelInput(v) };
+      if (action === "addCustomModels")
+        return { action, ...customModelsInput(v) };
+      if (action === "discoverModels")
+        return { action, ...customProviderInput(v) };
       if (action === "setThinking")
         return { action, level: str(v.level, "level") };
       if (action === "setQueueMode")
@@ -395,15 +480,19 @@ export function validateRouteInput(
             : [],
           ...(Array.isArray(v.models) ? { models: v.models.map((value) => {
             const m = obj(value);
-            return {
-              provider: str(m.provider, "provider"), id: str(m.id, "id"),
+            if (m.type !== undefined && !["chat", "image", "classifier"].includes(String(m.type)))
+              throw new Error("Invalid model type");
+            const base = { provider: str(m.provider, "provider"), id: str(m.id, "id"),
               name: str(m.name, "name"), api: str(m.api, "api"),
+              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"], cost: obj(m.cost) };
+            if (m.type === "image") return { ...base, type: "image", output: Array.isArray(m.output) && m.output.includes("text") ? ["text", "image"] : ["image"] };
+            if (m.type === "classifier") return { ...base, type: "classifier", contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER) };
+            return {
+              ...base,
               reasoning: m.reasoning === true,
               thinkingLevelMap: m.thinkingLevelMap === undefined ? undefined : obj(m.thinkingLevelMap),
-              input: Array.isArray(m.input) && m.input.includes("image") ? ["text", "image"] : ["text"],
               contextWindow: integer(m.contextWindow, "contextWindow", 1, Number.MAX_SAFE_INTEGER),
               maxTokens: integer(m.maxTokens, "maxTokens", 1, Number.MAX_SAFE_INTEGER),
-              cost: obj(m.cost),
             };
           }) } : {}),
         };
@@ -413,6 +502,25 @@ export function validateRouteInput(
           entryId: str(v.entryId, "entryId"),
           label: str(v.label, "label", true),
         };
+      if (action === "setPromptOverride") {
+        return { action, ...promptOverrideInput(v) };
+      }
+      if (action === "setPromptCustomization") {
+        const section = (value: unknown): string | undefined => {
+          const text = typeof value === "string" ? value.trim() && value : undefined;
+          return text || undefined;
+        };
+        const c = v.customization && typeof v.customization === "object" && !Array.isArray(v.customization)
+          ? v.customization as Record<string, unknown> : {};
+        const customization = {
+          ...(section(c.preamble) !== undefined ? { preamble: section(c.preamble)! } : {}),
+          ...(section(c.rules) !== undefined ? { rules: section(c.rules)! } : {}),
+          ...(section(c.docs) !== undefined ? { docs: section(c.docs)! } : {}),
+        };
+        return { action, customization };
+      }
+      if (action === "systemPromptPreview")
+        return { action };
       if (action === "navigateTree" || action === "fork")
         return { action, entryId: str(v.entryId, "entryId") };
       return { action };

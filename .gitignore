@@ -5,6 +5,8 @@ node_modules/
 out/
 out-test/
 server/dist/
+server/skills/
+server/LICENSE
 release/
 /.pix-installed-*/
 /PiX-Setup-*.exe
@@ -35,3 +37,6 @@ desktop.ini
 .vscode/
 .idea/
 .zcode/
+
+# Generated installer scripts extend the installed electron-builder templates.
+/build/generated/

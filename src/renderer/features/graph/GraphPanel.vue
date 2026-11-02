@@ -11,9 +11,10 @@ import {
   type VueFlowStore,
   type ViewportTransform,
 } from "@vue-flow/core";
+import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import { MiniMap } from "@vue-flow/minimap";
 import GraphOverview from "./GraphOverview.vue";
-import { computed, markRaw, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
@@ -22,9 +23,12 @@ import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualP
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
 import { searchGraphNodeIds } from "../../lib/graph-search";
+import { shortcutForEvent } from "../../keyboard-shortcuts";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
-import type { GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
+import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../../../shared/graph-filter";
+import { sessionImageData } from "../../lib/session-images";
+import type { GraphFilter, GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import DraftNode, { type DraftNodeData } from "./DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "./PromptNode.vue";
 
@@ -32,7 +36,7 @@ const emit = defineEmits<{ newSession: [] }>();
 const layout = useLayoutStore();
 const session = useSessionStore();
 const { t } = useI18n();
-const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft, submittedNodeId } = useDraftSubmit();
+const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft } = useDraftSubmit();
 type RenderNode = Node & { dimensions?: Dimensions; handleBounds?: FlowNode["handleBounds"] };
 const nodes = shallowRef<RenderNode[]>([]);
 const edges = shallowRef<Edge[]>([]);
@@ -49,28 +53,79 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
-// Sessions remember where they were left: manual card positions and the pane
-// viewport come back unchanged on return instead of re-centering.
+// Sessions remember where they were left: manual card positions, measured card
+// sizes, and the pane viewport come back unchanged on return instead of
+// re-centering. Sizes matter because only visible cards ever measure — without
+// them the return would re-stack the lanes from the flat estimate pitch.
 const rememberedLayouts = new Map<string, Map<string, ManualPosition>>();
+const rememberedDimensions = new Map<string, Map<string, Dimensions>>();
 const rememberedViewports = new Map<string, ViewportTransform>();
 // Holding the branch modifier at any point of a drag carries the cards after it too.
 let dragFollowsBranch = false;
 let transientNodeIds = new Set<string>();
 const draftParent = ref<string | null>();
 const branchOrder = new Map<string, number>();
-const sessionKey = computed(() => JSON.stringify([session.activeProjectId, session.current?.session.path, session.current?.session.id]));
+const preparingSession = computed(() => session.creating || session.creation?.status === "failed");
+const sessionKey = computed(() => JSON.stringify([session.activeProjectId,
+  preparingSession.value ? "creating" : session.current?.session.path,
+  preparingSession.value ? undefined : session.current?.session.id]));
+let creatingDraft: string | undefined;
 let orderSequence = 0;
 let draftOrder = 0;
 const emptyDraft = (): ComposerDraft => ({ text: "", images: [], busy: false, readingImages: false, error: "" });
 // Survives viewport unmounts, including attachment reads and failed submissions.
 const draftState = ref(emptyDraft());
+let retryRequest = 0;
 const draftModel = ref<RuntimeModel | null>();
 // Local picks and model-driven clamps override the inherited level for this draft.
 const draftThinking = ref<string>();
 let activeSession: string | undefined;
 const readableZoom = 0.9;
+// Draft size before Vue Flow measures it, and the vertical slot the layout
+// reserves for it: a draft growing past the slot overlays the cards below
+// instead of shoving them around on every keystroke.
+const DRAFT_SIZE = { width: 440, height: 320 };
 const booted = ref(false);
 const deleteError = ref("");
+const reopenError = ref("");
+const graphFilter = ref<GraphFilter>("all");
+const filterIds = computed(() => graphFilterIds(projection.value?.nodes ?? [], graphFilter.value));
+const filterCount = computed(() => (projection.value?.nodes ?? []).filter(node => matchesGraphFilter(node, graphFilter.value)).length);
+const labelTarget = ref<{ entryId: string; path: string }>();
+const labelText = ref("");
+const labelError = ref("");
+const labelSaving = ref(false);
+function labelKeydown(event: KeyboardEvent) {
+  if (layout.screen !== "workbench" || shortcutForEvent(event, layout.settings?.app.keyboardShortcuts) !== "editLabel") return;
+  const node = session.selectedNode;
+  if (!node || !canEditLabel(node)) return;
+  event.preventDefault();
+  editLabel(node);
+}
+onMounted(() => window.addEventListener("keydown", labelKeydown));
+onBeforeUnmount(() => window.removeEventListener("keydown", labelKeydown));
+function canEditLabel(node: GraphNode) {
+  const current = session.current;
+  return Boolean(current?.runtime.available && !node.running && !(current.graph
+    ? current.graph.runs.some(run => run.branchId === (node.branchId ?? "main") && run.status === "running")
+    : current.runtime.isStreaming || session.pendingPrompt));
+}
+function editLabel(node: GraphNode) {
+  if (!session.current || !canEditLabel(node)) return;
+  labelTarget.value = { entryId: node.userEntryId, path: session.current.session.path };
+  labelText.value = node.label ?? ""; labelError.value = "";
+}
+async function saveLabel() {
+  const target = labelTarget.value;
+  if (!target || labelSaving.value || target.path !== session.current?.session.path) return;
+  labelSaving.value = true; labelError.value = "";
+  try {
+    await session.control({ action: "setLabel", entryId: target.entryId, label: labelText.value });
+    if (labelTarget.value === target) labelTarget.value = undefined;
+  } catch (error) { labelError.value = String(error instanceof Error ? error.message : error); }
+  finally { labelSaving.value = false; }
+}
+watch(sessionKey, () => { labelTarget.value = undefined; graphFilter.value = "all"; });
 const searchOpen = ref(false);
 const searchQuery = ref("");
 // A plain click highlights a card without rebinding the chat panel — only a
@@ -80,13 +135,14 @@ watch(() => session.focusedNode, () => { session.highlightedNode = null; });
 const searchInput = ref<HTMLInputElement>();
 // -1 = no hit visited yet, so the first Enter lands on the first hit.
 const searchPosition = ref(-1);
-const recoveringDeletion = ref(false);
-const deletionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
+const reopeningSession = ref(false);
+const sessionNeedsRecovery = computed(() => Boolean(session.current?.graph?.storageError && !session.current.runtime.available));
+watch(() => session.current?.session.path, () => { deleteError.value = ""; reopenError.value = ""; });
 const promptCache = new Map<string, PromptNodeData>();
 function stablePrompt(data: PromptNodeData) {
   const previous = promptCache.get(data.node.id);
   if (previous && (Object.keys(data) as Array<keyof PromptNodeData>).every(key =>
-    typeof data[key] === "function" || data[key] === previous[key])) return previous;
+    data[key] === previous[key] || (typeof data[key] === "function" && typeof previous[key] === "function"))) return previous;
   const raw = markRaw(data);
   promptCache.set(data.node.id, raw);
   return raw;
@@ -95,11 +151,12 @@ function stablePrompt(data: PromptNodeData) {
 // restricted to real nodes, so draft open/close never invalidates manual slots.
 let autoPositions: Map<string, { x: number; y: number; width: number; height: number }> | undefined;
 
-const projection = computed(() => session.current?.projection);
+const projection = computed(() => preparingSession.value ? projectSession([], null) : session.current?.projection);
 const searchHits = computed<string[]>(() => {
   const value = projection.value;
   if (!searchOpen.value || !value || !session.current) return [];
-  return searchGraphNodeIds(value, session.current.entries, searchQuery.value);
+  const matched = new Set(value.nodes.filter(node => matchesGraphFilter(node, graphFilter.value)).map(node => node.id));
+  return searchGraphNodeIds(value, session.current.entries, searchQuery.value).filter(id => matched.has(id));
 });
 const searchHitIds = computed(() => new Set(searchHits.value));
 const searchCount = computed(() => {
@@ -108,19 +165,36 @@ const searchCount = computed(() => {
   if (!n) return t("graph.searchNoHits");
   return n === 1 ? t("graph.searchHitOne") : t("graph.searchHits", { n });
 });
-function rememberBranchOrder(id: string, order: number, pendingId?: string) {
-  if (!pendingId && branchOrder.get(id) === order) return;
+function rememberBranchOrder(id: string, order: number | undefined, pendingId?: string) {
+  if (branchOrder.get(id) === order && (!pendingId || !branchOrder.has(pendingId))) return;
   if (pendingId) branchOrder.delete(pendingId);
-  branchOrder.set(id, order);
+  if (order === undefined) branchOrder.delete(id);
+  else branchOrder.set(id, order);
   (layout.layout.branchOrders ??= {})[sessionKey.value] = [...branchOrder];
   void layout.save().catch(error => layout.showNotice(String(error), "error"));
 }
+const filteredGraph = computed(() => {
+  if (graphFilter.value === "all") return { nodes: nodes.value, edges: edges.value };
+  const visible = new Set(filterIds.value);
+  const byId = new Map(nodes.value.map(node => [node.id, node]));
+  // Preserve an open draft and its path even when its parent doesn't match.
+  for (const node of nodes.value) if (node.type === "draft" || transientNodeIds.has(node.id)) {
+    visible.add(node.id);
+    let parent = node.type === "draft" ? draftParent.value : node.data?.node?.parentId;
+    while (parent && !visible.has(parent)) {
+      visible.add(parent); parent = byId.get(parent)?.data?.node?.parentId;
+    }
+  }
+  return { nodes: nodes.value.filter(node => visible.has(node.id)),
+    edges: edges.value.filter(edge => visible.has(edge.source) && visible.has(edge.target)) };
+});
 const renderGraph = computed(() => {
-  if (nodes.value.length < 500) return { nodes: nodes.value, edges: edges.value };
-  if (!flow.value) return { nodes: nodes.value.filter(node => node.id === defaultFocusId()), edges: [] };
+  const nodes = filteredGraph.value.nodes, edges = filteredGraph.value.edges;
+  if (nodes.length < 500) return { nodes, edges };
+  if (!flow.value) return { nodes: nodes.filter(node => node.id === defaultFocusId()), edges: [] };
   const viewport = flow.value.getViewport();
   const size = flow.value.dimensions.value;
-  const targets = new Set(nodes.value.filter(node => {
+  const targets = new Set(nodes.filter(node => {
     const x = node.position.x * viewport.zoom + viewport.x;
     const y = node.position.y * viewport.zoom + viewport.y;
     return x < size.width + 100 && x + 360 * viewport.zoom > -100
@@ -128,10 +202,10 @@ const renderGraph = computed(() => {
   }).map(node => node.id));
   // A wide fork can have thousands of curves starting at one visible parent.
   // Keep incoming connections to visible cards; the overview shows the full tree.
-  const visibleEdges = edges.value.filter(edge => targets.has(edge.target));
+  const visibleEdges = edges.filter(edge => targets.has(edge.target));
   const included = new Set(targets);
   for (const edge of visibleEdges) included.add(edge.source);
-  return { nodes: nodes.value.filter(node => included.has(node.id)), edges: visibleEdges };
+  return { nodes: nodes.filter(node => included.has(node.id)), edges: visibleEdges };
 });
 
 // Continue with the parent's level; saved preferences only fill missing settings.
@@ -162,15 +236,21 @@ function nodeContent(id: string) {
 function rebuild() {
   const value = projection.value;
   if (!value) {
+    creatingDraft = undefined;
     nodes.value = [];
     edges.value = [];
     return;
   }
   if (session.highlightedNode && !value.nodes.some(node => node.id === session.highlightedNode)) session.highlightedNode = null;
   let restoredLayout: Map<string, ManualPosition> | undefined;
+  let restoredSizes: Map<string, Dimensions> | undefined;
   if (activeSession !== sessionKey.value) {
+    const adoptDraft = creatingDraft === session.activeProjectId && session.creation?.status === "ready"
+      && session.current?.session.path === session.creation.path;
+    creatingDraft = preparingSession.value ? session.activeProjectId : undefined;
     dragged.clear();
     restoredLayout = rememberedLayouts.get(sessionKey.value);
+    restoredSizes = rememberedDimensions.get(sessionKey.value);
     branchOrder.clear();
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
@@ -183,26 +263,36 @@ function rebuild() {
     draftOrder = 0;
     promptCache.clear();
     activeSession = sessionKey.value;
-    draftState.value = emptyDraft();
+    if (!adoptDraft) draftState.value = emptyDraft();
     draftParent.value = undefined;
-    draftModel.value = undefined;
-    draftThinking.value = undefined;
+    if (!adoptDraft) {
+      draftModel.value = undefined;
+      draftThinking.value = undefined;
+    }
     clearSubmittedDraft();
     deleteError.value = "";
   }
   if (draftParent.value && !value.nodes.some(node => node.id === draftParent.value)) resetDraft();
+  // The same submission changes ids as admission and the real turn arrive.
   for (const run of session.current?.graph?.runs ?? []) {
     const pendingId = `pending:${run.runId}`;
-    const order = branchOrder.get(pendingId);
-    if (run.nodeId && order !== undefined) {
-      rememberBranchOrder(run.nodeId, order, pendingId);
+    const submittedId = run.requestId ? `pending:${run.requestId}` : pendingId;
+    const from = branchOrder.has(pendingId) ? pendingId : submittedId;
+    const order = branchOrder.get(from);
+    const to = run.nodeId ?? pendingId;
+    if (order !== undefined) {
+      // A failed preflight can still report the existing source node.
+      const failedBeforeTurn = run.error && run.nodeId && nodes.value.some(node => node.id === run.nodeId);
+      if (failedBeforeTurn || (!run.nodeId && run.status !== "running")) rememberBranchOrder(from, undefined);
+      else if (to !== from) rememberBranchOrder(to, order, from);
     }
   }
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   // Settled positions use the same measured card sizes the pane renders, so
   // lanes track real heights instead of the fixed 280×146 estimate pitch.
-  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions.
-  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? { width: 280, height: 146 }]));
+  // Unmeasured nodes keep the estimate until Vue Flow reports dimensions; a
+  // returning session starts from the sizes it left with.
+  const sizes = new Map(value.nodes.map(n => [n.id, previousNodes.get(n.id)?.dimensions ?? restoredSizes?.get(n.id) ?? { width: 320, height: 146 }]));
   const calculated = layoutGraph(value, sizes, branchOrder);
   const positions = new Map(calculated.nodes.map(n => [n.id, { x: n.x, y: n.y, width: n.width, height: n.height }]));
   const removed = autoPositions && [...autoPositions.keys()].some(id => !positions.has(id));
@@ -244,11 +334,15 @@ function rebuild() {
       current: value.activeNodeId === node.id,
       runnable: Boolean(session.current?.runtime.available && !busy && node.forkable !== false),
       running: node.running,
+      compacting: () => Boolean(session.current?.graph ? session.runFor(node.id)?.runtime?.isCompacting : session.current?.runtime.isCompacting),
       blockedReason: busy
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
+      activity: () => session.activityFor(node.id),
       searchHit: searchHitIds.value.has(node.id),
+      filterContext: !matchesGraphFilter(node, graphFilter.value),
+      onEditLabel: canEditLabel(node) ? () => editLabel(node) : undefined,
       onCompose: direction => compose(node.id, direction),
       onOpenPanel: session.current?.graph ? () => openChatColumn(node.id) : undefined,
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
@@ -273,47 +367,53 @@ function rebuild() {
   }));
   const rootDraft = !placed.nodes.length;
   if (rootDraft) draftParent.value = null;
+  // Graph branches own their submission state. Only the automatic root editor
+  // (or a single-runtime session) follows sends from other input surfaces.
+  const draftSending = Boolean(draftState.value.busy || (!preparingSession.value && (
+    ((rootDraft || !session.current?.graph) && session.pendingPrompt)
+    || (rootDraft && session.current?.graph?.runs.some(run => run.status === "running" && run.pending)))));
   // The submitted prompt renders as a result-shaped node showing the agent at
   // work until the real node arrives with the settled snapshot.
-  const pending = session.pendingPrompt;
-  const pendingParent = pending?.targetNodeId
-    ? placed.nodes.find((node) => node.id === pending.targetNodeId)
-    : undefined;
-  const pendingSiblings = pendingParent ? children.get(pendingParent.id) ?? [] : [];
-  const pendingTurn: Node<PromptNodeData> | undefined = pending ? {
-    id: pending.message.entryId,
-    type: "prompt",
-    position: pendingParent
-      ? { x: pendingParent.x + pendingParent.width + 92, y: pendingSiblings.length ? Math.max(...pendingSiblings.map((node) => node.y)) + 178 : pendingParent.y }
-      : { x: 48, y: 48 },
-    data: {
-      node: {
-        id: pending.message.entryId,
-        userEntryId: pending.message.entryId,
-        parentId: pending.targetNodeId,
-        title: clipText(pending.message.text, 58) || (pending.message.images?.length ? `🖼 × ${pending.message.images.length}` : "Untitled prompt"),
-        imageCount: pending.message.images?.length,
-        preview: "",
-        timestamp: pending.message.timestamp,
-        rawEntryIds: [pending.message.entryId],
-        leafEntryId: pending.message.entryId,
-        toolCallCount: 0,
-        hasError: false,
-        depth: (pendingParent?.depth ?? -1) + 1,
-        footer: {
-          model: pending.model ?? session.current?.runtime.model ?? null,
-          thinkingLevel: pending.thinkingLevel ?? session.current?.runtime.thinkingLevel ?? "off",
-        },
-      } satisfies GraphNode,
-      active: true,
-      current: false,
-      running: true,
-      runnable: false,
-      blockedReason: "graph.blockedStreaming",
-      content: () => ({ user: pending.message.text, images: pending.message.images, assistant: t("graph.agentRunning") }),
-      onCompose: () => {},
-    },
-  } : undefined;
+  const pendingTurns = (preparingSession.value ? [] : session.currentPendingPrompts).filter(pending =>
+    !pending.requestId || !session.current?.graph?.runs.some(run => run.requestId === pending.requestId)
+  ).map((pending): Node<PromptNodeData> => {
+    const pendingParent = pending.targetNodeId ? placed.nodes.find(node => node.id === pending.targetNodeId) : undefined;
+    const pendingSiblings = pendingParent ? children.get(pendingParent.id) ?? [] : [];
+    return {
+      id: pending.message.entryId,
+      type: "prompt",
+      position: pendingParent
+        ? { x: pendingParent.x + pendingParent.width + 92, y: pendingSiblings.length ? Math.max(...pendingSiblings.map((node) => node.y)) + 178 : pendingParent.y }
+        : { x: 48, y: 48 },
+      data: {
+        node: {
+          id: pending.message.entryId,
+          userEntryId: pending.message.entryId,
+          parentId: pending.targetNodeId,
+          title: clipText(pending.message.text, 58) || (pending.message.images?.length ? `🖼 × ${pending.message.images.length}` : "Untitled prompt"),
+          imageCount: pending.message.images?.length,
+          preview: "",
+          timestamp: pending.message.timestamp,
+          rawEntryIds: [pending.message.entryId],
+          leafEntryId: pending.message.entryId,
+          toolCallCount: 0,
+          hasError: false,
+          depth: (pendingParent?.depth ?? -1) + 1,
+          footer: {
+            model: pending.model ?? session.current?.runtime.model ?? null,
+            thinkingLevel: pending.thinkingLevel ?? session.current?.runtime.thinkingLevel ?? "off",
+          },
+        } satisfies GraphNode,
+        active: true,
+        current: false,
+        running: true,
+        runnable: false,
+        blockedReason: "graph.blockedStreaming",
+        content: () => ({ user: pending.message.text, images: pending.message.images, assistant: t("graph.agentRunning") }),
+        onCompose: () => {},
+      },
+    };
+  });
   const parent = draftParent.value ? placed.nodes.find((node) => node.id === draftParent.value) : undefined;
   const model = draftModel.value === undefined
     ? parent?.footer?.model ?? session.current?.runtime.model ?? null
@@ -324,18 +424,26 @@ function rebuild() {
   const draft: Node<DraftNodeData> | undefined = (parent || rootDraft) ? {
     id: draftId,
     type: "draft",
-    // Keep the editor mounted while sending so failures retain text and images.
-    style: { visibility: pending ? "hidden" : "visible", pointerEvents: pending ? "none" : "auto" },
+    // Keep the editor mounted for failure recovery, but hidden through both
+    // the local submission and the server's pending-to-real-node handoff.
+    style: { visibility: draftSending ? "hidden" : "visible", pointerEvents: draftSending ? "none" : "auto" },
     position: parent
       ? { x: parent.x + parent.width + 92, y: siblings.length ? Math.max(...siblings.map((node) => node.y)) + 178 : parent.y }
       : { x: 48, y: 48 },
     data: {
       draftState: draftState.value,
       parentId: parent?.id ?? null,
-      runnable: Boolean(session.current?.runtime.available),
+      runnable: !preparingSession.value && Boolean(session.current?.runtime.available),
+      initializing: session.creating,
+      creationError: session.creation?.status === "failed" ? session.creation.error : undefined,
+      onRetry: session.creation?.status === "failed" ? () => {
+        void session.create().catch(error => layout.showNotice(String(error), "error"));
+      } : undefined,
       model,
       thinkingLevel,
       models: session.models,
+      personas: layout.settings?.app.personas ?? [],
+      promptOverride: session.promptOverrideAt(parent?.id ?? null),
       onModel: (next: RuntimeModel) => {
         draftModel.value = next;
         if (next.reasoning === false) draftThinking.value = "off";
@@ -351,16 +459,17 @@ function rebuild() {
       onSubmit: submitDraft,
     },
   } : undefined;
-  const nextNodes: RenderNode[] = [...turns, ...(pendingTurn ? [pendingTurn] : []), ...(draft ? [draft] : [])];
+  const nextNodes: RenderNode[] = [...turns, ...pendingTurns, ...(draft ? [draft] : [])];
   const nextEdges: Edge[] = value.edges.map((edge) => ({
     ...edge,
     class: "",
   }));
-  if (pending && pendingParent)
-    nextEdges.push({ id: `edge:${pending.message.entryId}`, source: pendingParent.id, target: pending.message.entryId, class: "draft-edge", animated: true });
-  if (parent && draft) nextEdges.push({ id: `edge:${draftId}`, source: parent.id, target: draftId, class: "draft-edge", animated: true });
+  for (const pending of pendingTurns)
+    if (pending.data!.node.parentId && positions.has(pending.data!.node.parentId))
+      nextEdges.push({ id: `edge:${pending.id}`, source: pending.data!.node.parentId, target: pending.id, class: "draft-edge", animated: true });
+  if (parent && draft && !draftSending) nextEdges.push({ id: `edge:${draftId}`, source: parent.id, target: draftId, class: "draft-edge", animated: true });
   const pendingRows = new Map<string | null, number>();
-  for (const run of session.current?.graph?.runs ?? []) {
+  for (const run of preparingSession.value ? [] : session.current?.graph?.runs ?? []) {
     if (!run.pending || run.status !== "running") continue;
     const parentId = run.pending.parentNodeId;
     const anchor = placed.nodes.find(n => n.id === parentId);
@@ -368,11 +477,20 @@ function rebuild() {
     pendingRows.set(parentId, offset + 1);
     const siblings = parentId ? children.get(parentId) ?? [] : placed.nodes;
     const id = `pending:${run.runId}`;
+    const submitted = session.currentPendingPrompts.find(prompt => prompt.requestId && prompt.requestId === run.requestId);
+    const pendingModel = run.pending.model ?? submitted?.model ?? run.runtime?.model ?? anchor?.footer?.model ?? session.current?.runtime.model ?? null;
+    const model = session.models.find(model => model.provider === pendingModel?.provider && model.id === pendingModel.id) ?? pendingModel;
     const node: GraphNode = { id, userEntryId: id, parentId, title: clipText(run.pending.text, 58), preview: "",
-      timestamp: "", rawEntryIds: [], leafEntryId: id, toolCallCount: 0, hasError: false, depth: (anchor?.depth ?? -1) + 1 };
+      imageCount: run.pending.images?.length,
+      timestamp: run.pending.timestamp ?? submitted?.message.timestamp ?? "",
+      metrics: run.runtime?.timing && run.runtime.timing.startedAt === run.pending.timestamp ? run.runtime.timing : undefined,
+      footer: { model, thinkingLevel: run.pending.thinkingLevel ?? submitted?.thinkingLevel ?? run.runtime?.thinkingLevel ?? anchor?.footer?.thinkingLevel ?? "off" },
+      rawEntryIds: [], leafEntryId: id, toolCallCount: 0, hasError: false, depth: (anchor?.depth ?? -1) + 1 };
     nextNodes.push({ id, type: "prompt", position: { x: anchor ? anchor.x + anchor.width + 92 : 48,
       y: (siblings.length ? Math.max(...siblings.map(n => n.y)) + 178 : anchor?.y ?? 48) + offset * 178 },
       data: { node, active: true, current: false, running: true, runnable: false,
+        compacting: () => Boolean(session.runFor(id)?.runtime?.isCompacting),
+        activity: () => session.activityFor(id),
         blockedReason: "graph.blockedStreaming", content: () => ({ user: run.pending!.text, assistant: t("graph.agentRunning"), images: run.pending!.images }), onCompose: () => {} } });
     if (parentId) nextEdges.push({ id: `edge:${id}`, source: parentId, target: id, animated: true });
   }
@@ -399,9 +517,9 @@ function rebuild() {
     const previous = previousNodes.get(node.id);
     Object.assign(node, {
       dimensions: existing?.dimensions.width ? existing.dimensions
-        : previous?.dimensions ?? { width: node.type === "draft" ? 360 : 280, height: node.type === "draft" ? 280 : 146 },
+        : previous?.dimensions ?? restoredSizes?.get(node.id) ?? (node.type === "draft" ? DRAFT_SIZE : { width: 320, height: 146 }),
       handleBounds: existing?.handleBounds.source?.length ? existing.handleBounds : previous?.handleBounds ?? {
-        source: [{ type: "source", nodeId: node.id, position: "right", x: 276, y: 69, width: 8, height: 8 }],
+        source: [{ type: "source", nodeId: node.id, position: "right", x: 316, y: 69, width: 8, height: 8 }],
         target: [{ type: "target", nodeId: node.id, position: "left", x: -4, y: 69, width: 8, height: 8 }],
       },
     });
@@ -424,17 +542,20 @@ function rebuild() {
 
 function layoutBranches(items: RenderNode[]) {
   // Runs on every rebuild and resize so settled lanes follow measured card
-  // heights; transients reserve vertical space but never widen columns.
-  const visible = items.filter(node => !(node.type === "draft" && session.pendingPrompt));
+  // heights; transients reserve vertical space but never widen columns, and a
+  // draft's reservation is capped at its opening slot so growth only overlays.
+  const visible = items.filter(node => typeof node.style === "function" || node.style?.visibility !== "hidden");
   const depths = new Map(projection.value?.nodes.map(node => [node.id, node.depth]));
   const tree = visible.map(node => node.type === "draft"
     ? { id: node.id, parentId: node.data.parentId, timestamp: "\uffff", depth: (depths.get(node.data.parentId) ?? -1) + 1 }
     : { ...node.data.node, timestamp: transientNodeIds.has(node.id) ? "\uffff" : node.data.node.timestamp });
   const order = new Map(branchOrder);
   if (draftParent.value !== undefined) order.set(draftParent.value ? `draft:${draftParent.value}` : "draft:root", draftOrder);
-  const pending = session.pendingPrompt;
+  const pending = !session.current?.graph && session.pendingPrompt;
   if (pending && pending.targetNodeId === draftParent.value) order.set(pending.message.entryId, draftOrder);
-  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.dimensions!])), order, transientNodeIds);
+  const placed = layoutGraph({ nodes: tree }, new Map(visible.map(node => [node.id, node.type === "draft"
+    ? { width: node.dimensions!.width, height: DRAFT_SIZE.height }
+    : node.dimensions!])), order, transientNodeIds);
   // Cards that were not on screen yet may be moved out of a pinned card's way;
   // the ones the user can already see keep the position they have.
   const known = new Set(nodes.value.map(node => node.id));
@@ -454,7 +575,7 @@ function layoutBranches(items: RenderNode[]) {
 
 let selectionRequest = 0;
 let centerRequest = 0;
-onBeforeUnmount(() => { selectionRequest++; centerRequest++; flow.value = undefined; });
+onBeforeUnmount(() => { selectionRequest++; centerRequest++; retryRequest++; flow.value = undefined; });
 
 async function select(id: string, openChat = false) {
   if (id.startsWith("draft:") || (id.startsWith("pending:") && !session.current?.graph)) return;
@@ -474,10 +595,16 @@ async function select(id: string, openChat = false) {
 
 async function deleteNode(id: string) {
   deleteError.value = "";
+  const request = ++centerRequest;
+  const view = session.viewRequest;
+  const key = sessionKey.value;
   try {
     await session.deleteNode(id);
-    rebuild();
-    await center(defaultFocusId());
+    // The projection watcher rebuilds the graph. Keep the viewport stable unless
+    // the surviving focus moved out of view, and yield to navigation during IO.
+    await nextTick();
+    if (request === centerRequest && view === session.viewRequest && key === sessionKey.value && !focusNodeVisible())
+      await center(defaultFocusId(), false, false);
   } catch (error) { deleteError.value = String(error); }
 }
 
@@ -490,17 +617,19 @@ async function exportSession(id: string) {
   }
 }
 
-async function recoverDeletion() {
+async function reopenSession() {
   const path = session.current?.session.path;
-  if (!path || recoveringDeletion.value) return;
-  recoveringDeletion.value = true;
+  if (!path || reopeningSession.value) return;
+  reopeningSession.value = true;
   deleteError.value = "";
+  reopenError.value = "";
   try { await session.open(path); }
-  catch (error) { deleteError.value = String(error); }
-  finally { recoveringDeletion.value = false; }
+  catch (error) { reopenError.value = String(error); }
+  finally { reopeningSession.value = false; }
 }
 
 async function compose(id: string, direction?: BranchDirection) {
+  ++retryRequest;
   if (draftParent.value !== id) draftState.value = emptyDraft();
   draftOrder = direction === "up" ? -++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
@@ -520,13 +649,28 @@ async function retryTurn(id: string) {
   if (!node) return;
   const content = nodeContent(id);
   if (!content.user.trim() && !content.images?.length) return;
+  const graph = session.current?.graph;
+  const request = ++retryRequest, view = session.viewRequest, key = sessionKey.value;
+  const draft = draftState.value, text = draft.text, attached = [...draft.images];
+  const model = draftModel.value, thinking = draftThinking.value;
+  const focus = session.focusedNode;
+  const isCurrent = () => request === retryRequest && view === session.viewRequest && key === sessionKey.value
+    && graph?.epoch === session.current?.graph?.epoch && focus === session.focusedNode
+    && draftState.value === draft && draft.text === text
+    && !draft.busy && !draft.readingImages && draftModel.value === model && draftThinking.value === thinking
+    && draft.images.length === attached.length && draft.images.every((image, index) => image === attached[index])
+    && session.current?.runtime.available && projection.value?.nodes.some(node => node.id === id);
+  let images: PromptImage[];
+  try { images = await Promise.all((content.images ?? []).map(sessionImageData)); }
+  catch (error) { if (isCurrent()) layout.showNotice(error instanceof Error ? error.message : String(error), "error"); return; }
+  if (!isCurrent()) return;
   const parent = node.parentId ?? node.id;
   const parentNode = projection.value?.nodes.find((item) => item.id === parent);
   resetDraft();
   draftParent.value = parent;
   draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
   draftThinking.value = undefined;
-  draftState.value = { ...emptyDraft(), text: content.user, images: [...(content.images ?? [])] };
+  draftState.value = { ...emptyDraft(), text: content.user, images };
   rebuild();
   await center(`draft:${parent}`, true);
 }
@@ -557,6 +701,7 @@ function cancelDraft() {
 }
 
 function resetDraft() {
+  ++retryRequest;
   draftState.value = emptyDraft();
   draftParent.value = undefined;
   draftModel.value = undefined;
@@ -567,16 +712,29 @@ function resetDraft() {
 async function submitDraft(text: string, images?: PromptImage[]) {
   const order = draftOrder;
   const targetSession = sessionKey.value;
+  const targetDraft = draftState.value;
+  const requestId = order && session.current?.graph ? crypto.randomUUID() : undefined;
+  if (requestId && order) rememberBranchOrder(`pending:${requestId}`, order);
   const delivered = await runDraftSubmit(
     draftParent.value ?? null,
     text,
     draftModel.value,
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
+    requestId || targetDraft.promptOverride !== undefined
+      ? { ...(requestId ? { requestId } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
+      : undefined,
   );
-  if (!delivered) return false;
+  if (!delivered) {
+    if (requestId && targetSession === sessionKey.value) rememberBranchOrder(`pending:${requestId}`, undefined);
+    return false;
+  }
   if (targetSession !== sessionKey.value) return true;
-  if (submittedNodeId.value && order) rememberBranchOrder(submittedNodeId.value, order);
+  if (delivered.nodeId && order) rememberBranchOrder(delivered.nodeId, order, requestId ? `pending:${requestId}` : undefined);
+  if (targetDraft !== draftState.value) {
+    rebuild();
+    return true;
+  }
   if (session.current?.graph) {
     resetDraft(); rebuild();
     await center(session.focusedNode ?? undefined, true);
@@ -634,8 +792,8 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   const distant = Math.hypot(position.x * zoom + viewport.x - pane.width / 2,
     position.y * zoom + viewport.y - pane.height / 2) > Math.hypot(pane.width, pane.height) * 2;
   await flow.value.setCenter(
-    position.x + (size?.width || (id.startsWith("draft:") ? 360 : 280)) / 2,
-    position.y + (size?.height || (id.startsWith("draft:") ? 280 : 146)) / 2,
+    position.x + (size?.width || (id.startsWith("draft:") ? DRAFT_SIZE.width : 320)) / 2,
+    position.y + (size?.height || (id.startsWith("draft:") ? DRAFT_SIZE.height : 146)) / 2,
     // D3's zoom interpolation zooms far out between distant nodes, transiently
     // mounting thousands of cards. Jump directly across large branches.
     { zoom: ensureReadable ? Math.max(zoom, readableZoom) : zoom, duration: animate && !distant ? 280 : 0 },
@@ -644,6 +802,12 @@ async function center(id = defaultFocusId(), ensureReadable = false, animate = t
   if (id.startsWith("draft:"))
     document.querySelector<HTMLTextAreaElement>(".draft-node textarea")?.focus({ preventScroll: true });
 }
+
+watch(graphFilter, async mode => {
+  if (mode === "all") return;
+  const target = projection.value?.nodes.find(node => matchesGraphFilter(node, mode));
+  if (target) await center(target.id, true, false);
+}, { flush: "post" });
 
 // A session switch resumes that session's remembered viewport instead of
 // re-centering; sessions seen for the first time still focus their active node.
@@ -793,17 +957,17 @@ function startDrag(event: NodeMouseEvent) {
   dragFollowsBranch = holdsBranchModifier(event);
 }
 
-function trackDragModifier(event: NodeMouseEvent) {
+function trackDrag(event: NodeMouseEvent) {
   if (holdsBranchModifier(event)) dragFollowsBranch = true;
+  // Rebuilds and measurements during a drag must use the current pointer position.
+  dragged.set(event.node.id, { ...event.node.position, branch: dragFollowsBranch });
+  const node = nodes.value.find(node => node.id === event.node.id);
+  if (node) node.position = { ...event.node.position };
 }
 
 function rememberDrag(event: NodeMouseEvent) {
-  const branch = dragFollowsBranch || holdsBranchModifier(event);
+  trackDrag(event);
   dragFollowsBranch = false;
-  dragged.set(event.node.id, { ...event.node.position, branch });
-  const node = nodes.value.find(node => node.id === event.node.id);
-  if (!node) return;
-  node.position = { ...event.node.position };
   // Lay out from the drop at once, so a branch dragged along moves with its card
   // instead of following on some later rebuild.
   layoutBranches(nodes.value);
@@ -831,20 +995,28 @@ function syncNodeDimensions(changes: NodeChange[]) {
 
 const pendingRuns = computed(() => JSON.stringify(session.current?.graph?.runs.filter(run => run.pending && run.status === "running") ?? []));
 watch(
-  [() => sessionKey.value, () => projection.value?.nodes, () => projection.value?.edges,
+  [() => sessionKey.value, () => session.creation, () => projection.value?.nodes, () => projection.value?.edges,
     () => projection.value?.activeBranchNodeIds, () => projection.value?.activeNodeId,
     () => session.current?.runtime.available, () => !session.current?.graph && session.current?.runtime.isStreaming,
-    () => session.models, () => draftParent.value, () => session.pendingPrompt, () => session.deleteBlockedReason, pendingRuns,
-    searchHitIds],
+    () => session.models, () => layout.settings?.app.personas, () => projection.value?.activePromptOverride,
+    () => draftParent.value, () => draftState.value.busy,
+    () => session.currentPendingPrompts, () => session.deleteBlockedReason, pendingRuns,
+    searchHitIds, graphFilter],
   () => {
-    if (!session.current) booted.value = false;
+    if (!session.current && !preparingSession.value) booted.value = false;
     const changedSession = activeSession !== sessionKey.value;
     // Stash the outgoing session's arrangement and pane position before the
-    // rebuild resets per-session state.
-    if (changedSession && activeSession !== undefined) {
+    // rebuild resets per-session state. A teardown (no projection) clears the
+    // cards without adopting a new session, so the next fire must not overwrite
+    // the good snapshot with the torn-down state; rendered sessions always
+    // carry at least the draft card, so empty means torn down.
+    if (changedSession && activeSession !== undefined && nodes.value.length) {
       const viewport = flow.value?.getViewport();
       if (viewport) rememberedViewports.set(activeSession, viewport);
       rememberedLayouts.set(activeSession, new Map(dragged));
+      rememberedDimensions.set(activeSession, new Map(nodes.value
+        .filter(node => node.dimensions?.width)
+        .map(node => [node.id, node.dimensions!])));
     }
     const submittedNode = acceptSubmittedNode();
     rebuild();
@@ -858,18 +1030,20 @@ watch(
 
 <template>
   <main class="panel graph-panel">
-    <div v-if="deleteError || deletionNeedsRecovery" class="graph-delete-error" role="alert">
-      {{ t('graph.deleteFailed', { error: deleteError || session.current?.graph?.storageError }) }}
-      <Button v-if="deletionNeedsRecovery" data-action="node-delete-recover" variant="outline" :disabled="recoveringDeletion" @click="recoverDeletion">
+    <div v-if="deleteError || reopenError || sessionNeedsRecovery" class="graph-delete-error" role="alert">
+      {{ t(deleteError ? 'graph.deleteFailed' : 'graph.recoveryNeeded', { error: deleteError || reopenError || session.current?.graph?.storageError }) }}
+      <Button v-if="sessionNeedsRecovery" data-action="node-delete-recover" variant="outline" :disabled="reopeningSession" @click="reopenSession">
         {{ t('graph.reopenSession') }}
       </Button>
     </div>
-    <div v-if="!session.current" class="graph-empty">
+    <div v-if="!session.current && !preparingSession" class="graph-empty">
       <div aria-hidden="true"><Network :size="64" :stroke-width="1.6" /></div>
       <span>
         {{ t("graph.empty") }}
       </span>
-      <Button @click="emit('newSession')">{{ t("graph.newSession") }}</Button>
+      <Button :disabled="session.loading" :aria-busy="session.loading" @click="emit('newSession')">
+        {{ t(session.loading ? "graph.startingSession" : "graph.newSession") }}
+      </Button>
     </div>
 
     <VueFlow
@@ -889,7 +1063,7 @@ watch(
       @node-click="nodeClicked"
       @node-double-click="nodeDoubleClicked"
       @node-drag-start="startDrag"
-      @node-drag="trackDragModifier"
+      @node-drag="trackDrag"
       @node-drag-stop="rememberDrag"
       @nodes-change="syncNodeDimensions"
     >
@@ -909,10 +1083,14 @@ watch(
         :aria-label="t('graph.minimapLabel')"
         @click="navigateMinimap"
       />
-      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="nodes" :highlight="searchHitIds.size ? searchHitIds : undefined" />
+      <GraphOverview v-if="layout.layout.minimap && nodes.length >= 500" :nodes="filteredGraph.nodes" :highlight="searchHitIds.size ? searchHitIds : undefined" />
     </VueFlow>
 
+    <p v-if="graphFilter !== 'all' && !filterCount" class="graph-filter-empty" role="status">{{ t("graph.filterEmpty") }}</p>
     <nav class="graph-controls">
+      <select v-model="graphFilter" data-action="graph-filter" :aria-label="t('graph.filterLabel')" class="graph-filter">
+        <option v-for="mode in GRAPH_FILTERS" :key="mode" :value="mode">{{ t(`graph.filters.${mode}`) }}</option>
+      </select>
       <div v-if="searchOpen" class="graph-search nodrag nowheel" @mousedown.stop @wheel.stop>
         <input
           ref="searchInput"
@@ -946,9 +1124,27 @@ watch(
     </nav>
 
     <footer class="graph-footer">
+      <span v-if="graphFilter !== 'all'">{{ t("graph.filterCount", { n: filterCount }) }}</span>
       <span>{{ t("graph.turnsLinks", { turns: projection?.nodes.length ?? 0, links: projection?.edges.length ?? 0 }) }}</span>
       <span>{{ t("graph.activeBranch", { n: projection?.activeBranchNodeIds.length ?? 0 }) }}</span>
       <span v-if="session.current?.graph">{{ t("graph.parallelRuns", { n: session.current.graph.runs.filter(r => r.status === 'running').length }) }}</span>
     </footer>
+    <DialogRoot :open="!!labelTarget" @update:open="!$event && !labelSaving && (labelTarget = undefined)">
+      <DialogPortal>
+        <DialogOverlay class="dialog-overlay" />
+        <DialogContent class="rename-dialog" :aria-describedby="undefined" @escape-key-down="labelSaving && $event.preventDefault()" @interact-outside="labelSaving && $event.preventDefault()">
+          <DialogTitle>{{ t("graph.editLabel") }}</DialogTitle>
+          <form @submit.prevent="saveLabel">
+            <input v-model="labelText" data-action="node-label-input" :aria-label="t('graph.editLabel')" maxlength="200" :disabled="labelSaving" />
+            <p>{{ t("graph.labelHint") }}</p>
+            <p v-if="labelError" role="alert">{{ labelError }}</p>
+            <footer>
+              <Button type="button" variant="ghost" :disabled="labelSaving" @click="labelTarget = undefined">{{ t("common.cancel") }}</Button>
+              <Button type="submit" data-action="node-label-save" :disabled="labelSaving">{{ t("common.save") }}</Button>
+            </footer>
+          </form>
+        </DialogContent>
+      </DialogPortal>
+    </DialogRoot>
   </main>
 </template>

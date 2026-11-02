@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import type { RawSessionEntry, PromptImage } from "../shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type PromptImage, type PromptOverrideInput } from "../shared/types.js";
 import { debugLog } from "./debug-log.js";
-import { projectSession } from "../shared/session.js";
+import { projectSession, promptDisplayTextMap } from "../shared/session.js";
 
 export interface SessionData { header: Record<string, unknown>; entries: RawSessionEntry[] }
 export interface BranchRecord {
@@ -13,7 +14,7 @@ export interface BranchRecord {
   parentId: string;
   forkEntryId: string;
   requestId: string;
-  request: { text: string; nodeId?: string | null; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string };
+  request: { text: string; nodeId?: string | null; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; timestamp?: string; promptOverride?: PromptOverrideInput };
   inherited: Record<string, string>;
   baseline: RawSessionEntry[];
   header: Record<string, unknown>;
@@ -39,7 +40,7 @@ export function parseStrict(raw: string): SessionData {
   if (!header || header.type !== "session" || typeof header.id !== "string" || !header.id || header.version !== 3)
     throw new Error("Expected a Pi v3 session header");
   const byId = new Map<string, RawSessionEntry>();
-  const types = new Set(["message", "model_change", "thinking_level_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
+  const types = new Set(["message", "model_change", "thinking_level_change", "usage", "compaction", "branch_summary", "custom", "custom_message", "context_edit", "label", "session_info"]);
   for (const entry of values) {
     if (!entry || !types.has(entry.type) || typeof entry.id !== "string" || !entry.id || byId.has(entry.id)
       || (entry.parentId !== null && typeof entry.parentId !== "string") || typeof entry.timestamp !== "string")
@@ -51,8 +52,9 @@ export function parseStrict(raw: string): SessionData {
     byId.set(entry.id, entry);
   }
   for (const entry of values) {
-    const ref = entry.type === "label" ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
-    if ((entry.type === "label" || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
+    const hasTarget = entry.type === "label" || entry.type === "context_edit";
+    const ref = hasTarget ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
+    if ((hasTarget || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
     // branch_summary.fromId may name the abandoned path outside an SDK-extracted session.
   }
   return { header, entries: values };
@@ -71,6 +73,34 @@ export function durableWrite(file: string, text: string) {
 export const graphDir = (main: string) => `${resolve(main)}.pix-tree`;
 
 /**
+ * A session's last activity: the newest of the main file's mtime and the
+ * conversation writes in its branch sidecar. Lists and snapshots must agree on
+ * this value — the panel ranks rows by it, so a branch run has to float the
+ * session row even though the main file itself never changed. Only branch
+ * transcripts and checkpoints count as activity: owner.json/cursor.json are
+ * ownership and view bookkeeping written by merely opening or switching, and
+ * must not float the session. The fallback (whatever the caller knows) stands
+ * in when nothing can be stat'ed.
+ */
+export function sessionModifiedAt(main: string, fallback: string): string {
+  let newest = "";
+  const consider = (iso: string) => {
+    if (iso > newest) newest = iso;
+  };
+  try {
+    consider(statSync(main).mtime.toISOString());
+  } catch { /* deleted mid-listing */ }
+  try {
+    const dir = graphDir(main);
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl") && !name.endsWith(".checkpoint")) continue;
+      try { consider(statSync(join(dir, name)).mtime.toISOString()); } catch { /* raced delete */ }
+    }
+  } catch { /* no branch sidecar */ }
+  return newest || fallback;
+}
+
+/**
  * `canonical()` re-prefixes a branch's own entries, so an inherited value is
  * either the entry's own id (inherited from main) or that same entry as an
  * ancestor names it. Any other value collapses two entries onto one id, which
@@ -84,6 +114,27 @@ function inheritsConsistently(record: BranchRecord) {
     seen.add(canonical);
   }
   return true;
+}
+
+/**
+ * Windows recycles pids aggressively: a lock outlives its force-killed owner
+ * as soon as an unrelated process reuses the number, and the plain signal
+ * probe then reports the holder alive forever. Before honoring a live
+ * holder, also require its process image to look like Pi (packaged PiX, dev
+ * electron, or the node-based remote host server).
+ */
+function holderLooksLikePi(pid: number): boolean {
+  let probe: ReturnType<typeof spawnSync>;
+  try {
+    probe =
+      process.platform === "win32"
+        ? spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true })
+        : spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+  } catch {
+    return true;
+  }
+  if (probe.error) return true;
+  return probe.status === 0 && /pix|electron|node/i.test(String(probe.stdout ?? ""));
 }
 
 export class GraphFiles {
@@ -111,15 +162,17 @@ export class GraphFiles {
     }
     durableWrite(file, JSON.stringify(value) + "\n");
   }
-  private readJson(file: string) {
+  private readJson(file: string, readOnly = false) {
     try { return JSON.parse(readFileSync(file, "utf8")); }
     catch (error) {
       if (!existsSync(`${file}.bak`)) throw error;
       const backup = readFileSync(`${file}.bak`, "utf8");
       const value = JSON.parse(backup);
-      if (existsSync(file)) copyFileSync(file, `${file}.damaged-${randomUUID()}`);
-      durableWrite(file, backup);
-      this.recoveryMessages.push(`Recovered metadata: ${basename(file)}`);
+      if (!readOnly) {
+        if (existsSync(file)) copyFileSync(file, `${file}.damaged-${randomUUID()}`);
+        durableWrite(file, backup);
+      }
+      this.recoveryMessages.push(`${readOnly ? "Read backup metadata" : "Recovered metadata"}: ${basename(file)}`);
       return value;
     }
   }
@@ -127,12 +180,24 @@ export class GraphFiles {
     mkdirSync(this.dir, { recursive: true });
     const file = join(this.dir, "owner.json");
     if (existsSync(file)) {
-      const owner = JSON.parse(readFileSync(file, "utf8"));
-      if (owner.host !== hostname()) throw new Error("Session graph is owned by another host");
-      let alive = true;
-      try { process.kill(owner.pid, 0); } catch (e) { alive = (e as NodeJS.ErrnoException).code !== "ESRCH"; }
-      if (alive) throw new Error("Session graph is already open in another PiX process");
-      rmSync(file);
+      // A corrupt or shapeless lock guards nothing: replace it.
+      let owner: { pid?: unknown; host?: unknown } | undefined;
+      try { owner = JSON.parse(readFileSync(file, "utf8")); } catch { owner = undefined; }
+      if (!owner || typeof owner.pid !== "number" || !Number.isInteger(owner.pid)) {
+        rmSync(file, { force: true });
+      } else if (owner.host !== hostname()) {
+        throw new Error(`Session graph is owned by another host (${String(owner.host)}); this computer is ${hostname()}. `
+          + "If this session is shared, close it in PiX on the owning computer, then reopen it here. "
+          + `If this is an independent copy, remove only the copied lock file "${file}", then reopen the session. `
+          + "Keep the session file and all other branch files.");
+      } else {
+        let alive = true;
+        try { process.kill(owner.pid, 0); } catch (e) { alive = (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+        if (alive && holderLooksLikePi(owner.pid))
+          throw new Error("Session graph is already open in another PiX process");
+        if (alive) debugLog("graph lock: holder pid no longer a Pi process; taking over", { pid: owner.pid });
+        rmSync(file, { force: true });
+      }
     }
     const fd = openSync(file, "wx");
     try { writeFileSync(fd, JSON.stringify({ pid: process.pid, host: hostname() })); fsyncSync(fd); }
@@ -143,12 +208,13 @@ export class GraphFiles {
     if (this.locked) rmSync(join(this.dir, "owner.json"), { force: true });
     this.locked = false;
   }
-  load() {
-    this.finishDeletion();
+  load({ readOnly = false }: { readOnly?: boolean } = {}) {
+    if (readOnly && !existsSync(this.dir)) return;
+    if (!readOnly) this.finishDeletion();
     const cursor = join(this.dir, "cursor.json");
     if (existsSync(cursor)) {
       try {
-        const leaf = this.readJson(cursor).leafId;
+        const leaf = this.readJson(cursor, readOnly).leafId;
         if (leaf !== null && typeof leaf !== "string") throw new Error("Invalid saved leaf");
         this.leafId = leaf; this.hasSavedLeaf = true;
       }
@@ -157,20 +223,20 @@ export class GraphFiles {
     for (const name of readdirSync(this.dir).filter(n => n.endsWith(".jsonl.origin.json"))) {
       let record: BranchRecord;
       try {
-        record = this.readJson(join(this.dir, name));
+        record = this.readJson(join(this.dir, name), readOnly);
         if (basename(this.origin(record.id)) !== name || !record.inherited || typeof record.request?.text !== "string"
           || !inheritsConsistently(record)
           || !["prepared", "running", "idle", "interrupted"].includes(record.status)) throw new Error("Invalid branch origin");
         parseStrict(encodeSession({ header: record.header, entries: record.baseline }));
       }
       catch { this.recoveryMessages.push(`Branch metadata unavailable; original session retained: ${name}`); continue; }
-      if (record.status === "prepared" && !existsSync(this.path(record.id))) {
+      if (!readOnly && record.status === "prepared" && !existsSync(this.path(record.id))) {
         const initial = encodeSession({ header: record.header, entries: record.baseline });
         parseStrict(initial);
         durableWrite(this.path(record.id), initial);
         durableWrite(this.checkpointPath(record.id), initial);
       }
-      const interrupted = record.status === "prepared" || record.status === "running";
+      const interrupted = !readOnly && (record.status === "prepared" || record.status === "running");
       if (interrupted) {
         record.status = "interrupted";
         record.error = "Execution interrupted; saved input retained. No tools were automatically replayed.";
@@ -182,7 +248,7 @@ export class GraphFiles {
     // after restart, including failures before Pi appended its first user message.
     for (const name of readdirSync(this.dir).filter(n => /^request-[a-zA-Z0-9-]+\.json$/.test(n))) {
       try {
-        const input = this.readJson(join(this.dir, name));
+        const input = this.readJson(join(this.dir, name), readOnly);
         if ((input.state === "prepared" || input.state === "queued") && typeof input.text === "string")
           this.recoveredInputs.push({ requestId: input.requestId, text: input.text, nodeId: input.nodeId, images: input.images });
       } catch { this.recoveryMessages.push(`Saved input unavailable; original retained: ${name}`); }
@@ -235,7 +301,7 @@ export class GraphFiles {
     for (const name of plan.removes) rmSync(join(this.dir, name), { force: true });
     rmSync(journal);
   }
-  /** Permanently prune a user entry and descendants from every source and saved copy. */
+  /** Permanently prune a user turn, its owned display marker, and descendants from every source and saved copy. */
   deleteNode(userEntryId: string, leafId: string | null) {
     const main = readStrict(this.main);
     const sources = [...this.records.values()].map(record => ({ record, data: readStrict(this.path(record.id)) }));
@@ -252,6 +318,14 @@ export class GraphFiles {
       siblings.push(entry.id); children.set(entry.parentId, siblings);
     }
     const removed = new Set<string>();
+    // New prompt-display records are persisted immediately before their user
+    // message, so they are ancestors rather than descendants of the turn.
+    // Delete only that direct owned marker; never sweep its other children.
+    const displayParent = root.parentId ? entries.get(root.parentId) : undefined;
+    const displayData = displayParent?.type === "custom" && displayParent.customType === PROMPT_DISPLAY_CUSTOM_TYPE
+      ? displayParent.data as { targetId?: unknown; text?: unknown; requestId?: unknown } | undefined : undefined;
+    if (displayParent && typeof displayData?.text === "string"
+      && (displayData.targetId === undefined || displayData.targetId === userEntryId)) removed.add(displayParent.id);
     const pending = [userEntryId];
     while (pending.length) {
       const id = pending.pop()!;
@@ -259,14 +333,27 @@ export class GraphFiles {
       removed.add(id);
       for (const child of children.get(id) ?? []) pending.push(child);
     }
+    // Labels are session-wide bookmarks, even when appended on a later path.
+    // Retain labels targeting surviving entries; prune() reparents their records.
+    for (const entry of entries.values())
+      if (entry.type === "label" && typeof entry.targetId === "string" && !removed.has(entry.targetId)) removed.delete(entry.id);
     // Metadata elsewhere can refer to an abandoned branch. Remove that metadata,
     // retaining its children and their original message ancestry.
     for (const entry of entries.values()) {
-      const ref = entry.type === "label" ? entry.targetId
-        : entry.type === "branch_summary" ? entry.fromId : undefined;
+      const ref = entry.type === "label" || entry.type === "context_edit" ? entry.targetId
+        : entry.type === "branch_summary" ? entry.fromId
+        : entry.type === "custom" && entry.customType === PROMPT_DISPLAY_CUSTOM_TYPE
+          ? (entry.data as { targetId?: unknown } | undefined)?.targetId : undefined;
       if (typeof ref === "string" && removed.has(ref)) removed.add(entry.id);
       if (entry.type === "compaction" && !removed.has(entry.id) && removed.has(String(entry.firstKeptEntryId)))
         throw new Error("A retained compaction depends on this node");
+    }
+    const deletedRequestIds = new Set<string>();
+    for (const id of removed) {
+      const entry = entries.get(id);
+      if (entry?.type !== "custom" || entry.customType !== PROMPT_DISPLAY_CUSTOM_TYPE) continue;
+      const requestId = (entry.data as { requestId?: unknown } | undefined)?.requestId;
+      if (typeof requestId === "string") deletedRequestIds.add(requestId);
     }
     const ancestor = (id: string | null) => {
       while (id && removed.has(id)) id = entries.get(id)?.parentId ?? null;
@@ -313,6 +400,7 @@ export class GraphFiles {
       ]) { writes[name!] = value!; removes.delete(name!); }
     }
     const deletedInputs = new Set<string>();
+    const promptTexts = promptDisplayTextMap([...entries.values()]);
     for (const id of removed) {
       const entry = entries.get(id)!;
       if (entry.type !== "message" || (entry.message as { role?: string })?.role !== "user") continue;
@@ -320,7 +408,8 @@ export class GraphFiles {
       let parent = entry.parentId ? entries.get(entry.parentId) : undefined;
       while (parent && !(parent.type === "message" && (parent.message as { role?: string })?.role === "user"))
         parent = parent.parentId ? entries.get(parent.parentId) : undefined;
-      deletedInputs.add(JSON.stringify([parent ? `turn:${parent.id}` : null, message.text, message.images ?? []]));
+      deletedInputs.add(JSON.stringify([parent ? `turn:${parent.id}` : null,
+        promptTexts.get(entry.id) ?? message.text, message.images ?? []]));
     }
     for (const name of names.filter(name => /^request-[a-zA-Z0-9-]+\.json$/.test(name))) {
       const request = JSON.parse(readFileSync(join(this.dir, name), "utf8"));
@@ -329,7 +418,8 @@ export class GraphFiles {
       const deletedInput = request.state === "prepared"
         && deletedInputs.has(JSON.stringify([request.nodeId ?? null, request.text, request.images ?? []]));
       // Keep independent unfinished inputs, even when their source file was pruned.
-      if (targetRemoved || ((request.branchId ? affected.has(request.branchId) : mainChanged) && (!unfinished || deletedInput))) {
+      if (targetRemoved || deletedRequestIds.has(String(request.requestId ?? ""))
+        || ((request.branchId ? affected.has(request.branchId) : mainChanged) && (!unfinished || deletedInput))) {
         // Retain only the deduplication receipt, never deleted prompt text or images.
         // Otherwise retrying an acknowledged request can execute its tools again.
         writes[name] = JSON.stringify({ requestId: name.slice(8, -5), state: unfinished ? "cancelled" : "settled" }) + "\n";
@@ -369,25 +459,42 @@ export class GraphFiles {
     const fd = openSync(this.main, "r+");
     try { fsyncSync(fd); } finally { closeSync(fd); }
   }
-  readBranch(record: BranchRecord): SessionData {
-    try { return readStrict(this.path(record.id)); }
+  readBranch(record: BranchRecord, { readOnly = false }: { readOnly?: boolean } = {}): SessionData {
+    const file = this.path(record.id);
+    if (readOnly && record.status === "prepared" && !existsSync(file))
+      return { header: record.header, entries: record.baseline };
+    // Parse and recover the same captured bytes while another process can append.
+    let original: string | undefined;
+    try {
+      original = readFileSync(file, "utf8");
+      return parseStrict(original);
+    }
     catch (error) {
-      record.error = `Source needs recovery; original retained: ${String(error)}`;
-      record.status = "interrupted";
-      this.recoveryMessages.push(record.error);
-      if (existsSync(this.path(record.id))) {
-        const raw = readFileSync(this.path(record.id), "utf8").trimEnd();
+      if (!readOnly) {
+        record.error = `Source needs recovery; original retained: ${String(error)}`;
+        record.status = "interrupted";
+        this.recoveryMessages.push(record.error);
+      }
+      if (original !== undefined) {
+        const raw = original.trimEnd();
         const prefix = raw.slice(0, raw.lastIndexOf("\n") + 1);
         try {
           const data = parseStrict(prefix);
           this.delta(record, data);
-          durableWrite(`${this.path(record.id)}.recovered`, encodeSession(data));
-          this.save(record);
+          if (!readOnly) {
+            durableWrite(`${file}.recovered`, encodeSession(data));
+            this.save(record);
+          } else {
+            let completeTail = false;
+            try { JSON.parse(raw.slice(raw.lastIndexOf("\n") + 1)); completeTail = true; } catch {}
+            if (completeTail) this.recoveryMessages.push(`Read branch prefix; invalid final record retained: ${record.id}: ${String(error)}`);
+          }
           return data;
         } catch (e) { debugLog(`graph-files: branch ${record.id} prefix recovery failed`, e); }
       }
       const checkpoint = readStrict(this.checkpointPath(record.id));
-      this.save(record);
+      if (readOnly) this.recoveryMessages.push(`Read branch checkpoint; source unavailable: ${record.id}`);
+      else this.save(record);
       return checkpoint;
     }
   }
@@ -423,6 +530,10 @@ export class GraphFiles {
       copy.parentId = entry.parentId === null ? record.forkEntryId || null : this.canonical(record, entry.parentId);
       for (const key of ["targetId", "firstKeptEntryId", "fromId"])
         if (typeof copy[key] === "string" && copy[key] !== "root") copy[key] = this.canonical(record, copy[key] as string);
+      if (copy.type === "custom" && copy.customType === PROMPT_DISPLAY_CUSTOM_TYPE) {
+        const data = copy.data as { targetId?: unknown; text?: unknown } | undefined;
+        if (typeof data?.targetId === "string") copy.data = { ...data, targetId: this.canonical(record, data.targetId) };
+      }
       // Session names and labels on copied history are session-wide SDK state.
       // Keep their provenance without overwriting the main session's metadata.
       if (copy.type === "session_info" || (copy.type === "label" && typeof entry.targetId === "string" && entry.targetId in record.inherited)) {
@@ -450,7 +561,7 @@ export class GraphFiles {
           const source = checkpoints ? checkpoints.get(id)! : readStrict(this.checkpointPath(id));
           if (source instanceof Error) throw source;
           delta = this.delta(record, source);
-          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", "pix.branch-metadata"].includes(String(e.customType)))
+          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", PROMPT_DISPLAY_CUSTOM_TYPE, "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
             || e.type === "custom_message")) throw new Error("Extension state needs a compatible export adapter; source retained");
         } catch (error) {
           throw new Error(`Cannot export branch ${id}: ${String(error)}`);

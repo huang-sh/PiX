@@ -48,6 +48,8 @@ export function checkPackagedFiles(archive, appDir) {
   const renderer = join(appDir, "out", "renderer");
   const required = new Set([
     join("out", "main", "index.js"),
+    join("out", "main", "pix-cli.js"),
+    join("out", "main", "pix-host.js"),
     join("out", "preload", "index.cjs"),
     join("out", "renderer", "index.html"),
   ]);

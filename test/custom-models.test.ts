@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { addCustomModel, getCustomModels } from "../src/main/custom-models.js";
+import { addCustomModel, addCustomModels, getCustomModels } from "../src/main/custom-models.js";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { validateRouteInput } from "../src/shared/contracts.js";
 import type { BrokerModel, CustomModelInput } from "../src/shared/types.js";
@@ -75,10 +75,92 @@ test("editing retains advanced options and sibling models, lists no credentials 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("adds a batch atomically and leaves all existing configuration intact on a conflict or invalid entry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-model-batch-"));
+  const path = join(dir, "models.json");
+  try {
+    addCustomModel(path, input);
+    const before = readFileSync(path, "utf8");
+    for (const models of [[], [{ modelId: "a" }, { modelId: input.modelId }], [{ modelId: "a" }, { modelId: " " }], [{ modelId: "a" }, { modelId: "a" }]]) {
+      assert.throws(() => addCustomModels(path, { ...input, models }));
+      assert.equal(readFileSync(path, "utf8"), before);
+    }
+    addCustomModels(path, { ...input, models: [{ modelId: "a", name: "Alpha" }, { modelId: "b" }] });
+    const models = getCustomModels(path);
+    assert.deepEqual(models.map(model => model.modelId), [input.modelId, "a", "b"]);
+    assert.equal(models[1]?.name, "Alpha");
+    assert.equal(models[2]?.name, "b");
+    assert.ok(!readFileSync(path, "utf8").includes(input.apiKey!));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a new provider's batch saves credentials once and is available after restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-model-batch-runtime-"));
+  const options = { modelsPath: join(dir, "models.json"), authPath: join(dir, "auth.json"), allowModelNetwork: false };
+  try {
+    const runtime = new PiRuntime(null, null, () => {}, async () => {});
+    runtime.agentDir = () => dir;
+    const sdk = await ModelRuntime.create(options);
+    runtime.modelServices = { modelRuntime: sdk };
+    await runtime.control({ action: "addCustomModels", ...input, models: [{ modelId: "first" }, { modelId: "second", name: "Second" }] });
+    assert.equal(JSON.parse(readFileSync(options.authPath, "utf8"))[input.provider].key, input.apiKey);
+    assert.ok(!readFileSync(options.modelsPath, "utf8").includes(input.apiKey!));
+    const restarted = await ModelRuntime.create(options);
+    const models = (await restarted.getAvailable()).filter(model => model.provider === input.provider);
+    assert.deepEqual(models.map(model => model.id), ["first", "second"]);
+    assert.equal(models[1]?.name, "Second");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("discovery keeps configured provider headers when previewing a new key and never saves that key", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-model-discovery-auth-"));
+  const options = { modelsPath: join(dir, "models.json"), authPath: join(dir, "auth.json"), allowModelNetwork: false };
+  try {
+    const runtime = new PiRuntime(null, null, () => {}, async () => {});
+    runtime.agentDir = () => dir;
+    const sdk = await ModelRuntime.create(options);
+    runtime.modelServices = { modelRuntime: sdk };
+    await runtime.control({ action: "addCustomModel", ...input });
+    const config = JSON.parse(readFileSync(options.modelsPath, "utf8"));
+    config.providers[input.provider].headers = { "x-tenant": "tenant-a" };
+    config.providers[input.provider].models[0].headers = { "x-model-only": "old-model-secret" };
+    writeFileSync(options.modelsPath, JSON.stringify(config));
+    await sdk.refresh({ allowNetwork: false });
+    const authBefore = readFileSync(options.authPath, "utf8");
+    const configBefore = readFileSync(options.modelsPath, "utf8");
+    let headers = new Headers();
+    t.mock.method(globalThis, "fetch", async (_url: URL, options: RequestInit) => {
+      headers = new Headers(options.headers);
+      return Response.json({ data: [{ id: "proxy-model" }] });
+    });
+    await runtime.control({ action: "discoverModels", ...input, apiKey: "replacement-key" });
+    assert.equal(headers.get("x-tenant"), "tenant-a");
+    assert.equal(headers.get("x-model-only"), null, "provider discovery cannot inherit a sibling model's private headers");
+    assert.equal(headers.get("Authorization"), "Bearer replacement-key");
+    assert.equal(readFileSync(options.authPath, "utf8"), authBefore);
+    assert.equal(readFileSync(options.modelsPath, "utf8"), configBefore);
+
+    config.providers[input.provider].headers.Authorization = "Token configured-auth";
+    writeFileSync(options.modelsPath, JSON.stringify(config));
+    await sdk.refresh({ allowNetwork: false });
+    await runtime.control({ action: "discoverModels", ...input, apiKey: "" });
+    assert.equal(headers.get("Authorization"), "Token configured-auth");
+    assert.equal(readFileSync(options.authPath, "utf8"), authBefore);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("custom model loads, authenticates, streams with the SDK, survives restart and reaches remote sessions without secrets", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-model-runtime-"));
   let request: any;
+  let discoveryAuthorization: string | undefined;
   const server = createServer(async (req, res) => {
+    if (req.method === "GET") {
+      assert.equal(req.url, "/v1/models");
+      discoveryAuthorization = req.headers.authorization;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: input.modelId }, { id: "batch-a", name: "Batch A" }, { id: "batch-b" }] }));
+      return;
+    }
     let body = "";
     for await (const chunk of req) body += chunk;
     request = { body: JSON.parse(body), authorization: req.headers.authorization, url: req.url };
@@ -94,7 +176,18 @@ test("custom model loads, authenticates, streams with the SDK, survives restart 
     const sdk = await ModelRuntime.create(options);
     runtime.modelServices = { modelRuntime: sdk };
     const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+    await runtime.control({ action: "discoverModels", ...input, baseUrl });
+    assert.equal(discoveryAuthorization, `Bearer ${input.apiKey}`);
+    assert.throws(() => readFileSync(options.modelsPath), /ENOENT/, "discovery never saves configuration");
     await runtime.control({ action: "addCustomModel", ...input, baseUrl });
+    const discovered = await runtime.control({ action: "discoverModels", ...input, baseUrl, apiKey: "" });
+    assert.equal(discoveryAuthorization, `Bearer ${input.apiKey}`, "blank keys reuse saved provider credentials");
+    assert.deepEqual(discovered, [{ id: "batch-a", name: "Batch A", exists: false }, { id: "batch-b", exists: false }, { id: input.modelId, exists: true }]);
+    const batch = { ...input, baseUrl, apiKey: "", models: [{ modelId: "batch-a" }, { modelId: "batch-b" }] };
+    await runtime.control({ action: "addCustomModels", ...batch });
+    const savedBatch = readFileSync(options.modelsPath, "utf8");
+    await assert.rejects(runtime.control({ action: "addCustomModels", ...batch, models: [{ modelId: "new" }, { modelId: "batch-a" }] }), /already exists/);
+    assert.equal(readFileSync(options.modelsPath, "utf8"), savedBatch);
     const models = await runtime.control({ action: "getModels" }) as Array<{ id: string }>;
     assert.ok(models.some((model) => model.id === input.modelId));
     assert.ok(!readFileSync(options.modelsPath, "utf8").includes(input.apiKey!));
@@ -103,6 +196,8 @@ test("custom model loads, authenticates, streams with the SDK, survives restart 
     const model = restarted.getModel(input.provider, input.modelId)!;
     assert.equal(model.baseUrl, baseUrl);
     assert.equal(model.contextWindow, input.contextWindow);
+    assert.ok(restarted.getModel(input.provider, "batch-a"));
+    assert.ok((await restarted.getAvailable()).some(model => model.id === "batch-b"));
     assert.deepEqual(model.input, ["text", "image"]);
     const image = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgo=" };
     const response = await restarted.completeSimple(model, { messages: [{ role: "user", content: [{ type: "text", text: "hello" }, image], timestamp: Date.now() }] });

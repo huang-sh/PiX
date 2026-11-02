@@ -3,15 +3,22 @@ import { X } from "@lucide/vue";
 import { Handle, Position } from "@vue-flow/core";
 import { useI18n } from "vue-i18n";
 import type { PromptImage, RuntimeModel } from "../../../shared/types";
+import type { NodePromptOverride, PersonaDefinition } from "../../../shared/types";
 import PromptComposer, { type ComposerDraft } from "../../components/PromptComposer.vue";
+import Button from "../../components/ui/Button.vue";
 
 export interface DraftNodeData {
   draftState?: ComposerDraft;
   parentId: string | null;
   runnable: boolean;
+  initializing?: boolean;
+  creationError?: string;
+  onRetry?: () => void;
   model: RuntimeModel | null;
   thinkingLevel: string;
   models: RuntimeModel[];
+  personas?: PersonaDefinition[];
+  promptOverride?: NodePromptOverride | null;
   onModel: (model: RuntimeModel) => void;
   onThinking: (level: string, explicit: boolean) => void;
   onCancel?: () => void;
@@ -34,14 +41,22 @@ const { t } = useI18n();
     <PromptComposer
       :draft-state="data.draftState"
       :runnable="data.runnable"
+      :editable="data.initializing || Boolean(data.creationError)"
       :model="data.model"
       :thinking-level="data.thinkingLevel"
       :models="data.models"
-      :placeholder="data.runnable ? t('draft.placeholder') : t('graph.blockedReadonly')"
+      :personas="data.personas"
+      :prompt-override="data.promptOverride"
+      :placeholder="data.initializing ? t('graph.preparingSession') : data.runnable || data.creationError ? t('draft.placeholder') : t('graph.blockedReadonly')"
       autofocus
+      auto-grow
       :on-model="data.onModel"
       :on-thinking="data.onThinking"
       :on-submit="data.onSubmit"
     />
+    <div v-if="data.creationError" role="alert">
+      <p>{{ data.creationError }}</p>
+      <Button variant="outline" @click="data.onRetry?.()">{{ t('graph.retrySession') }}</Button>
+    </div>
   </article>
 </template>

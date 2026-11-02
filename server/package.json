@@ -1,21 +1,34 @@
 {
   "name": "@pix/server",
-  "version": "0.0.20",
+  "version": "0.0.33",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-server": "0.85.1",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@ff-labs/pi-fff": "0.10.6",
     "@injaneity/pi-computer-use": "0.5.1",
     "diff": "8.0.4",
     "node-pty": "^1.2.0-beta.15",
-    "ws": "8.21.0"
+    "undici": "8.10.2",
+    "ws": "8.21.0",
+    "yaml": "^2.9.0"
   },
   "allowScripts": {
     "node-pty@1.2.0-beta.15": true
-  }
+  },
+  "bin": {
+    "pix": "bin/pix.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "skills",
+    "LICENSE"
+  ],
+  "license": "MPL-2.0"
 }

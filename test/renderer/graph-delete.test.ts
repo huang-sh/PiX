@@ -1,4 +1,5 @@
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
+import { VueFlow } from "@vue-flow/core";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import GraphPanel from "../../src/renderer/features/graph/GraphPanel.vue";
@@ -105,19 +106,67 @@ describe("graph node context menu deletion", () => {
     // The user dragged turn:d two rows down and turn:b aside; deleting the middle
     // sibling must compact the freed slot instead of leaving a stale hole.
     const flow = wrapper.findComponent({ name: "VueFlow" });
-    flow.vm.$emit("nodeDragStop", { node: { id: "turn:d", position: { x: 420, y: 600 } } });
+    flow.vm.$emit("nodeDragStop", { node: { id: "turn:d", position: { x: 460, y: 600 } } });
     flow.vm.$emit("nodeDragStop", { node: { id: "turn:b", position: { x: 840, y: 48 } } });
     await flushPromises();
     await wrapper.find('[data-id="turn:c"] .prompt-node').trigger("contextmenu", { clientX: 150, clientY: 90, button: 2 });
     await flushPromises();
     document.querySelector<HTMLElement>('[data-action="node-delete"]')!.click();
     await flushPromises();
-    // The reflow settles once the post-delete recenter animation finishes;
-    // Vue Flow unmounts off-viewport nodes while it pans.
-    await vi.waitFor(() => expect(nodeTransform(wrapper, "turn:d")).toEqual({ x: 420, y: 222 }), { timeout: 2000 });
+    // Vue Flow applies the rebuilt layout on its next render.
+    await vi.waitFor(() => expect(nodeTransform(wrapper, "turn:d")).toEqual({ x: 460, y: 222 }), { timeout: 2000 });
     // turn:b's auto slot is untouched by the deletion, so its manual pick stays.
     expect(nodeTransform(wrapper, "turn:b")).toEqual({ x: 840, y: 48 });
     wrapper.unmount();
+  });
+
+  it.each([true, false])("keeps a visible surviving focus still, or brings it into view without animation (visible: %s)", async visible => {
+    const pinia = createPinia(); setActivePinia(pinia);
+    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
+    const next = snapshot(); next.entries = next.entries.slice(0, 1); next.projection = projectSession(next.entries, "a"); next.graph!.revision++;
+    vi.mocked(window.pix!.invoke).mockResolvedValueOnce(next);
+    const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    const flow = (wrapper.findComponent(VueFlow).vm as unknown as { $: { exposed: Record<string, any> } }).$.exposed;
+    const graph = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
+    const setCenter = vi.spyOn(flow, "setCenter").mockResolvedValue(true);
+    flow.dimensions.value = { width: 2400, height: 900 };
+    wrapper.findComponent(VueFlow).vm.$emit("paneReady", flow);
+    await graph.center("turn:c", false, false);
+    setCenter.mockClear();
+    vi.spyOn(flow, "getViewport").mockReturnValue({ x: visible ? 0 : -4000, y: 0, zoom: 1 });
+    expect(graph.focusNodeVisible("turn:a")).toBe(visible);
+    await graph.deleteNode("turn:b");
+    expect(session.focusedNode).toBe("turn:a");
+    expect(wrapper.find('[data-id="turn:b"]').exists()).toBe(false);
+    if (visible) expect(setCenter).not.toHaveBeenCalled();
+    else {
+      expect(setCenter).toHaveBeenCalledTimes(1);
+      expect(setCenter).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), { zoom: 1, duration: 0 });
+    }
+  });
+
+  it("does not recenter a different session when a pending deletion completes", async () => {
+    const pinia = createPinia(); setActivePinia(pinia);
+    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
+    let resolve!: (value: SessionSnapshot) => void;
+    vi.mocked(window.pix!.invoke).mockImplementationOnce(() => new Promise<SessionSnapshot>(done => { resolve = done; }));
+    const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    await flushPromises();
+    const flow = (wrapper.findComponent(VueFlow).vm as unknown as { $: { exposed: Record<string, any> } }).$.exposed;
+    const graph = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
+    const setCenter = vi.spyOn(flow, "setCenter").mockResolvedValue(true);
+    wrapper.findComponent(VueFlow).vm.$emit("paneReady", flow);
+    const deletion = graph.deleteNode("turn:b");
+    session.viewRequest++;
+    session.applySnapshot(forkedSnapshot());
+    await graph.center("turn:d", false, false);
+    setCenter.mockClear();
+    vi.spyOn(flow, "getViewport").mockReturnValue({ x: -4000, y: 0, zoom: 1 });
+    resolve(snapshot());
+    await deletion;
+    expect(session.current?.session.id).toBe("s2");
+    expect(setCenter).not.toHaveBeenCalled();
   });
 
   it("disables deletion during a run and shows backend failures without removing cards", async () => {
@@ -146,6 +195,8 @@ describe("graph node context menu deletion", () => {
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
     expect(session.deleteBlockedReason).toBe("graph.blockedReadonly");
+    expect(wrapper.find('[role="alert"]').text()).toContain("Session needs recovery");
+    expect(wrapper.find('[role="alert"]').text()).not.toContain("Could not delete node");
     const invoke = vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error("still unavailable"));
     await wrapper.find('[data-action="node-delete-recover"]').trigger("click");
     await flushPromises();

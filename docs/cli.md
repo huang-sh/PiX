@@ -1,0 +1,155 @@
+# PiX CLI 与共享 Host
+
+GUI 与 CLI 都连接到独立的 PiX Host。Host 在同一台机器、同一 `PIX_HOME` 下只启动一份，管理多个项目和会话。CLI 不依赖 Electron，使用与 GUI 相同的 Agent、工具、配置和会话树。本版 CLI 命令针对本地项目；SSH/WSL 项目继续通过 GUI 连接远程 Host。
+
+桌面安装版使用应用自带运行时，无需另装 Node.js。安装后在项目目录打开新的终端，直接运行 `pix` 进入 TUI，或使用 `pix run`、`pix sessions` 等命令。各平台的注册方式见下文「桌面安装包的命令注册」。
+
+## 桌面安装包的命令注册
+
+桌面版包含专用 CLI 启动器，使用应用自带运行时，不要求另装 Node.js。安装后打开新的终端运行 `pix --help`。
+
+- **Windows 安装版**：NSIS 在卸载旧版、覆盖文件之前检查任务；无任务时正常继续，有任务时显示取消、重新检查及二次确认后的终止安装。安装器将 `resources\cli` 加入 PATH；仅当前用户安装写用户 PATH，所有用户安装写系统 PATH。卸载时只移除实际添加的目录，已有相同 PATH 项会保留。
+- **macOS DMG**：双击磁盘映像中的 PiX。无任务时正常关闭旧窗口及后台，直接安装并打开；仅在任务仍在进行时显示取消、重新检查及确认终止。取消或替换失败时会尝试恢复此前的窗口。ZIP 仍需将 PiX.app 放到 Applications，覆盖前先“退出 PiX”。安装后启动一次，自动创建 `~/.pix/bin/pix`，为 zsh 及已有 Bash/fish 配置添加带标记的 PATH 块。Finder 拖拽覆盖无法执行安装检查。移入废纸篓没有卸载钩子，因此删除应用前运行 `pix command uninstall`，保留用户配置。
+- **Linux deb/rpm**：pre-install 在覆盖文件前检查任务，post-install 释放升级锁。无任务时不增加交互；有任务时通过交互终端，或桌面会话中的 Zenity/KDialog，提供取消、重新检查及二次确认。缺少交互环境或明确指定静默模式时，有任务就取消安装并保留任务。安装器自动注册 `/usr/bin/pix`，GUI 使用 `pix-desktop`；保留原有 sandbox、MIME 与 AppArmor 行为。
+- **Linux tar.gz**：解压到固定目录并启动 GUI 一次后，按用户注册命令。
+- **Windows 便携版、AppImage**：不会自动修改 PATH；需要 `pix` 终端命令时，请使用支持命令注册的安装格式。macOS 直接从 `/Volumes/` 中运行也不会注册，避免指向稍后卸载的磁盘映像。
+
+三平台依据正在运行或等待处理的 Agent 任务、等待确认或执行中的 shell 命令、进行中的 Git 分支切换、检测到的终端子进程及已知远程任务显示任务确认；空闲窗口、终端会话及连接不触发额外确认。“终止并安装”先尝试正常退出，必要时才强制终止。普通安装不会强制关闭窗口。安装期间持有后台启动锁，避免旧客户端重新启动旧后台。
+
+内置终端采用简单的子进程检查：shell 存在子进程时视为有工作，没有子进程的终端可以正常关闭。此检查不注入 shell 脚本，也不修改提示符或调试钩子；仅在 shell 内执行的内置命令、函数或循环，以及尚未启动的排队输入，可能无法识别。检查不会阻塞终端输入；检查期间发生终端输入或会话变化时，会停止本次自动安装，请重新检查。子进程检查失败时，需先关闭终端再安装。
+
+较老的后台若不支持关闭空闲连接，新安装器会停止更新并提示先完整退出 PiX，不会为了跳过确认而强制结束后台。便携版、AppImage、tar.gz 和 Finder 手动覆盖没有安装前钩子，替换文件前仍需先完整退出。
+
+远程工作区同样检查 Agent 任务、直接执行的 shell 命令及终端子进程；状态无法确认或远程版本不支持检查时，安装会停止。退出连接及后台空闲回收会保留检测到工作或状态无法确认的远程 host，供稍后重新连接。
+
+断开远程连接后，只有后台确认已释放会话和工作区资源，才会删除重连信息；仍有工作或退出未确认时，再次连接会优先找回原后台。远程 Pi SDK 自动升级也需要这项确认，有命令、待处理任务或无法确认的终端时会推迟升级。旧版远程后台不支持退出确认时，需先在远程退出旧后台，再重新连接完成升级。
+
+```sh
+pix command status
+pix command uninstall
+# macOS 手动恢复注册（使用应用中的启动器）：
+/Applications/PiX.app/Contents/Resources/cli/pix command install
+```
+
+命令卸载后，GUI 不会在下次启动时自动装回；手动 `command install` 可恢复。重新打开终端后 PATH 变化生效。注册不会覆盖目标位置已有的其他命令；GUI 也不会主动遮蔽 PATH 中已有的 `pix`。直接删除 macOS 应用不能自动清理 shell 文件；如果已经删除，可删除 shell 配置中 `# >>> PiX CLI >>>` 到 `# <<< PiX CLI <<<` 的整块内容及 `~/.pix/bin/pix`。
+
+## 常用操作
+
+```sh
+pix --cwd /path/to/project new
+pix --cwd /path/to/project sessions
+pix run "解释这个项目" --model zai/glm-5.3
+pix resume <会话ID或JSONL完整路径>
+pix resume <会话ID或路径> "继续检查错误处理"
+pix tree --session <会话ID或路径>
+pix tree --session <会话ID或路径> --filter labeled
+pix label <节点ID> "测试通过" --session <会话ID或路径>
+pix label <节点ID> --session <会话ID或路径>  # 移除标签
+pix fork <节点ID> "尝试另一种方案" --session <会话ID或路径>
+pix run "新的独立上下文" --session <会话ID或路径> --root
+pix stop --session <会话ID或路径>
+```
+
+`run` 不指定会话时创建新会话；指定会话后默认从主分支当前节点继续。操作其他分支时使用 `--node` 或 `fork`，交互模式在每次回复后跟随本次任务实际所在的分支。会话选择限定于 `--cwd` 指定的项目，支持完整会话 ID 或完整路径。
+
+无命令时进入基于 `@earendil-works/pi-tui` 的交互界面，复用 Pi 原生编辑器、Markdown/代码与思考内容渲染、工具执行卡片和树选择器。支持中文、多行输入、粘贴、历史记录、命令与文件路径补全；底部显示当前模型、思考等级、分支和运行状态。根据终端背景选择明暗主题，也可手动 `/theme` 切换。
+
+- `/tree`：打开可搜索、折叠的 Pi 树选择器；选择已完成的 PiX 节点，查看其祖先路径并从该处继续。
+- 树内 `Shift+L` 编辑选中任务的标签，`Enter` 保存、`Esc` 取消，留空保存移除标签。标签为单行，最多 200 字符，保存为原生 Pi `label` 记录，GUI 与 CLI 实时同步；目标分支运行时暂不能修改。
+- 树内 `Ctrl+A` 全部、`Ctrl+L` 有标签、`Ctrl+R` 运行中、`Ctrl+E` 失败，`Ctrl+O` 循环切换。过滤保留祖先路径（CLI 标为 `ancestor`，GUI 淡化显示），不删除记录、不改变上下文。树内可按标签文字搜索。筛选作用于本客户端，默认全部。
+- GUI 选中任务后按 `Cmd+Shift+L`（macOS）或 `Ctrl+Shift+L`（Windows/Linux）编辑标签，也可在卡片上右键 →“编辑标签”。快捷键可在“设置 → 键盘快捷键”修改；右下角下拉菜单切换相同的任务筛选。搜索框也匹配标签文字。
+- `/sessions` 或 `/resume`：搜索并恢复当前项目的会话。
+- `/model`、`/thinking`：选择后续任务的模型和思考等级；`/new` 新建会话。
+- `/node <节点ID>` 或 `/node root`：指定后续输入的分叉点；`/help` 查看命令。
+- `Enter` 发送，`Shift+Enter` 换行，`Tab` 补全，`Ctrl+O` 展开工具输出，`Ctrl+T` 显示/隐藏思考内容。
+- `Esc` 或 `Ctrl+C` 停止本终端提交的任务；空闲时 `Ctrl+C` 清空草稿，草稿为空时退出。`/exit` 或空编辑器中的 `Ctrl+D` 退出客户端，已接受的任务继续在 Host 中执行。
+
+PiX 按任务组织树，因此这些是任务筛选；没有把一次任务拆成用户消息、回答和工具结果来套用 Pi 的原始条目筛选。
+
+标准扩展输入、选择和确认请求使用 Pi 原生组件显示；确认默认选中取消，不会自动批准。其他 slash 命令交给 Pi 扩展执行。扩展的任意自定义 TUI 组件目前不通过 Host 协议传递。
+
+树直接读取 PiX 的 `GraphRuntime` 快照，保留主干、嵌套分叉、继承关系与运行状态。主文件是 Pi v3 JSONL，子分支保存于相邻的 `<session>.pix-tree/`。备份时两者必须一起保存；CLI 不创建另一种会话格式。
+
+## 并发与生命周期
+
+可以在多个终端、多个 GUI 中同时查看和操作一棵树。每个客户端独立选择项目与会话，执行命令明确定位到其会话；底层注册表与会话锁由 Host 统一拥有。默认每棵树最多同时运行 8 路，可用 `PIX_MAX_PARALLEL_RUNS=1..64` 调整。启动已有 Host 时使用的是该 Host 启动时的环境。
+
+```sh
+pix fork <节点ID> "检查性能" --session <会话> --json --detach
+pix fork <节点ID> "检查错误处理" --session <会话> --json --detach
+pix tree --session <会话>
+pix stop --session <会话> --branch <branchId> --run-id <runId>
+```
+
+默认等待所提交的任务完成；`--detach` 在接受任务后退出。关闭 macOS 窗口、最小化到托盘、退出 CLI 或客户端意外断开不会取消已接受的 Agent 任务。等待过程中 Ctrl+C 只停止该 CLI 提交的 run；`--timeout <秒>` 只停止等待，任务继续执行。
+
+桌面端菜单、快捷键、托盘或界面中的“退出 PiX”会完整关闭本机共享后台。存在 Agent 任务、终端命令、终端会话、远程连接或其他客户端时，会先确认影响，默认取消；确认后停止本地任务并关闭连接的 PiX 窗口，防止其他窗口自动重启后台。取消保留原界面和任务；后台停止失败时可重试，取消退出会恢复连接。Windows/Linux 关闭窗口且未启用最小化到托盘时，也走完整退出流程。
+
+分支会话历史独立，但项目文件与 Git 工作目录共享。需要同时修改互不影响的代码时，请使用不同目录或 Git worktree。
+
+Host 没有客户端连接、没有任务和远程连接时，默认空闲 10 分钟退出，`PIX_HOST_LINGER_MS` 可调整。`pix host status` 显示状态；`pix host stop` 在没有其他客户端、任务及远程连接时关闭 Host。新版启动时，若旧 Host 协议兼容且没有其他客户端、任务及远程连接，会让旧 Host 正常退出并启动新版后台；不能自动切换时进入恢复界面，可等待或确认强制重启。
+
+后台暂时无法切换时，PiX 窗口仍会打开，显示后台版本、任务及连接状态，并自动重试。可点击“重试连接”，或点击“终止任务并重启…”查看影响并确认。强制重启会中断本地任务、终端命令及其他客户端连接；已保存的会话记录保留，未保存内容可能丢失。远程任务可能仍在远程主机运行，重连后请检查。
+
+命令行管理操作无需连接同版本的会话服务：`pix host status` 可检查旧后台，`pix host restart` 安全重启；明确需要中断任务时使用 `pix host restart --force`（仅停止后台则使用 `pix host stop --force`）。强制操作先尝试正常保存退出，无响应时才强制终止；如果检查后后台已被替换，会要求重新检查，避免停止新的后台。
+
+安装版保留原桌面身份，开发版按源码目录区分身份。支持桌面身份迁移的 Host 会在新身份还没有视图、旧身份的连接已经断开时，原子转移旧视图及其远程连接池；已有的新视图优先，在线的旧连接不会被抢占。旧身份原本由安装版和开发版共用，Host 无法追溯区分其来源。已运行且不支持迁移的旧 Host 会使开发版明确报错；应先用原客户端等待任务完成，再执行 `pix host stop` 并启动新版，不能把旧进程中的内存视图无损迁入一个重启后的 Host。会话文件仍按原规则保存。
+
+仅本机回环地址开放 WebSocket，使用私有 profile 中的随机 token 验证连接；浏览器 Origin 请求被拒绝。后台地址和启动日志在 `~/.pix/run/`，运行诊断沿用 `~/.pix/log/main.log`。Host 使用 Node.js 网络栈，代理通过 PiX 的 `httpProxy` 设置或标准代理环境变量配置；不使用 Chromium 的系统 PAC 解析。不要让外部 Pi CLI 绕过 Host 写入同一个源文件；现有整图独占锁继续生效。
+
+## 脚本与输入请求
+
+```sh
+printf '检查 README 的拼写' | pix run --json
+pix run "执行任务" --json --request-id job-123 --detach
+```
+
+`--json` 输出 NDJSON：`submitted` 包含 `session`、`requestId`、`branchId` 与 `runId`；`agent` 的 `event` 包含 SDK 事件；`result` 包含任务对应的 `nodeId` 和完整快照；`error` 表示失败并返回非零退出码。模型或工具的文字不会混入 JSON stdout；诊断使用 stderr。只有任务实际成功结束才输出 `result`。
+
+同一会话中复用 `--request-id` 不会重新执行已记录的任务。仍在运行且可定位的请求会返回原 run；早先已完成、已被后续输入替代的请求可能只返回已保存提示，此时用 `tree` 检查记录。连接中断或超时时不会自动重放写操作。
+
+GUI 与交互式 CLI 可以回答扩展的选择、确认和文本输入。无交互的 `run` 遇到本任务的输入请求会以错误退出，任务保持等待，可在 GUI 回答，或执行：
+
+```sh
+pix dialogs
+pix respond <请求ID> "回答"
+```
+
+输入请求只允许完成一次。无交互客户端不会自动批准确认请求。
+
+## 验证
+
+```sh
+npm run typecheck
+npm test
+npm run test:cli
+npm run test:cli:package
+npm run test:installation
+npm run test:gui:install
+PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:real
+PIX_REAL_PROVIDER=zai PIX_REAL_MODEL=glm-5.3 npm run test:cli:tui:real
+```
+
+`test:cli` 使用真实 Pi SDK、真实文件工具、本机可控 HTTP 模型、多个 CLI 进程和真实 Electron GUI，验证并发启动、分支并行、上下文隔离、独立停止、退出存活、GUI 实时同步和重启恢复。需要允许本机监听和桌面应用运行。
+
+`test:gui:install` 在 macOS 创建独立临时应用，验证正常退出、拒绝退出和确认强制关闭，不操作已安装的 PiX；其他系统跳过原生测试。
+
+`test:cli:package` 在仓库外的临时目录完成 npm 安装，确认没有 Electron/Vue 依赖，再启动 Host 并创建、读取会话；需要下载依赖。
+
+`test:installation` 验证打包启动器的参数和退出码、Linux 安装/卸载/升级钩子，以及 Windows 原生 PATH 生命周期（Windows 测试在其他系统跳过）。macOS 打包后还可执行 `node test/desktop-command-test.mjs /path/to/PiX.app`，在隔离 HOME 中验证首次启动注册、新登录终端、无需系统 Node、共享 Host、卸载和重装；不会修改当前用户的 shell 配置。
+
+`test:cli:real` 是显式选择的外部模型测试，会产生模型费用。它把指定 provider 的凭据复制到私有临时 profile，在独立工作目录验证真实读写、两个并发分支及输出值，结束后删除临时凭据。报告写入 `artifacts/cli-real-agent.json`，不包含凭据。
+
+设置 `PIX_REAL_CLI=/path/to/PiX.app/Contents/Resources/cli/pix` 可通过桌面包的运行时执行同一真实 agent 测试。
+
+`test:cli:tui:real` 通过真实 PTY 操作交互界面，验证外部模型实际读写、输出值、Pi 工具卡片、树选择器和终端模式恢复。也支持 `PIX_REAL_CLI`；报告及终端画面保存在 `artifacts/cli-tui-real-*`。`test:cli` 使用 xterm 解析实际终端画面，覆盖模型搜索、中文多行粘贴、窗口缩放、取消、扩展对话框和退出存活。
+
+## 代码边界
+
+- `src/host/`：Host 启动发现、本机协议、客户端和 Electron 适配。
+- `src/cli/`：命令行解析、终端交互与运行等待。
+- `MainController`：每个客户端独立的项目及会话视图。
+- `SessionRegistry`：共享唯一运行集合，独立维护各客户端选择；离开客户端不释放运行。
+- `GraphRuntime` / `PiRuntime` / `GraphFiles`：沿用原有会话树、Agent 和持久化实现。
+
+GUI 通过现有 preload IPC 到 Electron，再经共享客户端到 Host；文件选择和系统打开操作通过连接上的平台回调留在 Electron。模型请求由 Host 执行，普通客户端连接不会替换模型代理。现有 SSH/WSL 项目仍通过远程 Host 协议访问。

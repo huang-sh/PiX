@@ -23,7 +23,7 @@ export function resolveBuiltinSkills(moduleDir: string): string[] {
     // <root>/skills for dev runs (out/main) and remote server hosts
     // (server/dist/main), where the skills tree sits beside the app.
     resolve(moduleDir, "..", "..", "skills"),
-  ].filter((candidate) => existsSync(candidate));
+  ].filter((candidate) => existsSync(candidate)).slice(0, 1);
 }
 
 /** True for a markdown file inside the bundled skills roots. */

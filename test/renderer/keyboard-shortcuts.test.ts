@@ -60,6 +60,10 @@ describe("shortcut matching", () => {
 
   it("validates overrides and detects conflicts with defaults and duplicate aliases", () => {
     expect(shortcutBindings("commands")).toHaveLength(2);
+    expect(shortcutForEvent(key("L", { shiftKey: true }), {}, false)).toBe("editLabel");
+    expect(shortcutForEvent(key("L", { ctrlKey: false, metaKey: true, shiftKey: true }), {}, true)).toBe("editLabel");
+    expect(shortcutForEvent(key("L", { shiftKey: true }), { editLabel: [] }, false)).toBeUndefined();
+    expect(shortcutConflict({ editLabel: ["Mod+b"] })).toMatchObject({ first: "navigator", second: "editLabel" });
     expect(shortcutConflict({ commands: ["Mod+b"] })).toMatchObject({ first: "commands", second: "navigator" });
     expect(shortcutConflict({ commands: ["Mod+m", "Mod+m"] })).toBeDefined();
     expect(shortcutConflict({ commands: ["Mod+b"], navigator: [] })).toBeUndefined();
@@ -105,6 +109,8 @@ describe("keyboard shortcuts settings", () => {
 
   it("searches and records aliases without activating a live shortcut", async () => {
     const layout = open();
+    expect(wrapper.get('[data-shortcut="editLabel"]').text()).toContain("Edit task label");
+    expect(wrapper.get('[data-shortcut="editLabel"]').text()).toContain("Ctrl+Shift+L");
     await wrapper.get('[data-keyboard-shortcuts] input').setValue("Ctrl+Shift+P");
     expect(wrapper.findAll("[data-shortcut]")).toHaveLength(1);
     await wrapper.get('[data-keyboard-shortcuts] input').setValue("");

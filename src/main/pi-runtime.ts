@@ -1,7 +1,14 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, basename, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
+import type { ExtensionDialogs } from "./extension-dialogs.js";
+import type { ModelOperation } from "../shared/remote-protocol.js";
 import { debugLog } from "./debug-log.js";
 import { pixFileChangesExtension } from "./extensions/file-changes.js";
+import { pixGitBranchExtension } from "./extensions/git-branch.js";
+import { composeSystemPrompt, latestPromptOverride, pixPromptOverrideExtension } from "./extensions/prompt-override.js";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -17,8 +24,9 @@ import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.j
 import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skills.js";
 import { SkillControls } from "./skill-controls.js";
 import { canonicalPath, pixAgentDir } from "./paths.js";
-import { addCustomModel, getCustomModels } from "./custom-models.js";
-import { durableWrite, encodeSession } from "./graph-files.js";
+import { addCustomModel, addCustomModels, getCustomModels } from "./custom-models.js";
+import { discoverModels } from "./model-discovery.js";
+import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
 import { validatePromptImages } from "../shared/images.js";
 import { collectAgentCommands } from "../shared/commands.js";
 import type {
@@ -29,21 +37,43 @@ import type {
   RuntimeExtension,
   RuntimeProvider,
   RuntimeState,
+  PromptImage,
+  QueuedMessage,
   SessionSnapshot,
   SessionSummary,
 } from "../shared/types.js";
 import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { NODE_FOOTER_CUSTOM_TYPE } from "../shared/types.js";
-import { projectSession, summarizeSession } from "../shared/session.js";
+import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
+import type { PromptCustomization, SystemPromptPreview } from "../shared/types.js";
+import { needsPromptDisplayBoundary, projectSession, summarizeSession } from "../shared/session.js";
+import type { RunTiming } from "../shared/run-timing.js";
+import {
+  aggregateUsage,
+  dedupeUsageRecords,
+  estimateUsageCosts,
+  usageRecordsOf,
+  type UsageOverview,
+  type UsageProjectRef,
+  type UsageRange,
+  type UsageSessionInput,
+} from "../shared/usage.js";
+import { loadPricingTable, pricingResolver } from "./usage-pricing.js";
+import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+// Branches share the services factory, but each live session owns its input queue.
+const inputQueueOwners = new WeakMap<object, PiRuntime>();
+export type QueuedInput = QueuedMessage & { images?: PromptImage[]; nodeId?: string | null };
+export type QueuedInputState = "queued" | "prepared" | "settled" | "cancelled" | "interrupted";
 
 /** Control actions that need no open session; everything else is session-scoped. */
 export const MODEL_ACTIONS = [
   "getModels",
   "refreshModels",
   "addCustomModel",
+  "addCustomModels",
+  "discoverModels",
   "updateCustomModel",
   "getCustomModels",
   "getProviders",
@@ -62,6 +92,16 @@ export const MODEL_ACTIONS = [
   "logout",
   "setBrokerProviders",
 ] as const satisfies readonly AgentControl["action"][];
+
+const READ_ACTIONS = [
+  "commands", "getState", "getModels", "getCustomModels", "discoverModels", "getThinkingLevels",
+  "getTools", "getProviders", "getSkills", "getSkill", "getExtensions", "stats", "systemPromptPreview",
+] as const satisfies readonly AgentControl["action"][];
+
+export async function piSdkVersion(): Promise<string> {
+  const { VERSION } = await import("@earendil-works/pi-coding-agent");
+  return VERSION;
+}
 
 /** The SDK's settings surface the settings service writes through. */
 export interface PiSettingsSdk {
@@ -146,6 +186,94 @@ export async function piPixieSystemPrompt(cwd: string, identity: string): Promis
     : `${core}\n\n${identity}`;
 }
 
+const usageMessageText = (message: any): string => {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  return Array.isArray(content)
+    ? content
+        .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+        .map((part: any) => part.text)
+        .join(" ")
+    : "";
+};
+
+/** Reduces one open session manager to the identity + billed events aggregateUsage takes. */
+function sessionUsage(
+  manager: any,
+  path: string,
+  modified: string,
+  project?: UsageProjectRef,
+): UsageSessionInput {
+  const header = manager.getHeader(),
+    entries = manager.getEntries();
+  const firstUser = usageMessageText(
+    entries.find((e: any) => e.type === "message" && e.message?.role === "user")?.message,
+  );
+  const name = manager.getSessionName();
+  const clip = (s: string, n: number) => {
+    const c = s.replace(/\s+/g, " ").trim();
+    return c.length > n ? `${c.slice(0, n - 1)}…` : c;
+  };
+  return {
+    id: String(header?.id ?? basename(path)),
+    path,
+    ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
+    created: String(header?.timestamp ?? entries[0]?.timestamp ?? modified),
+    modified,
+    messageCount: entries.filter((e: any) => e.type === "message").length,
+    firstMessage: clip(firstUser, 120),
+    records: usageRecordsOf(entries),
+    ...(project ? { project } : {}),
+  };
+}
+
+/** Safety valve for pathological trees; real projects stay far below this. */
+const MAX_SESSION_FILES_PER_DIR = 5000;
+
+/** Every .jsonl under a session directory, top level first, sidecars after.
+ *  .pix-tree holds the graph model's worker/branch sessions; .pix-graph is
+ *  its orphaned predecessor (a "<session>.jsonl.pix-graph" sibling) and stays
+ *  out of the accounting. */
+function sessionFilesUnder(root: string): string[] {
+  const files: string[] = [];
+  const queue: string[] = [root];
+  while (queue.length && files.length < MAX_SESSION_FILES_PER_DIR) {
+    const dir = queue.shift()!;
+    for (const name of readdirSync(dir).sort()) {
+      if (name.endsWith(".pix-graph")) continue;
+      const path = join(dir, name);
+      try {
+        if (statSync(path).isDirectory()) queue.push(path);
+        else if (name.endsWith(".jsonl")) files.push(path);
+      } catch { /* vanished between listing and stat */ }
+    }
+  }
+  return files;
+}
+
+/**
+ * One session file's parsed usage, served from the persistent scan cache
+ * (mtime + size validation, clones on every hand-out) and reduced through the
+ * SDK on a miss.
+ */
+function cachedSessionUsage(
+  pi: any,
+  path: string,
+  dir: string,
+  cwd: string,
+  project: UsageProjectRef | undefined,
+): UsageSessionInput {
+  const stat = statSync(path);
+  const cached = usageScanCache.get(path, stat, project);
+  if (cached) return cached;
+  usageScanCache.set(
+    path,
+    stat,
+    sessionUsage(pi.SessionManager.open(path, dir, cwd), path, stat.mtime.toISOString(), project),
+  );
+  return usageScanCache.get(path, stat, project)!;
+}
+
 export class PiRuntime {
   mod: any;
   runtime: any;
@@ -156,12 +284,41 @@ export class PiRuntime {
   modelServices: any;
   brokerProviders = new Set<string>();
   brokerModels: BrokerModel[] = [];
-  modelBroker?: (model: any, context: any, options: any) => any;
+  modelBroker?: (model: any, context: any, options: any, operation?: ModelOperation) => any;
+  /** Brokered providers this machine serves with its own credentials. */
+  private localCredentialProviders = new Set<string>();
+  /** Original model-runtime methods per runtime, saved before brokering. */
+  private readonly nativeStreams = new WeakMap<object, {
+    stream: (model: any, context: any, options: any) => any;
+    streamSimple: (model: any, context: any, options: any) => any;
+    generateImages?: (model: any, context: any, options: any) => any;
+    classify?: (model: any, context: any, options: any) => any;
+    checkAuth: (provider: string) => Promise<any>;
+  }>();
+  /** Model runtimes currently overlaid with the fake broker registration. */
+  private readonly brokerOverlays = new WeakMap<object, Set<string>>();
   openExternal: (url: string) => Promise<void>;
   private closing = false;
   private pendingControls = new Set<Promise<unknown>>();
+  private pendingPrompts = 0;
+  private promptEpoch?: number;
+  private queueAdmissions = new Set<Promise<void>>();
+  private queueEpoch = 0;
+  private queuedMessages: QueuedInput[] = [];
+  private deliveredInputs = new Map<string, QueuedInput>();
+  onQueuedInput?: (message: QueuedInput, state: QueuedInputState) => void;
+  private extensionStartup: Promise<void> = Promise.resolve();
+  private extensionSession?: object;
+  private stopStartupDialogs?: () => void;
+  private controlEpoch = 0;
   private closeTask?: Promise<void>;
   private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
+  /** Standalone defaults; controller-owned sessions and graph workers share
+   * their owner's accessor so background runs always see current settings. */
+  promptCustomization: PromptCustomization | undefined;
+  getPromptCustomization = (): PromptCustomization | undefined => this.promptCustomization;
+  private promptTiming?: RunTiming;
+  private promptUserSeen = false;
   eventScope?: { graphId: string; branchId: string; runId: string };
   /** The settings page's skill management; every SDK touch stays behind live accessors. */
   readonly skillControls = new SkillControls({
@@ -177,6 +334,7 @@ export class PiRuntime {
     dir: string | null,
     emit: (e: unknown) => void,
     openExternal: (url: string) => Promise<void>,
+    readonly dialogs?: ExtensionDialogs,
   ) {
     this.cwd = cwd;
     this.dir = dir;
@@ -190,6 +348,8 @@ export class PiRuntime {
     this.dir = dir;
   }
   async pi() {
+    // Built-in MCP config, credentials and logs use Pi's process-wide profile.
+    process.env.PI_CODING_AGENT_DIR = this.agentDir();
     return (this.mod ??= await import("@earendil-works/pi-coding-agent"));
   }
   async exportSnapshotHtml(manager: any, outputPath: string): Promise<string> {
@@ -201,6 +361,24 @@ export class PiRuntime {
   }
   agentDir() {
     return pixAgentDir();
+  }
+  /**
+   * This machine's stored API keys, for deployment to a remote host the user
+   * opted in. OAuth credentials stay put: they are bound to this desktop.
+   */
+  listApiKeys(): Record<string, string> {
+    try {
+      const stored = JSON.parse(readFileSync(join(this.agentDir(), "auth.json"), "utf8")) as Record<string, unknown>;
+      const keys: Record<string, string> = {};
+      for (const [provider, credential] of Object.entries(stored)) {
+        const key = (credential as { type?: string; key?: unknown } | null);
+        if (key?.type === "api_key" && typeof key.key === "string" && key.key)
+          keys[provider] = key.key;
+      }
+      return keys;
+    } catch {
+      return {};
+    }
   }
   async modelRuntime() {
     if (this.runtime?.session?.modelRuntime)
@@ -216,13 +394,69 @@ export class PiRuntime {
     );
     return this.modelServices.modelRuntime;
   }
-  setModelBroker(broker?: (model: any, context: any, options: any) => any) {
+  setModelBroker(broker?: PiRuntime["modelBroker"]) {
     this.modelBroker = broker;
+  }
+  /**
+   * The system prompt the next run would send. An open session answers with
+   * its own rendering (live tool set, project context, skills); without one, a
+   * throwaway in-memory session is built from fresh project services, so the
+   * settings page can show the prompt before any session exists. The in-memory
+   * session never touches disk or an extension UI.
+   */
+  async previewSystemPrompt(): Promise<SystemPromptPreview> {
+    const session = this.runtime?.session;
+    const preview = (s: typeof session) => composeSystemPrompt(
+      s.extensionRunner.createCommandContext().getSystemPromptOptions(),
+      this.getPromptCustomization(),
+      latestPromptOverride(s.sessionManager.getBranch()),
+    );
+    if (session) return preview(session);
+    const pi = await this.pi();
+    const cwd = this.cwd ?? homedir();
+    // Catalog services can predate settings changes. Keep preview resources
+    // fresh without reloading a loader another catalog request may be using.
+    const services = await pi.createAgentSessionServices(
+      this.sessionServicesOptions(pi, cwd),
+    );
+    await this.applyModelBroker(services.modelRuntime);
+    const created = await pi.createAgentSessionFromServices({
+      services,
+      sessionManager: pi.SessionManager.inMemory(cwd),
+    });
+    try {
+      return await preview(created.session);
+    } finally {
+      created.session.dispose();
+    }
   }
 
   async configuredProviderIds() {
     const modelRuntime = await this.modelRuntime();
-    return [...new Set((await modelRuntime.getAvailable()).map((model: any) => String(model.provider)))];
+    return [...new Set((await modelRuntime.getAllAvailable()).map((model: any) => String(model.provider)))];
+  }
+
+  private async refreshModelCatalog(provider?: string) {
+    const signal = AbortSignal.timeout(15_000);
+    const modelRuntime = await this.modelRuntime();
+    const result: ModelsRefreshResult = await modelRuntime.refresh({
+      allowNetwork: true, force: true, signal,
+      ...(provider ? { providers: [provider] } : {}),
+    });
+    if (result.aborted || signal.aborted)
+      throw new Error("Model catalog refresh timed out. Please try again.");
+    if (result.errors.size) {
+      const details = Array.from(result.errors, ([id, error]) => `${id}: ${error.message}`).join("; ");
+      throw new Error(`Could not refresh model catalogs: ${details}`);
+    }
+  }
+
+  private async refreshLoginCatalog(provider: string) {
+    // Strip broker placeholders before OpenRouter looks up the new key's models.
+    await this.refreshBrokerAuth();
+    if (provider !== "openrouter") return;
+    try { await this.refreshModelCatalog(provider); }
+    catch (error) { return error instanceof Error ? error.message : String(error); }
   }
 
   async configureBrokerProviders(providers: string[], models: BrokerModel[] = []) {
@@ -263,32 +497,115 @@ export class PiRuntime {
 
   /** Switches one model runtime over to a catalog, dropping the providers that left it. */
   private async replaceBrokerCatalog(modelRuntime: any, providers: Set<string>, models: BrokerModel[]) {
-    for (const provider of this.brokerProviders)
-      if (!providers.has(provider)) {
-        await modelRuntime.removeRuntimeApiKey(provider);
-        modelRuntime.unregisterProvider(provider);
-      }
+    const overlays = this.brokerOverlays.get(modelRuntime);
+    if (overlays)
+      for (const provider of [...overlays])
+        if (!providers.has(provider)) await this.stripBrokerOverlay(modelRuntime, provider);
     this.brokerProviders = providers;
     this.brokerModels = models;
     await this.applyModelBroker(modelRuntime);
   }
 
+  /** Removes one provider's fake registration and runtime key, restoring its native form. */
+  private async stripBrokerOverlay(modelRuntime: any, provider: string) {
+    const overlays = this.brokerOverlays.get(modelRuntime);
+    if (!overlays?.has(provider)) return;
+    overlays.delete(provider);
+    // Best-effort: a provider the SDK cannot fully restore still reaches the
+    // broker on the next catalog sync.
+    await modelRuntime.removeRuntimeApiKey(provider).catch(() => {});
+    try { modelRuntime.unregisterProvider(provider); } catch { /* see above */ }
+  }
+
   async applyModelBroker(modelRuntime: any) {
+    if (!modelRuntime) return;
+    const overlays = this.brokerOverlays.get(modelRuntime) ?? new Set<string>();
+    this.brokerOverlays.set(modelRuntime, overlays);
+    // Strip every overlay before evaluating credentials: the fake runtime
+    // key would shadow this machine's real ones in checkAuth.
+    for (const provider of [...overlays]) await this.stripBrokerOverlay(modelRuntime, provider);
+    const local = new Set<string>();
     for (const provider of this.brokerProviders) {
+      try {
+        // A host with its own login (pi CLI, env, or deployed credentials)
+        // serves that provider directly; the desktop brokers only the rest.
+        if (await modelRuntime.checkAuth(provider)) local.add(provider);
+      } catch { /* unreachable credentials fall back to the broker */ }
+    }
+    this.localCredentialProviders = local;
+    for (const provider of this.brokerProviders) {
+      if (local.has(provider)) continue;
       const models = this.brokerModels.filter((model) => model.provider === provider);
       if (models.length) modelRuntime.registerProvider(provider, {
         baseUrl: "http://pix-desktop-broker.invalid",
         models,
       });
-    }
-    for (const provider of this.brokerProviders)
       await modelRuntime.setRuntimeApiKey(provider, "pix-desktop-broker");
+      overlays.add(provider);
+    }
     if (!this.modelBroker) return;
-    const broker = this.modelBroker;
-    modelRuntime.stream = (model: any, context: any, options: any) =>
-      broker(model, context, options);
-    modelRuntime.streamSimple = (model: any, context: any, options: any) =>
-      broker(model, context, options);
+    if (!this.nativeStreams.has(modelRuntime))
+      this.nativeStreams.set(modelRuntime, {
+        stream: modelRuntime.stream.bind(modelRuntime),
+        streamSimple: modelRuntime.streamSimple.bind(modelRuntime),
+        generateImages: modelRuntime.generateImages?.bind(modelRuntime),
+        classify: modelRuntime.classify?.bind(modelRuntime),
+        checkAuth: modelRuntime.checkAuth.bind(modelRuntime),
+      });
+    const native = this.nativeStreams.get(modelRuntime)!;
+    for (const operation of ["stream", "streamSimple", "generateImages", "classify"] as const)
+      modelRuntime[operation] = (model: any, context: any, options: any) =>
+        this.routeModelOperation(operation, native[operation], model, context, options);
+    // setModel's preflight and provider status reads ignore the runtime-key
+    // override, so a brokered provider would look unconfigured. Surface a
+    // synthetic credential for exactly those.
+    modelRuntime.checkAuth = async (provider: string) => {
+      const status = await native.checkAuth(provider);
+      if (status) return status;
+      if (this.modelBroker && this.brokerProviders.has(provider)
+        && !this.localCredentialProviders.has(provider))
+        return { type: "api_key", source: "pix-desktop-broker" };
+      return status;
+    };
+    // A session still holding a model resolved from the broker overlay must
+    // re-resolve once that provider gains local credentials: the overlay
+    // object's placeholder URL is something a direct call would dial.
+    const session = this.runtime?.session;
+    const held = session?.model;
+    if (held && String(held.baseUrl) === "http://pix-desktop-broker.invalid"
+      && !session.isStreaming
+      && this.localCredentialProviders.has(String(held.provider))) {
+      try {
+        const resolved = modelRuntime.getModel(held.provider, held.id);
+        if (resolved) await session.setModel(resolved);
+      } catch { /* keep the held model; the broker still serves it */ }
+    }
+  }
+  private routeModelOperation(
+    operation: ModelOperation,
+    native: ((model: any, context: any, options: any) => any) | undefined,
+    model: any,
+    context: any,
+    options: any,
+  ) {
+    const provider = String(model.provider);
+    if (this.brokerProviders.has(provider) && !this.localCredentialProviders.has(provider)) {
+      if (this.modelBroker) return this.modelBroker(model, context, options, operation);
+      // A lingering host without its desktop: the fake registration's URL
+      // would only produce a confusing DNS failure. Say what is missing.
+      throw new Error(`${provider} is served by the PiX desktop; reconnect it to use this model`);
+    }
+    if (!native) throw new Error(`Model runtime does not support ${operation}`);
+    return native(model, context, options);
+  }
+  /** Re-evaluates which brokered providers this machine serves by itself. */
+  async refreshBrokerAuth() {
+    if (!this.brokerProviders.size) return;
+    await this.replaceBrokerCatalog(
+      await this.modelRuntime(),
+      new Set(this.brokerProviders),
+      [...this.brokerModels],
+    );
   }
   /**
    * Options shared by every createAgentSessionServices call, so session and
@@ -325,7 +642,25 @@ export class PiRuntime {
       // pi-builtin/), and remote server hosts (server npm dependencies).
       resourceLoaderOptions: {
         extensionFactories: [
+          { name: "codemode", builtin: true, factory: pi.createCodemodeExtension() },
+          { name: "mcp", builtin: true, factory: pi.createMcpExtension({
+            openUrl: (url: string) => { void this.openExternal(url).catch(error => debugLog("mcp: open sign-in URL", error)); },
+          }) },
+          { name: "tool-search", builtin: true, factory: pi.createToolSearchExtension() },
           pixFileChangesExtension(() => this.runtime?.session.sessionManager.getSessionFile()),
+          pixGitBranchExtension,
+          pixPromptOverrideExtension(() => this.getPromptCustomization()),
+          { name: "pix-input-queue", factory: extension => {
+            extension.on("turn_end", (_event, context) => inputQueueOwners.get(context.sessionManager)?.deliverQueuedMessages("steer"));
+            extension.on("agent_before_settle", async (_event, context) => {
+              const owner = inputQueueOwners.get(context.sessionManager);
+              await owner?.deliverQueuedMessages("steer");
+              await owner?.deliverQueuedMessages("followUp");
+              // Follow-up input handlers may await while the user adds or
+              // promotes a Steer. Admit it before the SDK chooses its next turn.
+              await owner?.deliverQueuedMessages("steer");
+            });
+          } },
         ] as InlineExtension[],
         additionalExtensionPaths: resolveBuiltinPackages(
           moduleDir,
@@ -347,11 +682,9 @@ export class PiRuntime {
           );
           return resolved;
         },
-        // The outputStyle setting names a skill; the name joins the
-        // append-system prompt sections after the user's own file, and the
-        // model resolves it against <available_skills>. Reload re-runs both
-        // closures, so a saved switch takes effect on the next reload like
-        // the other pi settings.
+        // File links are an app convention shared by every output style.
+        // Reload re-runs both closures, so a saved style switch takes effect
+        // like the other pi settings.
         appendSystemPromptOverride: (base: string[]) =>
           appendOutputStyle(base, outputStyleSkills, settingsManager),
       },
@@ -368,25 +701,6 @@ export class PiRuntime {
         sessionManager,
         sessionStartEvent,
       });
-      const notify = (message: string, level = "info") =>
-        this.emit({ type: "notice", payload: { message, level, source: "extension" } });
-      const unsupported = async () => {
-        throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
-      };
-      await created.session.bindExtensions({
-        mode: "rpc",
-        uiContext: {
-          ...created.session.extensionRunner.getUIContext(),
-          notify,
-          select: unsupported,
-          confirm: unsupported,
-          input: unsupported,
-          editor: unsupported,
-          custom: unsupported,
-        },
-        onError: (error: { extensionPath: string; error: string }) =>
-          notify(`${error.extensionPath}: ${error.error}`, "error"),
-      });
       return {
         ...created,
         services,
@@ -394,17 +708,114 @@ export class PiRuntime {
       };
     };
   }
+  private startExtensions(session: any, cwd: string) {
+    let signInMessage: string | undefined;
+    const notify = (message: string, level = "info") => {
+      if (/https?:\/\//.test(message)) signInMessage = message;
+      this.emit({ type: "notice", payload: { message, level, source: "extension" } });
+    };
+    const unsupported = async () => {
+      throw new Error("This command requires a Pi terminal dialog, which PiX does not support yet.");
+    };
+    // Session-start hooks may build large search indexes. Show the session
+    // immediately; controls still wait for these hooks before using it.
+    let active = true;
+    this.stopStartupDialogs = () => { active = false; };
+    const startup: Promise<void> = session.bindExtensions({
+      mode: "rpc",
+      uiContext: {
+        ...session.extensionRunner.getUIContext(),
+        notify,
+        select: (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) =>
+          !active || this.closing ? Promise.resolve(undefined) :
+            this.dialogs?.request(session, { kind: "select", title, options, source: cwd, sessionPath: session.sessionFile }, opts) ?? unsupported(),
+        confirm: async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
+          active && !this.closing && (await (this.dialogs?.request(session, { kind: "confirm", title, message, options: ["yes"], source: cwd, sessionPath: session.sessionFile }, opts) ?? unsupported())) === "yes",
+        input: (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+          if (!active || this.closing) return Promise.resolve(undefined);
+          const message = signInMessage;
+          signInMessage = undefined;
+          return this.dialogs?.request(session, { kind: "input", title, placeholder, message, source: cwd, sessionPath: session.sessionFile }, opts) ?? unsupported();
+        },
+        editor: unsupported,
+        custom: unsupported,
+      },
+      onError: (error: { extensionPath: string; error: string }) =>
+        notify(`${error.extensionPath}: ${error.error}`, "error"),
+    });
+    this.extensionStartup = startup;
+    const settled = (error?: unknown) => {
+      setImmediate(() => {
+        if (this.runtime?.session !== session || this.closing) return;
+        try {
+          if (error !== undefined) notify(error instanceof Error ? error.message : String(error), "error");
+          this.emit({ type: "sessions", payload: { current: this.snapshot() } });
+        } catch (error) { debugLog("pi-runtime: startup notification", error); }
+      });
+    };
+    void startup.then(() => settled(), error => {
+      debugLog("pi-runtime: extension startup", error);
+      settled(error);
+    });
+  }
   bind() {
     this.unsubscribe?.();
-    const forwarder = agentEventForwarder(payload => this.emit({ type: "agent", payload }));
+    inputQueueOwners.set(this.runtime.session.sessionManager, this);
+    const forwarder = agentEventForwarder(payload => {
+      if (!this.closing) this.emit({ type: "agent", payload });
+    });
     const unsubscribe = this.runtime.session.subscribe((payload: unknown) => {
       // SDK emits message_end BEFORE persisting it. A UI listener must never
       // throw into that call stack, or the message would not be saved.
       try {
+        if ((payload as { type?: string }).type === "agent_start" && this.promptEpoch !== undefined
+          && (this.closing || this.promptEpoch !== this.controlEpoch))
+          void this.runtime.session.abort().catch((error: unknown) => debugLog("pi-runtime: cancelled prompt startup", error));
+        this.recordTiming(payload);
         forwarder.push({ ...(payload as object), ...this.eventScope });
       } catch (e) { debugLog("pi-runtime: event push", e); }
     });
     this.unsubscribe = () => { unsubscribe(); forwarder.dispose(); };
+    const session = this.runtime.session;
+    if (this.extensionSession !== session) {
+      this.promptTiming = undefined;
+      this.queuedMessages = [];
+      this.deliveredInputs.clear();
+      this.extensionSession = session;
+      this.startExtensions(session, this.cwd!);
+    }
+  }
+  private recordTiming(payload: unknown) {
+    if (!this.promptTiming) return;
+    const event = payload as { type?: string; aborted?: boolean; errorMessage?: string;
+      message?: { role?: string; timestamp?: number };
+      result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
+    const now = new Date().toISOString();
+    if (event.type === "message_start" && event.message?.role === "user") {
+      if (this.promptUserSeen) {
+        this.savePromptFooter(this.promptTiming);
+        // Keep the timing object owned by the original prompt control, while
+        // starting fresh measurements for the queued user turn.
+        this.promptTiming.startedAt = typeof event.message.timestamp === "number"
+          ? new Date(event.message.timestamp).toISOString() : now;
+        this.promptTiming.agentStartedAt = now;
+        this.promptTiming.compactions = [];
+      }
+      this.promptUserSeen = true;
+    }
+    if (event.type === "agent_start") this.promptTiming.agentStartedAt ??= now;
+    if (event.type === "compaction_start") this.promptTiming.compactions.push({ status: "running", startedAt: now });
+    if (event.type !== "compaction_end") return;
+    const current = this.promptTiming.compactions.at(-1);
+    if (!current || current.status !== "running") return;
+    const entry = event.result && [...this.runtime.session.sessionManager.getEntries()].reverse().find(entry => entry.type === "compaction");
+    this.promptTiming.compactions[this.promptTiming.compactions.length - 1] = {
+      ...current, endedAt: now, durationMs: Math.max(0, Date.parse(now) - Date.parse(current.startedAt!)),
+      status: event.aborted ? "aborted" : event.errorMessage ? "error" : "complete",
+      ...(entry ? { entryTimestamp: entry.timestamp } : {}),
+      tokensBefore: event.result?.tokensBefore, tokensAfter: event.result?.estimatedTokensAfter,
+      ...(event.errorMessage ? { error: event.errorMessage } : {}),
+    };
   }
   async waitForWrites() {
     await this.runtime?.session.waitForIdle?.();
@@ -431,23 +842,73 @@ export class PiRuntime {
     // canonicalizing that directory once spells every row without a realpath
     // per file.
     const root = all.length ? canonicalPath(dirname(String(all[0].path))) : "";
-    return all.map((s: any) => ({
-      id: s.id,
-      path: root ? join(root, basename(String(s.path))) : String(s.path),
-      name: s.name,
-      cwd: s.cwd || cwd,
-      created: new Date(s.created).toISOString(),
-      modified: new Date(s.modified).toISOString(),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage,
-    }));
+    // The SDK lists sessions in creation order; the panel's contract is newest
+    // modification first, matching the SessionFiles fallback list(). Modified
+    // is the mtime side of the session tree (branch sidecars included), so a
+    // branch run floats its session here too.
+    return all
+      .map((s: any) => {
+        const path = root ? join(root, basename(String(s.path))) : String(s.path);
+        return {
+          id: s.id,
+          path,
+          name: s.name,
+          cwd: s.cwd || cwd,
+          created: new Date(s.created).toISOString(),
+          modified: sessionModifiedAt(path, new Date(s.modified).toISOString()),
+          messageCount: s.messageCount,
+          firstMessage: s.firstMessage,
+        };
+      })
+      .sort((a: SessionSummary, b: SessionSummary) => b.modified.localeCompare(a.modified));
+  }
+  /**
+   * Aggregated usage across session files, for the settings page's usage
+   * panel. Read-only: each file is opened through the SDK's SessionManager
+   * (cached by mtime) and reduced in place; an unreadable file is skipped
+   * like the session list skips it. Costs the provider did not report are
+   * estimated from the cached public price table while the scan runs;
+   * subscription-billed providers the user marked cost nothing. Scans default
+   * to this runtime's project; the controller passes one entry per local
+   * project for the all-projects scope.
+   */
+  async usageOverview(
+    range: UsageRange,
+    unbilledProviders: readonly string[] = [],
+    scans?: Array<{ project?: UsageProjectRef; dir: string }>,
+  ): Promise<UsageOverview> {
+    const { cwd, dir } = this;
+    if (!cwd || !dir) throw new Error("Open a project first");
+    const pi = await this.pi();
+    const pricing = loadPricingTable();
+    const targets = scans?.length ? scans : [{ dir }];
+    const sessions: UsageSessionInput[] = [];
+    for (const target of targets) {
+      const root = canonicalPath(target.dir);
+      if (!existsSync(root)) continue;
+      // The graph model gives every branch and worker its own session file
+      // under .pix-graph/.pix-tree sidecar directories, so the scan walks the
+      // whole tree — copied prefixes are deduped by entry id afterwards.
+      for (const path of sessionFilesUnder(root)) {
+        try {
+          sessions.push(cachedSessionUsage(pi, path, target.dir, cwd, target.project));
+        } catch (e) { debugLog("pi-runtime: usage scan", e); }
+      }
+    }
+    const table = await pricing;
+    // Forks, branch exports, and imports copy entries between files with ids
+    // intact; the copies would bill twice without this pass.
+    dedupeUsageRecords(sessions);
+    estimateUsageCosts(sessions, pricingResolver(table), new Set(unbilledProviders));
+    return aggregateUsage(sessions, range);
   }
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
-    if (this.runtime)
+    if (this.runtime) {
+      await this.extensionStartup;
       await this.runtime.switchSession(path, { cwdOverride: this.cwd });
-    else {
+    } else {
       const manager = pi.SessionManager.open(path, this.dir, this.cwd);
       this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
         cwd: this.cwd,
@@ -461,8 +922,10 @@ export class PiRuntime {
   async create() {
     if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
-    if (this.runtime) await this.runtime.newSession();
-    else {
+    if (this.runtime) {
+      await this.extensionStartup;
+      await this.runtime.newSession();
+    } else {
       const manager = pi.SessionManager.create(this.cwd, this.dir);
       this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
         cwd: this.cwd,
@@ -482,9 +945,76 @@ export class PiRuntime {
     const pi = await this.pi();
     const manager = pi.SessionManager.create(cwd, dir);
     const path = manager.getSessionFile();
-    // Open an explicitly persisted header: SDK otherwise defers the first user input.
+    // The registry needs an empty file before the SDK persists the first user message.
     durableWrite(path, encodeSession({ header: manager.getHeader(), entries: [] }));
     return path;
+  }
+  private queueSnapshot(): QueuedMessage[] {
+    return this.queuedMessages.map(({ images: _images, nodeId: _nodeId, ...message }) => ({ ...message }));
+  }
+  private notifyQueue() {
+    setImmediate(() => {
+      if (this.closing || !this.runtime) return;
+      try { this.emit({ type: "sessions", payload: { current: this.snapshot() } }); }
+      catch (error) { debugLog("pi-runtime: queue notification", error); }
+    });
+  }
+  private requireActiveQueue() {
+    if (this.promptEpoch !== undefined ? this.promptEpoch !== this.controlEpoch : !this.runtime?.session.isStreaming)
+      throw new Error("This task has finished. Send the message again to start a new turn.");
+  }
+  updateQueuedMessage(id: string, operation: "steer" | "remove" | "edit", text?: string) {
+    const message = this.queuedMessages.find(message => message.id === id);
+    if (!message || message.delivering) throw new Error("This message is already being processed");
+    if (operation === "remove") {
+      this.onQueuedInput?.(message, "cancelled");
+      this.queuedMessages = this.queuedMessages.filter(message => message.id !== id);
+    } else if (operation === "edit") {
+      if (typeof text !== "string") throw new Error("text must be a string");
+      const edited = text.trim();
+      if (!edited && !message.images?.length) throw new Error("A queued message must contain text or images");
+      if (edited.startsWith("/") && this.runtime.session.extensionRunner.getCommand(edited.slice(1).split(/\s/)[0]))
+        throw new Error("Extension commands cannot be queued. Run the command after the task finishes.");
+      this.onQueuedInput?.({ ...message, text: edited }, "queued");
+      message.text = edited;
+      delete message.error;
+    } else {
+      this.onQueuedInput?.({ ...message, kind: "steer" }, "queued");
+      message.kind = "steer"; delete message.error;
+    }
+    this.notifyQueue();
+  }
+  private async deliverQueuedMessages(kind: "steer" | "followUp") {
+    const session = this.runtime?.session;
+    if (!session || this.closing || this.promptEpoch !== undefined && this.promptEpoch !== this.controlEpoch) return;
+    const mode = kind === "steer" ? session.steeringMode : session.followUpMode;
+    const epoch = this.queueEpoch;
+    const pending = this.queuedMessages.filter(message => message.kind === kind && !message.delivering && !message.error);
+    for (const message of mode === "all" ? pending : pending.slice(0, 1)) {
+      if (this.closing || epoch !== this.queueEpoch) break;
+      if (!this.queuedMessages.includes(message) || message.kind !== kind) continue;
+      message.delivering = true;
+      const admission = (async () => {
+        try {
+          this.onQueuedInput?.(message, "prepared");
+          await session[kind](message.text, message.images);
+          this.deliveredInputs.set(message.id, message);
+          this.queuedMessages = this.queuedMessages.filter(item => item !== message);
+        } catch (error) {
+          message.error = error instanceof Error ? error.message : String(error);
+          message.delivering = false;
+        }
+      })();
+      this.queueAdmissions.add(admission);
+      try { await admission; }
+      finally { this.queueAdmissions.delete(admission); this.notifyQueue(); }
+    }
+  }
+  private cancelQueuedInputs() {
+    const cancelled = new Map([...this.deliveredInputs, ...this.queuedMessages.map(message => [message.id, message] as const)]);
+    this.queuedMessages = [];
+    this.deliveredInputs.clear();
+    for (const message of cancelled.values()) this.onQueuedInput?.(message, "cancelled");
   }
   state(): RuntimeState {
     const s = this.runtime?.session;
@@ -501,9 +1031,14 @@ export class PiRuntime {
         autoRetryEnabled: true,
         steeringMode: "one-at-a-time",
         followUpMode: "one-at-a-time",
-        pendingMessageCount: 0,
+        pendingMessageCount: this.queuedMessages.length,
+        queuedMessages: this.queueSnapshot(),
       };
+    // The SDK's text bookkeeping retains empty image-only inputs after delivery.
+    // The Agent's actual queue is the authority for whether SDK work remains.
+    const sdkPending = s.agent?.hasQueuedMessages?.() === false ? 0 : Number(s.pendingMessageCount ?? 0);
     return {
+      ...(this.promptTiming ? { timing: structuredClone(this.promptTiming) } : {}),
       available: true,
       model: s.model
         ? {
@@ -528,7 +1063,8 @@ export class PiRuntime {
       autoRetryEnabled: Boolean(s.autoRetryEnabled),
       steeringMode: s.steeringMode ?? "one-at-a-time",
       followUpMode: s.followUpMode ?? "one-at-a-time",
-      pendingMessageCount: Number(s.pendingMessageCount ?? 0),
+      pendingMessageCount: sdkPending + this.queuedMessages.filter(message => !message.delivering).length,
+      queuedMessages: this.queueSnapshot(),
     };
   }
   snapshot(): SessionSnapshot {
@@ -541,7 +1077,12 @@ export class PiRuntime {
       this.projectionCache = { manager: m, count: entries.length, leaf, projection: projectSession(entries, leaf) };
     return {
       session: {
-        ...summarizeSession(s.sessionFile ?? "", m.getHeader?.() ?? null, entries, new Date().toISOString()),
+        ...summarizeSession(
+          s.sessionFile ?? "",
+          m.getHeader?.() ?? null,
+          entries,
+          sessionModifiedAt(s.sessionFile ?? "", String(entries.at(-1)?.timestamp ?? new Date().toISOString())),
+        ),
         id: s.sessionId,
         name: m.getSessionName?.(),
         cwd: m.getCwd(),
@@ -561,16 +1102,56 @@ export class PiRuntime {
   }
   control(input: AgentControl): Promise<unknown> {
     if (this.closing) return Promise.reject(new Error("Session is closing"));
+    const prompt = input.action === "prompt";
+    if (input.action === "prompt") {
+      input = { ...input, submittedAt: input.submittedAt ?? new Date().toISOString() };
+      if (!this.pendingPrompts) this.promptEpoch = this.controlEpoch;
+      this.pendingPrompts++;
+    }
     const pending = this.runControl(input);
     this.pendingControls.add(pending);
-    return pending.finally(() => this.pendingControls.delete(pending));
+    return pending.finally(() => {
+      this.pendingControls.delete(pending);
+      if (prompt && --this.pendingPrompts === 0) this.promptEpoch = undefined;
+    });
+  }
+  private preparePromptDisplay(text: string, hasImages: boolean, requestId?: string) {
+    const manager = this.runtime.session.sessionManager;
+    if (hasImages) {
+      manager.appendCustomEntry(PROMPT_DISPLAY_CUSTOM_TYPE, { text, ...(requestId ? { requestId } : {}) });
+      return;
+    }
+    const branch = (typeof manager.getBranch === "function" ? manager.getBranch() : manager.getEntries()) as RawSessionEntry[];
+    const leafId = typeof manager.getLeafId === "function" ? manager.getLeafId() : branch.at(-1)?.id ?? null;
+    if (needsPromptDisplayBoundary(branch, leafId))
+      manager.appendCustomEntry(PROMPT_DISPLAY_CUSTOM_TYPE, { boundary: true });
+  }
+  private savePromptFooter(timing: RunTiming) {
+    const s = this.runtime.session;
+    s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
+      timing: structuredClone(timing),
+      contextUsage: s.getContextUsage() ?? null,
+      model: s.model ? {
+        provider: String(s.model.provider), id: String(s.model.id), name: s.model.name,
+        contextWindow: s.model.contextWindow, reasoning: Boolean(s.model.reasoning),
+        ...(s.model.input ? { input: s.model.input } : {}),
+      } : null,
+      thinkingLevel: String(s.thinkingLevel ?? "off"),
+    });
   }
   private async runControl(input: AgentControl): Promise<unknown> {
+    const epoch = this.controlEpoch;
+    if (input.action === "abort") ++this.controlEpoch;
+    else if (!["abortBash", "abortCompaction", "abortRetry"].includes(input.action)) {
+      await this.extensionStartup;
+      if (this.closing || (epoch !== this.controlEpoch && !(READ_ACTIONS as readonly string[]).includes(input.action)))
+        throw new Error("Session operation cancelled");
+    }
     const s = this.runtime?.session;
     const modelAction = (MODEL_ACTIONS as readonly string[]).includes(input.action);
-    if (!this.cwd && !modelAction)
+    if (!this.cwd && !modelAction && input.action !== "systemPromptPreview")
       throw new Error("Open a project first");
-    if (!s && input.action !== "newSession" && !modelAction)
+    if (!s && input.action !== "newSession" && input.action !== "systemPromptPreview" && !modelAction)
       throw new Error("Open a session first");
     // Broker updates can replace a model while the remote session still holds its old definition.
     if (input.action === "prompt" && s?.model && this.brokerProviders.has(s.model.provider) && !s.isStreaming) {
@@ -584,13 +1165,58 @@ export class PiRuntime {
     }
     switch (input.action) {
       case "prompt": {
+        // Broker model selection can await auth or extension hooks after the startup check.
+        if (this.closing || epoch !== this.controlEpoch) throw new Error("Session operation cancelled");
         // prompt() also resolves without a turn for handled extension
         // commands and throws before appending anything (busy, no model, no
         // auth) — the footer may only be recorded when this call created one.
         const before = s.sessionManager.getEntries().length;
+        const timing: RunTiming = { startedAt: input.submittedAt ?? new Date().toISOString(), compactions: [] };
+        if (!s.isStreaming && !s.isCompacting) { this.promptTiming = timing; this.promptUserSeen = false; }
+        let completed = false;
         try {
-          await s.prompt(input.text, { source: "interactive", ...(input.images?.length ? { images: input.images } : {}) });
+          await s.prompt(input.text, {
+            source: "interactive",
+            ...(input.images?.length ? { images: input.images } : {}),
+            preflightResult: (result: "handled" | "queued" | "started") => {
+              const requestId = (input as typeof input & { requestId?: string }).requestId;
+              if (result === "started") this.preparePromptDisplay(input.text, Boolean(input.images?.length), requestId);
+            },
+          });
+          // Inputs can arrive while another extension awaits its final settle
+          // hook, after our delivery hook already ran. Keep those continuations
+          // inside this control's lifetime, including handled or failed inputs.
+          while (!this.closing && epoch === this.controlEpoch) {
+            const ready = this.queuedMessages.filter(message => !message.error && !message.delivering);
+            const message = ready.find(message => message.kind === "steer") ?? ready[0];
+            if (!message) break;
+            this.onQueuedInput?.(message, "prepared");
+            message.delivering = true;
+            const queueEpoch = this.queueEpoch;
+            try {
+              await s.prompt(message.text, { images: message.images, source: "interactive", preflightResult: (result: "handled" | "queued" | "started") => {
+                if (result === "started") this.preparePromptDisplay(message.text, Boolean(message.images?.length), message.id);
+                if (epoch === this.controlEpoch) this.deliveredInputs.set(message.id, message);
+                this.queuedMessages = this.queuedMessages.filter(item => item !== message);
+                this.notifyQueue();
+              } });
+            } catch (error) {
+              if (!this.closing && epoch === this.controlEpoch && queueEpoch === this.queueEpoch) {
+                // Preflight can remove the input before Agent.prompt rejects.
+                // Keep that failure recoverable unless the user cancelled it.
+                this.deliveredInputs.delete(message.id);
+                if (!this.queuedMessages.includes(message)) this.queuedMessages.unshift(message);
+              }
+              message.delivering = false;
+              message.error = error instanceof Error ? error.message : String(error);
+              this.notifyQueue();
+            }
+          }
+          completed = true;
         } finally {
+          if (this.promptEpoch === epoch) this.promptEpoch = undefined;
+          // The SDK retains footer data by reference; stop recording before saving it.
+          if (this.promptTiming === timing) this.promptTiming = undefined;
           const createdTurn = s.sessionManager
             .getEntries()
             .slice(before)
@@ -599,85 +1225,115 @@ export class PiRuntime {
                 e.type === "message" &&
                 (e.message as { role?: string } | undefined)?.role === "user",
             );
-          if (createdTurn)
-            s.sessionManager.appendCustomEntry(NODE_FOOTER_CUSTOM_TYPE, {
-              contextUsage: s.getContextUsage() ?? null,
-              model: s.model
-                ? {
-                    provider: String(s.model.provider),
-                    id: String(s.model.id),
-                    name: s.model.name,
-                    contextWindow: s.model.contextWindow,
-                    reasoning: Boolean(s.model.reasoning),
-                    ...(s.model.input ? { input: s.model.input } : {}),
-                  }
-                : null,
-              thinkingLevel: String(s.thinkingLevel ?? "off"),
-            });
+          if (createdTurn) this.savePromptFooter(timing);
+          if (completed && !this.closing) {
+            for (const message of this.deliveredInputs.values()) this.onQueuedInput?.(message, "settled");
+            this.deliveredInputs.clear();
+          }
+          for (const message of this.queuedMessages) {
+            message.delivering = false;
+            message.error ??= "The task ended before this message could be processed. Remove it and send again.";
+          }
+          if (!this.closing && this.onQueuedInput) {
+            const unfinished = new Map([
+              ...(!completed ? this.deliveredInputs : []),
+              ...this.queuedMessages.map(message => [message.id, message] as const),
+            ]);
+            for (const message of unfinished.values()) this.onQueuedInput(message, "interrupted");
+            this.queuedMessages = [];
+            this.deliveredInputs.clear();
+            if (!completed) s.clearQueue();
+          }
         }
         break;
       }
       case "steer":
-        await s.steer(input.text, input.images);
-        break;
       case "followUp":
-        await s.followUp(input.text, input.images);
+        this.requireActiveQueue();
+        if (input.text.startsWith("/") && s.extensionRunner.getCommand(input.text.slice(1).split(/\s/)[0]))
+          throw new Error("Extension commands cannot be queued. Run the command after the task finishes.");
+        {
+          const message: QueuedInput = { id: randomUUID(), kind: input.action, text: input.text,
+            imageCount: input.images?.length ?? 0, images: input.images };
+          this.onQueuedInput?.(message, "queued");
+          this.queuedMessages.push(message);
+        }
+        this.notifyQueue();
+        break;
+      case "updateQueuedMessage":
+        if (input.operation !== "remove") this.requireActiveQueue();
+        this.updateQueuedMessage(input.id, input.operation, input.operation === "edit" ? input.text : undefined);
         break;
       case "abort":
-        await s.abort();
+        this.dialogs?.cancel(s);
+        ++this.queueEpoch;
+        await Promise.allSettled([...this.queueAdmissions]);
+        try { this.cancelQueuedInputs(); }
+        finally { s.clearQueue(); await s.abort(); s.clearQueue(); }
         break;
       case "clearQueue":
-        await s.clearQueue();
+        ++this.queueEpoch;
+        await Promise.allSettled([...this.queueAdmissions]);
+        try { this.cancelQueuedInputs(); }
+        finally { s.clearQueue(); }
         break;
       case "getState":
         return this.state();
       case "refreshModels": {
-        const signal = AbortSignal.timeout(15_000);
-        const modelRuntime = await this.modelRuntime();
-        const result: ModelsRefreshResult = await modelRuntime.refresh({
-          allowNetwork: true,
-          force: true,
-          signal,
-        });
-        if (result.aborted || signal.aborted)
-          throw new Error("Model catalog refresh timed out. Please try again.");
-        if (result.errors.size) {
-          const details = Array.from(result.errors, ([provider, error]) => `${provider}: ${error.message}`).join("; ");
-          throw new Error(`Could not refresh model catalogs: ${details}`);
-        }
+        await this.refreshModelCatalog();
         return { ok: true };
       }
       case "getModels": {
         const modelRuntime = await this.modelRuntime();
-        if (input.broker) return (await modelRuntime.getAvailable()).map((m: any): BrokerModel => ({
-          provider: m.provider, id: m.id, name: m.name, api: m.api,
-          reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
-          input: m.input, contextWindow: m.contextWindow, maxTokens: m.maxTokens, cost: m.cost,
-        }));
-        return (await modelRuntime.getAvailable()).map(
+        if (input.broker) return (await modelRuntime.getAllAvailable()).map((m: any): BrokerModel => {
+          const base = { provider: m.provider, id: m.id, name: m.name, api: m.api, input: m.input, cost: m.cost };
+          if (m.type === "image") return { ...base, type: "image", output: m.output };
+          if (m.type === "classifier") return { ...base, type: "classifier", contextWindow: m.contextWindow };
+          return { ...base, reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
+            contextWindow: m.contextWindow, maxTokens: m.maxTokens };
+        });
+        return (await (input.allTypes ? modelRuntime.getAllAvailable() : modelRuntime.getAvailable())).map(
           (m: any): RuntimeModel => ({
             provider: String(m.provider),
             id: String(m.id),
             name: m.name,
+            ...(input.allTypes ? { type: m.type ?? "chat" } : {}),
             contextWindow: m.contextWindow,
-            reasoning: Boolean(m.reasoning),
             ...(m.input ? { input: m.input } : {}),
-            thinkingLevels: getSupportedThinkingLevels(m),
+            ...(m.type === "image" || m.type === "classifier" ? {} : {
+              reasoning: Boolean(m.reasoning),
+              thinkingLevels: getSupportedThinkingLevels(m),
+            }),
           }),
         );
       }
       case "getCustomModels": {
         return getCustomModels(join(this.agentDir(), "models.json"));
       }
+      case "discoverModels": {
+        const modelRuntime = await this.modelRuntime();
+        const signal = AbortSignal.timeout(15000);
+        const auth = await modelRuntime.getAuth(input.provider, { apiKey: input.apiKey?.trim() || undefined, signal })
+          .catch((error: unknown) => {
+            if (signal.aborted) throw new Error("Fetching models timed out. Please try again.");
+            throw error;
+          });
+        const models = await discoverModels(input, auth?.auth, signal);
+        return models.map(model => ({ ...model, exists: !!modelRuntime.getModel(input.provider, model.id) }));
+      }
       case "addCustomModel":
+      case "addCustomModels":
       case "updateCustomModel": {
         const update = input.action === "updateCustomModel";
         if (update && s?.isStreaming) throw new Error("Wait for the current response to finish before editing model settings.");
         const modelRuntime = await this.modelRuntime();
-        if (!update && modelRuntime.getModel(input.provider, input.modelId))
+        const models = input.action === "addCustomModels" ? input.models : [{ modelId: input.modelId }];
+        if (!update && models.some(model => modelRuntime.getModel(input.provider, model.modelId)))
           throw new Error("This provider/model ID already exists. Use a different model or provider ID.");
         if (!update && modelRuntime.getError()) throw new Error(modelRuntime.getError());
-        addCustomModel(join(this.agentDir(), "models.json"), input, update);
+        const path = join(this.agentDir(), "models.json");
+        if (input.action === "addCustomModels") addCustomModels(path, input);
+        else addCustomModel(path, input, update);
         await modelRuntime.refresh({ allowNetwork: false });
         if (modelRuntime.getError()) throw new Error(modelRuntime.getError());
         if (input.apiKey?.trim()) {
@@ -691,7 +1347,7 @@ export class PiRuntime {
             throw new Error(`Model saved, but credential setup failed. Configure this provider in settings: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
-        if (update && s?.model?.provider === input.provider && s.model.id === input.modelId) {
+        if (input.action === "updateCustomModel" && s?.model?.provider === input.provider && s.model.id === input.modelId) {
           await s.setModel(modelRuntime.getModel(input.provider, input.modelId));
           return this.snapshot();
         }
@@ -768,6 +1424,9 @@ export class PiRuntime {
             .map(async (p: any): Promise<RuntimeProvider> => ({
               id: p.id,
               name: p.name,
+              modelTypes: [...new Set<NonNullable<RuntimeModel["type"]>>(
+                modelRuntime.getAllModels(p.id).map((model: any) => model.type ?? "chat"),
+              )],
               authTypes: [
                 ...(p.auth?.apiKey?.login ? ["api_key" as const] : []),
                 ...(p.auth?.oauth?.login ? ["oauth" as const] : []),
@@ -840,23 +1499,43 @@ export class PiRuntime {
           },
           notify: () => undefined,
         });
-        return { ok: true };
+        const catalogError = await this.refreshLoginCatalog(input.provider);
+        return { ok: true, ...(catalogError ? { catalogError } : {}) };
       }
       case "loginOAuth": {
         const modelRuntime = await this.modelRuntime();
+        const loginAbort = new AbortController();
+        const cancelLogin = (promptSignal?: AbortSignal): never => {
+          const error = new Error("Sign-in cancelled");
+          // The provider also dismisses a manual prompt after a successful callback.
+          // Only user cancellation should abort the whole login and token exchange.
+          if (!promptSignal?.aborted) loginAbort.abort(error);
+          throw error;
+        };
+        // The settings manager backing the runtime owns this installation's
+        // stable device ID, which ChatGPT sign-in sends as its agent host ID.
+        const settingsManager = this.runtime?.session?.settingsManager ?? this.modelServices?.settingsManager;
         await modelRuntime.login(input.provider, "oauth", {
+          signal: loginAbort.signal,
           prompt: async (prompt: any) => {
+            const signal = prompt.signal ? AbortSignal.any([prompt.signal, loginAbort.signal]) : loginAbort.signal;
             if (prompt.type === "select") {
               const selected = prompt.options.find((option: any) => option.id === input.method);
               if (selected) return selected.id;
-              throw new Error(`OAuth method ${input.method} is not supported by this provider.`);
+              const choice = await this.dialogs?.request(this, { kind: "select", title: prompt.message,
+                options: prompt.options.map((option: any) => option.label), source: input.provider }, { signal });
+              const method = prompt.options.find((option: any) => option.label === choice);
+              if (method) return method.id;
+              return cancelLogin(prompt.signal);
             }
-            if (prompt.type === "manual_code" && prompt.signal)
-              return new Promise<string>((_resolve, reject) => {
-                const abort = () => reject(new Error("OAuth browser prompt closed"));
-                if (prompt.signal.aborted) abort();
-                else prompt.signal.addEventListener("abort", abort, { once: true });
-              });
+            if (prompt.type === "manual_code" || prompt.type === "text") {
+              // OpenAI's manual prompt races the browser callback; it is a fallback, not a required step.
+              const kind = input.provider === "openai" && prompt.type === "manual_code" ? "oauth" : "input";
+              const value = await this.dialogs?.request(this, { kind, title: prompt.message,
+                placeholder: prompt.placeholder, source: input.provider }, { signal });
+              if (value !== undefined) return value;
+              return cancelLogin(prompt.signal);
+            }
             throw new Error("This OAuth provider requires interactive Pi /login setup.");
           },
           notify: (event: any) => {
@@ -870,21 +1549,48 @@ export class PiRuntime {
               : event.type === "progress" ? event.message : event.instructions;
             if (message) this.emit({ type: "notice", payload: { message } });
           },
-        });
+        }, { getDeviceId: () => settingsManager.getOrCreateDeviceId() });
         const status = await modelRuntime.checkAuth(input.provider);
         if (status?.type !== "oauth")
           throw new Error("OAuth completed without a usable credential");
-        return { ok: true, status };
+        const catalogError = await this.refreshLoginCatalog(input.provider);
+        return { ok: true, status, ...(catalogError ? { catalogError } : {}) };
       }
       case "setBrokerProviders":
         await this.configureBrokerProviders(input.providers, input.models);
         return { ok: true };
       case "logout":
         await (await this.modelRuntime()).logout(input.provider);
+        // A revoked local credential hands the provider back to the broker.
+        await this.refreshBrokerAuth();
         return { ok: true };
+      case "setPromptCustomization": {
+        // Pure runtime memory: the desktop owns the persisted copy in app
+        // settings and re-syncs after every save, so nothing lands on disk here.
+        this.promptCustomization = input.customization;
+        break;
+      }
+      case "systemPromptPreview":
+        return this.previewSystemPrompt();
       case "setLabel":
         s.sessionManager.appendLabelChange(input.entryId, input.label);
         break;
+      case "setPromptOverride": {
+        // The persona text arrives with the action (settings live on the
+        // desktop), and the record snapshots it, so history stays faithful
+        // after the definition changes or disappears.
+        if ("off" in input) {
+          s.sessionManager.appendCustomEntry(PROMPT_OVERRIDE_CUSTOM_TYPE, { off: true });
+          break;
+        }
+        if (!input.text.trim()) throw new Error("Persona text is empty");
+        s.sessionManager.appendCustomEntry(PROMPT_OVERRIDE_CUSTOM_TYPE, {
+          mode: input.mode,
+          name: input.name,
+          text: input.text,
+        });
+        break;
+      }
       case "navigateTree":
         await s.navigateTree(input.entryId, { summarize: false });
         break;
@@ -912,24 +1618,43 @@ export class PiRuntime {
   }
   private async closeRuntime() {
     const runtime = this.runtime;
+    this.dialogs?.cancel(this);
     if (!runtime) return;
+    this.dialogs?.cancel(runtime.session);
     this.closing = true;
-    this.unsubscribe?.();
+    ++this.queueEpoch;
+    this.stopStartupDialogs?.();
+    ++this.controlEpoch;
     try {
+      if (runtime.session.isStreaming) this.queuedMessages = [];
+      await Promise.allSettled([...this.queueAdmissions]);
+      runtime.session.clearQueue();
       runtime.session.abortBash();
+      // Keep internal timing subscribed until abort and footer persistence finish.
       await runtime.session.abort();
       // A prompt can still be in preflight, or writing its footer after abort.
       // Drain controller calls before unlinking the session file.
-      await Promise.allSettled([...this.pendingControls]);
+      await Promise.allSettled([this.extensionStartup, ...this.pendingControls]);
       await runtime.dispose();
       if (this.runtime === runtime) this.runtime = undefined;
     } finally {
+      this.unsubscribe?.();
+      this.extensionSession = undefined;
+      this.extensionStartup = Promise.resolve();
       this.closing = false;
     }
   }
   dispose() {
+    this.stopStartupDialogs?.();
+    this.dialogs?.cancel(this);
+    if (this.runtime) this.dialogs?.cancel(this.runtime.session);
     this.unsubscribe?.();
-    this.runtime?.session?.dispose?.();
+    const runtime = this.runtime;
+    ++this.controlEpoch;
+    void this.extensionStartup.then(() => runtime?.session?.dispose?.(), () => runtime?.session?.dispose?.())
+      .catch(error => debugLog("pi-runtime: dispose", error));
+    this.extensionStartup = Promise.resolve();
+    this.extensionSession = undefined;
     this.runtime = undefined;
   }
 }

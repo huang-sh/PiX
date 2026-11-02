@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, provide, ref, watch } from "vue";
-import { ArrowLeft, Bot, Box, FlaskConical, History, Info, Keyboard, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wand2, Wrench } from "@lucide/vue";
+import { ArrowLeft, Bot, Box, ChartColumn, FlaskConical, History, Info, Keyboard, MonitorUp, Palette, Puzzle, SlidersHorizontal, Sparkles, Terminal, Wand2, Wrench } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import AboutPage from "./AboutPage.vue";
@@ -10,8 +10,10 @@ import ExtensionInspector from "./ExtensionInspector.vue";
 import ModelInspector from "./ModelInspector.vue";
 import ModelsPanel from "./ModelsPanel.vue";
 import PixiePanel from "./PixiePanel.vue";
+import RemotePanel from "./RemotePanel.vue";
 import SettingsRowsPanel from "./SettingsRowsPanel.vue";
 import SkillsPanel from "./SkillsPanel.vue";
+import UsageSettingsPanel from "./UsageSettingsPanel.vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -31,7 +33,9 @@ const inspectorFocus = createInspectorFocus();
 // Created before the draft: the agent category's output-style select lists
 // the loaded skills that opt in with an output-style marker.
 const skillCtx = useSkills();
-const outputStyleSkills = computed(() => skillCtx.skills.value.filter((skill) => skill.outputStyle).map((skill) => skill.name));
+const outputStyleSkills = computed(() => skillCtx.skills.value
+  .filter((skill) => skill.outputStyle && !skill.disableModelInvocation)
+  .map((skill) => skill.name));
 const draftCtx = useSettingsDraft(outputStyleSkills);
 const modelCtx = useModels(draftCtx.draft, inspectorFocus, () => closeDetailsPanel(), draftCtx.save);
 const extensionCtx = useExtensions(inspectorFocus);
@@ -96,12 +100,14 @@ const categories = computed(() => [
   ["shortcuts", t("settings.categories.shortcuts"), Keyboard],
   ["models", t("settings.categories.models"), Box],
   ["sessions", t("settings.categories.sessions"), History],
+  ["usage", t("settings.categories.usage"), ChartColumn],
   ["agent", t("settings.categories.agent"), Bot],
   ["tools", t("settings.categories.tools"), Wrench],
   ["skills", t("settings.categories.skills"), Sparkles],
   ["pixie", t("settings.categories.pixie"), Wand2],
   ["extensions", t("settings.categories.extensions"), Puzzle],
   ["shell", t("settings.categories.shell"), Terminal],
+  ["remote", t("settings.categories.remote"), MonitorUp],
   ["experimental", t("settings.categories.experimental"), FlaskConical],
   ["about", t("settings.categories.about"), Info],
 ] as const);
@@ -169,6 +175,7 @@ watch(
           <p v-else-if="layout.settingsCategory === 'extensions'">{{ t("settings.extensionsDescription", { n: extensions.length }) }}</p>
           <p v-else-if="layout.settingsCategory === 'shortcuts'">{{ t("shortcuts.description") }}</p>
           <p v-else-if="layout.settingsCategory === 'pixie'">{{ t("settings.pixieDescription") }}</p>
+          <p v-else-if="layout.settingsCategory === 'usage'">{{ t("settings.usageDescription") }}</p>
         </div>
       </header>
 
@@ -176,6 +183,8 @@ watch(
       <ModelsPanel v-if="layout.settingsCategory === 'models'" />
       <SkillsPanel v-else-if="layout.settingsCategory === 'skills'" />
       <PixiePanel v-else-if="layout.settingsCategory === 'pixie'" />
+      <UsageSettingsPanel v-else-if="layout.settingsCategory === 'usage'" />
+      <RemotePanel v-else-if="layout.settingsCategory === 'remote'" />
       <ExtensionsPanel v-else-if="layout.settingsCategory === 'extensions'" />
       <AboutPage v-else-if="layout.settingsCategory === 'about'" />
       <SettingsRowsPanel v-else-if="layout.settingsCategory !== 'shortcuts'" />

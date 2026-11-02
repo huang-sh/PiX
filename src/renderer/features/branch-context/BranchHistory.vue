@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { Brain, ChevronRight, LoaderCircle, Terminal } from "@lucide/vue";
+import { Brain, ChevronRight, GitBranch, LoaderCircle, Terminal } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { BranchMessage } from "../../../shared/types";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import ContextStatus from "./ContextStatus.vue";
+import ToolDuration from "./ToolDuration.vue";
 import FileChanges from "./FileChanges.vue";
+import CompactionBubble from "./CompactionBubble.vue";
+import type { CompactionRecord } from "../../../shared/run-timing";
 import type { FileChange } from "../../../shared/file-changes";
 
 export interface HistoryTurn {
@@ -15,7 +19,11 @@ export interface HistoryTurn {
   /** The turn's last assistant message: its text is the answer, its isError the failure. */
   terminal?: BranchMessage;
   running?: boolean;
+  gitBranch?: string;
+  gitCommit?: string;
   fileChanges?: FileChange[];
+  compactions?: CompactionRecord[];
+  trailingCompactions?: CompactionRecord[];
 }
 
 defineProps<{
@@ -37,8 +45,18 @@ const { t } = useI18n();
         <article v-if="turn.user" class="branch-message user">
           <p v-if="turn.user.text || !turn.user.images?.length">{{ turn.user.text || t("common.empty") }}</p>
           <MessageImages :images="turn.user.images" />
-          <CopyButton :text="turn.user.text" />
+          <div class="message-actions">
+            <ContextStatus :status="turn.user.contextStatus" />
+            <CopyButton :text="turn.user.text" />
+          </div>
         </article>
+        <CompactionBubble v-for="(compaction, index) in turn.compactions" :key="`pre:${index}`" :compaction="compaction" />
+        <div v-if="turn.gitBranch" class="chat-git-branch"
+          :title="t('graph.gitBranchAtStart', { branch: turn.gitCommit ? `${turn.gitBranch} · ${turn.gitCommit}` : turn.gitBranch })"
+          :aria-label="t('graph.gitBranchAtStart', { branch: turn.gitCommit ? `${turn.gitBranch} · ${turn.gitCommit}` : turn.gitBranch })">
+          <GitBranch :size="13" aria-hidden="true" />
+          <span>{{ turn.gitBranch }}<template v-if="turn.gitCommit"> · {{ turn.gitCommit.slice(0, 7) }}</template></span>
+        </div>
 
         <details v-if="turn.process.length || turn.terminal?.thinking" class="agent-process"
           :open="expandedProcesses.has(turn.id)" @toggle="emit('toggle', turn.id, $event, viewKey)">
@@ -50,7 +68,7 @@ const { t } = useI18n();
           <div v-if="expandedProcesses.has(turn.id)" class="process-items">
             <template v-for="message in processMessages.get(turn.id)" :key="message.entryId">
               <details v-if="message.thinking" class="process-item process-thinking">
-                <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
+                <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}<ContextStatus :status="message.contextStatus" /></strong></summary>
                 <p>{{ message.thinking }}</p>
               </details>
               <details
@@ -60,18 +78,33 @@ const { t } = useI18n();
               >
                 <summary>
                   <Terminal :size="13" />
-                  <strong>{{ message.toolName || t("branch.tool") }}</strong>
+                  <strong>{{ message.toolName || t("branch.tool") }}<ContextStatus :status="message.contextStatus" /></strong>
                   <code v-if="message.toolInput" :title="message.toolInput">{{ message.toolInput }}</code>
+                  <ToolDuration :duration-ms="message.durationMs" />
                 </summary>
                 <pre>{{ message.text || t("common.noOutput") }}</pre>
+                <MessageImages :images="message.images" />
+                <div v-if="message.nestedCalls?.length" class="nested-tools">
+                  <small>{{ t('branch.nestedCalls') }}</small>
+                  <p v-if="!message.nestedCallsComplete">{{ t('branch.nestedCallsIncomplete') }}</p>
+                  <details v-for="call in message.nestedCalls" :key="call.id" :class="{ error: call.status !== 'ok' }">
+                    <summary><strong>{{ call.name }}</strong> · {{ t(`branch.nestedStatus.${call.status === 'ok' ? 'ok' : call.status === 'error' ? 'error' : 'unfinished'}`) }} <ToolDuration :duration-ms="call.durationMs" /></summary>
+                    <pre v-if="call.input">{{ call.input }}</pre>
+                    <pre v-if="call.error">{{ call.error }}</pre>
+                  </details>
+                </div>
               </details>
-              <div v-else-if="message.text" class="process-item assistant">
+              <div v-else-if="message.text || message.images?.length" class="process-item assistant">
                 <MarkdownRenderer :content="message.text" :custom-id="message.entryId" />
-                <CopyButton :text="message.text" />
+                <MessageImages :images="message.images" />
+                <div class="message-actions">
+                  <ContextStatus :status="message.contextStatus" />
+                  <CopyButton :text="message.text" />
+                </div>
               </div>
             </template>
             <details v-if="turn.terminal?.thinking" class="process-item process-thinking">
-              <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}</strong></summary>
+              <summary><Brain :size="13" /><strong>{{ t("branch.thinking") }}<ContextStatus :status="turn.terminal.contextStatus" /></strong></summary>
               <p>{{ turn.terminal.thinking }}</p>
             </details>
           </div>
@@ -79,15 +112,28 @@ const { t } = useI18n();
 
         <article v-if="turn.terminal?.isError" class="branch-message assistant error-response">
           <p class="error-message">{{ errorText(turn.terminal) }}</p>
-          <CopyButton :text="errorText(turn.terminal)" />
+          <div class="message-actions">
+            <ContextStatus :status="turn.terminal.contextStatus" />
+            <CopyButton :text="errorText(turn.terminal)" />
+          </div>
         </article>
 
-        <article v-if="turn.terminal?.text" class="branch-message assistant"
+        <article v-if="turn.terminal && (turn.terminal.text || turn.terminal.images?.length)" class="branch-message assistant"
           :class="turn.running || turn.terminal.isError ? 'progress-response' : 'final-response'">
           <MarkdownRenderer :content="turn.terminal.text" :custom-id="turn.terminal.entryId" />
-          <CopyButton :text="turn.terminal.text" />
+          <MessageImages :images="turn.terminal.images" />
+          <div class="message-actions">
+            <ContextStatus :status="turn.terminal.contextStatus" />
+            <CopyButton :text="turn.terminal.text" />
+          </div>
         </article>
         <FileChanges v-if="!turn.running && turn.fileChanges?.length && sessionPath" :changes="turn.fileChanges" :session-path="sessionPath" />
+        <CompactionBubble v-for="(compaction, index) in turn.trailingCompactions" :key="`post:${index}`" :compaction="compaction" />
       </section>
   </div>
 </template>
+
+<style scoped>
+.nested-tools { margin: 8px 0 0 16px; padding-left: 10px; border-left: 1px solid var(--border); }
+.nested-tools small { color: var(--muted); }
+</style>

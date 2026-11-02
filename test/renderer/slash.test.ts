@@ -203,6 +203,7 @@ describe("PromptComposer slash menu", () => {
   });
 
   it("IME composition Enter neither selects nor submits", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
     const run = vi.fn().mockResolvedValue(undefined);
     const wrapper = mountComposer(run);
     await type(wrapper, "/");

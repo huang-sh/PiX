@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { MainController, type Platform } from "../src/main/controller.js";
 import type { ProjectGroup, ProjectInfo, SettingsBundle } from "../src/shared/types.js";
 
@@ -26,9 +27,100 @@ const denied: Platform = {
     return false;
   },
   async openExternal() {},
+  async openPath() {},
+  async openWith() {},
+  async openWithApps() { return []; },
+  async openWithApp() {},
+
+
   showItemInFolder() {},
   quit() {},
 };
+
+test("file links resolve line suffixes without changing file-tree paths or literal filenames", async () => {
+  const project = mkdtempSync(join(home, "open-links-"));
+  writeFileSync(join(project, "My Report.md"), "report");
+  const opened: string[] = [];
+  const controller = new MainController(project, { ...denied, openPath: async path => { opened.push(path); } });
+  await controller.invoke("app.openFileLink", { href: "./My%20Report.md:12" });
+  assert.deepEqual(opened, [join(project, "My Report.md")]);
+  await controller.invoke("app.openPath", { path: "My Report.md" });
+  assert.equal(opened.at(-1), join(project, "My Report.md"));
+  if (process.platform !== "win32") {
+    writeFileSync(join(project, "My Report.md:12"), "literal filename");
+    await controller.invoke("app.openFileLink", { href: "./My%20Report.md:12" });
+    assert.equal(opened.at(-1), join(project, "My Report.md:12"));
+    await controller.invoke("app.openFileLink", { href: "./My%20Report.md%3A12" });
+    assert.equal(opened.at(-1), join(project, "My Report.md:12"));
+  }
+  await controller.invoke("app.openPath", { path: "My Report.md:12" });
+  assert.equal(opened.at(-1), join(project, "My Report.md:12"), "file-tree actions never interpret line suffixes");
+  const count = opened.length;
+  await assert.rejects(controller.invoke("app.openFileLink", { href: "../outside.md:12" }), /escapes project/);
+  assert.equal(opened.length, count);
+  controller.project!.remote = { kind: "ssh", host: "server" };
+  await assert.rejects(controller.invoke("app.openPath", { path: "My Report.md" }), /Remote files/);
+  assert.equal(opened.length, count);
+});
+
+test("explicit file links preserve outside absolute paths while workspace actions remain confined", async () => {
+  const project = mkdtempSync(join(home, "file-links-"));
+  const downloads = mkdtempSync(join(home, "下载 文档-"));
+  const document = join(downloads, "技术白皮书.docx");
+  writeFileSync(document, "fixture");
+  const shorthand = `${project.split(/[\\/]/).at(-1)}.md`;
+  writeFileSync(join(project, shorthand), "project readme");
+  // A same-named project path must never shadow the actual absolute document.
+  if (process.platform !== "win32") {
+    const shadow = join(project, document.replace(/^[/\\]+/, ""));
+    mkdirSync(resolve(shadow, ".."), { recursive: true });
+    writeFileSync(shadow, "different file");
+    writeFileSync(`${shadow}:12`, "different literal file");
+  }
+  const opened: string[] = [];
+  const controller = new MainController(project, { ...denied, openPath: async path => { opened.push(path); } });
+  const initial = controller.project;
+  await controller.invoke("app.openFileLink", { href: document });
+  assert.equal(opened.at(-1), document);
+  await controller.invoke("app.openFileLink", { href: `${document}:12` });
+  assert.equal(opened.at(-1), document);
+  await controller.invoke("app.openFileLink", { href: `${pathToFileURL(document).href}:12?view=full#section` });
+  assert.equal(opened.at(-1), document);
+  if (process.platform !== "win32") {
+    writeFileSync(`${document}:12`, "literal filename");
+    await controller.invoke("app.openFileLink", { href: `${document}:12` });
+    assert.equal(opened.at(-1), `${document}:12`);
+    await controller.invoke("app.openFileLink", { href: `/${shorthand}` });
+    assert.equal(opened.at(-1), join(project, shorthand));
+  }
+  assert.equal(controller.project, initial);
+  const count = opened.length;
+  await assert.rejects(controller.invoke("app.openPath", { path: document }), /escapes project/);
+  await assert.rejects(controller.invoke("app.openFileLink", { href: "../outside.docx" }), /escapes project/);
+  await assert.rejects(controller.invoke("app.openFileLink", { href: "https://example.com/report.docx" }), /Expected a file link/);
+  controller.project!.remote = { kind: "ssh", host: "server" };
+  await assert.rejects(controller.invoke("app.openFileLink", { href: document }), /Remote files/);
+  assert.equal(opened.length, count);
+});
+
+test("a missing explicit file URL never opens a project file with the same name", async () => {
+  const project = mkdtempSync(join(home, "file-url-"));
+  const name = `${project.split(/[\\/]/).at(-1)}.docx`;
+  writeFileSync(join(project, name), "a different project document");
+  const absolute = resolve(project, "/", name);
+  assert.equal(existsSync(absolute), false);
+  const opened: string[] = [];
+  const controller = new MainController(project, { ...denied, openPath: async path => {
+    if (!existsSync(path)) throw new Error(`Missing file: ${path}`);
+    opened.push(path);
+  } });
+  await controller.invoke("app.openFileLink", { href: `/${name}` });
+  assert.deepEqual(opened, [join(project, name)]);
+  for (const suffix of ["", ":12", ":12#section"]) {
+    await assert.rejects(controller.invoke("app.openFileLink", { href: `${pathToFileURL(absolute).href}${suffix}` }), /Missing file/);
+  }
+  assert.deepEqual(opened, [join(project, name)]);
+});
 
 /** Installs a mock remote workspace as the pooled, active connection. */
 function attachRemote(
@@ -82,6 +174,53 @@ test("shell commands require main-process approval", async () => {
   })) as { cancelled: boolean };
   assert.equal(result.cancelled, true);
   assert.equal(ran, false);
+});
+
+test("shell confirmations remain pending across views until every request settles", async t => {
+  const project = mkdtempSync(join(home, "pending-shell-"));
+  const approvals: Array<{ resolve(value: boolean): void; reject(error: Error): void }> = [];
+  const platform = { ...denied, confirm: () => new Promise<boolean>((resolve, reject) => { approvals.push({ resolve, reject }); }) };
+  const owner = new MainController(project, platform);
+  const first = new MainController(project, platform, owner);
+  const second = new MainController(project, platform, owner);
+  t.after(async () => {
+    await Promise.all([first, second, owner].map(controller => controller.closeAll()));
+    for (const controller of [first, second, owner]) { controller.projectRuntime.dispose(); controller.shell.dispose(); }
+  });
+  for (const controller of [first, second])
+    t.mock.method(controller.shell, "run", async () => { throw new Error("an unapproved command must not start"); });
+  const cancelled = first.invoke("shell.run", { command: "first" });
+  const rejected = second.invoke("shell.run", { command: "second" });
+  assert.equal(approvals.length, 2);
+  assert.ok([owner, first, second].every(controller => controller.hasPendingWork));
+  approvals[0]!.resolve(false);
+  assert.equal((await cancelled as { cancelled: boolean }).cancelled, true);
+  assert.equal(owner.hasPendingWork, true, "another view's confirmation is still pending");
+  const failure = assert.rejects(rejected, /confirmation failed/);
+  approvals[1]!.reject(new Error("confirmation failed"));
+  await failure;
+  assert.ok([owner, first, second].every(controller => !controller.hasPendingWork));
+});
+
+test("shell execution and startup failures release pending work", async t => {
+  const project = mkdtempSync(join(home, "shell-lifecycle-"));
+  const controller = new MainController(project, { ...denied, confirm: async () => true });
+  t.after(async () => { await controller.closeAll(); controller.projectRuntime.dispose(); controller.shell.dispose(); });
+  const result = { id: "command", command: "fixture", output: "done", exitCode: 0, cancelled: false, truncated: false };
+  let finish!: (value: typeof result) => void;
+  let started!: () => void;
+  const running = new Promise<void>(resolve => { started = resolve; });
+  t.mock.method(controller.shell, "run", () => new Promise<typeof result>(resolve => { finish = resolve; started(); }));
+  const command = controller.invoke("shell.run", { command: "fixture" });
+  assert.equal(controller.hasPendingWork, true);
+  await running;
+  assert.equal(controller.hasPendingWork, true);
+  finish(result);
+  assert.deepEqual(await command, result);
+  assert.equal(controller.hasPendingWork, false);
+  t.mock.method(controller.shell, "run", () => { throw new Error("could not spawn"); });
+  await assert.rejects(controller.invoke("shell.run", { command: "fixture" }), /could not spawn/);
+  assert.equal(controller.hasPendingWork, false);
 });
 
 test("interactive terminals open without a second confirmation", async () => {
@@ -219,22 +358,32 @@ test("remote OAuth login runs on the desktop and only syncs models", async () =>
   }]);
 });
 
-test("remote model refresh uses the desktop catalog and resyncs the model broker", async () => {
+test("remote OpenRouter refresh and login preserve personalized limits/prices and revoke old models", async () => {
   const controller = new MainController(root, denied);
   const localCalls: unknown[] = [];
   const remoteCalls: Array<{ route: string; input: unknown }> = [];
+  const first = { provider: "openrouter", id: "allowed-a", api: "openai-completions", contextWindow: 75000, maxTokens: 4096,
+    cost: { input: 2, output: 7, cacheRead: 1, cacheWrite: 0 } };
+  const second = { ...first, id: "allowed-b", contextWindow: 80000, maxTokens: 8192 };
+  let models = [first];
   controller.projectRuntime.control = async (input) => {
     localCalls.push(input);
-    return input.action === "getModels" ? [{ provider: "openai", id: "new-model" }] : { ok: true };
+    return input.action === "getModels" ? models : { ok: true };
   };
   attachRemote(controller, async (route, input) => {
     remoteCalls.push({ route, input });
     return { ok: true };
   });
-  await controller.invoke("agent.control", { action: "refreshModels" });
-  assert.deepEqual(localCalls, [{ action: "refreshModels" }, { action: "getModels", broker: true }]);
-  assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openai"], models: [{ provider: "openai", id: "new-model" }] } }]);
-  assert.ok(controller.remoteBrokerModels.has("openai\0new-model"));
+  for (const model of [first, second]) {
+    models = [model]; localCalls.length = 0; remoteCalls.length = 0;
+    const input = model === first ? { action: "refreshModels" }
+      : { action: "loginApiKey", provider: "openrouter", apiKey: "test-key-b" };
+    await controller.invoke("agent.control", input);
+    assert.deepEqual(localCalls, [input, { action: "getModels", broker: true }]);
+    assert.deepEqual(remoteCalls, [{ route: "agent.control", input: { action: "setBrokerProviders", providers: ["openrouter"], models } }]);
+    assert.ok(controller.remoteBrokerModels.has(`openrouter\0${model.id}`));
+  }
+  assert.equal(controller.remoteBrokerModels.has("openrouter\0allowed-a"), false, "the previous key's model cannot remain broker-enabled");
 });
 
 test("adding a remote custom model saves credentials on the desktop only", async () => {
@@ -265,6 +414,17 @@ test("adding a remote custom model saves credentials on the desktop only", async
   assert.equal((localCalls[0] as typeof input).action, "updateCustomModel");
   assert.deepEqual(remoteCalls, [{ action: "setBrokerProviders", providers: [model.provider], models: [model] }]);
   assert.ok(!JSON.stringify(remoteCalls).includes(input.apiKey));
+  localCalls.length = 0;
+  remoteCalls.length = 0;
+  await controller.invoke("agent.control", { ...input, action: "addCustomModels", models: [{ modelId: "a" }, { modelId: "b" }] });
+  assert.equal((localCalls[0] as { action: string }).action, "addCustomModels");
+  assert.deepEqual(remoteCalls, [{ action: "setBrokerProviders", providers: [model.provider], models: [model] }]);
+  assert.ok(!JSON.stringify(remoteCalls).includes(input.apiKey));
+  localCalls.length = 0;
+  remoteCalls.length = 0;
+  await controller.invoke("agent.control", { ...input, action: "discoverModels" });
+  assert.equal((localCalls[0] as { action: string }).action, "discoverModels");
+  assert.deepEqual(remoteCalls, [], "discovery runs on the desktop and does not forward keys");
   remoteCalls.length = 0;
   await controller.invoke("agent.control", { action: "getCustomModels" });
   assert.deepEqual(remoteCalls, []);
@@ -277,11 +437,14 @@ test("WSL shell commands keep the local main-process approval boundary", async (
     calls.push(route);
     return [];
   }, { defaultProjectTrust: "ask" });
-  const result = (await controller.invoke("shell.run", {
+  const command = controller.invoke("shell.run", {
     command: "uname -a",
-  })) as { cancelled: boolean };
+  });
+  assert.equal(controller.hasPendingWork, true, "forwarded commands count while local approval is pending");
+  const result = await command as { cancelled: boolean };
   assert.equal(result.cancelled, true);
   assert.deepEqual(calls, []);
+  assert.equal(controller.hasPendingWork, false);
 });
 
 test("remote interactive terminals open without a second confirmation", async () => {

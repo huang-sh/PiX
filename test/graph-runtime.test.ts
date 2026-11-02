@@ -6,13 +6,702 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
-import { durableWrite, parseStrict } from "../src/main/graph-files.js";
+import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord } from "../src/main/graph-files.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(r => setTimeout(r, 20)); }
   throw new Error("Timed out waiting for graph state");
 }
+
+test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 30000 }, async t => {
+  for (const stage of ["startup", "model", "model failure", "startup abort", "model abort", "open abort", "startup direct abort", "model direct abort"]) for (const target of ["main", "branch", "continuation"]) {
+    if (stage === "open abort" && target === "main") continue;
+    if (stage.includes("direct") && target !== "main") continue;
+    await t.test(`${target}: ${stage}`, async () => {
+      const home = mkdtempSync(join(tmpdir(), "pix-pending-startup-"));
+      const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+      process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+      const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+      const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+      const startup = stage.startsWith("startup"), cancelled = stage.endsWith("abort");
+      let block = target === "main" && startup, entered = false;
+      let release!: () => void;
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      runtime["sessionServicesOptions"] = (pi, cwd) => ({
+        cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+        resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+          (pi: any) => pi.on("session_start", async () => {
+            if (block && startup) { entered = true; await blocked; }
+          }),
+        ] },
+      });
+      const factory = runtime.factory.bind(runtime);
+      runtime.factory = pi => async args => {
+        const result = await factory(pi)(args);
+        result.services.modelRuntime.registerNativeProvider(faux.provider);
+        if (block && stage === "open abort") { entered = true; await blocked; }
+        const setModel = result.session.setModel.bind(result.session);
+        result.session.setModel = async (...args: any[]) => {
+          if (block && stage.startsWith("model")) {
+            entered = true; await blocked;
+            if (stage === "model failure") throw new Error("simulated model configuration failure");
+          }
+          return setModel(...args);
+        };
+        return result;
+      };
+      let submitted: Promise<unknown> | undefined, stopped: Promise<unknown> | undefined;
+      try {
+        await runtime.create();
+        if (!block) await runtime.control({ action: "commands" });
+        const manager = runtime.runtime.session.sessionManager;
+        manager.appendMessage({ role: "user", content: "parent", timestamp: 1 });
+        manager.appendMessage(fauxAssistantMessage("parent reply"));
+        let parentId = target === "main" ? runtime.snapshot().projection.activeNodeId : null;
+        if (target === "continuation") {
+          faux.setResponses([fauxAssistantMessage("branch reply")]);
+          await runtime.control({ action: "promptAt", requestId: "first-branch", nodeId: null,
+            text: "branch parent", provider: "faux", modelId: "test" });
+          await until(() => !runtime.busy);
+          parentId = runtime.snapshot().graph!.runs.find(run => run.requestId === "first-branch")!.nodeId;
+          assert.ok(parentId);
+        }
+        block = true;
+        faux.setResponses([fauxAssistantMessage("new reply")]);
+        // The input metadata must survive refresh even before a user entry exists.
+        submitted = runtime.control({ action: "promptAt", requestId: "pending-request", nodeId: parentId,
+          text: "pending question", provider: "faux", modelId: "test" });
+        const failure = cancelled ? /Session operation cancelled/ : /simulated model configuration failure/;
+        const rejected = cancelled || stage === "model failure" ? assert.rejects(submitted, failure) : undefined;
+        assert.equal(runtime.busy, true, "queued admission must prevent session eviction");
+        await until(() => entered && Boolean(runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")));
+        const submittedAt = runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")!.pending!.timestamp;
+        assert.ok(Number.isFinite(Date.parse(submittedAt!)));
+        for (let refresh = 0; refresh < 2; refresh++) {
+          const snapshot = runtime.snapshot();
+          const run = snapshot.graph!.runs.find(run => run.requestId === "pending-request")!;
+          assert.equal(runtime.busy, true);
+          assert.equal(run.status, "running");
+          assert.equal(run.nodeId, null, "an old parent must never be acknowledged as the new turn");
+          assert.equal(run.pending!.timestamp, submittedAt, "refresh must preserve the original submission time");
+          assert.equal(run.pending!.text, "pending question");
+          assert.equal(run.pending!.parentNodeId, parentId);
+          assert.equal(run.pending!.model?.provider, "faux");
+          assert.equal(run.pending!.model?.id, "test");
+          assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
+        }
+        if (cancelled) {
+          const run = runtime.snapshot().graph!.runs.find(run => run.requestId === "pending-request")!;
+          stopped = runtime.control(stage.includes("direct") ? { action: "abort" }
+            : { action: "branchAbort", branchId: run.branchId, runId: run.runId });
+          void stopped.catch(() => {});
+          await new Promise<void>(resolve => setImmediate(resolve));
+        }
+        release();
+        if (rejected) await rejected; else await submitted;
+        if (stopped) {
+          const result = await stopped;
+          const stoppedSnapshot = stage.includes("direct") ? runtime.snapshot() : result as SessionSnapshot;
+          assert.notEqual(stoppedSnapshot.graph!.runs.find(run => run.requestId === "pending-request")?.status, "running");
+        }
+        await until(() => !runtime.busy);
+        const snapshot = runtime.snapshot();
+        const run = snapshot.graph!.runs.find(run => run.requestId === "pending-request")!;
+        assert.notEqual(run.status, "running");
+        assert.equal(run.pending, undefined);
+        if (rejected) assert.match(run.error ?? "", failure);
+        else {
+          const node = snapshot.projection.nodes.find(node => node.id === run.nodeId)!;
+          assert.equal(node.title, "pending question");
+          assert.equal(node.parentId, parentId);
+          assert.match(JSON.stringify(snapshot.entries), /new reply/);
+        }
+        if (cancelled) {
+          assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
+          assert.ok(!JSON.stringify(snapshot.entries).includes("new reply"), "no model call may start after stop");
+          block = false;
+          faux.setResponses([fauxAssistantMessage("after cancellation")]);
+          await runtime.control({ action: "promptAt", requestId: "after-stop", nodeId: parentId,
+            text: "fresh question", provider: "faux", modelId: "test" });
+          await until(() => !runtime.busy);
+          assert.match(JSON.stringify(runtime.snapshot().entries), /after cancellation/);
+        }
+      } finally {
+        release();
+        await submitted?.catch(() => {});
+        await stopped?.catch(() => {});
+        await runtime.close();
+        if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+        if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("model changes expose context compaction before the new user entry and resume afterwards", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-model-compaction-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "large", contextWindow: 200000 }, { id: "small", contextWindow: 16384 }] });
+  let entered = false, release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1024, keepRecentTokens: 128 } }),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    for (const [index, text] of ["history ".repeat(20000), "recent ".repeat(256)].entries()) {
+      faux.setResponses([fauxAssistantMessage("parent reply")]);
+      await runtime.control({ action: "promptAt", requestId: `parent-${index}`, nodeId: runtime.snapshot().projection.activeNodeId,
+        text, provider: "faux", modelId: "large" });
+      await until(() => !runtime.busy);
+    }
+    faux.setResponses([async () => { entered = true; await blocked; return fauxAssistantMessage("Earlier history summary."); }, fauxAssistantMessage("Hello back")]);
+    await runtime.control({ action: "promptAt", requestId: "smaller-model", nodeId: runtime.snapshot().projection.activeNodeId,
+      text: "hello", provider: "faux", modelId: "small" });
+    await until(() => entered);
+    const during = runtime.snapshot();
+    const run = during.graph!.runs.find(run => run.requestId === "smaller-model")!;
+    assert.equal(run.runtime!.isCompacting, true);
+    assert.equal(run.status, "running");
+    assert.equal(run.nodeId, null);
+    assert.equal(run.pending!.model!.id, "small");
+    assert.ok(Number.isFinite(Date.parse(run.pending!.timestamp!)));
+    assert.equal(run.runtime!.timing!.startedAt, run.pending!.timestamp);
+    assert.equal(run.runtime!.timing!.agentStartedAt, undefined);
+    assert.equal(run.runtime!.timing!.compactions[0]!.status, "running");
+    assert.ok(!during.projection.nodes.some(node => node.title === "hello"));
+    release();
+    await until(() => !runtime.busy);
+    const after = runtime.snapshot();
+    assert.ok(after.entries.some(entry => entry.type === "compaction"));
+    assert.ok(after.projection.nodes.some(node => node.title === "hello" && node.preview.includes("Hello back")));
+    const metrics = after.projection.nodes.find(node => node.title === "hello")!.metrics!;
+    assert.equal(metrics.startedAt, run.pending!.timestamp);
+    assert.ok(metrics.agentStartedAt);
+    assert.equal(metrics.compactions![0]!.status, "complete");
+    assert.ok(metrics.compactions![0]!.tokensBefore! > 0);
+    assert.ok(metrics.compactions![0]!.tokensAfter! > 0);
+    assert.ok(after.entries.some(entry => entry.type === "compaction" && entry.timestamp === metrics.compactions![0]!.entryTimestamp));
+    assert.ok(metrics.durationMs! >= metrics.compactionDurationMs! + metrics.agentDurationMs!);
+    assert.equal(after.graph!.runs.find(run => run.requestId === "smaller-model")!.pending, undefined);
+    const path = after.session.path;
+    await runtime.close();
+    const reopened = await runtime.open(path);
+    assert.deepEqual(reopened.projection.nodes.find(node => node.title === "hello")!.metrics, metrics);
+  } finally {
+    release(); await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("manual compaction cannot change a completed turn's timing or block later prompts", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-manual-compaction-timing-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 128 } }),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: runtime.snapshot().projection.activeNodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("history", "history ".repeat(2048));
+    await prompt("recent", "recent ".repeat(256));
+    const before = runtime.snapshot();
+    const footer = runtime.runtime.session.sessionManager.getEntries().filter((entry: any) => entry.customType === "pix.node-footer").at(-1);
+    const savedTiming = structuredClone(footer.data.timing);
+    faux.setResponses([fauxAssistantMessage("Earlier history summary.")]);
+    await runtime.control({ action: "compact" });
+    assert.ok(runtime.snapshot().entries.some(entry => entry.type === "compaction"));
+    assert.deepEqual(footer.data.timing, savedTiming, "manual compaction must not mutate an earlier completion footer");
+    await prompt("after-compaction", "Continue after compaction");
+    const after = runtime.snapshot();
+    assert.equal(runtime.needsReopen, false);
+    assert.equal(after.graph!.storageError, undefined);
+    assert.equal(after.runtime.available, true);
+    assert.ok(after.projection.nodes.some(node => node.preview.includes("Reply to after-compaction")));
+    await runtime.close();
+    const reopened = await runtime.open(before.session.path);
+    assert.deepEqual((reopened.entries.find(entry => entry.id === footer.id)!.data as { timing: unknown }).timing, savedTiming);
+    await prompt("after-reopen", "Continue after reopening");
+    assert.equal(runtime.needsReopen, false);
+    assert.ok(runtime.snapshot().projection.nodes.some(node => node.preview.includes("Reply to after-reopen")));
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stopping automatic compaction saves a cancelled record across close and reopen", { timeout: 20000 }, async t => {
+  for (const target of ["main", "branch"] as const) for (const action of ["abort", "close"] as const) await t.test(`${target}: ${action}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), "pix-close-compaction-"));
+    const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+    process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+    let entered = false, shuttingDown = false;
+    const lateEvents: unknown[] = [];
+    const runtime = new GraphRuntime(home, join(home, "sessions"), event => {
+      if (shuttingDown && (event as { type?: string }).type === "agent") lateEvents.push(event);
+    }, async () => {});
+    const faux = fauxProvider({ models: [{ id: "test", contextWindow: 16384 }], tokenSize: { min: 4096, max: 4096 } });
+    runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+      settingsManager: pi.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1024, keepRecentTokens: 128 } }),
+      resourceLoaderOptions: { noExtensions: true },
+    });
+    const factory = runtime.factory.bind(runtime);
+    runtime.factory = pi => async args => {
+      const result = await factory(pi)(args);
+      result.services.modelRuntime.registerNativeProvider(faux.provider);
+      return result;
+    };
+    try {
+      await runtime.create();
+      faux.setResponses([fauxAssistantMessage("First reply")]);
+      await runtime.control({ action: "promptAt", requestId: "first", nodeId: null,
+        text: "history ".repeat(2048), provider: "faux", modelId: "test" });
+      await until(() => !runtime.busy);
+      const parentId = runtime.snapshot().projection.activeNodeId;
+      if (target === "branch") {
+        faux.setResponses([fauxAssistantMessage("Main reply")]);
+        await runtime.control({ action: "promptAt", requestId: "main-tail", nodeId: parentId,
+          text: "Other main turn", provider: "faux", modelId: "test" });
+        await until(() => !runtime.busy);
+      }
+      faux.setResponses([fauxAssistantMessage("Long reply ".repeat(6000)), async (_context, options) => {
+        entered = true;
+        const signal = options?.signal;
+        assert.ok(signal);
+        await new Promise<void>(resolve => {
+          if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fauxAssistantMessage("unused summary");
+      }]);
+      await runtime.control({ action: "promptAt", requestId: "compacting", nodeId: parentId,
+        text: "recent ".repeat(256), provider: "faux", modelId: "test" });
+      await until(() => entered);
+      const during = runtime.snapshot(), path = during.session.path;
+      const run = during.graph!.runs.find(run => run.requestId === "compacting")!;
+      assert.ok(run.nodeId, "compaction starts after this turn's reply was saved");
+      assert.equal(run.runtime!.isCompacting, true);
+      assert.equal(run.branchId === "main", target === "main");
+      if (action === "close") {
+        shuttingDown = true;
+        await runtime.close();
+        assert.equal(lateEvents.length, 0, "closing must retain internal timing events without forwarding agent progress");
+        shuttingDown = false;
+      } else {
+        await runtime.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId });
+        await until(() => !runtime.busy);
+        await runtime.close();
+      }
+      const reopened = await runtime.open(path);
+      const node = reopened.projection.nodes.find(node => node.id === run.nodeId)!;
+      assert.equal(node.running, false);
+      assert.ok(reopened.graph!.runs.every(run => run.status !== "running"));
+      const compaction = node.metrics!.compactions!.at(-1)!;
+      assert.equal(compaction.status, "aborted");
+      assert.ok(Number.isFinite(Date.parse(compaction.endedAt!)));
+      assert.ok(Number.isFinite(compaction.durationMs) && compaction.durationMs! >= 0);
+      const metrics = JSON.stringify(node.metrics);
+      await runtime.close();
+      const again = await runtime.open(path);
+      assert.equal(JSON.stringify(again.projection.nodes.find(node => node.id === run.nodeId)!.metrics), metrics);
+      assert.equal(runtime.needsReopen, false);
+    } finally {
+      await runtime.close();
+      if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+      if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+test("broker model preflight respects cancellation before a prompt starts", { timeout: 15000 }, async t => {
+  for (const action of ["run", "abort", "branchAbort", "close"] as const) await t.test(action, async t => {
+    const home = mkdtempSync(join(tmpdir(), "pix-broker-preflight-"));
+    const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+    process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+    const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+    const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+    const factory = runtime.factory.bind(runtime);
+    runtime.factory = pi => async args => {
+      const result = await factory(pi)(args);
+      result.services.modelRuntime.registerNativeProvider(faux.provider);
+      return result;
+    };
+    let entered!: () => void, release!: () => void;
+    const updating = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let stopped: Promise<unknown> | undefined;
+    try {
+      await runtime.create();
+      await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+      const session = runtime.runtime.session, manager = session.sessionManager;
+      runtime.brokerProviders.add("faux");
+      const getModel = session.modelRuntime.getModel.bind(session.modelRuntime);
+      t.mock.method(session.modelRuntime, "getModel", (provider: string, id: string) => {
+        const model = getModel(provider, id);
+        return model ? { ...model, name: "updated broker model" } : model;
+      });
+      const setModel = session.setModel.bind(session);
+      const updatingModel = t.mock.method(session, "setModel", async (...args: unknown[]) => {
+        entered(); await blocked;
+        return setModel(...args);
+      });
+      faux.setResponses([fauxAssistantMessage("preflight reply")]);
+      await runtime.control({ action: "promptAt", requestId: "broker-preflight", nodeId: null, text: "pending broker question" });
+      await updating;
+      const run = runtime.snapshot().graph!.runs.find(run => run.requestId === "broker-preflight")!;
+      assert.equal(run.status, "running");
+      assert.equal(run.nodeId, null);
+      if (action !== "run") {
+        stopped = action === "close" ? runtime.close() : runtime.control(action === "abort" ? { action: "abort" }
+          : { action: "branchAbort", branchId: run.branchId, runId: run.runId });
+        void stopped.catch(() => {});
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      release();
+      await stopped;
+      await until(() => !runtime.busy);
+      assert.equal(updatingModel.mock.callCount(), 1);
+      const entries = JSON.stringify(manager.getEntries().filter((entry: { message?: { role?: string } }) =>
+        entry.message?.role === "user" || entry.message?.role === "assistant"));
+      if (action === "run") {
+        assert.match(entries, /pending broker question/);
+        assert.match(entries, /preflight reply/);
+        assert.equal(session.model.name, "updated broker model");
+      } else {
+        assert.doesNotMatch(entries, /pending broker question|preflight reply/);
+        if (action === "close") assert.equal(runtime.runtime, undefined);
+        else {
+          assert.match(runtime.snapshot().graph!.runs.find(run => run.requestId === "broker-preflight")?.error ?? "", /cancelled/);
+          faux.setResponses([fauxAssistantMessage("reply after stop")]);
+          await runtime.control({ action: "promptAt", requestId: "after-broker-stop", nodeId: null, text: "fresh question" });
+          await until(() => !runtime.busy);
+          assert.match(JSON.stringify(runtime.snapshot().entries), /reply after stop/);
+        }
+      }
+    } finally {
+      release();
+      await stopped?.catch(() => {});
+      await runtime.close();
+      if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+      if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+test("each branch waits for its own extension startup without blocking the main session", { timeout: 15000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-branch-startup-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home;
+  process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const events: any[] = [];
+  const runtime = new GraphRuntime(home, join(home, "sessions"), event => { events.push(event); }, async () => {});
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let starts = 0, invoked = 0, shutdown = 0;
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({
+    cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+      (pi: any) => {
+        let ready = false;
+        pi.on("session_start", async () => {
+          if (++starts > 1) await blocked;
+          ready = true;
+        });
+        pi.on("session_shutdown", () => { assert.equal(ready, true); shutdown++; });
+        pi.registerCommand("startup-test", { handler: () => { assert.equal(ready, true); invoked++; } });
+      },
+    ] },
+  });
+  try {
+    const root = await runtime.create();
+    await runtime.control({ action: "commands" });
+    runtime.runtime.session.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+    for (const requestId of ["branch-one", "branch-two"])
+      await runtime.control({ action: "promptAt", requestId, nodeId: null, text: "/startup-test" });
+    let mainCommandsReady = false;
+    const commands = runtime.control({ action: "commands" }).then(() => { mainCommandsReady = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(starts, 3);
+    assert.equal(invoked, 0, "branch commands must wait for their own hooks");
+    assert.equal(shutdown, 0, "a pending branch must not shut down before startup finishes");
+    assert.equal(mainCommandsReady, true, "worker startup must not replace main readiness");
+    release();
+    await commands;
+    await until(() => !runtime.busy);
+    assert.equal(invoked, 2);
+    assert.equal(shutdown, 2);
+    assert.ok(events.filter(event => event.type === "sessions" && event.payload.current)
+      .every(event => event.payload.current.session.path === root.session.path), "worker snapshots stay inside the root graph");
+  } finally {
+    release();
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("restart can continue main and branch turns left without a reply or tool result", { timeout: 30000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pix-crash-followup-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  try {
+    for (const branch of [false, true]) for (const toolCall of [false, true]) {
+      await t.test(`${branch ? "branch" : "main"}: ${toolCall ? "missing tool result" : "user message only"}`, async () => {
+        const path = join(home, `${branch}-${toolCall}.jsonl`);
+        const manager = SessionManager.inMemory(cwd);
+        manager.appendModelChange("faux", "test");
+        const baselineCount = manager.getEntries().length;
+        const userId = manager.appendMessage({ role: "user", content: [{ type: "text", text: "interrupted prompt" }], timestamp: 1 });
+        if (toolCall) manager.appendMessage(fauxAssistantMessage([
+          { type: "toolCall", id: "unfinished", name: "bash", arguments: { command: "echo must-not-replay" } },
+        ], { stopReason: "toolUse" }));
+        const data = parseStrict([manager.getHeader(), ...manager.getEntries()].map(entry => JSON.stringify(entry)).join("\n"));
+        const baseline = data.entries.slice(0, baselineCount);
+        const files = new GraphFiles(path);
+        files.acquire();
+        if (branch) {
+          durableWrite(path, encodeSession({ header: data.header, entries: baseline }));
+          const record: BranchRecord = { id: "crashed", parentId: "main", forkEntryId: "", requestId: "crashed",
+            request: { text: "interrupted prompt" }, inherited: Object.fromEntries(baseline.map(entry => [entry.id, entry.id])),
+            header: data.header, baseline, status: "running", runId: "crashed-run" };
+          files.create(record, data);
+        } else durableWrite(path, encodeSession(data));
+        files.release();
+
+        const events: unknown[] = [];
+        const runtime = new GraphRuntime(cwd, home, event => { events.push(event); }, async () => {});
+        const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+        const factory = runtime.factory.bind(runtime);
+        runtime.factory = pi => async args => {
+          const result = await factory(pi)(args);
+          result.services.modelRuntime.registerNativeProvider(faux.provider);
+          return result;
+        };
+        try {
+          const restored = await runtime.open(path);
+          const nodeId = `turn:${branch ? "crashed:" : ""}${userId}`;
+          const node = restored.projection.nodes.find(node => node.id === nodeId)!;
+          assert.equal(restored.runtime.available, true);
+          assert.equal(runtime.busy, false);
+          assert.equal(node.running, false);
+          assert.equal(node.forkable, true, "the restored turn must unlock the composer and pass promptAt admission");
+          if (branch) assert.equal(restored.graph!.runs.find(run => run.branchId === "crashed")?.status, "interrupted");
+          const retained = structuredClone(restored.entries);
+          faux.setResponses([fauxAssistantMessage("continued after restart")]);
+          await runtime.control({ action: "promptAt", requestId: "followup", nodeId, text: "continue", provider: "faux", modelId: "test" });
+          await until(() => !runtime.busy);
+          const continued = runtime.snapshot();
+          assert.match(JSON.stringify(continued.entries), /continued after restart/);
+          for (const entry of retained) assert.deepEqual(continued.entries.find(value => value.id === entry.id), entry);
+          assert.ok(continued.projection.nodes.some(node => node.title === "continue" && node.parentId === nodeId));
+          assert.ok(!JSON.stringify(events).includes('"tool_execution_start"'), "old tool calls must not be replayed");
+          await runtime.close();
+          assert.equal((await runtime.open(path)).projection.nodes.find(node => node.id === nodeId)?.forkable, true);
+        } finally { await runtime.close(); }
+      });
+    }
+  } finally {
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("interrupted turns resume and retain native bookmarks across branches, restart, export and removal", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-abort-followup-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    let started = false;
+    faux.setResponses([
+      async (_context, options) => {
+        started = true;
+        await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        return fauxAssistantMessage("", { stopReason: "aborted" });
+      },
+      fauxAssistantMessage("after interrupt"),
+    ]);
+    await runtime.control({ action: "promptAt", requestId: "interrupted", nodeId: null, text: "first", provider: "faux", modelId: "test" });
+    await until(() => started);
+    const running = runtime.snapshot().graph!.runs.find(run => run.status === "running")!;
+    await runtime.control({ action: "branchAbort", branchId: running.branchId, runId: running.runId });
+    assert.equal(runtime.snapshot().graph!.runs.find(run => run.branchId === "main")?.status, "idle");
+    const target = runtime.snapshot().projection.activeNodeId;
+    await runtime.control({ action: "promptAt", requestId: "followup", nodeId: target, text: "second", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "second")
+      && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after interrupt"));
+
+    let branchStarted = false;
+    faux.setResponses([
+      async (_context, options) => {
+        branchStarted = true;
+        await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        return fauxAssistantMessage("", { stopReason: "aborted" });
+      },
+      fauxAssistantMessage("branch after interrupt"),
+    ]);
+    await runtime.control({ action: "promptAt", requestId: "branch-interrupted", nodeId: null,
+      text: "branch first", provider: "faux", modelId: "test" });
+    await until(() => branchStarted);
+    const branch = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-interrupted")!;
+    assert.equal(branch.status, "running");
+    const busyNode = runtime.snapshot().projection.nodes.find(node => node.title === "branch first");
+    if (busyNode) await assert.rejects(runtime.control({ action: "setLabel", entryId: busyNode.userEntryId, label: "busy" }), /finish/);
+
+    await runtime.control({ action: "branchAbort", branchId: branch.branchId, runId: branch.runId });
+    assert.equal(runtime.snapshot().graph!.runs.find(run => run.branchId === branch.branchId)?.status, "idle");
+    const branchNode = runtime.snapshot().projection.nodes.find(node => node.title === "branch first")!;
+    await runtime.control({ action: "promptAt", requestId: "branch-followup", nodeId: branchNode.id,
+      text: "branch second", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "branch second")
+      && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("branch after interrupt"));
+    const tree = runtime.snapshot(), path = tree.session.path;
+    const main = tree.projection.nodes.find(node => node.title === "first")!;
+    const label = async (entryId: string, value?: string) => runtime.control({ action: "setLabel", entryId, label: value }) as Promise<SessionSnapshot>;
+    await label(main.userEntryId, "Main bookmark");
+    const marked = await label(branchNode.userEntryId, "分支测试通过");
+    assert.equal(marked.projection.nodes.find(node => node.id === main.id)?.label, "Main bookmark");
+    assert.equal(marked.projection.nodes.find(node => node.id === branchNode.id)?.label, "分支测试通过");
+    assert.equal(marked.projection.nodes.length, tree.projection.nodes.length);
+    faux.setResponses([fauxAssistantMessage("after bookmark")]);
+    await runtime.control({ action: "promptAt", requestId: "labeled-fork", nodeId: main.id, text: "fork after labels", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    await assert.rejects(label("unknown", "bad"), /not found/);
+    await assert.rejects(label(main.userEntryId, "bad\nlabel"), /single-line/);
+    await runtime.close(); await runtime.open(path);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === branchNode.id)?.label, "分支测试通过");
+    const exported = await runtime.control({ action: "exportJsonl" }) as { path: string };
+    const data = parseStrict(readFileSync(exported.path, "utf8"));
+    assert.ok(data.entries.some(entry => entry.type === "label" && entry.targetId === branchNode.userEntryId && entry.label === "分支测试通过"));
+    const exportedBranch = await runtime.control({ action: "exportBranchSession", graphId: path, nodeId: main.id }) as { path: string };
+    const exportedData = parseStrict(readFileSync(exportedBranch.path, "utf8"));
+    assert.ok(exportedData.entries.some(entry => entry.type === "label" && entry.targetId === main.userEntryId && entry.label === "Main bookmark"));
+    await label(branchNode.userEntryId);
+    await runtime.close(); await runtime.open(path);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === branchNode.id)?.label, undefined);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === main.id)?.label, "Main bookmark");
+
+  } finally {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("failed persistence after abort blocks writes until the graph is reopened", { timeout: 20000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pix-abort-storage-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const interrupted = (started: () => void) => async (_context: unknown, options?: { signal?: AbortSignal }) => {
+    started();
+    await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return fauxAssistantMessage("", { stopReason: "aborted" });
+  };
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    const path = runtime.graph!.main;
+    let mainStarted = false;
+    faux.setResponses([interrupted(() => { mainStarted = true; })]);
+    await runtime.control({ action: "promptAt", requestId: "main-fault", nodeId: null, text: "first", provider: "faux", modelId: "test" });
+    await until(() => mainStarted);
+    const sealMain = t.mock.method(runtime.graph!, "sealMain", () => { throw new Error("simulated main EIO"); });
+    const main = runtime.snapshot().graph!.runs.find(run => run.status === "running")!;
+    await assert.rejects(runtime.control({ action: "branchAbort", branchId: main.branchId, runId: main.runId }), /storage failure.*main EIO/);
+    assert.equal(runtime.snapshot().runtime.available, false);
+    assert.match(runtime.snapshot().graph!.storageError ?? "", /Reopen this session.*main EIO/);
+    await assert.rejects(runtime.control({ action: "promptAt", requestId: "blocked-main", nodeId: null, text: "must not send" }), /Reopen this session/);
+    assert.equal(readdirSync(runtime.graph!.dir).some(name => name.includes("blocked-main")), false);
+    sealMain.mock.restore();
+    await runtime.open(path);
+    assert.equal(runtime.snapshot().runtime.available, true);
+
+    let branchStarted = false;
+    faux.setResponses([interrupted(() => { branchStarted = true; })]);
+    await runtime.control({ action: "promptAt", requestId: "branch-fault", nodeId: null, text: "branch", provider: "faux", modelId: "test" });
+    await until(() => branchStarted);
+    const sealBranch = t.mock.method(runtime.graph!, "seal", () => { throw new Error("simulated branch EIO"); });
+    const branch = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-fault")!;
+    await assert.rejects(runtime.control({ action: "branchAbort", branchId: branch.branchId, runId: branch.runId }), /storage failure.*branch EIO/);
+    assert.equal(runtime.snapshot().runtime.available, false);
+    await assert.rejects(runtime.control({ action: "promptAt", requestId: "blocked-branch", nodeId: null, text: "must not send" }), /Reopen this session/);
+    sealBranch.mock.restore();
+    await runtime.open(path);
+    assert.equal(runtime.snapshot().runtime.available, true);
+    faux.setResponses([fauxAssistantMessage("after reopen")]);
+    await runtime.control({ action: "promptAt", requestId: "recovered", nodeId: runtime.snapshot().projection.activeNodeId,
+      text: "safe again", provider: "faux", modelId: "test" });
+    await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
+    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after reopen"));
+    const failedCursor = t.mock.method(runtime.graph!, "saveLeaf", () => { throw new Error("simulated cursor EIO"); });
+    await assert.rejects(runtime.close(), /simulated cursor EIO/);
+    assert.equal(runtime.graph, undefined, "a failed close releases graph ownership");
+    failedCursor.mock.restore();
+    await runtime.open(path);
+    assert.equal(runtime.snapshot().runtime.available, true);
+  } finally {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("permanent node deletion preserves tools and deduplication, and recovers failed commits", { timeout: 30000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "pix-delete-runtime-"));
@@ -55,7 +744,26 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     const sibling = await prompt("sibling", root, "sibling");
     await assert.rejects(runtime.control({ action: "deleteNode", graphId: "another-session", nodeId: a2 }), /same writable graph/);
     await runtime.control({ action: "setTools", names: ["read"] });
-    await runtime.control({ action: "deleteNode", graphId, nodeId: a2 });
+    let closing = 0;
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>(resolve => { releaseClose = resolve; });
+    const workers = [...runtime["workers"].values()];
+    assert.ok(workers.length > 1);
+    const closes = workers.map(worker => {
+      const close = worker.pi.close.bind(worker.pi);
+      return t.mock.method(worker.pi, "close", async () => { closing++; await closeGate; await close(); });
+    });
+    const remove = t.mock.method(runtime.graph!, "deleteNode");
+    const deletion = runtime.control({ action: "deleteNode", graphId, nodeId: a2 });
+    try {
+      await until(() => closing === workers.length);
+      assert.equal(remove.mock.callCount(), 0, "all writers must stop before any deletion is committed");
+    } finally {
+      releaseClose();
+      await deletion;
+      closes.forEach(close => close.mock.restore());
+      remove.mock.restore();
+    }
     assert.deepEqual(runtime.runtime.session.getActiveToolNames(), ["read"]);
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === a));
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === b));
@@ -94,7 +802,8 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     assert.equal(runtime.snapshot().projection.nodes.length, 0);
     assert.equal(runtime.state().model?.provider, "faux");
     assert.equal(runtime.state().model?.id, "test");
-    assert.equal(runtime.runtime.session.sessionManager.buildSessionContext().messages.length, 0);
+    assert.ok(runtime.runtime.session.sessionManager.buildSessionContext().messages.every(
+      (message: { role: string }) => message.role === "system"), "deletion leaves no conversation messages in model context");
     const fresh = await prompt("fresh", null, "fresh");
     assert.equal(runtime.snapshot().projection.nodes.length, 1);
     const failingChild = await prompt("failure-child", fresh, "failure child");
@@ -157,9 +866,18 @@ test("independent branches persist without merging; export during a run preserve
     // Real providers keep optional fields in memory which Pi omits from JSONL.
     faux.setResponses([{ ...fauxAssistantMessage("root answer"), errorMessage: undefined }]);
     await runtime.control({ action: "prompt", text: "root prompt" });
+    const manager = runtime.runtime.session.sessionManager as SessionManager;
+    const answer = manager.getEntries().find(entry => entry.type === "message" && entry.message.role === "assistant")!;
+    manager.appendContextEdit(answer.id, { content: "edited root context" });
+    manager.appendUsage("cache_warm", "faux", "test", fauxAssistantMessage("").usage);
+    await runtime.runtime.session.refreshContext();
     const root = runtime.snapshot().projection.activeNodeId!;
     faux.setResponses([
-      async () => { await new Promise<void>(r => { releaseMain = r; }); return fauxAssistantMessage("main answer"); },
+      async (context) => {
+        assert.ok(JSON.stringify(context.messages).includes("edited root context"));
+        assert.ok(!JSON.stringify(context.messages).includes("root answer"));
+        await new Promise<void>(r => { releaseMain = r; }); return fauxAssistantMessage("main answer");
+      },
       fauxAssistantMessage("A answer"),
       async (_context, options) => { await new Promise<void>(r => { releaseA = r; options?.signal?.addEventListener("abort", () => r(), { once: true }); }); return fauxAssistantMessage("A continuation"); },
       fauxAssistantMessage("B answer"),
@@ -216,6 +934,7 @@ test("independent branches persist without merging; export during a run preserve
     await runtime.close(); await runtime.open(mainFile);
     // Source files are enumerated by filename after restart, not creation order.
     assert.deepEqual(new Map(runtime.snapshot().projection.nodes.map(n => [n.id, { parentId: n.parentId, leafEntryId: n.leafEntryId }])), nodes);
+    assert.ok(JSON.stringify(runtime.runtime.session.sessionManager.buildSessionContext()).includes("edited root context"));
     runtime.runtime.session.sessionManager.resetLeaf();
     await runtime.close(); await runtime.open(mainFile);
     assert.equal(runtime.runtime.session.sessionManager.buildSessionContext().messages.length, 0,

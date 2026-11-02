@@ -69,6 +69,30 @@ describe("session stream focus", () => {
     expect(session.sessions.map(row => row.path)).toEqual(["new.jsonl"]);
   });
 
+  it("opens creation immediately and prevents duplicate requests while awaiting the new file", async () => {
+    const session = useSessionStore();
+    useWorkspaceStore().hydrate(project);
+    hydrate(session, snapshot(first, "a1"));
+    const created = { ...session.current!, session: { ...session.current!.session, path: "new.jsonl" } };
+    let finish!: (value: SessionSnapshot) => void;
+    const pending = new Promise<SessionSnapshot>(resolve => { finish = resolve; });
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation(async (route, input) => {
+      if (route === "agent.control" && (input as { action?: string }).action === "newSession") return pending;
+      if (route === "session.list") return [created.session];
+      return [];
+    });
+    invoke.mockClear();
+    const creating = session.create();
+    expect(session.creating).toBe(true);
+    await session.create();
+    expect(invoke.mock.calls.filter(([route, input]) => route === "agent.control"
+      && (input as { action?: string })?.action === "newSession")).toHaveLength(1);
+    finish(created);
+    await creating;
+    expect(session.creating).toBe(false);
+    expect(session.current?.session.path).toBe("new.jsonl");
+  });
+
   it("applies project-group refreshes from any project without touching the view", () => {
     const session = useSessionStore();
     hydrate(session, snapshot(first, "a1"));

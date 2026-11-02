@@ -55,8 +55,11 @@ describe("draft placement", () => {
       else expect(node.position.y).toBeGreaterThanOrEqual(sibling.position.y + sibling.dimensions.height + 28);
     };
     checkOrder("draft:turn:root");
+    const settled = graph.nodes.map((node: any) => ({ ...node.position }));
     graph.syncNodeDimensions([{ type: "dimensions", id: "draft:turn:root", dimensions: { width: 360, height: 500 } }]);
-    checkOrder("draft:turn:root");
+    // A draft growing past its reserved slot overlays the cards below instead
+    // of pushing them, so typing never moves anything on the canvas.
+    expect(graph.nodes.map((node: any) => node.position)).toEqual(settled);
     const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
       const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "root", timestamp: "9", message: { role: "user", content: "new" } }];
       session.current!.entries = entries;
@@ -149,8 +152,42 @@ describe("draft placement", () => {
     try { await graph.submitDraft("done"); await flushPromises(); }
     finally { promptAt.mockRestore(); }
     const child = graph.nodes.find((node: any) => node.id === "turn:done");
-    expect(child.position).toEqual({ x: manual.x + 372, y: manual.y });
+    expect(child.position).toEqual({ x: manual.x + 412, y: manual.y });
     expectClear(graph, "turn:done");
+  });
+
+  it.each(["up", "down"])("clears a pinned child when branching %s from a manually positioned parent", async direction => {
+    const { graph, session } = setup();
+    for (const id of ["turn:b", "turn:c"]) {
+      const node = graph.nodes.find((item: any) => item.id === id);
+      graph.rememberDrag({ node: { id, position: { ...node.position } }, event: { shiftKey: true } });
+    }
+    const child = { ...graph.nodes.find((node: any) => node.id === "turn:c").position };
+    const parent = { ...graph.nodes.find((node: any) => node.id === "turn:b").position };
+    await graph.compose("turn:b", direction); await flushPromises();
+    expectClear(graph, "draft:turn:b");
+    expect(graph.nodes.find((node: any) => node.id === "turn:c").position).toEqual(child);
+    graph.rebuild();
+    expectClear(graph, "draft:turn:b");
+    const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
+      session.current!.graph!.runs = [{ branchId: "new", runId: "new", nodeId: null, status: "running",
+        pending: { text: "new", parentNodeId: "turn:b" } }];
+      return "pending:new";
+    });
+    try { await graph.submitDraft("new"); await flushPromises(); }
+    finally { promptAt.mockRestore(); }
+    expectClear(graph, "pending:new");
+    const entries = [...session.current!.entries, { type: "message", id: "new", parentId: "b", timestamp: "9",
+      message: { role: "user", content: "new" } }];
+    session.current!.entries = entries;
+    session.current!.projection = projectSession(entries, "new");
+    session.current!.graph!.runs = [{ branchId: "new", runId: "new", nodeId: "turn:new", status: "idle" }];
+    await flushPromises();
+    expectClear(graph, "turn:new");
+    graph.rebuild();
+    expectClear(graph, "turn:new");
+    expect(graph.nodes.find((node: any) => node.id === "turn:c").position).toEqual(child);
+    expect(graph.nodes.find((node: any) => node.id === "turn:b").position).toEqual(parent);
   });
 
   it.each([{ x: 1200, y: 900 }, { x: 800, y: 230 }])("retains manual positions without overlap when submitting another child (%j)", async (manual) => {
@@ -292,9 +329,11 @@ describe("draft placement", () => {
       expect(node("b").position.y).toBe(node("c").position.y);
     };
     expectBranchOrder();
+    const settled = graph.nodes.map((node: any) => ({ ...node.position }));
     graph.syncNodeDimensions([{ type: "dimensions", id: "draft:turn:a", dimensions: { width: 360, height: 700 } }]);
-    expectClear(graph, "draft:turn:a");
-    expectBranchOrder();
+    // Beyond its slot the draft covers the next branch instead of moving it.
+    expect(graph.nodes.map((node: any) => node.position)).toEqual(settled);
+    expect(draft().position.y + draft().dimensions.height).toBeGreaterThan(node("c").position.y);
     graph.cancelDraft(); await flushPromises();
     expect(graph.nodes.map((node: any) => node.position)).toEqual(original);
   });
@@ -317,7 +356,7 @@ describe("draft placement", () => {
     await graph.compose("turn:c"); await flushPromises();
     const parent = graph.nodes.find((node: any) => node.id === "turn:c");
     const draft = graph.nodes.find((node: any) => node.id === "draft:turn:c");
-    expect(draft.position.x).toBe(parent.position.x + 280 + 92);
+    expect(draft.position.x).toBe(parent.position.x + 320 + 92);
     expect(draft.position.y + draft.dimensions.height / 2).toBe(parent.position.y + parent.dimensions.height / 2);
     expectClear(graph, draft.id);
   });

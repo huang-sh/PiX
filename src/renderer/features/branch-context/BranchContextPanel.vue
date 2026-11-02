@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal, X } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { withoutToolLabels } from "../../../shared/session";
+import { promptDisplayTextMap, sessionEntryDisplayText, withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
+import type { CompactionRecord } from "../../../shared/run-timing";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
 import CopyButton from "../../components/CopyButton.vue";
+import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import BranchHistory, { type HistoryTurn as Turn } from "./BranchHistory.vue";
-import PromptComposer from "../../components/PromptComposer.vue";
+import ToolDuration from "./ToolDuration.vue";
+import PromptComposer, { type ComposerDraft } from "../../components/PromptComposer.vue";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
@@ -18,14 +21,42 @@ import { useSessionStore } from "../../stores/session";
 const props = defineProps<{ nodeId?: string | null }>();
 const session = useSessionStore();
 const layout = useLayoutStore();
-const panelNodeId = computed(() => props.nodeId ?? session.focusedNode ?? session.current?.projection.activeNodeId ?? null);
+const panelNodeId = computed(() => {
+  const pending = props.nodeId && session.currentPendingPrompts.find(prompt => prompt.columnId === props.nodeId
+    && prompt.columnDraft === layout.chatColumnComposers[props.nodeId!]?.draft);
+  const run = pending && session.current?.graph?.runs.find(run => run.requestId === pending.requestId);
+  return (run && run.status === "running" ? run.nodeId ?? `pending:${run.runId}` : undefined)
+    ?? props.nodeId ?? session.focusedNode ?? session.current?.projection.activeNodeId ?? null;
+});
 const panelNode = computed(() => session.nodeFor(panelNodeId.value));
 const selectedRun = computed(() => session.runFor(panelNodeId.value));
+// Composer recall list: the session's user prompts, newest first, with
+// consecutive duplicates collapsed. Session-wide so a fork can recall the
+// latest phrasing even when another branch sent it.
+const promptHistory = computed(() => {
+  const entries = session.current?.entries ?? [];
+  const texts = promptDisplayTextMap(entries);
+  const history: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    if (entry.type !== "message" || (entry.message as { role?: string } | undefined)?.role !== "user") continue;
+    const text = sessionEntryDisplayText(entry, texts).trim();
+    if (text && text !== history.at(-1)) history.push(text);
+  }
+  return history;
+});
+const liveCompactions = computed<CompactionRecord[] | undefined>(() => {
+  const run = selectedRun.value;
+  if (run?.status !== "running") return undefined;
+  const timing = run.runtime?.timing;
+  if (timing && (!run.pending?.timestamp || run.pending.timestamp === timing.startedAt)) return timing.compactions;
+  return run.runtime?.isCompacting ? [{ status: "running" }] : undefined;
+});
 // Every branch's store updates immediately; only the visible view is frame-paced.
 const latestActivity = computed(() => layout.layout.collapsed.chat ? undefined : session.activityFor(panelNodeId.value));
 const activity = shallowRef<AgentActivity>();
 let activityFrame: number | undefined;
-const { submitDraft, submittedNodeId } = useDraftSubmit();
+const { submitDraft } = useDraftSubmit();
 const { t } = useI18n();
 const scroll = ref<HTMLElement>();
 const content = ref<HTMLElement>();
@@ -73,15 +104,17 @@ const composerModel = ref<RuntimeModel | null>();
 const composerThinking = ref<string>();
 
 const composerRunnable = computed(() =>
-  Boolean(session.current?.runtime.available && (session.current.graph
+  Boolean(session.current?.runtime.available && (composerRunning.value || (session.current.graph
     ? panelNode.value?.forkable !== false && !panelNodeId.value?.startsWith("pending:")
-    : !session.current.runtime.isStreaming)));
+    : !session.current.runtime.isStreaming))));
 const composerModelValue = computed(() => {
+  if (composerRunning.value) return selectedRun.value?.runtime?.model ?? session.current?.runtime.model ?? null;
   if (composerModel.value !== undefined) return composerModel.value;
   return panelNode.value?.footer?.model ?? session.current?.runtime.model ?? null;
 });
 const composerThinkingValue = computed(() =>
-  composerThinking.value
+  (composerRunning.value ? selectedRun.value?.runtime?.thinkingLevel ?? session.current?.runtime.thinkingLevel : undefined)
+  ?? composerThinking.value
   ?? panelNode.value?.footer?.thinkingLevel
   ?? session.userThinking
   ?? session.current?.runtime.thinkingLevel
@@ -89,16 +122,35 @@ const composerThinkingValue = computed(() =>
 const composerPlaceholder = computed(() => !composerRunnable.value
   ? t(session.current?.runtime.isStreaming ? "graph.blockedStreaming" : "graph.blockedReadonly")
   : t("draft.placeholder"));
-// The composer's send button doubles as the stop control while the branch it
-// targets is running: graph runs stop per-branch, plain sessions abort the stream.
+// Queue and stop controls target the same run, including pinned branch columns.
 const composerRunning = computed(() => Boolean(session.current?.graph
   ? selectedRun.value?.status === "running"
   : session.current?.runtime.isStreaming));
+const composerPending = computed(() => selectedRun.value?.runtime?.queuedMessages ?? (!session.current?.graph
+  ? session.current?.runtime.queuedMessages : undefined));
 
-function stopComposer() {
+function queueTarget() {
+  const graph = session.current?.graph, run = selectedRun.value;
+  if (!graph) return {};
+  if (!run) throw new Error(t("draft.runFinished"));
+  return { graphId: graph.id, branchId: run.branchId, runId: run.runId };
+}
+async function queueComposer(text: string, images?: PromptImage[]) {
+  await session.control({ action: "followUp", text, ...(images?.length ? { images } : {}), ...queueTarget() });
+  return true;
+}
+async function updateComposerQueue(id: string, operation: "steer" | "remove" | "edit", text?: string) {
+  await session.control({ action: "updateQueuedMessage", id, operation,
+    ...(operation === "edit" ? { text } : {}), ...queueTarget() });
+}
+
+async function stopComposer() {
   const run = session.current?.graph ? selectedRun.value : undefined;
-  if (run) void session.control({ action: "branchAbort", branchId: run.branchId, runId: run.runId });
-  else void session.control({ action: "abort" });
+  try {
+    await session.control(run ? { action: "branchAbort", branchId: run.branchId, runId: run.runId } : { action: "abort" });
+  } catch (error) {
+    layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 const composerTarget = computed(() =>
   panelNode.value
@@ -126,32 +178,32 @@ function setComposerThinking(level: string, explicit: boolean) {
 
 // The host admits the prompt and its model settings as one branch operation.
 // A pinned column submits without moving the global focus, then follows its
-// own branch to the new node; the primary column keeps the current selection.
+// own branch as soon as progress arrives. Its identity stays on the parent
+// through initialization so failures cannot merge away the submitting editor.
 async function submitComposer(text: string, images?: PromptImage[]) {
-  if (!props.nodeId)
-    return submitDraft(panelNode.value?.id ?? null, text, composerModelValue.value, composerThinkingValue.value, images);
-  const delivered = await submitDraft(props.nodeId, text, composerModelValue.value, composerThinkingValue.value, images, { follow: false });
-  if (delivered && submittedNodeId.value) layout.advanceChatColumn(props.nodeId, submittedNodeId.value);
-  return delivered;
+  return Boolean(await submitDraft(props.nodeId ?? panelNode.value?.id ?? null, text,
+    composerModelValue.value, composerThinkingValue.value, images,
+    props.nodeId || composerState.draft.promptOverride !== undefined
+      ? { ...(props.nodeId ? { follow: false, columnId: props.nodeId } : {}), ...(composerState.draft.promptOverride !== undefined ? { promptOverride: composerState.draft.promptOverride } : {}) }
+      : undefined));
 }
 
-// Each column's composer expands independently. A pinned column remounts
-// when its node advances, so its expansion is kept in the store to survive
-// that remount; the primary column never remounts.
+// Drafts and submission callbacks must share the same state across a pinned
+// column's remounts, including a failed handoff back to the parent node.
 const composer = ref<InstanceType<typeof PromptComposer>>();
-const composerOpen = ref(props.nodeId ? layout.chatColumnComposers[props.nodeId] ?? false : false);
-// Register the live state up front, so a record entry always mirrors a mounted
-// column and an advance can tell a live column from an id no column holds.
-if (props.nodeId) layout.chatColumnComposers[props.nodeId] = composerOpen.value;
+const savedComposer = props.nodeId ? layout.chatColumnComposers[props.nodeId] : undefined;
+const composerState = reactive(savedComposer ?? {
+  open: false,
+  draft: { text: "", images: [], busy: false, readingImages: false, error: "" } as ComposerDraft,
+});
+if (props.nodeId) layout.chatColumnComposers[props.nodeId] = composerState;
 async function openComposer() {
-  composerOpen.value = true;
-  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = true;
+  composerState.open = true;
   await nextTick();
   void composer.value?.focus();
 }
 function closeComposer() {
-  composerOpen.value = false;
-  if (props.nodeId) layout.chatColumnComposers[props.nodeId] = false;
+  composerState.open = false;
 }
 // Reopening the chat panel puts the cursor back in the primary column's
 // composer when it is expanded; pinned columns leave the focus alone.
@@ -180,19 +232,38 @@ const turns = computed(() => {
   return grouped;
 });
 
+const compactionEntries = computed(() => new Map((session.current?.entries ?? [])
+  .filter(entry => entry.type === "compaction").map(entry => [entry.timestamp, entry])));
+function compactionDetails(record: CompactionRecord): CompactionRecord {
+  const entry = record.entryTimestamp ? compactionEntries.value.get(record.entryTimestamp) : undefined;
+  return { ...record, ...(typeof entry?.summary === "string" ? { summary: entry.summary } : {}) };
+}
+const claimedCompactions = computed(() => new Set([
+  ...(session.current?.projection.nodes.flatMap(node => node.metrics?.compactions ?? []) ?? []),
+  ...(liveCompactions.value ?? []),
+].map(record => record.entryTimestamp).filter(Boolean)));
+
 const visibleTurns = computed<Turn[]>(() =>
   turns.value.slice(-visibleTurnCount.value).map(({ id, user, body }) => {
     // A turn ends at its last assistant message, whatever it carries — the same
     // message the projection reads for node.hasError. An empty final reply is a
     // failure, never the earlier text that happened to precede it.
     const terminal = [...body].reverse().find((message) => message.role === "assistant");
+    const node = session.nodeFor(id);
+    const selected = id === (selectedRun.value?.nodeId ?? `pending:${selectedRun.value?.runId}`);
+    const compactions = selected && liveCompactions.value !== undefined ? liveCompactions.value : node?.metrics?.compactions;
     return {
       id,
-      fileChanges: session.current?.projection.nodes.find(node => node.id === id)?.fileChanges,
+      gitBranch: node?.gitBranch,
+      gitCommit: node?.gitCommit,
+      fileChanges: node?.fileChanges,
       user,
       terminal,
-      running: selectedRun.value?.status === "running" && id === selectedRun.value.nodeId,
-      process: body.filter((message) => message !== terminal),
+      running: selectedRun.value?.status === "running" && selected,
+      compactions: compactions?.map(compactionDetails),
+      trailingCompactions: body.filter(message => message.compaction && !claimedCompactions.value.has(message.compaction.entryTimestamp))
+        .map(message => ({ ...message.compaction!, summary: message.text })),
+      process: body.filter((message) => message !== terminal && !message.compaction),
     };
   }),
 );
@@ -220,10 +291,12 @@ async function showEarlierTurns() {
 }
 
 function duration(turn: Turn) {
+  const execution = session.nodeFor(turn.id)?.metrics?.agentDurationMs;
   const start = new Date(turn.user?.timestamp ?? "").getTime();
   const end = new Date(turn.terminal?.timestamp ?? turn.process.at(-1)?.timestamp ?? "").getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return t("time.aMoment");
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  const elapsed = execution ?? end - start;
+  if (!Number.isFinite(elapsed)) return t("time.aMoment");
+  const seconds = Math.max(0, Math.round(elapsed / 1000));
   return seconds >= 60
     ? `${t("time.minutes", { n: Math.floor(seconds / 60) })} ${t("time.seconds", { n: seconds % 60 })}`
     : t("time.seconds", { n: seconds });
@@ -357,6 +430,7 @@ onBeforeUnmount(() => {
         <MessageSquare :size="17" />
         <small>{{ panelNode?.title ?? t("branch.noNodeSelected") }}</small>
       </span>
+      <GitBranchPicker />
       <button
         type="button"
         class="branch-close"
@@ -398,7 +472,7 @@ onBeforeUnmount(() => {
           :duration="duration" :error-text="errorText" @toggle="toggleProcess" />
       </KeepAlive>
 
-      <div v-if="selectedRun?.status === 'running' && !showingActivity" class="process-item waiting" role="status">
+      <div v-if="selectedRun?.status === 'running' && !showingActivity && !liveCompactions?.some(item => item.status === 'running')" class="process-item waiting" role="status">
         <LoaderCircle :size="14" class="spin" /> {{ t('branch.running') }}
       </div>
 
@@ -431,7 +505,8 @@ onBeforeUnmount(() => {
             <details
               v-if="item.kind === 'tool'"
               class="process-item process-tool"
-              :class="item.status"
+              :class="[item.status, { 'nested-tool': item.parentToolCallId }]"
+              :data-parent-tool-call="item.parentToolCallId"
               :open="item.status === 'running'"
               @toggle="toggleLiveTool(item.id, $event)"
             >
@@ -440,8 +515,10 @@ onBeforeUnmount(() => {
                 <Terminal v-else :size="13" />
                 <strong>{{ item.title }}</strong>
                 <code v-if="item.input" :title="item.input">{{ item.input }}</code>
+                <ToolDuration :running="activity.active && item.status === 'running'" :started-at="item.timestamp" :duration-ms="item.durationMs" />
               </summary>
               <pre v-if="item.status === 'running' || expandedLiveTools.has(item.id)">{{ (item.status === 'running' ? liveText(item.text) : item.text) || (item.status === "running" ? t("branch.running") : t("common.noOutput")) }}</pre>
+              <MessageImages v-if="item.status === 'running' || expandedLiveTools.has(item.id)" :images="item.images" />
             </details>
             <div v-else-if="item.text" class="process-item assistant">
               <MarkdownRenderer
@@ -468,7 +545,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer v-if="session.current" class="chat-composer">
-      <div v-if="!composerOpen" class="composer-bar">
+      <div v-if="!composerState.open" class="composer-bar">
         <button
           type="button"
           class="composer-collapsed"
@@ -493,29 +570,34 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-else class="composer-expanded">
-        <div class="composer-head">
-          <button
-            type="button"
-            :title="t('branch.composerClose')"
-            :aria-label="t('branch.composerClose')"
-            @click="closeComposer"
-          >
-            <ChevronDown :size="14" />
-          </button>
-        </div>
         <PromptComposer
           ref="composer"
+          :draft-state="composerState.draft"
+          :history="promptHistory"
           :runnable="composerRunnable"
           :model="composerModelValue"
           :thinking-level="composerThinkingValue"
           :models="session.models"
+          :personas="layout.settings?.app.personas ?? []"
+          :prompt-override="session.promptOverrideAt(props.nodeId ?? panelNode?.id ?? null)"
           :placeholder="composerPlaceholder"
           :running="composerRunning"
           :on-model="setComposerModel"
           :on-thinking="setComposerThinking"
           :on-submit="submitComposer"
           :on-stop="stopComposer"
-        />
+          :on-queue="queueComposer"
+          :queued-messages="composerRunning ? composerPending : undefined"
+          :on-queued-action="updateComposerQueue"
+        >
+          <template #header>
+            <div class="composer-head">
+              <button type="button" :title="t('branch.composerClose')" :aria-label="t('branch.composerClose')" @click="closeComposer">
+                <ChevronDown :size="14" />
+              </button>
+            </div>
+          </template>
+        </PromptComposer>
       </div>
     </footer>
   </section>

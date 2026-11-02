@@ -45,9 +45,12 @@ import type {
   ShellResult,
 } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
-import { validateShortcutOverrides } from "../shared/shortcuts.js";
+import { migrateShortcutOverrides, validateShortcutOverrides } from "../shared/shortcuts.js";
 import { normalizeTheme } from "../shared/theme.js";
+import { normalizeNodeCardFields } from "../shared/node-card.js";
+import { balanceQuery } from "../shared/provider-balances.js";
 import { parseSessionJsonl, summarizeSession } from "../shared/session.js";
+import { sessionModifiedAt } from "./graph-files.js";
 import { fileChangeDir } from "./file-changes.js";
 import { graphDir } from "./graph-files.js";
 import { canonicalPath, pixAgentDir, pixHome } from "./paths.js";
@@ -137,18 +140,69 @@ export function bootstrapPixProfile(home: string) {
   quarantineCorruptSettings(join(home, ".pix", "gui.settings.json"));
   const source = join(home, ".pi", "agent");
   const target = join(home, ".pix", "agent");
-  if (
-    !existsSync(source) ||
-    existsSync(join(target, "auth.json")) ||
-    existsSync(join(target, "models.json"))
-  )
-    return;
-  mkdirSync(target, { recursive: true });
-  cpSync(source, target, {
-    recursive: true,
-    force: false,
-    // Sessions live in each project's .pi/sessions; CLI history stays there.
-    filter: (src) => basename(src) !== "sessions",
+  if (existsSync(source) && !existsSync(target)) {
+    mkdirSync(target, { recursive: true });
+    cpSync(source, target, {
+      recursive: true,
+      force: false,
+      // Sessions live in each project's .pi/sessions; CLI history stays there.
+      filter: (src) => basename(src) !== "sessions",
+    });
+  }
+  migrateAzureProvider(target);
+}
+
+/** Pi 1.1 renamed the built-in Azure provider, but kept its API ID unchanged. */
+function migrateAzureProvider(agentDir: string) {
+  const oldId = "azure-openai-responses";
+  const newId = "azure";
+  const migrate = (name: string, update: (data: Record<string, unknown>) => boolean) => {
+    const path = join(agentDir, name);
+    if (!existsSync(path)) return;
+    let temp: string | undefined;
+    try {
+      const data = JSON.parse(readFileSync(path, "utf8"));
+      if (!data || typeof data !== "object" || Array.isArray(data) || !update(data)) return;
+      temp = `${path}.${randomUUID()}.tmp`;
+      writeFileSync(temp, JSON.stringify(data, null, 2) + "\n", {
+        flag: "wx", mode: name === "auth.json" ? 0o600 : statSync(path).mode & 0o777,
+      });
+      renameSync(temp, path);
+    } catch (error) { debugLog(`services: migrate ${name} Azure provider`, error); }
+    finally {
+      if (temp) try { rmSync(temp, { force: true }); }
+      catch (error) { debugLog(`services: remove ${name} migration temp file`, error); }
+    }
+  };
+  migrate("auth.json", data => {
+    if (!Object.hasOwn(data, oldId)) return false;
+    if (!Object.hasOwn(data, newId)) data[newId] = data[oldId];
+    delete data[oldId];
+    return true;
+  });
+  migrate("settings.json", data => {
+    let changed = false;
+    if (data.defaultProvider === oldId) { data.defaultProvider = newId; changed = true; }
+    const patterns = data.enabledModels;
+    if (Array.isArray(patterns)) {
+      const updated = patterns.map((pattern: unknown) =>
+        typeof pattern === "string" && pattern.startsWith(`${oldId}/`)
+          ? `${newId}/${pattern.slice(oldId.length + 1)}` : pattern);
+      if (updated.some((pattern, index) => pattern !== patterns[index])) {
+        data.enabledModels = updated;
+        changed = true;
+      }
+    }
+    return changed;
+  });
+  migrate("models.json", data => {
+    const providers = data.providers;
+    if (!providers || typeof providers !== "object" || Array.isArray(providers)
+      || !Object.hasOwn(providers, oldId) || Object.hasOwn(providers, newId)) return false;
+    const catalog = providers as Record<string, unknown>;
+    catalog[newId] = catalog[oldId];
+    delete catalog[oldId];
+    return true;
   });
 }
 /**
@@ -183,7 +237,11 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     "enterToSend",
     "openLinksInApp",
     "closeToTray",
+    "preventSleepDuringTasks",
+    "keepScreenOnDuringTasks",
     "canvasDotGrid",
+    "nodeCardShowCommit",
+    "deployModelCredentialsToRemote",
     "experimentalHistory",
   ])
     expectBoolean(key);
@@ -196,10 +254,64 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     const { assistant, ...rest } = shortcuts;
     out.keyboardShortcuts = rest.pixie === undefined ? { ...rest, pixie: assistant } : rest;
   }
+  if (out.nodeCardFields !== undefined) out.nodeCardFields = normalizeNodeCardFields(out.nodeCardFields);
   try {
-    if (out.keyboardShortcuts !== undefined) validateShortcutOverrides(out.keyboardShortcuts);
+    if (out.keyboardShortcuts !== undefined) out.keyboardShortcuts = migrateShortcutOverrides(out.keyboardShortcuts);
   } catch {
     drop("keyboardShortcuts");
+  }
+  if (out.usage !== undefined) {
+    const usage = out.usage && typeof out.usage === "object" ? out.usage as Record<string, unknown> : {};
+    const providers = usage.unbilledProviders;
+    const unbilled = [
+      ...new Set(
+        (Array.isArray(providers) ? providers : []).filter(
+          (p): p is string => typeof p === "string" && /^[^/\s]+$/u.test(p),
+        ),
+      ),
+    ];
+    const queries = usage.balanceQueries;
+    const balanceQueries = Object.fromEntries(
+      (queries && typeof queries === "object" && !Array.isArray(queries) ? Object.entries(queries) : []).flatMap(([id, value]) => {
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id) || ["__proto__", "prototype", "constructor"].includes(id)) return [];
+        try { return [[id, balanceQuery(value)]]; } catch { return []; }
+      }),
+    );
+    if (unbilled.length || Object.keys(balanceQueries).length) out.usage = {
+      ...(unbilled.length ? { unbilledProviders: unbilled } : {}),
+      ...(Object.keys(balanceQueries).length ? { balanceQueries } : {}),
+    };
+    else drop("usage");
+  }
+  if (out.personas !== undefined) {
+    const seen = new Set<string>();
+    const personas = (Array.isArray(out.personas) ? out.personas : []).flatMap(item => {
+      const persona = item as { name?: unknown; text?: unknown };
+      if (typeof persona?.name !== "string" || typeof persona?.text !== "string") return [];
+      const name = persona.name.trim().slice(0, 60);
+      const text = persona.text.slice(0, 100_000);
+      if (!name || !text.trim() || seen.has(name)) return [];
+      seen.add(name);
+      return [{ name, text }];
+    });
+    if (personas.length) out.personas = personas;
+    else drop("personas");
+  }
+  if (out.promptCustomization !== undefined) {
+    const raw = out.promptCustomization as Record<string, unknown>;
+    const section = (value: unknown): string | undefined =>
+      typeof value === "string" && value.trim() ? value.slice(0, 100_000) : undefined;
+    const preamble = section(raw?.preamble);
+    const preamblePersona = raw?.preamblePersona === null ? null
+      : typeof raw?.preamblePersona === "string" ? raw.preamblePersona.trim().slice(0, 60) || undefined : undefined;
+    const customization = {
+      ...(preamble !== undefined ? { preamble } : {}),
+      ...(preamble !== undefined && preamblePersona !== undefined ? { preamblePersona } : {}),
+      ...(section(raw?.rules) !== undefined ? { rules: section(raw.rules) } : {}),
+      ...(section(raw?.docs) !== undefined ? { docs: section(raw.docs) } : {}),
+    };
+    if (Object.keys(customization).length) out.promptCustomization = customization;
+    else drop("promptCustomization");
   }
   return out;
 }
@@ -249,9 +361,13 @@ export class SettingsService {
       enterToSend: true,
       openLinksInApp: true,
       closeToTray: true,
+      preventSleepDuringTasks: true,
+      keepScreenOnDuringTasks: false,
       canvasDotGrid: true,
+      nodeCardShowCommit: true,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
+      deployModelCredentialsToRemote: false,
       experimentalHistory: false,
     };
     // Normalize the raw file before the defaults merge, so a dropped key is
@@ -283,6 +399,9 @@ export class SettingsService {
       // This map is a complete set of overrides: merging would resurrect reset bindings.
       next.keyboardShortcuts = patch.keyboardShortcuts;
     }
+    // The editor sends a complete snapshot: omitted sections reset to dynamic
+    // content, and null provenance must survive the merge's deletion semantics.
+    if (Object.hasOwn(patch, "promptCustomization")) next.promptCustomization = patch.promptCustomization;
     // App writes persist only values the app can read back.
     atomic(this.appPath, normalizeAppSettings(next));
     return this.bundle();
@@ -390,7 +509,7 @@ export class SettingsService {
   }
 }
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
-export const MAX_IMAGE_PREVIEW_BYTES = 20 * 1024 * 1024;
+export const MAX_BINARY_PREVIEW_BYTES = 20 * 1024 * 1024;
 function readBounded(path: string, max: number): { bytes: Buffer; truncated: boolean } {
   const fd = openSync(path, "r");
   try {
@@ -473,25 +592,27 @@ export class WorkspaceService {
     if (!root) throw new Error("Open a project first");
     const a = this.safe(p),
       ext = extname(a).toLowerCase(),
-      mime: Record<string, string> = {
-        ".avif": "image/avif",
-        ".bmp": "image/bmp",
-        ".gif": "image/gif",
-        ".ico": "image/x-icon",
-        ".jpeg": "image/jpeg",
-        ".jpg": "image/jpeg",
-        ".png": "image/png",
-        ".svg": "image/svg+xml",
-        ".webp": "image/webp",
+      binaries: Record<string, { mime: string; language: string }> = {
+        ".avif": { mime: "image/avif", language: "image" },
+        ".bmp": { mime: "image/bmp", language: "image" },
+        ".gif": { mime: "image/gif", language: "image" },
+        ".ico": { mime: "image/x-icon", language: "image" },
+        ".jpeg": { mime: "image/jpeg", language: "image" },
+        ".jpg": { mime: "image/jpeg", language: "image" },
+        ".pdf": { mime: "application/pdf", language: "pdf" },
+        ".png": { mime: "image/png", language: "image" },
+        ".svg": { mime: "image/svg+xml", language: "image" },
+        ".webp": { mime: "image/webp", language: "image" },
       };
-    if (mime[ext]) {
-      const { bytes, truncated } = readBounded(a, MAX_IMAGE_PREVIEW_BYTES);
+    const binary = binaries[ext];
+    if (binary) {
+      const { bytes, truncated } = readBounded(a, MAX_BINARY_PREVIEW_BYTES);
       return {
         path: relative(root, a).split(sep).join("/"),
         name: basename(a),
         content: "",
-        dataUrl: truncated ? undefined : `data:${mime[ext]};base64,${bytes.toString("base64")}`,
-        language: "image",
+        dataUrl: truncated ? undefined : `data:${binary.mime};base64,${bytes.toString("base64")}`,
+        language: binary.language,
         readonly: true,
         truncated,
       };
@@ -578,7 +699,7 @@ export class GitService {
     }));
     return {
       available: true,
-      branch: head.slice(3).split("...")[0]?.split(" [")[0] || "HEAD",
+      branch: head.slice(3).replace(/^(?:No commits yet on |Initial commit on )/, "").split("...")[0]?.split(" [")[0] || "HEAD",
       ahead: Number(head.match(/ahead (\d+)/)?.[1] ?? 0),
       behind: Number(head.match(/behind (\d+)/)?.[1] ?? 0),
       changes,
@@ -602,11 +723,59 @@ export class GitService {
     });
     return stdout || "No changes.";
   }
+  async branches(): Promise<string[]> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const { stdout } = await git("git", ["-c", `safe.directory=${root}`, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"],
+      { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10000 });
+    return stdout.trim().split(/\r?\n/).filter(Boolean);
+  }
+  async switchBranch(branch: string): Promise<GitStatus> {
+    const root = this.root;
+    if (!root) throw new Error("Open a project first");
+    const repository = new GitService(root);
+    // Accept exact local branch names, never revision expressions or Git options.
+    if (!(await repository.branches()).includes(branch)) throw new Error("Choose an existing local Git branch");
+    try {
+      await git("git", ["-c", `safe.directory=${root}`, "switch", "--no-guess", "--", branch],
+        { cwd: root, encoding: "utf8", windowsHide: true, timeout: 30000 });
+    } catch (error) {
+      throw new Error(String((error as { stderr?: string }).stderr || (error as Error).message).trim());
+    }
+    return repository.status();
+  }
 }
 export class ShellService {
   root: string | null;
-  running = new Map<string, any>();
+  running = new Map<string, { kill(): void }>();
   terminals = new Map<string, IPty>();
+  terminalRevision = 0;
+  /** Like a terminal close warning, this checks child processes, not shell input. */
+  async terminalWork() {
+    const revision = this.terminalRevision;
+    const pids = [...this.terminals.values()].map(terminal => terminal.pid);
+    const valid = pids.filter(pid => Number.isSafeInteger(pid) && pid > 0);
+    const unknown = pids.length - valid.length;
+    if (!valid.length) return { commands: 0, unknown };
+    const win = process.platform === "win32";
+    const args = win
+      ? ["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -Filter '" +
+        valid.map(pid => `ParentProcessId=${pid}`).join(" OR ") +
+        "' | Where-Object { $_.Name -notin @('conhost.exe', 'OpenConsole.exe') } | Select-Object -ExpandProperty ParentProcessId"]
+      : ["-A", "-o", "ppid=", "-o", "stat="];
+    try {
+      const { stdout } = await promisify(execFile)(win ? "powershell.exe" : "ps", args,
+        { encoding: "utf8", windowsHide: true, timeout: 1500 });
+      if (revision !== this.terminalRevision) return { commands: 0, unknown: this.terminals.size };
+      const parents = new Set(stdout.trim().split(/\r?\n/).flatMap(line => {
+        const [parent, state] = line.trim().split(/\s+/);
+        // Exited background jobs can remain as zombies until the next shell prompt.
+        return state?.startsWith("Z") ? [] : [Number(parent)];
+      }));
+      return { commands: valid.filter(pid => parents.has(pid)).length, unknown };
+    } catch { return { commands: 0, unknown: this.terminals.size }; }
+  }
   emit: (e: unknown) => void;
   constructor(p: string | null, emit: (e: unknown) => void) {
     this.root = p;
@@ -633,11 +802,13 @@ export class ShellService {
       ...(win ? { useConpty: true } : {}),
     });
     this.terminals.set(id, terminal);
+    this.terminalRevision++;
     terminal.onData((data) =>
       this.emit({ type: "terminal", payload: { id, data } }),
     );
     terminal.onExit(({ exitCode }) => {
       this.terminals.delete(id);
+      this.terminalRevision++;
       this.emit({ type: "terminal", payload: { id, exitCode } });
     });
     return { id };
@@ -645,6 +816,7 @@ export class ShellService {
   writeTerminal(id: string, data: string) {
     const terminal = this.terminals.get(id);
     if (!terminal) throw new Error("Terminal session not found");
+    this.terminalRevision++;
     terminal.write(data);
   }
   resizeTerminal(id: string, cols: number, rows: number) {
@@ -656,6 +828,7 @@ export class ShellService {
     const terminal = this.terminals.get(id);
     if (!terminal) return false;
     this.terminals.delete(id);
+    this.terminalRevision++;
     terminal.kill();
     return true;
   }
@@ -674,8 +847,21 @@ export class ShellService {
         cwd: this.root ?? undefined,
         env: process.env,
         windowsHide: true,
+        detached: !win,
       });
-      this.running.set(id, child);
+      let cancelled = false;
+      this.running.set(id, { kill() {
+        cancelled = true;
+        if (!child.pid) return;
+        if (win) {
+          const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"],
+            { windowsHide: true, stdio: "ignore", timeout: 5000 });
+          if (result.status !== 0) child.kill();
+        } else {
+          try { process.kill(-child.pid, "SIGTERM"); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        }
+      } });
       let output = "",
         truncated = false;
       const add = (c: unknown) => {
@@ -694,7 +880,7 @@ export class ShellService {
           command,
           output,
           exitCode: code,
-          cancelled: signal !== null,
+          cancelled: cancelled || signal !== null,
           truncated,
         });
       });
@@ -703,12 +889,12 @@ export class ShellService {
   abort(id: string) {
     const p = this.running.get(id);
     if (!p) return false;
-    p.kill("SIGTERM");
+    p.kill();
     return true;
   }
   dispose() {
     this.closeTerminals();
-    for (const process of this.running.values()) process.kill("SIGTERM");
+    for (const process of this.running.values()) process.kill();
     this.running.clear();
   }
 }
@@ -758,7 +944,7 @@ export class SessionFiles {
           const s = statSync(p),
             x = parseSessionJsonl(readFileSync(p, "utf8"));
           return [
-            summarizeSession(p, x.header, x.entries, s.mtime.toISOString()),
+            summarizeSession(p, x.header, x.entries, sessionModifiedAt(p, s.mtime.toISOString())),
           ];
         } catch {
           return [];
@@ -833,4 +1019,18 @@ export function configuredSessionDir(
   if (typeof v === "string" && v.trim())
     return isAbsolute(v) ? resolve(v) : resolve(project, v);
   return join(project, ".pi", "sessions");
+}
+/**
+ * A historical project's session directory for the usage panel's
+ * all-projects scope: only sessionDir differs from the bundle in effect,
+ * and the project's own settings file wins over the global default.
+ */
+export function historySessionDir(project: ProjectInfo, bundle: SettingsBundle) {
+  const own = readJson<PiSettings>(join(project.path, ".pi", "settings.json")).sessionDir;
+  const effective =
+    typeof own === "string" && own.trim() ? own : bundle.piGlobal.sessionDir;
+  return configuredSessionDir(project.path, {
+    ...bundle,
+    effective: { ...bundle.effective, sessionDir: effective },
+  });
 }

@@ -20,9 +20,29 @@ test("recovers cumulative assistant and tool output without their start events",
   assert.equal(activity?.items.length, 2);
   assert.equal(activity?.items[1]?.text, "tool completed");
   assert.equal(activity?.items[1]?.status, "complete");
+  assert.equal(activity?.items[1]?.timestamp, undefined, "a recovered call must not invent its start time");
   activity = reduceAgentActivity(activity, { type: "agent_settled" });
   assert.equal(activity?.active, false);
   assert.equal(reduceAgentActivity(undefined, { type: "agent_settled" }), undefined);
+});
+
+test("tool timing uses SDK durations for successful, failed and recovered calls", () => {
+  let activity = reduceAgentActivity(undefined, { type: "tool_execution_start", toolCallId: "outer", toolName: "codemode" });
+  const timestamp = activity?.items[0]?.timestamp;
+  assert.ok(timestamp && Number.isFinite(Date.parse(timestamp)));
+  activity = reduceAgentActivity(activity, { type: "tool_execution_end", toolCallId: "outer", durationMs: 1234,
+    result: { content: [] } });
+  assert.equal(activity?.items[0]?.timestamp, timestamp);
+  assert.equal(activity?.items[0]?.durationMs, 1234);
+  activity = reduceAgentActivity(activity, { type: "tool_execution_end", toolCallId: "failed", durationMs: 0,
+    isError: true, result: { content: [] } });
+  assert.equal(activity?.items[1]?.timestamp, undefined);
+  assert.equal(activity?.items[1]?.durationMs, 0);
+  assert.equal(activity?.items[1]?.status, "error");
+  for (const durationMs of [undefined, -1, NaN, Infinity, "12"]) {
+    const recovered = reduceAgentActivity(undefined, { type: "tool_execution_end", toolCallId: "old", durationMs, result: {} });
+    assert.equal(recovered?.items[0]?.durationMs, undefined);
+  }
 });
 
 test("reduces Pi assistant and tool streams until agent_settled", () => {

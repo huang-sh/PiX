@@ -72,6 +72,8 @@ function resolveBuiltinPackage(moduleDir: string, name: string): string | undefi
   return [
     resolve(moduleDir, "..", "..", "..", "pi-builtin", "node_modules", ...segments),
     resolve(moduleDir, "..", "..", "node_modules", ...segments),
+    // Source CLI build: server/dist/main shares the repository dependencies.
+    resolve(moduleDir, "..", "..", "..", "node_modules", ...segments),
   ].find((candidate) => existsSync(candidate));
 }
 

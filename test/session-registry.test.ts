@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MainController, type Platform } from "../src/main/controller.js";
 import { projectId, type ProjectInfo, type SessionSnapshot } from "../src/shared/types.js";
 import { SessionRegistry } from "../src/main/session-registry.js";
+import { GraphFiles, encodeSession, type BranchRecord, type SessionData } from "../src/main/graph-files.js";
 
 // Sessions are remembered into PIX_HOME's settings.json, so without an
 // isolated home these tests would enroll their temp workspaces in the
@@ -27,6 +29,12 @@ const platform: Platform = {
     return false;
   },
   async openExternal() {},
+  async openPath() {},
+  async openWith() {},
+  async openWithApps() { return []; },
+  async openWithApp() {},
+
+
   showItemInFolder() {},
   quit() {},
 };
@@ -41,6 +49,146 @@ async function until(check: () => boolean) {
 // /var -> /private/var symlink — so fixtures must be canonical from birth or
 // every path the tests assert against would diverge from the registry's.
 const workspace = () => realpathSync(mkdtempSync(join(tmpdir(), "pix-registry-ws-")));
+
+test("opening an owned graph read-only retains sibling and nested branches without changing the owner's files", async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  const owner = new GraphFiles(join(controller.files.dir!, "owned.jsonl"));
+  const header = { type: "session", version: 3, id: "owned", cwd: ws, timestamp: "2026-01-01" };
+  const entry = (id: string, parentId: string | null, role = "user") => ({
+    type: "message", id, parentId, timestamp: "2026-01-01", message: { role, content: id, timestamp: 1 },
+  });
+  const baseline = [entry("root", null), entry("answer", "root", "assistant")];
+  const record = (id: string): BranchRecord => ({
+    id, parentId: "main", forkEntryId: "answer", inherited: { root: "root", answer: "answer" },
+    baseline, header: { ...header, id }, request: { text: id }, requestId: id, runId: id, status: "running",
+  });
+  try {
+    writeFileSync(owner.main, encodeSession({ header, entries: [...baseline, entry("main", "answer")] }));
+    assert.equal(controller.fallback(owner.main).projection.nodes.length, 2, "plain sessions still load without a sidecar");
+    assert.equal(existsSync(owner.dir), false, "read-only viewing creates no sidecar");
+    owner.acquire();
+    owner.saveLeaf("answer");
+    const a = record("A"), c = record("C");
+    const aData: SessionData = { header: a.header, entries: [...baseline, entry("a", "answer"), entry("aa", "a", "assistant")] };
+    owner.create(a, aData);
+    const b = { ...record("B"), parentId: "A", forkEntryId: "A:aa", baseline: aData.entries,
+      inherited: { root: "root", answer: "answer", a: "A:a", aa: "A:aa" } };
+    owner.create(b, { header: b.header, entries: [...aData.entries, entry("b", "aa")] });
+    owner.create(c, { header: c.header, entries: [...baseline, entry("c", "answer")] });
+    owner.save({ ...record("prepared"), status: "prepared" });
+    // The viewer must tolerate an in-flight append and backup metadata without
+    // running the owner's disk recovery or interrupted-deletion cleanup.
+    writeFileSync(owner.path("B"), readFileSync(owner.path("B"), "utf8") + '{"type":"message"');
+    owner.save(c);
+    writeFileSync(`${owner.path("C")}.origin.json`, "{in-flight metadata");
+    writeFileSync(join(owner.dir, "delete-pending.json"), '{"writes":{},"removes":[]}');
+    const contents = () => new Map([owner.main, ...readdirSync(owner.dir).sort().map(name => join(owner.dir, name))]
+      .map(path => [path, readFileSync(path, "utf8")]));
+    const before = contents();
+    const notices: string[] = [];
+    controller.onEvent(event => {
+      if (event.type === "notice") notices.push((event.payload as { message: string }).message);
+    });
+
+    const viewer = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { MainController } from ${JSON.stringify(new URL("../src/main/controller.js", import.meta.url).href)};
+      const controller = new MainController(process.argv[1], {});
+      try {
+        const current = await controller.invoke("session.open", { path: process.argv[2] });
+        console.log(JSON.stringify({ available: current.runtime.available, ids: current.projection.nodes.map(node => node.id).sort() }));
+      } finally { await controller.closeAll(); }
+    `, ws, owner.main], { encoding: "utf8", timeout: 15_000, windowsHide: true });
+    assert.equal(viewer.status, 0, viewer.stderr || String(viewer.error));
+    assert.deepEqual(JSON.parse(viewer.stdout), { available: false,
+      ids: ["turn:root", "turn:main", "turn:A:a", "turn:B:b", "turn:C:c"].sort() }, "a separate process gets the full read-only tree");
+
+    const current = await controller.invoke("session.open", { path: owner.main }) as SessionSnapshot;
+    assert.equal(current.runtime.available, false);
+    assert.equal(controller.registry.entry(owner.main)?.runtime, undefined);
+    assert.deepEqual(current.projection.nodes.map(node => node.id).sort(),
+      ["turn:root", "turn:main", "turn:A:a", "turn:B:b", "turn:C:c"].sort());
+    assert.equal(current.projection.activeNodeId, "turn:root", "the saved main cursor is retained");
+    assert.equal(current.projection.nodes.find(node => node.id === "turn:root")?.leafEntryId, "answer");
+    assert.equal(current.projection.nodes.find(node => node.id === "turn:B:b")?.parentId, "turn:A:a");
+    assert.ok(current.projection.edges.some(edge => edge.source === "turn:A:a" && edge.target === "turn:B:b"));
+    assert.ok(!notices.some(message => message.includes("source unavailable: B")), "an in-flight partial append is not reported as corruption");
+    assert.deepEqual(contents(), before, "read-only viewing cannot rewrite ownership, origins, transcripts or recovery files");
+
+    writeFileSync(owner.path("A"), encodeSession({ ...aData, entries: [...aData.entries, entry("new", "aa")] }));
+    const updated = await controller.invoke("session.open", { path: owner.main }) as SessionSnapshot;
+    assert.ok(updated.projection.nodes.some(node => node.id === "turn:A:new"), "reopening reads the owner's latest persisted turns");
+
+    // A syntactically valid source can still violate its inherited baseline.
+    // Dropping that branch must be visible to the viewer, not just the log.
+    writeFileSync(owner.path("A"), encodeSession({ ...aData, entries: [
+      entry("root", null), { ...baseline[1]!, message: { role: "assistant", content: "changed baseline", timestamp: 1 } },
+      ...aData.entries.slice(baseline.length),
+    ] }));
+    notices.length = 0;
+    const damaged = contents();
+    const partial = await controller.invoke("session.open", { path: owner.main }) as SessionSnapshot;
+    assert.ok(!partial.projection.nodes.some(node => node.id === "turn:A:a"));
+    assert.ok(partial.projection.nodes.some(node => node.id === "turn:C:c"), "a healthy sibling remains readable");
+    assert.ok(notices.some(message => message.includes("Branch baseline changed: A")), "the viewer is told why a branch is missing");
+    assert.deepEqual(contents(), damaged, "reporting corruption never repairs the owner's sources");
+
+    const invalidTail = encodeSession(aData) + JSON.stringify(entry("orphan", "missing-parent")) + "\n";
+    writeFileSync(owner.path("A"), invalidTail);
+    notices.length = 0;
+    const prefix = await controller.invoke("session.open", { path: owner.main }) as SessionSnapshot;
+    assert.ok(prefix.projection.nodes.some(node => node.id === "turn:A:a"), "the valid prefix stays readable");
+    assert.ok(notices.some(message => message.includes("Missing or cyclic parent of orphan")), "a complete but invalid final record is reported");
+    assert.equal(readFileSync(owner.path("A"), "utf8"), invalidTail);
+
+    const corruptMiddle = encodeSession(aData).replace(JSON.stringify(aData.entries[2]), "{broken");
+    writeFileSync(owner.path("A"), corruptMiddle);
+    notices.length = 0;
+    const checkpoint = await controller.invoke("session.open", { path: owner.main }) as SessionSnapshot;
+    assert.ok(checkpoint.projection.nodes.some(node => node.id === "turn:A:a"), "the last checkpoint remains readable");
+    assert.ok(notices.some(message => message.includes("Read branch checkpoint; source unavailable: A")), "checkpoint fallback is reported");
+    assert.equal(readFileSync(owner.path("A"), "utf8"), corruptMiddle);
+  } finally {
+    await controller.closeAll();
+    owner.release();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("an invalid branch sidecar does not prevent read-only access to the main transcript", async () => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  const path = join(controller.files.dir!, "invalid-sidecar.jsonl");
+  const graph = new GraphFiles(path);
+  const source = encodeSession({ header: { type: "session", version: 3, id: "invalid-sidecar", cwd: ws, timestamp: "2026-01-01" },
+    entries: [{ type: "message", id: "root", parentId: null, timestamp: "2026-01-01", message: { role: "user", content: "saved prompt" } }] });
+  try {
+    writeFileSync(path, source);
+    writeFileSync(graph.dir, "unexpected file");
+    const current = await controller.invoke("session.open", { path }) as SessionSnapshot;
+    assert.equal(current.runtime.available, false);
+    assert.deepEqual(current.projection.nodes.map(node => node.id), ["turn:root"]);
+    assert.equal(readFileSync(path, "utf8"), source);
+    assert.equal(readFileSync(graph.dir, "utf8"), "unexpected file");
+
+    let rejectOpen!: (error: Error) => void;
+    controller.createSessionRuntime = () => ({
+      open: () => new Promise<void>((_, reject) => { rejectOpen = reject; }),
+      state: () => ({}), close: async () => {},
+    }) as never;
+    const notices: unknown[] = [];
+    controller.onEvent(event => { if (event.type === "notice") notices.push(event.payload); });
+    const opening = controller.invoke("session.open", { path });
+    controller.configure(null);
+    rejectOpen(new Error("Session graph is already open"));
+    await opening;
+    assert.equal(controller.current, undefined);
+    assert.deepEqual(notices, [], "a late fallback cannot warn in a different project view");
+  } finally {
+    await controller.closeAll();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
 
 test("late local opens keep the latest selection, including a project switch", async () => {
   const ws = workspace(), other = workspace();
@@ -294,6 +442,38 @@ test("session.stop aborts a background run and preserves its file", { timeout: 3
     const reopened = await controller.invoke("session.open", { path: first.path }) as SessionSnapshot;
     assert.ok(JSON.stringify(reopened.entries).includes("hello"), "the submitted prompt is preserved");
     assert.ok(!JSON.stringify(reopened.entries).includes("never delivered"), "the aborted answer never lands");
+  } finally {
+    await controller.closeSessions();
+    controller.dispose();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("session.stop reports a failed save instead of claiming the run stopped cleanly", { timeout: 30000 }, async (t) => {
+  const ws = workspace();
+  const controller = new MainController(ws, platform);
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", name: "Faux", reasoning: false, contextWindow: 128_000 }] });
+    injectFaux(controller, faux);
+    await controller.invoke("agent.control", { action: "newSession" });
+    await controller.invoke("agent.control", { action: "setModel", provider: "faux", modelId: "faux-1" });
+    const path = controller.current!.session.path;
+    let started = false;
+    faux.setResponses([async (_context: unknown, options?: { signal?: AbortSignal }) => {
+      started = true;
+      await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }]);
+    await controller.invoke("agent.control", { action: "promptAt", requestId: "stop-fault", nodeId: null,
+      text: "hello", provider: "faux", modelId: "faux-1" });
+    await until(() => started);
+    const runtime = controller.registry.entry(path)!.runtime!;
+    const seal = t.mock.method(runtime.graph!, "sealMain", () => { throw new Error("simulated stop EIO"); });
+    await assert.rejects(controller.invoke("session.stop", { path }), /storage failure.*stop EIO/);
+    assert.equal(runtime.snapshot().runtime.available, false);
+    seal.mock.restore();
+    const reopened = await controller.invoke("session.open", { path }) as SessionSnapshot;
+    assert.equal(reopened.runtime.available, true);
   } finally {
     await controller.closeSessions();
     controller.dispose();
@@ -608,11 +788,11 @@ test("forgetting a project during an in-flight open disposes the late runtime", 
       return runtime;
     };
 
-    const opening = controller.invoke("session.open", { path });
+    const opening = assert.rejects(controller.invoke("session.open", { path }), /Session was closed while opening/);
     await new Promise(resolve => setTimeout(resolve, 20));   // the open is registered as pending
     controller.configure(second);
     await controller.invoke("app.forgetProject", { id: `local:${first}` });
-    await opening.catch(() => {});
+    await opening;
 
     assert.equal(Boolean(controller.registry.entry(path)), false, "the late open goes with the history row");
     assert.ok(!controller.projectGroups().some(record => record.id === `local:${first}`), "the project is gone from the list");
@@ -1028,7 +1208,7 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
     const dir = controller.files.dir!;
     const path = join(dir, "dying.jsonl");
     writeFileSync(path, "");
-    let builds = 0, broken = false;
+    let builds = 0, broken = false, needsReopen = false;
     const snapshot = (): SessionSnapshot =>
       ({ session: { path }, entries: [], projection: { nodes: [] } }) as never;
     controller.createSessionRuntime = () => {
@@ -1036,6 +1216,7 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
       return {
         async open() {},
         snapshot: () => { if (instance === 1 && broken) throw new Error("runtime died"); return snapshot(); },
+        get needsReopen() { return instance === 2 && needsReopen; },
         state: () => ({}),
         async close() {},
       } as never;
@@ -1047,6 +1228,9 @@ test("a cached runtime that died reopens instead of surfacing its error", { time
 
     assert.equal(reopened.session.path, path, "the session reopens on a fresh runtime");
     assert.equal(builds, 2, "the dead cached runtime is replaced, not reused");
+    needsReopen = true;
+    await controller.invoke("session.open", { path });
+    assert.equal(builds, 3, "a storage-failed runtime is rebuilt even if its snapshot is readable");
   } finally {
     await controller.closeSessions();
     controller.dispose();
@@ -1131,6 +1315,13 @@ test("a custom model reaches the session that was already open", { timeout: 3000
     await controller.invoke("agent.control", { action: "updateCustomModel", ...definition, contextWindow: 2000 });
     assert.equal(entry.runtime!.state().model?.contextWindow, 2000,
       "a session running the updated model adopts the new definition");
+
+    await controller.invoke("agent.control", { action: "addCustomModels", ...definition,
+      apiKey: "", models: [{ modelId: "acme-2" }, { modelId: "acme-3" }] });
+    for (const modelId of ["acme-2", "acme-3"]) {
+      const selected = await controller.invoke("agent.control", { action: "setModel", provider: "acme", modelId }) as SessionSnapshot;
+      assert.equal(selected.runtime.model?.id, modelId, "every batch model reaches an existing session");
+    }
   } finally {
     await controller.closeAll();
     rmSync(ws, { recursive: true, force: true });
@@ -1209,5 +1400,78 @@ test("eviction never disposes an entry that became active while it was closing a
     if (previousLimit === undefined) delete process.env.PIX_MAX_LIVE_SESSIONS;
     else process.env.PIX_MAX_LIVE_SESSIONS = previousLimit;
     for (const release of [...gates.values()]) release();
+  }
+});
+
+test("a newly attached client replays the owner's live progress without waiting for another token", async () => {
+  const ws = workspace();
+  const owner = new MainController(null, platform);
+  const first = new MainController(ws, platform, owner);
+  let second: MainController | undefined;
+  const path = join(first.files.dir!, "live.jsonl");
+  const snapshot = { session: { path }, entries: [], projection: { nodes: [], messages: [], edges: [] },
+    runtime: { isStreaming: true }, graph: { id: path, epoch: "live", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  owner.createSessionRuntime = () => ({ open: async () => snapshot, snapshot: () => snapshot,
+    state: () => ({ sessionFile: path, isStreaming: true }), close: async () => {} }) as never;
+  try {
+    await first.registry.open(first.project!, first.files.dir, path);
+    const progress = { type: "agent", payload: { type: "message_update", graphId: path, branchId: "main", runId: "run",
+      message: { role: "assistant", content: [{ type: "text", text: "Already streamed" }] } } };
+    owner.registry.entry(path)!.runtime!.emit(progress);
+    first.detach();
+    second = new MainController(ws, platform, owner);
+    await second.registry.open(second.project!, second.files.dir, path);
+    const received: unknown[] = [];
+    second.onEvent(event => { if (event.type === "agent") received.push(event); });
+    await second.invoke("session.snapshot");
+    assert.deepEqual(received, [progress]);
+  } finally {
+    first.detach(); second?.detach(); await owner.closeAll();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("host clients share runtimes while selection, explicit reads and detachment remain independent", { timeout: 30000 }, async () => {
+  const ws = workspace();
+  const owner = new MainController(null, platform);
+  const a = new MainController(ws, platform, owner);
+  const b = new MainController(ws, platform, owner);
+  const previousLimit = process.env.PIX_MAX_LIVE_SESSIONS;
+  process.env.PIX_MAX_LIVE_SESSIONS = "1";
+  try {
+    const faux = fauxProvider({ models: [{ id: "faux-1", contextWindow: 128000 }] });
+    injectFaux(owner, faux);
+    const run = await startGatedRun(a, faux, "survived client detach");
+    await b.invoke("session.open", { path: run.path });
+    assert.equal(a.registry.entry(run.path)?.runtime, b.registry.entry(run.path)?.runtime);
+    await b.invoke("agent.control", { action: "newSession" });
+    const bPath = b.current!.session.path;
+    assert.equal(a.current?.session.path, run.path);
+    const explicit = await b.invoke("session.snapshot", undefined, run.path) as SessionSnapshot;
+    assert.equal(explicit.session.path, run.path);
+    assert.equal(b.current?.session.path, bPath, "targeted reads do not select their target");
+    a.detach();
+    assert.equal(owner.registry.entry(run.path)?.runtime?.busy, true);
+    await run.finish();
+    await b.invoke("session.open", { path: run.path });
+    assert.ok(JSON.stringify(b.current).includes("survived client detach"));
+    const clone = await b.invoke("agent.control", { action: "clone" }) as SessionSnapshot;
+    assert.notEqual(clone.session.path, run.path);
+    assert.ok(owner.registry.entry(run.path)?.runtime, "cloning leaves the source runtime and lock intact");
+    assert.ok(JSON.stringify(clone).includes("survived client detach"));
+    // An idle session being viewed by another client must survive LRU eviction.
+    const c = new MainController(ws, platform, owner);
+    try {
+      await c.invoke("session.open", { path: run.path });
+      for (let i = 0; i < 4; i++) await b.invoke("agent.control", { action: "newSession" });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.ok(c.registry.entry(run.path)?.runtime);
+      assert.equal(c.current?.session.path, run.path);
+    } finally { c.detach(); }
+  } finally {
+    a.detach(); b.detach(); await owner.closeAll();
+    if (previousLimit === undefined) delete process.env.PIX_MAX_LIVE_SESSIONS;
+    else process.env.PIX_MAX_LIVE_SESSIONS = previousLimit;
+    rmSync(ws, { recursive: true, force: true });
   }
 });

@@ -95,6 +95,32 @@ try {
   await until(`window.__pixTest && !__pixTest.state().loading && document.querySelector('#navigator-panel')`);
   await until(`__pixTest.state().current && document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('layout').panelsSettled`);
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  // The welcome screen must share the workbench instead of covering its navigator.
+  await evaluate(`(() => {
+    const stores = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s;
+    stores.get('workspace').hydrate(null);
+    const session = stores.get('session');
+    session.hydrate(null, [], session.projects);
+  })()`);
+  await until(`!!document.querySelector('#graph-panel [data-welcome]')`);
+  assert.ok(await evaluate(`Array.from(document.querySelectorAll('.navigator-actions button')).slice(1).every(button => button.disabled)`), 'project-scoped actions are disabled without a project');
+  await click(button);
+  await until(`${expanded} && document.querySelector('#navigator-panel').getBoundingClientRect().left===0`);
+  assert.ok(await evaluate(`(() => {
+    const pin = document.querySelector('${pinButton}');
+    const r = pin.getBoundingClientRect();
+    return pin.contains(document.elementFromPoint(r.x+r.width/2, r.y+r.height/2));
+  })()`), 'welcome does not cover the floating navigator');
+  await click(pinButton);
+  await until(pinned);
+  assert.ok(await evaluate(`document.querySelector('[data-welcome]').getBoundingClientRect().left >= document.querySelector('#navigator-panel').getBoundingClientRect().right`), 'welcome makes room for the pinned navigator');
+  await click(pinButton);
+  await until(`!(${pinned})`);
+  await click('.project-main');
+  await click('.session-item');
+  await until(`!document.querySelector('[data-welcome]') && __pixTest.state().current && !__pixTest.state().loading`);
+  assert.ok(await evaluate(`Array.from(document.querySelectorAll('.navigator-actions button')).slice(1).every(button => !button.disabled)`), 'project-scoped actions are restored after opening a saved session');
+  report.welcomeNavigator = 'passed';
   await until(`!(${expanded})`);
   // Reverse transitions before they finish, including both nested splitters at once.
   for (let toggle = 0; toggle < 3; toggle++) {

@@ -3,6 +3,7 @@ import { Check, Lock, RotateCcw, X } from "@lucide/vue";
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { shortcutsBlocked } from "../../keyboard-shortcuts";
+import { relativeTimeUnit } from "../../lib/relative-time";
 import type { HistoryEntry } from "./store";
 import {
   closePanel,
@@ -21,11 +22,8 @@ const now = ref(Date.now());
 let clock: ReturnType<typeof setInterval> | undefined;
 
 function relative(ts: number): string {
-  const elapsed = Math.max(0, now.value - ts);
-  if (elapsed < 60_000) return t("time.now");
-  if (elapsed < 3_600_000) return t("time.minutes", { n: Math.floor(elapsed / 60_000) });
-  if (elapsed < 86_400_000) return t("time.hours", { n: Math.floor(elapsed / 3_600_000) });
-  return t("time.days", { n: Math.floor(elapsed / 86_400_000) });
+  const { unit, n } = relativeTimeUnit(now.value - ts);
+  return t(`time.${unit}`, { n });
 }
 
 interface PanelRow {

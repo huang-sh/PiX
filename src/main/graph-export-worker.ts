@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, samePersistedValue, type BranchRecord, type SessionData } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
-import type { RawSessionEntry } from "../shared/types.js";
 
 async function run() {
   const { main, data, branches, leafId, outputPath, html, targetLeafId } = workerData as {
@@ -23,29 +22,17 @@ async function run() {
   const adapter = new PiRuntime(null, null, () => {}, async () => {});
   const pi = await adapter.pi();
   let exported = result;
+  let outputLeaf = leafId;
   if (targetLeafId != null) {
-    // Branch export keeps only the root-to-leaf path: the selected node becomes
-    // the new session's tip, and every entry after it stays in the original graph.
-    const byId = new Map(result.entries.map(entry => [entry.id, entry]));
-    const path: RawSessionEntry[] = [];
-    const seen = new Set<string>();
-    for (let cursor: string | null = targetLeafId; cursor && !seen.has(cursor); ) {
-      seen.add(cursor);
-      const entry = byId.get(cursor);
-      if (!entry) throw new Error(`Export target is missing from the graph: ${targetLeafId}`);
-      path.push(entry);
-      cursor = entry.parentId;
-    }
-    exported = { header: result.header, entries: path.reverse() };
-    // A path entry can reference the past that left with its branch: a label may
-    // name an entry on an abandoned sibling. Strict validation fails closed on
-    // such a dangling target — no file is produced, sources stay intact. If this
-    // ever blocks real sessions, prune those labels with deleteNode's reparent
-    // pattern; a compaction's firstKeptEntryId must keep failing, because
-    // dropping a retained compaction changes context.
+    // Let Pi copy the path and its latest bookmarks together. Labels may have
+    // been edited from a different tip, so walking parents alone loses them.
+    const manager = pi.SessionManager.inMemory(String(result.header.cwd), undefined, [result.header, ...result.entries]);
+    manager.createBranchedSession(targetLeafId);
+    exported = { header: manager.getHeader(), entries: manager.getEntries() };
+    outputLeaf = manager.getLeafId();
     parseStrict(encodeSession(exported));
     if (!samePersistedValue(pi.buildSessionContext(result.entries, targetLeafId),
-      pi.buildSessionContext(exported.entries, targetLeafId)))
+      pi.buildSessionContext(exported.entries, outputLeaf)))
       throw new Error("Export changed the branch context");
   } else {
     for (const { record, data: source } of branches) {
@@ -64,7 +51,7 @@ async function run() {
     durableWrite(jsonl, encodeSession(output));
     const manager = pi.SessionManager.open(jsonl);
     manager.getTree();
-    const activeLeaf = targetLeafId ?? leafId;
+    const activeLeaf = outputLeaf;
     if (activeLeaf) manager.branch(activeLeaf); else manager.resetLeaf();
     const source = html ? await adapter.exportSnapshotHtml(manager, join(temp, "tree.html")) : jsonl;
     // Exclusive installation also protects a destination created after dispatch.

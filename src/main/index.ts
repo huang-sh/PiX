@@ -7,18 +7,31 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  net,
+  powerSaveBlocker,
+  session,
   shell,
   Tray,
 } from "electron";
 import { dirname, join, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { MainController } from "./controller.js";
+import { registerDesktopCommand } from "./cli-command.js";
+import { desktopClientId, DesktopHostController } from "../host/desktop.js";
+import { imageThumbnail } from "./image-thumbnail.js";
+import type { PromptImage } from "../shared/types.js";
 import { debugLog, logFile } from "./debug-log.js";
 import { UpdateChecker } from "./update-check.js";
-import { pixHome } from "./paths.js";
-import { bootstrapPixProfile } from "./services.js";
 import { applyLinuxImeWorkaround } from "./linux-ime.js";
+import { createKeepAwake } from "./power-save.js";
+import { isMacInstallSource, offerMacInstall } from "./mac-install.js";
+import { handleDesktopClose, quitWithHost } from "./host-quit.js";
+import { localHostInstallInProgress } from "../host/client.js";
+import { SettingsService } from "./services.js";
+import type { HostConnectionState } from "../shared/host-protocol.js";
+import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
 
@@ -31,9 +44,12 @@ applyLinuxImeWorkaround({
 });
 
 const dir = dirname(fileURLToPath(import.meta.url));
-let win: any, controller: MainController;
+let win: any, controller: DesktopHostController;
+let closeHttpProxy: (() => Promise<void>) | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
+let quitPromptAbort: AbortController | undefined;
+const setKeepAwake = createKeepAwake(powerSaveBlocker, () => isQuitting);
 // Set once the startup chain reaches its end; anything earlier leaves no usable window.
 let started = false;
 // Holds Pixie's delayed prewarm so a quit in flight can cancel it.
@@ -138,20 +154,14 @@ async function create() {
     show: false,
     frame: darwin,
     titleBarStyle: "hidden",
-    // Windows/Linux draw overlay window controls into the page; the renderer
-    // reserves their space via env(titlebar-area-*). macOS has no overlay, so
-    // the native traffic lights sit over the hidden title bar — position them
-    // inside the 40px custom titlebar and let the renderer pad around them
-    // (env(titlebar-area-*) stays 0 there).
-    ...(darwin
-      ? { trafficLightPosition: { x: 14, y: 14 } }
-      : {
-          titleBarOverlay: {
-            color: colors.background,
-            symbolColor: colors.text,
-            height: 40,
-          },
-        }),
+    // Expose native control bounds through env(titlebar-area-*) on every
+    // platform, including when macOS hides its traffic lights in fullscreen.
+    titleBarOverlay: {
+      color: colors.background,
+      symbolColor: colors.text,
+      height: 40,
+    },
+    ...(darwin ? { trafficLightPosition: { x: 4, y: 14 } } : {}),
     webPreferences: {
       preload: join(dir, "../preload/index.cjs"),
       contextIsolation: true,
@@ -205,17 +215,16 @@ async function create() {
       p.sandbox = true;
     },
   );
-  // Close-to-tray (Windows/Linux): the X button hides the window instead of
-  // destroying it, keeping the process alive. Real quits bypass this via the
-  // isQuitting flag (before-quit fires before close events) or the tray
-  // menu's Quit item. macOS keeps native behavior: the window closes and the
-  // app stays in the dock.
+  // Windows/Linux close either hides to tray or enters the full Quit flow.
+  // Preserve the window if task confirmation is cancelled. macOS keeps its
+  // native close-window behavior until the user explicitly quits the app.
   created.on("close", (e: { preventDefault(): void }) => {
-    if (isQuitting || process.platform === "darwin") return;
-    if (controller.settings.bundle().app.closeToTray === false) return;
-    e.preventDefault();
-    created.hide();
-    ensureTray();
+    handleDesktopClose(e, {
+      platform: process.platform, quitting: isQuitting,
+      installing: localHostInstallInProgress(),
+      closeToTray: controller.settings.bundle().app.closeToTray !== false,
+      hide() { created.hide(); ensureTray(); }, quit() { app.quit(); },
+    });
   });
   // Release the reference the moment the window is destroyed: every later
   // broadcast and theme sync then no-ops instead of throwing into the agent
@@ -226,13 +235,28 @@ async function create() {
   else await created.loadFile(join(dir, "../renderer/index.html"));
 }
 app.whenReady().then(async () => {
-  bootstrapPixProfile(pixHome());
+  if (isMacInstallSource(process.platform, app.isPackaged, app.getPath("exe"))) {
+    const language = new SettingsService(null).bundle().app.language;
+    await offerMacInstall({
+      zh: language === "zh-CN" || (language === "system" && app.getLocale().startsWith("zh")),
+      show: options => dialog.showMessageBox(options),
+      // A running destination must never focus the old version and quit this installer.
+      move: () => app.moveToApplicationsFolder({ conflictHandler: conflict => conflict === "exists" }),
+    });
+    app.quit(); return;
+  }
+  if (app.isPackaged) {
+    try { registerDesktopCommand(join(process.resourcesPath, "cli", process.platform === "win32" ? "pix.cmd" : "pix")); }
+    catch (error) { debugLog("index: terminal command registration", error); }
+  }
   // No implicit project: without an explicit PIX_PROJECT override the app
   // starts project-less and the welcome screen asks for one.
   const initial = process.env.PIX_PROJECT
     ? resolve(process.env.PIX_PROJECT)
     : null;
-  controller = new MainController(initial, {
+  const clientId = desktopClientId(app.getPath("userData"), app.getAppPath(), app.isPackaged);
+  const legacyClientId = app.isPackaged ? undefined : desktopClientId(app.getPath("userData"), app.getAppPath(), true);
+  controller = DesktopHostController.create(initial, {
     async pickProject() {
       const r = await dialog.showOpenDialog(win, {
         properties: ["openDirectory"],
@@ -257,8 +281,100 @@ app.whenReady().then(async () => {
       });
       return result.response === 1;
     },
+    async resolveProxy(url) {
+      return session.defaultSession.resolveProxy(url);
+    },
+    setKeepAwake,
     async openExternal(url) {
       await openExternal(url);
+    },
+    async openPath(path) {
+      if (!existsSync(path)) throw new Error(`Path was not found or is inaccessible: ${path}`);
+      // openPath resolves to the OS handler for the file type — associated
+      // app for files, Explorer/Finder for folders — and reports failures as
+      // a string rather than rejecting.
+      const failure = await shell.openPath(path);
+      if (failure) throw new Error(failure);
+    },
+    async openWith(path) {
+      if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
+      if (process.platform === "win32") {
+        // OpenAs_RunDLL opens the system "Open with" dialog, which lists every
+        // application registered for this file type, offers browsing for one
+        // and can reset the default handler. Detached: the dialog outlives any
+        // single window and never blocks the app.
+        const rundll32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "rundll32.exe");
+        const child = spawn(rundll32, ["shell32.dll,OpenAs_RunDLL", path], { detached: true, stdio: "ignore" });
+        child.unref();
+        await new Promise<void>((done, fail) => {
+          child.once("error", fail);
+          child.once("spawn", () => done());
+        });
+        return;
+      }
+      if (process.platform !== "darwin")
+        throw new Error("The open-with chooser is only available on Windows and macOS");
+      // "choose application" opens the native, searchable application list;
+      // cancelling the dialog is a user no-op, not a failure.
+      const script = "set picked to choose application with prompt \"Open With\" as alias\nPOSIX path of picked";
+      await new Promise<void>((done, fail) => {
+        execFile("osascript", ["-e", script], (error, stdout) => {
+          if (!error) {
+            const appPath = String(stdout).trim();
+            if (appPath) spawn("open", ["-a", appPath, path], { detached: true, stdio: "ignore" }).unref();
+            done();
+          } else if (/User canceled/i.test(error.message)) done();
+          else fail(error);
+        });
+      });
+    },
+    async openWithApps(path) {
+      if (process.platform !== "linux") return [];
+      const mime = await new Promise<string | undefined>((done) => {
+        execFile("file", ["--brief", "--mime-type", path], (error, stdout) =>
+          done(error || !stdout ? undefined : stdout.trim()));
+      });
+      if (!mime) return [];
+      const apps = new Map<string, { id: string; name: string }>();
+      // User applications take precedence over system ones with the same id.
+      for (const dir of [join(homedir(), ".local/share/applications"), "/usr/share/applications"]) {
+        let names: string[];
+        try {
+          names = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const name of names) {
+          if (!name.endsWith(".desktop")) continue;
+          const id = name.slice(0, -".desktop".length);
+          if (apps.has(id)) continue;
+          let entry: string;
+          try {
+            entry = readFileSync(join(dir, name), "utf8");
+          } catch {
+            continue;
+          }
+          // Only keys of the [Desktop Entry] group count; later groups use
+          // their own headers.
+          const section = entry.slice(0, entry.indexOf("\n[", entry.indexOf("[") + 1) + 1 || undefined);
+          if (!/^Name\s*=.*$/m.test(section) || /^(NoDisplay|Hidden)\s*=\s*true\b/m.test(section)) continue;
+          const mimes = section.match(/^MimeType\s*=\s*(.+)$/m)?.[1]?.split(";") ?? [];
+          if (!mimes.includes(mime)) continue;
+          apps.set(id, { id, name: section.match(/^Name\s*=\s*(.+)$/m)![1]!.trim() });
+        }
+      }
+      return [...apps.values()].sort((a, b) => a.name.localeCompare(b.name));
+    },
+    async openWithApp(path, appId) {
+      if (process.platform !== "linux")
+        throw new Error("Choosing an application applies to Linux desktop entries");
+      if (!/^[\w.-]+$/.test(appId)) throw new Error("Invalid application id");
+      const child = spawn("gtk-launch", [appId, path], { detached: true, stdio: "ignore" });
+      child.unref();
+      await new Promise<void>((done, fail) => {
+        child.once("error", fail);
+        child.once("spawn", () => done());
+      });
     },
     showItemInFolder(path) {
       if (!existsSync(path)) throw new Error("Path was not found or is inaccessible");
@@ -267,8 +383,15 @@ app.whenReady().then(async () => {
     quit() {
       app.quit();
     },
-  });
-  controller.onEvent((e) => win?.webContents.send("pix:event", e), true);
+  }, clientId, legacyClientId);
+  controller.onEvent((e) => {
+    if (e.type === "host.shutdown") { quitPromptAbort?.abort(); return; }
+    win?.webContents.send("pix:event", e);
+  }, true);
+  closeHttpProxy = installHttpProxy(
+    () => controller.settings.bundle().piGlobal.httpProxy,
+    (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+  );
   // Release awareness runs only in the desktop main process — a remote host
   // serves sessions but must not announce desktop updates itself.
   new UpdateChecker({
@@ -286,6 +409,8 @@ app.whenReady().then(async () => {
       let result: unknown;
       try {
         result = await controller.invoke(route, input);
+        if (route === "session.image" && (input as { thumbnail?: unknown })?.thumbnail === true)
+          result = imageThumbnail(result as PromptImage);
       } catch (error) {
         // Answering with the failure keeps Electron from re-wrapping the
         // message as "Error invoking remote method 'pix:invoke': ...". The
@@ -320,20 +445,49 @@ app.whenReady().then(async () => {
   try { reportFailure("startup", "index: startup", e); }
   finally { if (!started) app.quit(); }
 });
-let sessionsClosed = false;
-let closingSessions = false;
+let clientDetached = false;
+let detachingClient = false;
+if (process.platform === "linux") process.on("SIGTERM", () => {
+  if (localHostInstallInProgress()) app.quit();
+  else app.exit(143);
+});
 app.on("before-quit", (event) => {
-  isQuitting = true;
-  // A prewarm firing mid-quit would spawn a fresh Pixie for a dying app.
+  // Cancel delayed startup before disconnecting from the execution host.
   clearTimeout(prewarmTimer);
-  if (!sessionsClosed && controller) {
+  if (controller && localHostInstallInProgress()) controller.prepareForInstallQuit();
+  if (!clientDetached && controller) {
     event.preventDefault();
-    if (!closingSessions) {
-      closingSessions = true;
-      void controller.closeAll().finally(() => { sessionsClosed = true; app.quit(); }).catch(() => {});
+    if (!detachingClient) {
+      detachingClient = true;
+      void (async () => {
+        if (started && !controller.hostShutdownRequested) {
+          quitPromptAbort = new AbortController();
+          const accepted = await quitWithHost({
+            zh: zhUi(),
+            status: () => controller.invoke("app.hostStatus") as Promise<HostConnectionState>,
+            disconnect: async () => { isQuitting = true; await controller.disconnectForQuit(); },
+            resume: async () => { isQuitting = false; await controller.resumeAfterCancelledQuit(); },
+            show: options => dialog.showMessageBox({ ...options, signal: quitPromptAbort?.signal }),
+            alreadyStopping: () => controller.hostShutdownRequested,
+          });
+          quitPromptAbort = undefined;
+          if (!accepted && !controller.hostShutdownRequested) { isQuitting = false; detachingClient = false; return; }
+        }
+        isQuitting = true;
+        await controller.detach().catch(error => debugLog("index: detach on quit", error));
+        try { await closeHttpProxy?.(); } catch (error) { debugLog("index: close proxy on quit", error); }
+        clientDetached = true;
+        app.quit();
+      })().catch(error => {
+        isQuitting = false;
+        detachingClient = false;
+        debugLog("index: quit", error);
+        dialog.showErrorBox("PiX", String(error));
+      });
     }
     return;
   }
+  isQuitting = true;
   tray?.destroy();
   tray = undefined;
   controller?.dispose();
@@ -342,5 +496,9 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
+  // Skip until the startup chain finished: it creates the window itself, and a
+  // dock-click activate racing it would run before the controller exists. A
+  // failed startup quits the app, so there is nothing else to wait for.
+  if (!started) return;
   if (BrowserWindow.getAllWindows().length === 0) void create().catch(e => reportFailure("window", "index: create from activate", e));
 });

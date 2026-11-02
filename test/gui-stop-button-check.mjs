@@ -1,10 +1,9 @@
-// GUI regression for the composer stop control: submits held streaming runs
-// through the chat composer, then verifies the send→stop morph, Enter gating
-// while stopping, and unlock after branchAbort — including the collapsed-bar
-// stop button. Spawns gui-parallel-fixture.mjs (local deterministic model).
+// GUI regression for running-task input: Follow-up queueing, per-message Steer
+// editing and removal, send/stop controls, cancellation, and following the next turn.
+// Spawns gui-parallel-fixture.mjs (local deterministic model).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -107,19 +106,53 @@ try {
   assert.equal(stopping.disabled, false);
   assert.match(stopping.icon, /lucide-square/);
 
-  // Enter must not deliver while the button is the stop control.
+  // Enter queues a Follow-up without starting a competing model request.
   await evaluate(`(() => { const e = document.querySelector('.branch-panel textarea');
     e.value = 'queued while running'; e.dispatchEvent(new Event('input', { bubbles: true }));
     e.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
-  await new Promise(resolve => setTimeout(resolve, 800));
+  await until(`document.querySelectorAll('.branch-panel .composer-queue li').length === 1`);
   assert.equal((await requests()).length, before + 1);
-  assert.equal(await evaluate(`document.querySelector('.branch-panel textarea').value`), 'queued while running');
+  assert.equal(await evaluate(`document.querySelector('.branch-panel textarea').value`), '');
+  assert.equal(await evaluate(`Boolean(document.querySelector('.composer-delivery'))`), false);
+  await click('.branch-panel .composer-queue-edit');
+  await until(`Boolean(document.querySelector('.composer-queue-editor textarea'))`);
+  assert.equal(await evaluate(`document.querySelector('.composer-queue-editor textarea').value`), 'queued while running');
+  await evaluate(`(() => { const e = document.querySelector('.composer-queue-editor textarea');
+    e.value = 'discard these edits'; e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await click('.composer-queue-edit-cancel');
+  assert.equal(await evaluate(`document.querySelector('.composer-queue-text').textContent.trim()`), 'queued while running');
+  await click('.branch-panel .composer-queue-edit');
+  await evaluate(`(() => { const e = document.querySelector('.composer-queue-editor textarea');
+    e.value = 'edited queued while running'; e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const editClip = await evaluate(`(() => { const r = document.querySelector('.branch-panel .composer-expanded').getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height, scale: 1 }; })()`);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: editClip.x + editClip.width / 2, y: editClip.y + editClip.height / 2 });
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const editScreenshot = await send('Page.captureScreenshot', { format: 'png', clip: editClip });
+  writeFileSync(join(root, 'artifacts', 'gui-queue-edit.png'), Buffer.from(editScreenshot.data, 'base64'));
+  await click('.composer-queue-edit-save');
+  await until(`!document.querySelector('.composer-queue-editor') && document.querySelector('.composer-queue-text')?.textContent.includes('edited queued while running')`);
+  assert.equal((await requests()).length, before + 1);
+  const clip = await evaluate(`(() => { const r = document.querySelector('.branch-panel .composer-expanded').getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height, scale: 1 }; })()`);
+  const screenshot = await send('Page.captureScreenshot', { format: 'png', clip });
+  writeFileSync(join(root, 'artifacts', 'gui-input-queue.png'), Buffer.from(screenshot.data, 'base64'));
+  await click('.branch-panel .composer-queue-steer');
+  await until(`__pixTest.state().current.graph.runs.some(r => r.runtime?.queuedMessages?.some(m => m.kind === 'steer'))`);
+  await evaluate(`(() => { const e = document.querySelector('.branch-panel textarea');
+    e.value = 'remove this queued message'; e.dispatchEvent(new Event('input', { bubbles: true }));
+    e.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+  await until(`document.querySelectorAll('.branch-panel .composer-queue li').length === 2`);
+  await click('.branch-panel .composer-queue li:last-child .composer-queue-remove');
+  await until(`document.querySelectorAll('.branch-panel .composer-queue li').length === 1`);
 
   // Stopping from the button must abort the held stream and unlock the composer.
   await click('.branch-panel .composer-submit');
   await until(`!(${runningExpr})`);
   const settled = (await requests()).find(request => request.text === 'HOLD stop check one');
   assert.equal(settled.status, 'aborted');
+  assert.equal((await requests()).length, before + 1);
+  assert.equal(await evaluate(`document.querySelectorAll('.branch-panel .composer-queue li').length`), 0);
   const send1 = await buttonState();
   assert.match(send1.label, /Enter to send/);
   assert.match(send1.icon, /lucide-arrow-up/);
@@ -142,10 +175,34 @@ try {
   await until(`Boolean(document.querySelector('.branch-panel .composer-submit'))`);
   assert.match((await buttonState()).label, /Enter to send/);
 
-  console.log('stop-button GUI check passed');
+  // A released task drains Follow-up in the same branch and the chat follows it.
+  await evaluate(`(() => { const e = document.querySelector('.branch-panel textarea');
+    e.value = 'HOLD follow-up delivery'; e.dispatchEvent(new Event('input', { bubbles: true }));
+    e.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+  await until(`(${runningExpr})`);
+  await evaluate(`(() => { const e = document.querySelector('.branch-panel textarea');
+    e.value = 'delivered follow-up'; e.dispatchEvent(new Event('input', { bubbles: true }));
+    e.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+  await until(`document.querySelectorAll('.branch-panel .composer-queue li').length === 1`);
+  await fetch(`${model}/release/${encodeURIComponent('HOLD follow-up delivery')}`);
+  await until(`!(${runningExpr}) && __pixTest.state().current.projection.nodes.some(n => n.title === 'delivered follow-up')`);
+  assert.equal((await requests()).find(request => request.text === 'delivered follow-up').status, 'completed');
+  assert.equal(await evaluate(`document.querySelectorAll('.branch-panel .composer-queue li').length`), 0);
+  await until(`document.querySelector('.branch-panel')?.textContent.includes('Finished delivered follow-up')`);
+
+  console.log('input-queue and stop-button GUI check passed');
 } finally {
-  await fetch(`${model}/shutdown`, { method: 'POST' }).catch(() => fixture.kill());
-  await new Promise(resolve => { fixture.once('exit', resolve); setTimeout(resolve, 5000); });
-  socket.close();
-  rmSync(home, { recursive: true, force: true });
+  await fetch(`${model}/shutdown`, { method: 'POST', signal: AbortSignal.timeout(5000) }).catch(() => {});
+  if (fixture.exitCode === null && fixture.signalCode === null) {
+    const exited = await new Promise(resolve => { fixture.once('exit', () => resolve(true)); setTimeout(() => resolve(false), 5000); });
+    if (!exited) {
+      // Only the fixture's own, isolated Electron instance is force-closed.
+      try { process.kill(fixtureLine.electronPid, 'SIGKILL'); } catch {}
+      const closed = new Promise(resolve => fixture.once('close', resolve));
+      fixture.kill();
+      await closed;
+    }
+  }
+  socket.terminate();
+  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

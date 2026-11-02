@@ -5,8 +5,8 @@
 // file mtime, so dropping a session there would hijack gui-test.mjs).
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, parse } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { electronBinary } from "./lib/electron-binary.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -30,13 +30,15 @@ mkdirSync(join(testHome, ".pix", "agent"), { recursive: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 mkdirSync(join(project, ".pi", "sessions"), { recursive: true });
 writeFileSync(join(project, "README.md"), "# gui-link-project\n\nFixture project for the chat-link GUI test.\n");
+const missingAbsolute = join(parse(project).root, `pix-missing-link-${process.pid}.txt`);
+writeFileSync(join(project, `pix-missing-link-${process.pid}.txt`), "This must not replace the missing absolute target.");
 writeFileSync(
-  join(project, "NOTES.md"),
-  "# Notes\n\nFixture file for the absolute-path chat-link GUI test.\n",
+  join(project, "My Notes.md"),
+  Array.from({ length: 100 }, (_, index) => `Notes line ${index + 1}`).join("\n"),
 );
 // Forward slashes on purpose: chat models emit absolute paths this way, and
 // the drive-letter form must survive into the rendered href untouched.
-const notesHref = join(project, "NOTES.md").replaceAll("\\", "/");
+const notesHref = `${join(project, "My Notes.md").replaceAll("\\", "/")}:60`;
 writeFileSync(
   join(testHome, ".pix", "agent", "settings.json"),
   JSON.stringify({ defaultProjectTrust: "always" }),
@@ -156,7 +158,7 @@ writeFileSync(
         content: [
           {
             type: "text",
-            text: `The notes live at [NOTES.md](${notesHref}) on disk.`,
+            text: `The notes live at [My Notes.md:60](<${notesHref}>) on disk.`,
           },
         ],
         api: "openai-responses",
@@ -280,6 +282,27 @@ class Cdp {
 
 let cdp;
 const result = {};
+async function checkDefaultAppMenu(point) {
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "right", clickCount: 1 });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "right", clickCount: 1 });
+  await retry(async () => {
+    const menu = await cdp.evaluate(`(() => {
+      const item = document.querySelector('[data-action="markdown-open-external"]');
+      const rect = item?.getBoundingClientRect();
+      return { text: item?.textContent, disabled: item?.hasAttribute('data-disabled'),
+        visible: Boolean(rect && rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.y >= 0
+          && rect.right <= innerWidth && rect.bottom <= innerHeight) };
+    })()`);
+    if (menu.text !== "Open with default app" || menu.disabled || !menu.visible)
+      throw new Error(`Default app menu is unavailable: ${JSON.stringify(menu)}`);
+  });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await retry(async () => {
+    if (await cdp.evaluate("Boolean(document.querySelector('[data-action=\"markdown-open-external\"]'))"))
+      throw new Error("Link menu did not close with Escape");
+  });
+}
 try {
   const target = await retry(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -363,6 +386,8 @@ try {
 
   // Trusted OS-level click through CDP input: exercises the real event path
   // (hit-testing, modifiers, default action) rather than a synthetic .click().
+  await checkDefaultAppMenu({ x: link.x, y: link.y });
+  result.webLinkContextMenu = true;
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed",
     x: link.x,
@@ -447,37 +472,39 @@ try {
       section: window.__pixTest.state().contentSection,
       fileTab: Boolean(document.querySelector('[data-file-tab="README.md"]')),
       fileTabActive: document.querySelector('[data-file-tab="README.md"]')?.classList.contains('active'),
-      editor: Boolean(document.querySelector('.code-editor')),
-      editorText: document.querySelector('.code-editor')?.textContent?.slice(0, 60)
+      preview: Boolean(document.querySelector('[data-markdown-preview]')),
+      previewText: document.querySelector('[data-markdown-preview]')?.textContent?.slice(0, 60)
     })`);
-    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.editor)
+    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.preview)
       throw new Error(
         `Relative link did not open the file in the Files tool: ${JSON.stringify(value)}`,
       );
     return value;
   });
   result.fileOpenedInTool = true;
-  result.editorText = await cdp.evaluate(
-    "document.querySelector('.code-editor')?.textContent?.slice(0, 60)",
+  result.previewText = await cdp.evaluate(
+    "document.querySelector('[data-markdown-preview]')?.textContent?.slice(0, 60)",
   );
   result.probe = await cdp.evaluate("window.__linkProbe");
 
   // Third turn: an absolute-path link (drive letter on Windows, POSIX on
-  // macOS) to an in-project file must open in the Files tool the same way.
+  // macOS), with spaces and a line suffix, opens and reveals the target line.
   // Vue Flow only mounts on-screen nodes, so the third card may have no DOM
   // element to double-click; focus it through the store instead — the chat
   // panel is already open and follows the focused node.
   await cdp.evaluate('window.__pixTest.selectNode("turn:00000004")');
+  const notesLinkExpression = `[...document.querySelectorAll('.chat .agent-markdown a[href]')]
+    .find(a => decodeURIComponent(a.getAttribute('href')) === ${JSON.stringify(notesHref)})`;
   await retry(async () => {
     if (!(await cdp.evaluate(
-      `Boolean(document.querySelector('.chat .agent-markdown a[href=${JSON.stringify(notesHref)}]'))`,
+      `Boolean(${notesLinkExpression})`,
     )))
       throw new Error("Third turn did not expose the absolute-path file link");
   });
   await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 500))");
   const absoluteLink = await retry(async () => {
     const value = await cdp.evaluate(`(() => {
-      const a = document.querySelector('.chat .agent-markdown a[href=${JSON.stringify(notesHref)}]');
+      const a = ${notesLinkExpression};
       if (!a) return { missing: true };
       a.scrollIntoView({ block: "center" });
       const r = a.getBoundingClientRect();
@@ -490,6 +517,8 @@ try {
       throw new Error(`Click coordinates miss the absolute-path link (covered by <${value.hitTag}>)`);
     return value;
   });
+  await checkDefaultAppMenu({ x: absoluteLink.x, y: absoluteLink.y });
+  result.fileLinkContextMenu = true;
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed",
     x: absoluteLink.x,
@@ -507,17 +536,37 @@ try {
   await retry(async () => {
     const value = await cdp.evaluate(`({
       section: window.__pixTest.state().contentSection,
-      fileTab: Boolean(document.querySelector('[data-file-tab="NOTES.md"]')),
-      fileTabActive: document.querySelector('[data-file-tab="NOTES.md"]')?.classList.contains('active'),
-      editor: Boolean(document.querySelector('.code-editor'))
+      fileTab: Boolean(document.querySelector('[data-file-tab="My Notes.md"]')),
+      fileTabActive: document.querySelector('[data-file-tab="My Notes.md"]')?.classList.contains('active'),
+      selected: (() => {
+        const editor = document.querySelector('.file-editor');
+        return editor?.value.slice(editor.selectionStart, editor.selectionEnd);
+      })(),
+      scrollTop: document.querySelector('.file-editor')?.scrollTop,
+      targetVisible: (() => {
+        const editor = document.querySelector('.file-editor');
+        if (!editor) return false;
+        const style = getComputedStyle(editor);
+        const y = parseFloat(style.paddingTop) + 59 * parseFloat(style.lineHeight) - editor.scrollTop;
+        return y >= 0 && y + parseFloat(style.lineHeight) <= editor.clientHeight;
+      })()
     })`);
-    if (value.section !== "files" || !value.fileTab || !value.fileTabActive || !value.editor)
+    if (value.section !== "files" || !value.fileTab || !value.fileTabActive
+      || value.selected !== "Notes line 60" || !value.targetVisible)
       throw new Error(
         `Absolute-path link did not open the file in the Files tool: ${JSON.stringify(value)}`,
       );
     return value;
   });
   result.absolutePathOpenedInTool = true;
+  const missingError = await cdp.evaluate(`(async () => {
+    try { await window.pix.invoke('app.openFileLink', { href: ${JSON.stringify(pathToFileURL(missingAbsolute).href)} }); }
+    catch (error) { return error.message; }
+    return '';
+  })()`);
+  if (!missingError.includes(missingAbsolute))
+    throw new Error(`Missing file URL did not report its actual absolute target: ${missingError}`);
+  result.missingFileUrlPreserved = true;
   const absoluteShot = await cdp.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(
     join(artifacts, "gui-link-absolute-path.png"),

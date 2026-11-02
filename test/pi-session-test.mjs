@@ -7,9 +7,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url)),
   workspace = join(root, "test", "workspace"),
@@ -42,7 +42,19 @@ function findPi() {
   return walk(join(root, "vendor", "pi"));
 }
 const bin = findPi();
-if (!bin) throw new Error("Pi v0.84.4 binary not found");
+if (!bin) throw new Error("Pi binary not found");
+const shim = process.platform === "win32" && bin.endsWith(".cmd");
+const command = shim ? process.execPath : bin;
+const prefixArgs = shim
+  ? [join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js")]
+  : [];
+const agentDir = join(dir, "agent");
+mkdirSync(agentDir);
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
+const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" };
+const version = spawnSync(command, [...prefixArgs, "--version"], { env, encoding: "utf8", timeout: 15_000, windowsHide: true });
+if (version.error || version.status !== 0)
+  throw new Error(`Pi version check failed: ${version.error ?? version.stderr}`);
 const files = readdirSync(fixtureDir).filter((n) => n.endsWith(".jsonl"));
 for (const file of files) {
   const lines = readFileSync(join(fixtureDir, file), "utf8").split("\n"),
@@ -52,27 +64,16 @@ for (const file of files) {
   writeFileSync(join(dir, file), lines.join("\n"));
 }
 async function request(file) {
-  const shim = process.platform === "win32" && bin.endsWith(".cmd");
   const child = spawn(
-    shim ? process.execPath : bin,
+    command,
     [
-      ...(shim
-        ? [
-            join(
-              root,
-              "node_modules",
-              "@earendil-works",
-              "pi-coding-agent",
-              "dist",
-              "bundle",
-              "cli.js",
-            ),
-          ]
-        : []),
+      ...prefixArgs,
       "--mode",
       "rpc",
       "--offline",
       "--no-approve",
+      "--no-extensions",
+      "--no-skills",
       "--session",
       join(dir, file),
       "--session-dir",
@@ -80,7 +81,8 @@ async function request(file) {
     ],
     {
       cwd: workspace,
-      env: { ...process.env, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" },
+      env,
+      windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -138,6 +140,6 @@ for (const f of files) results.push(await request(f));
 mkdirSync(join(root, "artifacts"), { recursive: true });
 writeFileSync(
   join(root, "artifacts", "pi-session-test.json"),
-  JSON.stringify({ binary: bin, version: "0.84.4", results }, null, 2) + "\n",
+  JSON.stringify({ binary: bin, version: version.stdout.trim(), results }, null, 2) + "\n",
 );
 console.log(JSON.stringify(results, null, 2));

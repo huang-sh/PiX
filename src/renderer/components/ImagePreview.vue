@@ -32,7 +32,9 @@ function restoreFocus(event: Event) {
           <DialogClose as-child><button type="button" data-image-preview-close :aria-label="t('draft.closeImagePreview')" :title="t('draft.closeImagePreview')"><X :size="21" /></button></DialogClose>
         </header>
         <div class="image-viewer-stage" :class="{ 'is-zoomed': zoomed }" @click.self="layout.imagePreview = undefined">
-          <img v-if="layout.imagePreview" :src="layout.imagePreview.src" :alt="layout.imagePreview.alt" draggable="false" />
+          <p v-if="layout.imagePreview?.error" role="alert">{{ layout.imagePreview.error }}</p>
+          <p v-else-if="!layout.imagePreview?.src" role="status">{{ t("draft.imagesReading") }}</p>
+          <img v-else-if="layout.imagePreview" :src="layout.imagePreview.src" :alt="layout.imagePreview.alt" draggable="false" />
         </div>
       </DialogContent>
     </DialogPortal>

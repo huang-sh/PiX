@@ -39,7 +39,8 @@ test("finds the bundled package in the dev and server layouts via node_modules",
     const packageDir = packageMarker(join(root, "node_modules"));
     for (const moduleDir of [
       join(root, "out", "main"), // dev Electron run
-      join(root, "dist", "main"), // remote server host
+      join(root, "dist", "main"), // installed server host
+      join(root, "server", "dist", "main"), // source CLI build
     ]) {
       assert.deepEqual(resolveBuiltinPackages(moduleDir), [packageDir]);
     }

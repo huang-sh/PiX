@@ -8,7 +8,7 @@ import { useSessionStore } from "../../src/renderer/stores/session";
 import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
 import { graphNodeBlobs, searchGraphNodeIds } from "../../src/renderer/lib/graph-search";
-import type { RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type SessionSnapshot, type SettingsBundle } from "../../src/shared/types";
 
 vi.mock("../../src/renderer/lib/frame", () => ({
   nextFrame: vi.fn(async () => {}), whenVisible: async () => {}, whenTransitionsSettle: async () => {},
@@ -31,6 +31,18 @@ describe("graph search matching", () => {
     expect(searchGraphNodeIds(projection, entries, "read")).toEqual(["turn:u1"]);
     expect(searchGraphNodeIds(projection, entries, "docs")).toEqual(["turn:u2"]);
     expect(searchGraphNodeIds(projection, entries, "  ")).toEqual([]);
+  });
+
+  it("searches structured prompt display text instead of model-only image hints", () => {
+    const imageEntries: RawSessionEntry[] = [
+      { type: "custom", id: "display", parentId: null, timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图" } },
+      { type: "message", id: "image-user", parentId: "display", timestamp: "2026-01-01",
+        message: { role: "user", content: "model-only coordinate hint\n\n检查截图" } },
+    ];
+    const imageProjection = projectSession(imageEntries, "image-user");
+    expect(searchGraphNodeIds(imageProjection, imageEntries, "检查截图")).toEqual(["turn:image-user"]);
+    expect(searchGraphNodeIds(imageProjection, imageEntries, "coordinate hint")).toEqual([]);
   });
 
   it("builds text blobs once per immutable snapshot", () => {
@@ -109,4 +121,125 @@ describe("graph search panel", () => {
     expect(state.nodes.find((node: { id: string }) => node.id === "turn:u1").data.searchHit).toBeFalsy();
     expect(wrapper.find('[data-action="graph-search-input"]').exists()).toBe(false);
   });
+});
+
+
+describe("graph labels and task filters", () => {
+  beforeEach(() => { vi.mocked(window.pix!.invoke).mockReset().mockResolvedValue({}); });
+  it("shows matching tasks and ancestor context without changing the session projection", async () => {
+    const { wrapper, setupState } = mountGraph(); await flushPromises();
+    const session = useSessionStore();
+    session.current!.projection = { ...session.current!.projection, nodes: session.current!.projection.nodes.map((node, index) =>
+      index ? { ...node, label: "文档完成", parentId: "turn:u1" } : node) };
+    await wrapper.get('[data-action="graph-filter"]').setValue("labeled"); await flushPromises();
+    expect(setupState.filterCount).toBe(1);
+    expect(setupState.filteredGraph.nodes.map((node: { id: string }) => node.id)).toEqual(["turn:u1", "turn:u2"]);
+    expect(setupState.nodes.find((node: { id: string }) => node.id === "turn:u1").data.filterContext).toBe(true);
+    expect(session.current!.projection.nodes).toHaveLength(2);
+    await wrapper.get('[data-action="graph-filter"]').setValue("running"); await flushPromises();
+    expect(setupState.filteredGraph.nodes.filter((node: { type: string }) => node.type === "prompt")).toHaveLength(0);
+    expect(wrapper.get('[role="status"]').text()).toContain("No matching tasks");
+    await wrapper.get('[data-action="graph-filter"]').setValue("all"); await flushPromises();
+    expect(setupState.filteredGraph.nodes.filter((node: { type: string }) => node.type === "prompt")).toHaveLength(2);
+  });
+
+  it("saves a node label through the shared control and keeps failures editable", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    setupState.editLabel(useSessionStore().current!.projection.nodes[0]);
+    setupState.labelText = "登录测试通过";
+    vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error("storage unavailable"));
+    await setupState.saveLabel();
+    expect(setupState.labelError).toBe("storage unavailable");
+    expect(setupState.labelText).toBe("登录测试通过");
+    expect(setupState.labelTarget).toBeTruthy();
+    vi.mocked(window.pix!.invoke).mockResolvedValueOnce({});
+    await setupState.saveLabel();
+    expect(window.pix!.invoke).toHaveBeenLastCalledWith("agent.control", { action: "setLabel", entryId: "u1", label: "登录测试通过" });
+    expect(setupState.labelTarget).toBeUndefined();
+  });
+
+  it("searches bookmark names and closes label editing when sessions change", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    const current = useSessionStore().current!;
+    const marked = { ...current.projection, nodes: current.projection.nodes.map((node, index) => index ? { ...node, label: "文档书签" } : node) };
+    expect(searchGraphNodeIds(marked, entries, "文档书签")).toEqual(["turn:u2"]);
+    setupState.editLabel(current.projection.nodes[0]);
+    current.session = { ...current.session, path: "other-session" };
+    await flushPromises();
+    expect(setupState.labelTarget).toBeUndefined();
+  });
+});
+
+
+describe("graph label shortcut", () => {
+  const press = (modifiers: KeyboardEventInit = {}, target: EventTarget = window) => {
+    const event = new KeyboardEvent("keydown", { key: "L", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true, ...modifiers });
+    target.dispatchEvent(event); return event;
+  };
+  it("edits the highlighted task rather than the viewed task and cleans up on unmount", async () => {
+    const { wrapper, setupState } = mountGraph(); await flushPromises();
+    useSessionStore().highlightedNode = "turn:u2";
+    expect(press().defaultPrevented).toBe(true);
+    expect(setupState.labelTarget.entryId).toBe("u2");
+    setupState.labelTarget = undefined; await flushPromises();
+    wrapper.unmount();
+    expect(press().defaultPrevented).toBe(false);
+  });
+  it("honors custom bindings, disabling, settings and protected input", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    const layout = useLayoutStore();
+    layout.settings = { app: { keyboardShortcuts: { editLabel: ["Mod+Shift+m"] } } } as SettingsBundle;
+    expect(press().defaultPrevented).toBe(false);
+    expect(press({ key: "M" }).defaultPrevented).toBe(true);
+    setupState.labelTarget = undefined; await flushPromises();
+    layout.settings.app.keyboardShortcuts = { editLabel: [] };
+    expect(press({ key: "M" }).defaultPrevented).toBe(false);
+    layout.settings.app.keyboardShortcuts = {};
+    layout.screen = "settings";
+    expect(press().defaultPrevented).toBe(false);
+    layout.screen = "workbench";
+    expect(press({ isComposing: true }).defaultPrevented).toBe(false);
+    expect(press({ repeat: true }).defaultPrevented).toBe(false);
+    const terminal = document.createElement("div"); terminal.className = "xterm"; document.body.append(terminal);
+    expect(press({}, terminal).defaultPrevented).toBe(false); terminal.remove();
+    expect(setupState.labelTarget).toBeUndefined();
+  });
+  it("does not consume the key for a readonly or running branch", async () => {
+    const { setupState } = mountGraph(); await flushPromises();
+    const current = useSessionStore().current!;
+    current.runtime.available = false;
+    expect(press().defaultPrevented).toBe(false);
+    current.runtime.available = true;
+    current.graph = { id: current.session.path, revision: 1, runs: [{ branchId: "main", status: "running", runId: "test", nodeId: "turn:u2" }] };
+    expect(press().defaultPrevented).toBe(false);
+    expect(setupState.labelTarget).toBeUndefined();
+    current.graph.runs[0]!.status = "idle";
+    expect(press().defaultPrevented).toBe(true);
+  });
+});
+
+
+it("restores the label menu when a branch settles while its sibling keeps running", async () => {
+  const { setupState } = mountGraph(); await flushPromises();
+  const current = useSessionStore().current!;
+  current.graph = { id: current.session.path, revision: 1, runs: [
+    { branchId: "main", runId: "main", status: "running", nodeId: "turn:u2" },
+    { branchId: "other", runId: "other", status: "running", nodeId: null },
+  ] };
+  current.projection = { ...current.projection, nodes: [...current.projection.nodes], activeNodeId: "turn:u2" };
+  await flushPromises();
+  const card = () => setupState.nodes.find((node: { id: string }) => node.id === "turn:u1").data;
+  expect(card().onEditLabel).toBeUndefined();
+  current.graph.runs[0]!.status = "idle";
+  current.projection = { ...current.projection, nodes: [...current.projection.nodes] };
+  await flushPromises();
+  expect(setupState.canEditLabel(current.projection.nodes[0])).toBe(true);
+  expect(card().onEditLabel).toBeTypeOf("function");
+  card().onEditLabel();
+  expect(setupState.labelTarget.entryId).toBe("u1");
+  setupState.labelTarget = undefined; await flushPromises();
+  current.graph.runs[0]!.status = "running";
+  current.projection = { ...current.projection, nodes: [...current.projection.nodes] };
+  await flushPromises();
+  expect(card().onEditLabel).toBeUndefined();
 });

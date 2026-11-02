@@ -1,13 +1,126 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { resolveBuiltinSkills } from "../src/main/builtin-skills.js";
 import { pixAgentDir } from "../src/main/paths.js";
-import type { AgentControl, RuntimeSkill, RuntimeSkillDocument } from "../src/shared/types.js";
+import { validateRouteInput } from "../src/shared/contracts.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, type AgentControl, type RuntimeSkill, type RuntimeSkillDocument } from "../src/shared/types.js";
+
+for (const action of ["run", "abort", "close"] as const) {
+  test(`a session opens before slow startup hooks finish: ${action}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), "pix-startup-"));
+    let entered!: () => void, release!: () => void;
+    const starting = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let ready = false, invoked = false, opened = false, shutdown = false;
+    const runtime = new PiRuntime(home, join(home, "sessions"), () => {}, async () => {});
+    runtime["sessionServicesOptions"] = (pi, cwd) => ({
+      cwd, agentDir: home, settingsManager: pi.SettingsManager.inMemory({}),
+      resourceLoaderOptions: { additionalExtensionPaths: [], noExtensions: true, extensionFactories: [
+        (pi: any) => {
+          pi.on("session_start", async () => {
+            entered();
+            await blocked;
+            ready = true;
+          });
+          pi.on("session_shutdown", () => { assert.equal(ready, true); shutdown = true; });
+          pi.registerCommand("startup-test", { handler: () => { assert.equal(ready, true); invoked = true; } });
+        },
+      ] },
+    });
+    const creating = runtime.create().then(snapshot => { opened = true; return snapshot; });
+    try {
+      await starting;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(opened, true, "the session snapshot must not wait for extension indexing");
+      const snapshot = await creating;
+      assert.ok(snapshot.session.path);
+      assert.equal(snapshot.runtime.available, true);
+      const commands = runtime.control({ action: "commands" });
+      if (action === "close") {
+        const closing = runtime.close();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(shutdown, false, "shutdown must not race extension startup");
+        release();
+        await closing;
+        await commands.catch(() => {});
+        assert.equal(shutdown, true);
+        return;
+      }
+      const command = runtime.control({ action: "prompt", text: "/startup-test" });
+      const cancelled = action === "abort" ? assert.rejects(command, /cancelled/) : undefined;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(invoked, false, "a prompt must not race session-start hooks");
+      if (action === "abort") await runtime.control({ action: "abort" });
+      release();
+      if (action === "abort") await cancelled;
+      else await command;
+      assert.ok((await commands as Array<{ name: string }>).some(command => command.name === "startup-test"),
+        "aborting a prompt must not cancel the command catalog read");
+      assert.equal(invoked, action === "run");
+      await runtime.close();
+      assert.equal(shutdown, true);
+    } finally {
+      release();
+      await creating.catch(() => {});
+      await runtime.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
+
+test("aborting a prompt during extension startup does not cancel model discovery", async t => {
+  const runtime = new PiRuntime("/project", null, () => {}, async () => {});
+  let release!: () => void;
+  runtime["extensionStartup"] = new Promise<void>(resolve => { release = resolve; });
+  runtime.runtime = { session: {
+    modelRuntime: { getModels: () => [], getModel: () => undefined, getAuth: async () => undefined },
+    clearQueue: () => {}, abort: async () => {},
+  } };
+  runtime.snapshot = (() => ({})) as typeof runtime.snapshot;
+  t.mock.method(globalThis, "fetch", async () => Response.json({ data: [] }));
+  const discovery = runtime.control({ action: "discoverModels", provider: "custom", baseUrl: "https://example.test/v1", api: "openai-completions" });
+  const result = discovery.then(value => value, error => error);
+  await runtime.control({ action: "abort" });
+  release();
+  assert.deepEqual(await result, []);
+});
+
+test("the discovery deadline also bounds a stalled credential lookup", async t => {
+  const runtime = new PiRuntime(null, null, () => {}, async () => {});
+  const deadline = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+    assert.equal(milliseconds, 15000);
+    return deadline.signal;
+  });
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({ data: [] }));
+  let started!: () => void, release!: () => void;
+  const authStarted = new Promise<void>(resolve => { started = resolve; });
+  runtime.modelServices = { modelRuntime: {
+    getModels: () => [],
+    getAuth: async (_provider: string, options: { signal?: AbortSignal }) => {
+      started();
+      return new Promise((_resolve, reject) => {
+        release = () => reject(new Error("Released stalled credential lookup"));
+        options.signal?.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+      });
+    },
+  } };
+  const result = runtime.control({ action: "discoverModels", provider: "proxy", baseUrl: "https://proxy.test/v1", api: "openai-completions" })
+    .then(value => value, error => error);
+  try {
+    await authStarted;
+    deadline.abort(new DOMException("Deadline reached", "TimeoutError"));
+    const completed = await Promise.race([result, new Promise(resolve => setImmediate(() => resolve("still pending")))]);
+    assert.ok(completed instanceof Error, "the request must settle when credential lookup exceeds its deadline");
+    assert.match(completed.message, /timed out/);
+    assert.equal(fetch.mock.callCount(), 0);
+  } finally { release(); await result; }
+});
 
 test("extension commands deliver notifications and errors before and after reload", async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-slash-"));
@@ -54,7 +167,11 @@ test("a failing event consumer cannot throw into SDK message persistence", async
   let listener!: (event: unknown) => void;
   let delivered = false;
   const runtime = new PiRuntime(null, null, () => { delivered = true; throw new Error("UI failed"); }, async () => {});
-  runtime.runtime = { session: { subscribe: (handler: typeof listener) => { listener = handler; return () => {}; } } };
+  runtime.runtime = { session: {
+    sessionManager: {},
+    subscribe: (handler: typeof listener) => { listener = handler; return () => {}; },
+    bindExtensions: async () => {}, extensionRunner: { getUIContext: () => ({}) },
+  } };
   runtime.bind();
   assert.doesNotThrow(() => listener({ type: "message_end", message: { role: "user", content: "saved" } }));
   assert.equal(delivered, false, "listener is deferred until after SDK can persist");
@@ -69,8 +186,9 @@ test("records SDK context usage once after a prompt finishes", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.runtime = {
     session: {
-      prompt: async () => {
-        entries.push({ type: "message", message: { role: "user" } });
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
       },
       getContextUsage: () => {
         usageCalls++;
@@ -86,14 +204,46 @@ test("records SDK context usage once after a prompt finishes", async () => {
   };
   runtime.snapshot = (() => ({ saved: true })) as unknown as typeof runtime.snapshot;
 
-  await runtime.control({ action: "prompt", text: "hello" });
+  const submittedAt = "2026-10-27T00:00:00Z";
+  await runtime.control({ action: "prompt", text: "hello", submittedAt });
 
   assert.equal(usageCalls, 1);
   assert.deepEqual(appended, [["pix.node-footer", {
+    timing: { startedAt: submittedAt, compactions: [] },
     contextUsage: { tokens: 41_000, contextWindow: 128_000, percent: 32.03125 },
     model: { provider: "openai", id: "gpt-5.4", name: "GPT-5.4", contextWindow: 128_000, reasoning: true },
     thinkingLevel: "high",
   }]]);
+});
+
+test("stores structured display text for image prompts", async () => {
+  const appended: unknown[] = [];
+  const entries: unknown[] = [];
+  const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
+  runtime.runtime = {
+    session: {
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        assert.deepEqual(appended[0], [PROMPT_DISPLAY_CUSTOM_TYPE, { text: "检查截图" }]);
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
+      },
+      getContextUsage: () => null,
+      model: { provider: "openai", id: "vision", input: ["text", "image"] },
+      thinkingLevel: "off",
+      sessionManager: {
+        getEntries: () => entries,
+        appendCustomEntry: (...args: unknown[]) => appended.push(args),
+      },
+    },
+  };
+  runtime.snapshot = (() => ({ saved: true })) as unknown as typeof runtime.snapshot;
+
+  await runtime.control({ action: "prompt", text: "检查截图", images: [
+    { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+  ] });
+
+  assert.deepEqual(appended[0], [PROMPT_DISPLAY_CUSTOM_TYPE, { text: "检查截图" }]);
+  assert.equal(appended.length, 2, "the prompt display record is followed by the ordinary node footer");
 });
 
 test("skips the node footer when the prompt created no turn", async () => {
@@ -128,8 +278,9 @@ test("records the node footer when a prompt rejects mid-turn", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   runtime.runtime = {
     session: {
-      prompt: async () => {
-        entries.push({ type: "message", message: { role: "user" } });
+      prompt: async (_text: string, options: { preflightResult?: (result: string) => void }) => {
+        options.preflightResult?.("started");
+        entries.push({ type: "message", id: "u1", message: { role: "user" } });
         throw new Error("mid-run failure");
       },
       getContextUsage: () => ({ tokens: 900, contextWindow: 128_000, percent: 0.7 }),
@@ -159,6 +310,7 @@ test("every mutating control action returns the refreshed snapshot", async () =>
     calls.push(name);
   };
   const session = {
+    isStreaming: false,
     prompt: track("prompt"),
     steer: track("steer"),
     followUp: track("followUp"),
@@ -181,6 +333,8 @@ test("every mutating control action returns the refreshed snapshot", async () =>
     setActiveToolsByName: track("setTools"),
     navigateTree: track("navigateTree"),
     reload: track("reload"),
+    bindExtensions: async () => {},
+    extensionRunner: { getUIContext: () => ({}) },
     subscribe: () => () => undefined,
     getContextUsage: () => undefined,
     model: null,
@@ -227,12 +381,16 @@ test("every mutating control action returns the refreshed snapshot", async () =>
   };
   for (const [action, input] of Object.entries(actions)) {
     calls.length = 0;
+    session.isStreaming = action === "steer" || action === "followUp";
     const result = await runtime.control({ action, ...input } as AgentControl);
     assert.ok(
       result && typeof result === "object" && "projection" in result,
       `${action} must return the refreshed snapshot`,
     );
-    assert.equal(calls.length, 1, `${action} must run its SDK effect`);
+    if (action === "steer" || action === "followUp") {
+      assert.equal(calls.length, 0, "queued inputs remain editable before their delivery boundary");
+      assert.equal(runtime.state().queuedMessages!.at(-1)!.kind, action);
+    } else assert.equal(calls.length, action === "abort" ? 3 : 1, `${action} must run its SDK effect`);
   }
 });
 
@@ -272,6 +430,103 @@ test("model refresh reports provider failures and timeouts without changing the 
   await assert.rejects(runtime.control({ action: "refreshModels" }), /timed out/);
   assert.equal(runtime.runtime.session, session);
   assert.equal(session.model, activeModel);
+});
+
+test("OpenRouter login refreshes only its catalog after broker auth, while other providers stay offline", async t => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  const calls: string[] = [];
+  const signal = new AbortController().signal;
+  t.mock.method(AbortSignal, "timeout", (ms: number) => { assert.equal(ms, 15000); return signal; });
+  runtime.modelServices = { modelRuntime: {
+    login: async (provider: string, _type: string, interaction: any) => {
+      assert.equal(await interaction.prompt({ type: "secret" }), "test-key");
+      calls.push(`login:${provider}`);
+    },
+    refresh: async (options: unknown) => {
+      assert.deepEqual(options, { allowNetwork: true, force: true, signal, providers: ["openrouter"] });
+      calls.push("refresh");
+      return { aborted: false, errors: new Map() };
+    },
+  } };
+  t.mock.method(runtime, "refreshBrokerAuth", async () => { calls.push("brokerAuth"); });
+  for (const provider of ["openrouter", "anthropic"]) {
+    calls.length = 0;
+    assert.deepEqual(await runtime.control({ action: "loginApiKey", provider, apiKey: "test-key" }), { ok: true });
+    assert.deepEqual(calls, [`login:${provider}`, "brokerAuth", ...(provider === "openrouter" ? ["refresh"] : [])]);
+  }
+});
+
+test("failed OpenRouter catalog refreshes retain API key/OAuth saves and return a retry warning", async t => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("the caller owns the warning"), async () => undefined);
+  let savedType: string | undefined;
+  let savedDeviceId: string | undefined;
+  const outcome = { aborted: false, errors: new Map([["openrouter", new Error("Network unavailable")]]) };
+  runtime.modelServices = {
+    // ChatGPT sign-in reads its agent host ID from the settings manager.
+    settingsManager: { getOrCreateDeviceId: () => "01234567-89ab-cdef-0123-456789abcdef" },
+    modelRuntime: {
+      login: async (_provider: string, type: string, _interaction: unknown, options?: { getDeviceId?: () => string }) => {
+        savedType = type;
+        savedDeviceId = options?.getDeviceId?.();
+      },
+      checkAuth: async () => ({ type: savedType }),
+      refresh: async () => outcome,
+    },
+  };
+  t.mock.method(runtime, "refreshBrokerAuth", async () => {});
+  for (const action of ["loginApiKey", "loginOAuth"] as const) {
+    savedType = undefined;
+    savedDeviceId = undefined;
+    const result = await runtime.control({ action, provider: "openrouter", apiKey: "test-key", method: "browser" } as AgentControl) as any;
+    assert.equal(result.ok, true);
+    assert.equal(savedType, action === "loginApiKey" ? "api_key" : "oauth");
+    assert.equal(savedDeviceId, action === "loginOAuth" ? "01234567-89ab-cdef-0123-456789abcdef" : undefined);
+    assert.match(result.catalogError, /openrouter: Network unavailable/);
+  }
+  outcome.aborted = true; outcome.errors = new Map();
+  const result = await runtime.control({ action: "loginApiKey", provider: "openrouter", apiKey: "test-key" }) as any;
+  assert.equal(result.ok, true);
+  assert.match(result.catalogError, /timed out/);
+});
+
+test("settings can list every model type without exposing credentials or changing the chat catalog", async () => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  const chat = { provider: "test", id: "shared-id", reasoning: true };
+  const image = { provider: "test", id: "shared-id", type: "image", headers: { Authorization: "secret" } };
+  const classifier = { provider: "test", id: "judge", type: "classifier", apiKey: "secret" };
+  runtime.modelServices = { modelRuntime: {
+    getAvailable: async () => [chat],
+    getAllAvailable: async () => [chat, image, classifier],
+  } };
+  const input = validateRouteInput("agent.control", { action: "getModels", allTypes: true }) as AgentControl;
+  const catalog = await runtime.control(input) as Array<Record<string, unknown>>;
+  assert.deepEqual(catalog.map(model => [model.type, model.id]), [
+    ["chat", "shared-id"], ["image", "shared-id"], ["classifier", "judge"],
+  ]);
+  assert.ok(!JSON.stringify(catalog).includes("secret"));
+  for (const model of catalog.slice(1)) {
+    assert.equal(model.reasoning, undefined);
+    assert.equal(model.thinkingLevels, undefined);
+  }
+  const chatOnly = await runtime.control({ action: "getModels" }) as Array<Record<string, unknown>>;
+  assert.equal(chatOnly.length, 1);
+  assert.equal(chatOnly[0]!.id, chat.id);
+  assert.throws(() => validateRouteInput("agent.control", { action: "getModels", allTypes: "yes" }), /boolean/);
+});
+
+test("provider model types include the full catalog before credentials are configured", async () => {
+  const runtime = new PiRuntime(null, null, () => assert.fail("must not emit session changes"), async () => undefined);
+  runtime.modelServices = { modelRuntime: {
+    getProviders: () => [{ id: "unconfigured", name: "Unconfigured", auth: { apiKey: { login: true } } }],
+    getAllModels: (provider: string) => {
+      assert.equal(provider, "unconfigured");
+      return [{ id: "chat" }, { id: "image", type: "image" }, { id: "judge", type: "classifier" }, { id: "judge-2", type: "classifier" }];
+    },
+    checkAuth: async () => undefined,
+  } };
+  assert.deepEqual(await runtime.control({ action: "getProviders" }), [{
+    id: "unconfigured", name: "Unconfigured", modelTypes: ["chat", "image", "classifier"], authTypes: ["api_key"], status: undefined,
+  }]);
 });
 
 test("reports each model's supported thinking levels", async () => {
@@ -558,12 +813,84 @@ test("installs and removes recommended extensions with user scope and PiX's agen
   );
 });
 
+test("output style follows saved selections on reload while preserving format rules and user instructions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pix-file-link-prompt-"));
+  const runtime = new PiRuntime(root, join(root, "sessions"), () => undefined, async () => undefined);
+  runtime.agentDir = () => join(root, "agent");
+  const skillDir = join(runtime.agentDir(), "skills", "sample-style");
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(join(runtime.agentDir(), "APPEND_SYSTEM.md"), "Keep the user's custom instructions.");
+  writeFileSync(join(runtime.agentDir(), "settings.json"), JSON.stringify({ outputStyle: "sample-style" }));
+  writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sample-style\ndescription: Sample output style\noutput-style: true\n---\n\nBe concise.\n");
+  const otherSkillDir = join(runtime.agentDir(), "skills", "other-style");
+  mkdirSync(otherSkillDir);
+  writeFileSync(join(otherSkillDir, "SKILL.md"), "---\nname: other-style\ndescription: Another output style\noutput-style: true\n---\n\nExplain in detail.\n");
+  let session: any;
+  try {
+    const pi = await import("@earendil-works/pi-coding-agent");
+    const options = runtime["sessionServicesOptions"](pi, root);
+    const services = await pi.createAgentSessionServices({
+      ...options,
+      resourceLoaderOptions: {
+        ...options.resourceLoaderOptions,
+        extensionFactories: [], additionalExtensionPaths: [], additionalSkillPaths: [], noExtensions: true,
+      },
+    });
+    ({ session } = await pi.createAgentSessionFromServices({ services, sessionManager: pi.SessionManager.inMemory(root) }));
+    const sections = services.resourceLoader.getAppendSystemPrompt();
+    assert.equal(sections[0], "Keep the user's custom instructions.");
+    assert.equal(sections.length, 2);
+    const outputStyle = sections[1]!;
+    assert.match(outputStyle, /<content_style>\nUse the sample-style skill listed in available_skills\.\n<\/content_style>/);
+    const formatRules = outputStyle.match(/<format_rules>[\s\S]*?<\/format_rules>/)![0];
+    assert.ok(formatRules.includes("clickable Markdown links"));
+    assert.match(session.systemPrompt, /clickable Markdown links/);
+    assert.match(session.systemPrompt, /absolute filesystem paths on the session host/);
+    assert.match(session.systemPrompt, /Do not wrap Markdown links in backticks/);
+    assert.ok(session.systemPrompt.includes("[My Report.md](</absolute/path/My Project/My Report.md>)"));
+    assert.ok(session.systemPrompt.includes("[app.py:12](/absolute/path/app.py:12)"));
+    await session.reload();
+    assert.deepEqual(services.resourceLoader.getAppendSystemPrompt(), sections);
+    assert.equal(session.systemPrompt.split("clickable Markdown links").length, 2);
+    for (const selected of ["other-style", "sample-style", "", undefined, "missing-style"]) {
+      writeFileSync(join(runtime.agentDir(), "settings.json"), JSON.stringify({ outputStyle: selected }));
+      await session.reload();
+      const updated = services.resourceLoader.getAppendSystemPrompt();
+      assert.equal(updated.length, 2);
+      assert.equal(updated[0], sections[0]);
+      const contentStyle = updated[1]!.match(/<content_style>\n([\s\S]*?)\n<\/content_style>/)?.[1];
+      assert.equal(contentStyle, selected === "sample-style" || selected === "other-style"
+        ? `Use the ${selected} skill listed in available_skills.` : undefined);
+      assert.equal(updated[1]!.match(/<format_rules>[\s\S]*?<\/format_rules>/)?.[0], formatRules);
+      assert.equal(session.systemPrompt.split("<output_style>").length, 2);
+      assert.equal(session.systemPrompt.split("clickable Markdown links").length, 2);
+    }
+    writeFileSync(join(runtime.agentDir(), "settings.json"), JSON.stringify({ outputStyle: "sample-style" }));
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    for (const projectStyle of ["other-style", "", null, undefined]) {
+      writeFileSync(join(root, ".pi", "settings.json"), JSON.stringify({ outputStyle: projectStyle }));
+      await session.reload();
+      const updated = services.resourceLoader.getAppendSystemPrompt();
+      const contentStyle = updated[1]!.match(/<content_style>\n([\s\S]*?)\n<\/content_style>/)?.[1];
+      const selected = projectStyle ?? "sample-style";
+      assert.equal(contentStyle, selected ? `Use the ${selected} skill listed in available_skills.` : undefined);
+      assert.equal(updated[1]!.match(/<format_rules>[\s\S]*?<\/format_rules>/)?.[0], formatRules);
+    }
+  } finally {
+    session?.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("factory loads bundled packages as additional extension paths", async () => {
   const runtime = new PiRuntime("/project", "/sessions", () => undefined, async () => undefined);
   let servicesOptions: any;
   const packages = ["npm:@injaneity/pi-computer-use"];
   const fakePi = {
     getAgentDir: () => "/agent",
+    createCodemodeExtension: () => () => {},
+    createMcpExtension: () => () => {},
+    createToolSearchExtension: () => () => {},
     SettingsManager: {
       create: () => ({ getPackages: () => packages, getShellPath: () => undefined }),
     },
@@ -580,9 +907,9 @@ test("factory loads bundled packages as additional extension paths", async () =>
 
   // The user's own install suppresses the bundled copy.
   await create();
-  assert.deepEqual(servicesOptions.resourceLoaderOptions.additionalExtensionPaths, []);
-  assert.equal(servicesOptions.resourceLoaderOptions.extensionFactories[0].name, "file-changes");
-  assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories[0].factory, "function");
+  assert.ok(servicesOptions.resourceLoaderOptions.additionalExtensionPaths.every((path: string) => !path.endsWith("@injaneity/pi-computer-use")), "the user-installed package is not loaded twice; other bundled packages remain available");
+  assert.deepEqual(servicesOptions.resourceLoaderOptions.extensionFactories.slice(0, 3).map((entry: any) => entry.name), ["codemode", "mcp", "tool-search"]);
+  assert.equal(typeof servicesOptions.resourceLoaderOptions.extensionFactories.find((entry: any) => entry.name === "file-changes").factory, "function");
 
   // The bundled copy loads once no user install is configured. Factory
   // resolves relative to pi-runtime's compiled location (out-test/src/main),
@@ -615,5 +942,89 @@ test("factory loads bundled packages as additional extension paths", async () =>
     assert.equal(extension.bundled, true);
   } finally {
     rmSync(join(dirname(fixtureDir), "@injaneity"), { recursive: true, force: true });
+  }
+});
+
+test("session lists come back newest-modified first, whatever order the SDK returns", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-list-"));
+  try {
+    const runtime = new PiRuntime(home, join(home, "sessions"), () => undefined, async () => undefined);
+    const row = (id: string, created: string, modified: string) => ({
+      id, path: join(home, "sessions", `${id}.jsonl`), name: id, cwd: home,
+      created, modified, messageCount: 1, firstMessage: id,
+    });
+    // A session whose main file is old but whose branch sidecar was just
+    // written: the SDK cannot see the sidecar, the listing must.
+    const branchedMain = join(home, "sessions", "branched.jsonl");
+    mkdirSync(dirname(branchedMain), { recursive: true });
+    writeFileSync(branchedMain, `${JSON.stringify({ type: "session", id: "branched", cwd: home, timestamp: "2026-09-01T00:00:00Z" })}\n`);
+    const idle = new Date("2026-09-01T00:00:00Z");
+    utimesSync(branchedMain, idle, idle);
+    mkdirSync(`${branchedMain}.pix-tree`, { recursive: true });
+    const branchFile = join(`${branchedMain}.pix-tree`, "b1.jsonl");
+    writeFileSync(branchFile, "{}\n");
+    const branchRun = new Date("2026-09-06T00:00:00Z");
+    utimesSync(branchFile, branchRun, branchRun);
+    // The SDK lists in creation order; recency is scrambled against it.
+    runtime["pi"] = async () => ({
+      SessionManager: { list: async () => [
+        row("oldest", "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+        row("branched", "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+        row("middle", "2026-09-02T00:00:00Z", "2026-09-03T00:00:00Z"),
+        row("youngest-touched", "2026-09-03T00:00:00Z", "2026-09-05T00:00:00Z"),
+      ] },
+    }) as Awaited<ReturnType<PiRuntime["pi"]>>;
+    assert.deepEqual((await runtime.list()).map((listed) => listed.id), [
+      "branched", "youngest-touched", "middle", "oldest",
+    ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a snapshot summary carries the file's mtime, not the moment of the snapshot", () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-snapshot-mtime-"));
+  try {
+    const entries = [
+      { type: "message", id: "u1", parentId: null, timestamp: "2026-09-01T00:00:01Z", message: { role: "user", content: "hi" } },
+    ];
+    const file = join(home, "session.jsonl");
+    writeFileSync(file, `${JSON.stringify({ type: "session", id: "s1", cwd: home, timestamp: "2026-09-01T00:00:00Z" })}\n`);
+    // The panel ranks by modified; a fresh "now" would float an opened session
+    // to the top until the next list refresh drops it back.
+    const settled = new Date("2026-09-02T03:04:05Z");
+    utimesSync(file, settled, settled);
+    const runtime = new PiRuntime(home, home, () => undefined, async () => undefined);
+    runtime.runtime = {
+      session: {
+        sessionFile: file,
+        sessionId: "s1",
+        sessionManager: {
+          getEntries: () => entries,
+          getLeafId: () => "u1",
+          getHeader: () => ({ type: "session", id: "s1", cwd: home, timestamp: "2026-09-01T00:00:00Z" }),
+          getCwd: () => home,
+        },
+      },
+    };
+    assert.equal(runtime.snapshot().session.modified, settled.toISOString());
+    // A branch run writes only the sidecar; the main summary must still show it.
+    const sidecar = `${file}.pix-tree`;
+    mkdirSync(sidecar, { recursive: true });
+    const branchFile = join(sidecar, "b1.jsonl");
+    writeFileSync(branchFile, "{}\n");
+    const branched = new Date("2026-09-22T21:00:00Z");
+    utimesSync(branchFile, branched, branched);
+    assert.equal(runtime.snapshot().session.modified, branched.toISOString());
+    // Opening and closing write only ownership/view bookkeeping into the
+    // sidecar; a fresh lock or cursor must not float the session.
+    for (const bookkeeping of ["owner.json", "cursor.json"]) {
+      const file = join(sidecar, bookkeeping);
+      writeFileSync(file, "{}\n");
+      utimesSync(file, new Date("2026-09-23T10:00:00Z"), new Date("2026-09-23T10:00:00Z"));
+    }
+    assert.equal(runtime.snapshot().session.modified, branched.toISOString());
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

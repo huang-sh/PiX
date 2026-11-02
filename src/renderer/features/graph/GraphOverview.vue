@@ -31,7 +31,7 @@ watchEffect(() => {
       // With an active search, only hits stay opaque so they read as a cluster.
       ctx.globalAlpha = !props.highlight || props.highlight.has(node.id) ? 1 : 0.3;
       ctx.fillRect((node.position.x - transform.x) * scale,
-        (node.position.y - transform.y) * scale, Math.max(1, 280 * scale), Math.max(1, 146 * scale));
+        (node.position.y - transform.y) * scale, Math.max(1, 320 * scale), Math.max(1, 146 * scale));
     }
     ctx.globalAlpha = 1;
     ctx.strokeStyle = ctx.fillStyle;

@@ -75,7 +75,7 @@ const growthViolations = (before: Record<string, Card>, after: Card[]) => {
 };
 const measure = (graph: any) => {
   graph.syncNodeDimensions(Object.entries(HEIGHTS).map(([id, height]) =>
-    ({ type: "dimensions", id, dimensions: { width: 280, height } })));
+    ({ type: "dimensions", id, dimensions: { width: 320, height } })));
 };
 
 describe("settled graph layout follows measured card sizes", () => {
@@ -136,14 +136,14 @@ describe("settled graph layout follows measured card sizes", () => {
     const { graph } = setup();
     const estimates = byId(graph);
     // One measurement lands mid-graph: the card is taller than its estimate.
-    graph.syncNodeDimensions([{ type: "dimensions", id: "turn:a1", dimensions: { width: 280, height: HEIGHTS["turn:a1"]! } }]);
+    graph.syncNodeDimensions([{ type: "dimensions", id: "turn:a1", dimensions: { width: 320, height: HEIGHTS["turn:a1"]! } }]);
     await flushPromises();
     let snapshot = cards(graph);
     expect(growthViolations(estimates, snapshot), JSON.stringify(snapshot)).toEqual([]);
     expect(snapshot.find(c => c.id === "turn:a2")!.y).toBeGreaterThan(estimates["turn:a2"]!.y);
     // The remaining measurements land in a second wave.
     graph.syncNodeDimensions(Object.entries(HEIGHTS).filter(([id]) => id !== "turn:a1")
-      .map(([id, height]) => ({ type: "dimensions", id, dimensions: { width: 280, height } })));
+      .map(([id, height]) => ({ type: "dimensions", id, dimensions: { width: 320, height } })));
     await flushPromises();
     const partial = byId(graph);
     snapshot = cards(graph);
@@ -171,7 +171,7 @@ describe("settled graph layout follows measured card sizes", () => {
     // I2b landed the card at its estimate; the real card is taller (preview content).
     const settled = byId(graph);
     expect(settled["turn:new"]!.h).toBe(146);
-    graph.syncNodeDimensions([{ type: "dimensions", id: "turn:new", dimensions: { width: 280, height: 217 } }]);
+    graph.syncNodeDimensions([{ type: "dimensions", id: "turn:new", dimensions: { width: 320, height: 217 } }]);
     await flushPromises();
     const snapshot = cards(graph);
     expect(growthViolations(settled, snapshot), JSON.stringify(snapshot)).toEqual([]);

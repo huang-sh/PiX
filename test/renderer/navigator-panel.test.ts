@@ -8,6 +8,8 @@ import Workbench from "../../src/renderer/features/workbench/Workbench.vue";
 import SessionNavigator from "../../src/renderer/features/navigator/SessionNavigator.vue";
 import NavigatorMenu from "../../src/renderer/features/navigator/NavigatorMenu.vue";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
+import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
+import { useSessionStore } from "../../src/renderer/stores/session";
 import { i18n } from "../../src/renderer/i18n";
 
 vi.mock("../../src/renderer/features/graph/GraphPanel.vue", () => ({ default: { template: '<div class="graph-test" tabindex="0" />' } }));
@@ -30,6 +32,8 @@ describe("session panel controls", () => {
     vi.useFakeTimers();
     const pinia = createPinia();
     setActivePinia(pinia);
+    useWorkspaceStore().hydrate({ name: "project", path: "/project" });
+    useSessionStore().activeProjectId = "local:/project";
     layout = useLayoutStore();
     wrapper = mount({ components: { AppTitlebar, Workbench }, template: "<AppTitlebar /><Workbench />" }, {
       attachTo: document.body,
@@ -50,6 +54,62 @@ describe("session panel controls", () => {
     wrapper.unmount();
     document.body.innerHTML = "";
     vi.useRealTimers();
+  });
+
+  it("keeps saved sessions and panel controls accessible on the welcome screen", async () => {
+    const graph = wrapper.get(".graph-test").element;
+    useWorkspaceStore().hydrate(null);
+    useSessionStore().activeProjectId = "";
+    const record = { id: "local:/saved", project: { name: "saved", path: "/saved" },
+      sessions: [{ id: "saved-session", path: "/saved/session.jsonl", name: "saved session", cwd: "/saved",
+        created: "2026-10-27T00:00:00Z", modified: "2026-10-27T00:00:00Z", messageCount: 1, firstMessage: "hello" }],
+      lastOpened: "", connected: false };
+    useSessionStore().projects = [record];
+    await nextTick();
+    expect(wrapper.get("#graph-panel [data-welcome]").exists()).toBe(true);
+    expect(wrapper.get(".graph-test").isVisible()).toBe(false);
+
+    await singleClick();
+    expect(panel().isVisible()).toBe(true);
+    await wrapper.get(".project-main").trigger("click");
+    await wrapper.get(".session-item").trigger("click");
+    expect(wrapper.getComponent(Workbench).emitted("openProjectSession")?.[0]).toEqual([record, record.sessions[0]!.path]);
+    await pin().trigger("click");
+    expect(layout.layout.navigatorPinned).toBe(true);
+    await wrapper.get('[data-action="welcome-open-project"]').trigger("click");
+    expect(wrapper.getComponent(Workbench).emitted("pickProject")).toHaveLength(1);
+
+    useWorkspaceStore().hydrate(record.project);
+    await nextTick();
+    expect(wrapper.find("[data-welcome]").exists()).toBe(false);
+    expect(wrapper.get(".graph-test").isVisible()).toBe(true);
+    expect(wrapper.get(".graph-test").element).toBe(graph);
+  });
+
+  it("disables project-scoped import and refresh until a project is selected", async () => {
+    const session = useSessionStore();
+    const importSession = vi.spyOn(session, "importSession").mockResolvedValue();
+    const refresh = vi.spyOn(session, "refresh").mockResolvedValue();
+    useWorkspaceStore().hydrate(null);
+    session.activeProjectId = "";
+    await singleClick();
+    const actions = wrapper.findAll(".navigator-actions button").slice(1);
+    for (const action of actions) {
+      expect(action.attributes("disabled")).toBeDefined();
+      await action.trigger("click");
+    }
+    expect(importSession).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+
+    useWorkspaceStore().hydrate({ name: "project", path: "/project" });
+    session.activeProjectId = "local:/project";
+    await nextTick();
+    for (const action of actions) {
+      expect(action.attributes("disabled")).toBeUndefined();
+      await action.trigger("click");
+    }
+    expect(importSession).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledOnce();
   });
 
   it("toggles immediately and changes pinning only through the header pin button", async () => {

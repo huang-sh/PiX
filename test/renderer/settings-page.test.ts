@@ -8,6 +8,7 @@ import { i18n } from "../../src/renderer/i18n";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { SETTINGS_RELOAD_QUIET_MS, useSessionStore } from "../../src/renderer/stores/session";
 import { version } from "../../package.json";
+import { appendOutputStyle } from "../../src/main/output-style";
 
 const settings = {
   app: {
@@ -20,6 +21,8 @@ const settings = {
     enterToSend: true,
     openLinksInApp: true,
     closeToTray: true,
+    preventSleepDuringTasks: true,
+    keepScreenOnDuringTasks: false,
     canvasDotGrid: true,
     canvasDotGridSpacing: 24,
     canvasDotGridDotSize: 4,
@@ -72,6 +75,86 @@ describe("SettingsPage auto-save", () => {
   afterEach(() => {
     for (const [route, payload] of vi.mocked(desktop.invoke).mock.calls)
       expect(() => structuredClone(payload), `${route} payload`).not.toThrow();
+  });
+
+  it("saves both power preferences independently and shows the Windows limit only when allowing screen-off", async () => {
+    const stored: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") Object.assign(stored.app, (payload as UpdatePayload).patch);
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "general";
+    openSession(true);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      const paths = wrapper.findAll('[data-setting-path]').map(row => row.attributes('data-setting-path'));
+      expect(paths[paths.indexOf('closeToTray') + 1]).toBe('preventSleepDuringTasks');
+      expect(paths[paths.indexOf('preventSleepDuringTasks') + 1]).toBe('keepScreenOnDuringTasks');
+      const row = wrapper.get('[data-setting-path="preventSleepDuringTasks"]');
+      expect(row.text()).toContain('allowing the screen to turn off');
+      expect(row.text()).toContain('Windows limitation:');
+      expect((row.get('input').element as HTMLInputElement).checked).toBe(true);
+      await row.get('input').setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: 'app', patch: { preventSleepDuringTasks: false } });
+      expect(layout.settings?.app.preventSleepDuringTasks).toBe(false);
+      const screen = wrapper.get('[data-setting-path="keepScreenOnDuringTasks"] input');
+      expect((screen.element as HTMLInputElement).checked).toBe(false);
+      await screen.setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: 'app', patch: { keepScreenOnDuringTasks: true } });
+      expect(layout.settings?.app.keepScreenOnDuringTasks).toBe(true);
+      expect(row.text()).not.toContain('Windows limitation:');
+      expect(reloadCalls()).toHaveLength(0);
+    } finally { wrapper.unmount(); platform.mockRestore(); }
+  });
+
+  it("groups appearance settings and persists node information selection and priority", async () => {
+    const stored: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") Object.assign(stored.app, (payload as UpdatePayload).patch);
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "appearance";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      expect(wrapper.findAll('[data-appearance-group]').map(group => group.attributes('data-appearance-group'))).toEqual(["interface", "canvas", "nodeCard"]);
+      expect(wrapper.get('[data-appearance-group="interface"] [data-setting-path="theme"]').exists()).toBe(true);
+      expect(wrapper.get('[data-appearance-group="canvas"] [data-setting-path="canvasDotGrid"]').exists()).toBe(true);
+      expect(wrapper.find('[data-settings-category="nodeCard"]').exists()).toBe(false);
+      expect(wrapper.find('[data-node-card-field="model"]').exists()).toBe(false);
+      expect(wrapper.find('[data-node-card-field="thinking"]').exists()).toBe(false);
+      expect(wrapper.get('[data-appearance-group="nodeCard"]').text()).toContain('Model and thinking level always stay visible.');
+      expect(wrapper.findAll('[data-node-card-field]').filter(item => (item.get('input').element as HTMLInputElement).checked).map(item => item.attributes('data-node-card-field'))).toEqual(["branch", "context"]);
+      const commitToggle = wrapper.get('[data-node-card-show-commit] input');
+      expect((commitToggle.element as HTMLInputElement).checked).toBe(true);
+      await commitToggle.setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch).toEqual({ nodeCardShowCommit: false });
+      expect(layout.settings?.app.nodeCardShowCommit).toBe(false);
+      await wrapper.get('[data-node-card-field="tokens"] input').setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch).toEqual({ nodeCardFields: ["branch", "context", "tokens"] });
+      await wrapper.get('[data-node-card-field="tokens"] [data-move="up"]').trigger('click');
+      await flushPromises();
+      expect(layout.settings?.app.nodeCardFields).toEqual(["branch", "tokens", "context"]);
+      await wrapper.get('[data-node-card-field="branch"] input').setValue(false);
+      await flushPromises();
+      expect(layout.settings?.app.nodeCardFields).toEqual(["tokens", "context"]);
+      await wrapper.get('[data-node-card-reset]').trigger('click');
+      await flushPromises();
+      expect(layout.settings?.app.nodeCardFields).toEqual(["branch", "context"]);
+      expect(layout.settings?.app.nodeCardShowCommit).toBe(true);
+    } finally { wrapper.unmount(); }
   });
 
   it("resizes the settings sidebar by drag and keyboard, persisting the width", async () => {
@@ -353,6 +436,265 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
+  it("saves the current content-style choice and reloads it once the session is idle", async () => {
+    vi.useFakeTimers();
+    let wrapper: ReturnType<typeof mount> | undefined;
+    try {
+      const stored: SettingsBundle = structuredClone(settings);
+      const skills: RuntimeSkill[] = ["sample-style", "other-style", "manual-style", "ordinary"].map(name => ({
+        name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+        editable: true, outputStyle: name !== "ordinary", disableModelInvocation: name === "manual-style",
+      }));
+      vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+        if (route === "agent.control")
+          return (payload as { action: string }).action === "getSkills" ? skills : { ok: true };
+        if (route === "settings.update") {
+          const { patch } = payload as { patch: Record<string, unknown> };
+          if (patch.outputStyle === null) delete stored.piGlobal.outputStyle;
+          else stored.piGlobal.outputStyle = patch.outputStyle;
+          stored.effective = { ...stored.piGlobal };
+        }
+        return structuredClone(stored);
+      });
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      const layout = useLayoutStore();
+      layout.hydrate(stored);
+      const session = openSession(true);
+      layout.settingsCategory = "agent";
+      wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+      await flushPromises();
+      const select = wrapper.get('[data-setting-path="outputStyle"] select');
+      expect(select.findAll("option").map(option => option.attributes("value")))
+        .toEqual(["", "sample-style", "other-style"]);
+      for (const name of ["sample-style", "other-style"]) {
+        await select.setValue(name);
+        await flushPromises();
+        expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: name } });
+        expect((select.element as HTMLSelectElement).value).toBe(name);
+      }
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(0);
+      session.current!.runtime.isStreaming = false;
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(1);
+      expect(stored.piGlobal.outputStyle).toBe("other-style");
+
+      await select.setValue("");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: null } });
+      expect(stored.piGlobal.outputStyle).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(SETTINGS_RELOAD_QUIET_MS);
+      expect(reloadCalls()).toHaveLength(2);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { scope: "global", failFirst: false },
+    { scope: "global", failFirst: true },
+    { scope: "project", failFirst: false },
+    { scope: "project", failFirst: true },
+  ])("preserves a queued model-default choice during a $scope style save (failure: $failFirst)", async ({ scope, failFirst }) => {
+    const stored: SettingsBundle = {
+      ...structuredClone(settings), piGlobal: { outputStyle: "sample-style" },
+      piProject: scope === "project" ? { outputStyle: "sample-style" } : {},
+    };
+    const skills: RuntimeSkill[] = ["sample-style", "other-style"].map(name => ({
+      name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+      outputStyle: true, disableModelInvocation: false, editable: true,
+    }));
+    let releaseFirst!: () => void;
+    let first = true;
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control")
+        return (payload as { action: string }).action === "getSkills" ? skills : { ok: true };
+      if (route === "settings.update") {
+        const { scope: savedScope, patch } = payload as UpdatePayload;
+        if (first) {
+          first = false;
+          await new Promise<void>(resolve => { releaseFirst = resolve; });
+          if (failFirst) throw new Error("disk full");
+        }
+        const target = savedScope === "project" ? stored.piProject : stored.piGlobal;
+        if (patch!.outputStyle === null) delete target.outputStyle;
+        else target.outputStyle = patch!.outputStyle;
+      }
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      const select = () => wrapper.get('[data-setting-path="outputStyle"] select');
+      await select().setValue("other-style");
+      await select().setValue("");
+      releaseFirst();
+      await flushPromises();
+      expect(updateCalls()).toEqual([
+        { scope, patch: { outputStyle: "other-style" } },
+        { scope, patch: { outputStyle: scope === "project" ? "" : null } },
+      ]);
+      expect((select().element as HTMLSelectElement).value).toBe("");
+      expect(stored.piProject.outputStyle).toBe(scope === "project" ? "" : undefined);
+      expect(stored.piGlobal.outputStyle).toBe(scope === "project" ? "sample-style" : undefined);
+      if (failFirst) expect(layout.notice?.message).toBe("disk full");
+      await select().setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toEqual({ scope, patch: { outputStyle: "other-style" } });
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each([
+    { projectStyle: "i-have-adhd", selected: "i-have-adhd", scope: "project" },
+    { projectStyle: "", selected: "", scope: "project" },
+    { projectStyle: "   ", selected: "", scope: "project" },
+    { projectStyle: " i-have-adhd ", selected: "i-have-adhd", scope: "project" },
+    { projectStyle: "missing-style", selected: "missing-style", scope: "project" },
+    { projectStyle: undefined, selected: "eli5", scope: "global" },
+    { projectStyle: null, selected: "eli5", scope: "global" },
+  ])("keeps the selected content style aligned with its effective scope: $scope / $projectStyle", async ({ projectStyle, selected, scope }) => {
+    const stored: SettingsBundle = {
+      ...structuredClone(settings), piGlobal: { outputStyle: "eli5" }, piProject: { outputStyle: projectStyle },
+    };
+    const skills: RuntimeSkill[] = ["eli5", "i-have-adhd", "other-style"].map(name => ({
+      name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+      outputStyle: true, disableModelInvocation: false, editable: true,
+    }));
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control")
+        return (payload as { action: string }).action === "getSkills" ? skills : { ok: true };
+      if (route === "settings.update") {
+        const { scope: savedScope, patch } = payload as { scope: string; patch: Record<string, unknown> };
+        const target = savedScope === "project" ? stored.piProject : stored.piGlobal;
+        if (patch.outputStyle === null) delete target.outputStyle;
+        else target.outputStyle = patch.outputStyle;
+        stored.effective = { ...stored.piGlobal, ...stored.piProject };
+      }
+      return structuredClone(stored);
+    });
+    const prompt = () => appendOutputStyle([], skills, {
+      getGlobalSettings: () => stored.piGlobal,
+      getProjectSettings: () => stored.piProject,
+    }).join("\n");
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      const row = wrapper.get('[data-setting-path="outputStyle"]');
+      const select = row.get("select");
+      expect((select.element as HTMLSelectElement).value).toBe(selected);
+      expect(row.text()).toContain(i18n.global.t(`settings.rows.outputStyle${scope === "project" ? "Project" : "Global"}Scope`));
+
+      await select.setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope, patch: { outputStyle: "other-style" } });
+      expect(prompt()).toContain("Use the other-style skill");
+      expect(scope === "project" ? stored.piGlobal.outputStyle : stored.piProject.outputStyle)
+        .toBe(scope === "project" ? "eli5" : projectStyle);
+
+      await select.setValue("");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope, patch: { outputStyle: scope === "project" ? "" : null } });
+      expect((select.element as HTMLSelectElement).value).toBe("");
+      expect(prompt()).not.toContain("<content_style>");
+      expect(prompt()).toContain("<format_rules>");
+
+      await select.setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)?.scope).toBe(scope);
+      expect(prompt()).toContain("Use the other-style skill");
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each(["manual-only", "missing"])("preserves an unavailable saved content style (%s) and updates it when restored", async state => {
+    const stored: SettingsBundle = {
+      ...structuredClone(settings), piGlobal: { outputStyle: "eli5" }, effective: { outputStyle: "eli5" },
+    };
+    const available: RuntimeSkill[] = ["eli5", "other-style"].map(name => ({
+      name, description: name, path: `/skills/${name}/SKILL.md`, source: "local", scope: "user",
+      outputStyle: true, disableModelInvocation: false, editable: true,
+    }));
+    let skills = state === "missing" ? available.slice(1)
+      : available.map(skill => ({ ...skill, disableModelInvocation: skill.name === "eli5" }));
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "agent.control")
+        return (payload as { action: string }).action === "getSkills" ? structuredClone(skills) : { ok: true };
+      if (route === "settings.update") {
+        stored.piGlobal.outputStyle = (payload as { patch: Record<string, unknown> }).patch.outputStyle;
+        stored.effective = { ...stored.piGlobal };
+      }
+      return structuredClone(stored);
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate(stored);
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      let select = wrapper.get('[data-setting-path="outputStyle"] select');
+      let selected = (select.element as HTMLSelectElement).selectedOptions[0]!;
+      expect(selected.value).toBe("eli5");
+      expect(selected.disabled).toBe(true);
+      expect(selected.textContent?.trim()).toBe(i18n.global.t("settings.unavailableOption", { name: "eli5" }));
+      expect(stored.piGlobal.outputStyle).toBe("eli5");
+      expect(updateCalls()).toHaveLength(0);
+
+      skills = available;
+      layout.settingsCategory = "skills";
+      await flushPromises();
+      layout.settingsCategory = "agent";
+      await flushPromises();
+      select = wrapper.get('[data-setting-path="outputStyle"] select');
+      selected = (select.element as HTMLSelectElement).selectedOptions[0]!;
+      expect(selected.value).toBe("eli5");
+      expect(selected.disabled).toBe(false);
+      expect(selected.textContent?.trim()).toBe(i18n.global.t("options.eli5"));
+      expect(select.findAll('option[value="eli5"]')).toHaveLength(1);
+      expect(updateCalls()).toHaveLength(0);
+
+      await select.setValue("other-style");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: "other-style" } });
+      expect((select.element as HTMLSelectElement).value).toBe("other-style");
+    } finally { wrapper.unmount(); }
+  });
+
+  it("can clear an unavailable saved content style to model default", async () => {
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) =>
+      route === "agent.control" && (payload as { action: string }).action === "getSkills" ? [] : settings);
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const layout = useLayoutStore();
+    layout.hydrate({ ...structuredClone(settings), piGlobal: { outputStyle: "missing-style" } });
+    layout.settingsCategory = "agent";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      const select = wrapper.get('[data-setting-path="outputStyle"] select');
+      expect((select.element as HTMLSelectElement).value).toBe("missing-style");
+      await select.setValue("");
+      await flushPromises();
+      expect(updateCalls().at(-1)).toMatchObject({ scope: "global", patch: { outputStyle: null } });
+      const selected = (select.element as HTMLSelectElement).selectedOptions[0]!;
+      expect(selected.value).toBe("");
+      expect(selected.disabled).toBe(false);
+      expect(selected.textContent).toBe(i18n.global.t("options.modelDefault"));
+    } finally { wrapper.unmount(); }
+  });
+
   it("coalesces a burst of non-app saves into one session reload", async () => {
     vi.useFakeTimers();
     try {
@@ -488,9 +830,15 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
-  it("adds a custom model and refreshes the shared picker catalog", async () => {
-    const available: RuntimeModel[] = [];
-    const providers: RuntimeProvider[] = [];
+  it.each(["all", "image", "classifier"])("reveals and selects a custom chat model added from the %s category", async (type) => {
+    const available: RuntimeModel[] = [
+      { provider: "existing", id: "old-chat", type: "chat" },
+      { provider: "existing", id: "paint", type: "image" },
+      { provider: "existing", id: "judge", type: "classifier" },
+    ];
+    const providers: RuntimeProvider[] = [
+      { id: "existing", name: "Existing", authTypes: ["api_key"], status: { type: "api_key" } },
+    ];
     vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
       if (route !== "agent.control") return settings;
       const v = payload as Record<string, unknown>;
@@ -511,6 +859,10 @@ describe("SettingsPage auto-save", () => {
     layout.settingsCategory = "models";
     const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
     await flushPromises();
+    await wrapper.get(`[data-model-type-filter="${type}"]`).trigger("click");
+    await wrapper.get('[data-provider="existing"] .provider-model-toggle').trigger("click");
+    await wrapper.get('[data-model-search]').setValue("existing");
+    await wrapper.get('[data-provider-filter="other"]').trigger("click");
     await wrapper.get("[data-add-custom-model]").trigger("click");
     await wrapper.get('[name="provider"]').setValue("local-llm");
     await wrapper.get('[name="modelId"]').setValue("custom-model");
@@ -521,9 +873,14 @@ describe("SettingsPage auto-save", () => {
     await wrapper.get("[data-custom-model-form]").trigger("submit");
     await flushPromises();
     expect(wrapper.find("[data-custom-model-form]").exists()).toBe(false);
-    expect(useSessionStore().models).toEqual(available);
+    expect(useSessionStore().models).toEqual(available.filter(model => !model.type || model.type === "chat"));
+    expect(wrapper.get('[data-model-type-filter="chat"]').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get('[data-provider-filter="all"]').attributes("aria-pressed")).toBe("true");
+    expect((wrapper.get('[data-model-search]').element as HTMLInputElement).value).toBe("");
     expect(wrapper.find('[data-provider="local-llm"]').exists()).toBe(true);
-    expect(wrapper.get("#model-details-panel").text()).toContain("custom-model");
+    expect(wrapper.get('[data-model="local-llm/custom-model"] .model-select').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get(".model-actions strong").text()).toBe("custom-model");
+    expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -648,6 +1005,7 @@ describe("SettingsPage auto-save", () => {
     await flushPromises();
     await wrapper.get("[data-add-custom-model]").trigger("click");
     await wrapper.get('[name="provider"]').setValue("my-provider");
+    await wrapper.get('[name="modelId"]').setValue("my-model");
     await wrapper.get("[data-custom-model-form]").trigger("submit");
     await flushPromises();
     expect(wrapper.get('[data-custom-model-form] [role="alert"]').text()).toContain("Invalid model endpoint");
@@ -766,6 +1124,129 @@ describe("SettingsPage auto-save", () => {
     wrapper.unmount();
   });
 
+  it("keeps unconfigured providers in category filters even without available models", async () => {
+    const providers: RuntimeProvider[] = [
+      { id: "ready", name: "Ready", modelTypes: ["classifier"], authTypes: ["api_key"], status: { type: "api_key" } },
+      { id: "pending", name: "Pending", modelTypes: ["image", "classifier"], authTypes: ["api_key"] },
+      { id: "chat-only", name: "Chat only", modelTypes: ["chat"], authTypes: ["api_key"] },
+    ];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action: string }).action;
+      if (action === "getModels") return [{ provider: "ready", id: "judge", type: "classifier" }];
+      if (action === "getProviders") return providers;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      await wrapper.get('[data-model-type-filter="classifier"]').trigger("click");
+      expect(wrapper.get('[data-model-type-filter="classifier"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="all"] span').text()).toBe("2");
+      expect(wrapper.get('[data-provider-filter="configured"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("1");
+      await wrapper.get('[data-provider-filter="other"]').trigger("click");
+      expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["pending"]);
+      expect(wrapper.find('[data-provider="pending"] .provider-model-toggle').exists()).toBe(false);
+      await wrapper.get('[data-provider-configure="pending"]').trigger("click");
+      expect(wrapper.find('[data-provider-api-key="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-type-filter="image"]').trigger("click");
+      expect(wrapper.get('[data-model-type-filter="image"] span').text()).toBe("0");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("1");
+      expect(wrapper.find('[data-provider="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-search]').setValue("Pending");
+      expect(wrapper.find('[data-provider="pending"]').exists()).toBe(true);
+      await wrapper.get('[data-model-search]').setValue("missing");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(0);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("groups model types and keeps default, cycling and thinking settings chat-only", async () => {
+    const catalog: RuntimeModel[] = [
+      { provider: "mixed", id: "shared", name: "Chat model" },
+      { provider: "mixed", id: "shared", name: "Painter", type: "image" },
+      { provider: "mixed", id: "judge", name: "Classifier", type: "classifier" },
+      { provider: "chat-only", id: "other", type: "chat" },
+    ];
+    const providers: RuntimeProvider[] = ["mixed", "chat-only"].map(id => ({
+      id, name: id, authTypes: ["api_key"], status: { type: "api_key" },
+    }));
+    const persisted: SettingsBundle = structuredClone(settings);
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "settings.update") {
+        for (const [key, value] of Object.entries((payload as UpdatePayload).patch ?? {})) {
+          if (value === null) delete persisted.piGlobal[key];
+          else persisted.piGlobal[key] = value;
+        }
+        return structuredClone(persisted);
+      }
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action: string }).action;
+      if (action === "getModels") return catalog;
+      if (action === "getProviders") return providers;
+      return [];
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
+    const previousLocale = i18n.global.locale.value;
+    try {
+      await flushPromises();
+      expect(desktop.invoke).toHaveBeenCalledWith("agent.control", { action: "getModels", allTypes: true });
+      expect(useSessionStore().models.map(model => model.id)).toEqual(["shared", "other"]);
+      expect(wrapper.get('[data-model-type-filter="chat"]').text()).toContain("2");
+      expect(wrapper.get('[data-model-type-filter="image"]').text()).toContain("1");
+      expect(wrapper.get('[data-model-type-filter="classifier"]').text()).toContain("1");
+      await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
+      expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["chat", "image", "classifier"]);
+      const image = wrapper.get('[data-model-group="image"] [data-model="mixed/shared"]');
+      const chat = wrapper.get('[data-model-group="chat"] [data-model="mixed/shared"]');
+      await image.get(".model-select").trigger("click");
+      expect(image.get(".model-select").attributes("aria-pressed")).toBe("true");
+      expect(chat.get(".model-select").attributes("aria-pressed")).toBe("false");
+      expect(image.find(".model-cycle").exists()).toBe(false);
+      expect(wrapper.find('[data-model-action="default"]').exists()).toBe(false);
+      expect(wrapper.find('[data-setting-path="modelThinkingLevels"]').exists()).toBe(false);
+      expect(wrapper.get(".model-actions").text()).toContain("+codemode");
+      await chat.get(".model-select").trigger("click");
+      expect(wrapper.find('[data-model-action="default"]').exists()).toBe(true);
+      expect(wrapper.find('[data-setting-path="modelThinkingLevels"]').exists()).toBe(true);
+      await chat.get(".model-cycle input").setValue(false);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch?.enabledModels).toEqual(["chat-only/other"]);
+      await chat.get(".model-cycle input").setValue(true);
+      await flushPromises();
+      expect(updateCalls().at(-1)?.patch?.enabledModels).toBeNull();
+      const imageFilter = wrapper.get('[data-model-type-filter="image"]');
+      (imageFilter.element as HTMLButtonElement).focus();
+      await imageFilter.trigger("click");
+      expect(document.activeElement).toBe(imageFilter.element);
+      expect(wrapper.find(".model-inspector").exists()).toBe(false);
+      expect(wrapper.findAll("[data-provider]").map(provider => provider.attributes("data-provider"))).toEqual(["mixed"]);
+      expect(wrapper.get('[data-provider-filter="all"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="configured"] span').text()).toBe("1");
+      expect(wrapper.get('[data-provider-filter="other"] span').text()).toBe("0");
+      await wrapper.get('[data-provider="mixed"] .provider-model-toggle').trigger("click");
+      expect(wrapper.findAll("[data-model-group]").map(group => group.attributes("data-model-group"))).toEqual(["image"]);
+      await wrapper.get("[data-model-search]").setValue("judge");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(0);
+      await wrapper.get(".model-empty button").trigger("click");
+      expect(wrapper.get('[data-model-type-filter="all"]').attributes("aria-pressed")).toBe("true");
+      expect(wrapper.findAll("[data-provider]")).toHaveLength(2);
+      i18n.global.locale.value = "zh-CN";
+      await flushPromises();
+      expect(wrapper.get('[data-model-type-filter="image"]').text()).toContain("图像生成");
+      expect(wrapper.get('[data-model-type-filter="classifier"]').text()).toContain("分类器");
+    } finally {
+      i18n.global.locale.value = previousLocale;
+      wrapper.unmount();
+    }
+  });
+
   it("forces a catalog refresh only on click and updates the composer after it completes", async () => {
     let finishRefresh!: () => void;
     const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
@@ -801,7 +1282,7 @@ describe("SettingsPage auto-save", () => {
     await flushPromises();
     expect(vi.mocked(desktop.invoke).mock.calls.slice(1)).toEqual([
       ["agent.control", { action: "getCustomModels" }],
-      ["agent.control", { action: "getModels" }], ["agent.control", { action: "getProviders" }],
+      ["agent.control", { action: "getModels", allTypes: true }], ["agent.control", { action: "getProviders" }],
     ]);
     expect(useSessionStore().models.map(model => model.id)).toContain("new-model");
     expect(layout.notice?.message).toContain("Model catalogs refreshed");
@@ -846,6 +1327,40 @@ describe("SettingsPage auto-save", () => {
     // reopen, or manual catalog refresh.
     expect(store.models.map((model) => model.id)).toEqual(["existing-model", "new-model"]);
     wrapper.unmount();
+  });
+
+  it.each(["api_key", "oauth"] as const)("keeps a visible retry warning after a saved %s credential cannot refresh its catalog", async type => {
+    const providers: RuntimeProvider[] = [{ id: "openrouter", name: "OpenRouter", authTypes: [type] }];
+    const available: RuntimeModel[] = [{ provider: "openrouter", id: "cached-model" }];
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route !== "agent.control") return settings;
+      const action = (payload as { action?: string }).action;
+      if (action === "getModels") return available;
+      if (action === "getProviders") return providers;
+      if (action === "loginApiKey" || action === "loginOAuth") {
+        providers[0].status = { type };
+        return { ok: true, catalogError: "Network unavailable" };
+      }
+      return {};
+    });
+    const pinia = createPinia(); setActivePinia(pinia);
+    const layout = useLayoutStore(); layout.hydrate(settings); layout.settingsCategory = "models";
+    const wrapper = mount(SettingsPage, { global: { plugins: [pinia, i18n] } });
+    try {
+      await flushPromises();
+      await wrapper.get('[data-provider-configure="openrouter"]').trigger("click");
+      if (type === "api_key") {
+        await wrapper.get('[data-provider-api-key="openrouter"]').setValue("test-key");
+        await wrapper.get("form.provider-auth").trigger("submit");
+      } else await wrapper.get('[data-provider-oauth="openrouter"][data-oauth-method="browser"]').trigger("click");
+      await flushPromises();
+      expect(layout.notice?.level).toBe("warning");
+      expect(layout.notice?.message).toContain("Credentials saved");
+      expect(layout.notice?.message).toContain("Refresh models");
+      expect(layout.notice?.message).toContain("Network unavailable");
+      expect(wrapper.find("form.provider-auth").exists()).toBe(false);
+      expect(useSessionStore().models.map(model => model.id)).toEqual(["cached-model"]);
+    } finally { wrapper.unmount(); }
   });
 
   it("re-points the settings selection when logout removes the selected model", async () => {

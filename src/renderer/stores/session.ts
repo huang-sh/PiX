@@ -5,6 +5,9 @@ import type {
   BranchMessage,
   ProjectGroup,
   ProjectInfo,
+  NodePromptOverride,
+  PromptOverrideInput,
+  SystemPromptPreview,
   RuntimeCommand,
   RuntimeModel,
   PromptImage,
@@ -16,6 +19,7 @@ import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
 import { entryAnchorForNode, deliversPendingTurn, isSessionRunning } from "../../shared/session";
 import { desktop } from "../api";
+import type { ComposerDraft } from "../components/PromptComposer.vue";
 import { i18n } from "../i18n";
 import { track, trackEvent } from "../experimental/history";
 import { useLayoutStore } from "./layout";
@@ -56,9 +60,15 @@ function nodeForId(current: SessionSnapshot | undefined, id: string | null) {
 }
 
 interface PendingPrompt {
+  projectId: string;
+  sessionPath: string;
+  requestId?: string;
   message: BranchMessage;
   knownEntryIds: string[];
   targetNodeId: string | null;
+  columnId?: string;
+  columnDraft?: ComposerDraft;
+  resolvedNodeId?: string;
   model?: RuntimeModel | null;
   thinkingLevel?: string;
 }
@@ -69,7 +79,9 @@ let settingsReloadTimer: ReturnType<typeof setTimeout> | undefined;
 export const useSessionStore = defineStore("session", {
   state: () => ({
     loading: true,
+    creation: undefined as { request: number; status: "pending" | "ready" | "failed"; path?: string; error?: string } | undefined,
     viewRequest: 0,
+    promptPreviewRevision: 0,
     sessions: [] as SessionSummary[],
     projects: [] as ProjectGroup[],
     activeProjectId: "",
@@ -92,15 +104,24 @@ export const useSessionStore = defineStore("session", {
     models: [] as RuntimeModel[],
     activity: undefined as AgentActivity | undefined,
     branchActivities: {} as Record<string, { runId: string; activity?: AgentActivity }>,
-    pendingPrompt: undefined as PendingPrompt | undefined,
+    pendingPrompts: {} as Record<string, PendingPrompt>,
     deletingNode: false,
   }),
   getters: {
+    currentPendingPrompts(state): PendingPrompt[] {
+      return Object.values(state.pendingPrompts).filter(pending =>
+        pending.projectId === state.activeProjectId && pending.sessionPath === state.current?.session.path);
+    },
+    // Navigation defaults follow the latest send; cards and messages use the full collection.
+    pendingPrompt(): PendingPrompt | undefined {
+      return this.currentPendingPrompts.at(-1);
+    },
+    creating: state => state.creation?.status === "pending",
     deleteBlockedReason(state): string | undefined {
       const current = state.current;
       if (!current?.graph || !current.runtime.available) return "graph.blockedReadonly";
       if (state.deletingNode) return "graph.deletingNode";
-      if (state.pendingPrompt || current.graph.runs.some(run => run.status === "running")
+      if (this.currentPendingPrompts.length || current.graph.runs.some(run => run.status === "running")
         || current.runtime.isStreaming || current.runtime.isCompacting || current.runtime.isRetrying
         || current.runtime.pendingMessageCount) return "graph.deleteBlockedRunning";
       return undefined;
@@ -121,10 +142,13 @@ export const useSessionStore = defineStore("session", {
           pinned: pinned.has(session.path) || undefined,
           archived: archived.has(session.path) || undefined,
         }));
-      // Pinned sessions top their project group; the sort is stable, so
-      // recency order survives inside each rank.
+      // Pinned sessions top their project group; last-modified recency orders
+      // the rest, whatever order the list's source (SDK, remote host, history
+      // snapshot) handed over.
       const ranked = (sessions: SessionSummary[]) =>
-        [...sessions].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+        [...sessions].sort((a, b) =>
+          Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
+          || b.modified.localeCompare(a.modified));
       return state.projects
         .map((record) => {
           const projectMatch = !query || `${record.project.name} ${record.project.path} ${
@@ -180,6 +204,8 @@ export const useSessionStore = defineStore("session", {
     ) {
       request ??= ++this.viewRequest;
       if (request !== this.viewRequest) return;
+      const creation = project && this.activeProjectId === projectId(project)
+        && (this.creating || this.creation?.status === "failed") ? this.creation : undefined;
       this.adoptMarks(projects);
       this.projects = projects;
       this.activeProjectId = project ? projectId(project) : "";
@@ -188,8 +214,8 @@ export const useSessionStore = defineStore("session", {
       this.highlightedNode = null;
       this.activity = undefined;
       this.branchActivities = {};
-      this.pendingPrompt = undefined;
       this.current = undefined;
+      this.creation = creation;
       this.commands = [];
       this.commandRequest++;
       this.syncProject();
@@ -222,6 +248,16 @@ export const useSessionStore = defineStore("session", {
       const previousGraph = this.current?.graph;
       if (previousGraph && snapshot.graph && previousGraph.id === snapshot.graph.id && previousGraph.epoch === snapshot.graph.epoch && previousGraph.revision > snapshot.graph.revision) return;
       const graphChanged = this.current?.session.path !== snapshot.session.path;
+      // Queued input creates another turn in the same run. Follow that run only
+      // while viewing its live node; selecting history must keep its position.
+      if (!graphChanged && previousGraph?.epoch === snapshot.graph?.epoch) {
+        for (const before of previousGraph?.runs ?? []) {
+          const after = snapshot.graph?.runs.find(run => run.branchId === before.branchId && run.runId === before.runId);
+          if (before.status !== "running" || !before.nodeId || !after?.nodeId || before.nodeId === after.nodeId) continue;
+          if (this.focusedNode === before.nodeId) this.focusedNode = after.nodeId;
+          useLayoutStore().advanceChatColumn(before.nodeId, after.nodeId);
+        }
+      }
       if (!graphChanged && this.focusedNode && previousProjection?.nodes.some(node => node.id === this.focusedNode)
         && !snapshot.projection.nodes.some(node => node.id === this.focusedNode)) {
         const previous = new Map(previousProjection.nodes.map(node => [node.id, node]));
@@ -234,7 +270,6 @@ export const useSessionStore = defineStore("session", {
         this.branchActivities = {};
         messageCaches.delete(this);
       } else if (previousProjection) reuseGraphProjection(previousProjection, snapshot.projection);
-      const pending = this.pendingPrompt;
       if (this.current?.session.path !== snapshot.session.path) this.userThinking = undefined;
       // Session records/projections are immutable snapshots, replaced together.
       // Deep proxies on every historical entry make large-tree navigation costly.
@@ -247,8 +282,24 @@ export const useSessionStore = defineStore("session", {
           ...this.sessions.filter((item) => item.path !== snapshot.session.path),
         ];
       this.syncProject();
-      if (pending && deliversPendingTurn(snapshot.projection.messages, pending.message.text, pending.knownEntryIds))
-        this.pendingPrompt = undefined;
+      for (const pending of this.currentPendingPrompts) {
+        const acceptedRun = pending.requestId && snapshot.graph?.runs.find(run => run.requestId === pending.requestId);
+        if (acceptedRun && acceptedRun.nodeId) pending.resolvedNodeId = acceptedRun.nodeId;
+        if (acceptedRun && this.focusedNode === pending.message.entryId)
+          this.focusedNode = acceptedRun.nodeId ?? (acceptedRun.status === "running" ? `pending:${acceptedRun.runId}` : pending.targetNodeId);
+        // A pending run changes the column's content, not its identity. Keep
+        // the parent pinned until admission succeeds or a real turn exists.
+        if (acceptedRun && acceptedRun.nodeId && pending.columnId) {
+          const next = acceptedRun.nodeId;
+          const layout = useLayoutStore();
+          if (layout.chatColumns.includes(pending.columnId)
+            && layout.chatColumnComposers[pending.columnId]?.draft === pending.columnDraft) {
+            layout.advanceChatColumn(pending.columnId, next);
+            pending.columnId = next;
+          }
+        }
+        if (pending.requestId ? Boolean(acceptedRun && acceptedRun.nodeId) : deliversPendingTurn(snapshot.projection.messages, pending.message.text, pending.knownEntryIds)) delete this.pendingPrompts[pending.message.entryId];
+      }
       if (snapshot.graph) {
         const run = snapshot.graph.runs.find(r => this.focusedNode === `pending:${r.runId}`);
         if (run?.nodeId) this.focusedNode = run.nodeId;
@@ -303,14 +354,21 @@ export const useSessionStore = defineStore("session", {
     async fetchCommands(): Promise<RuntimeCommand[]> {
       return desktop.invoke<RuntimeCommand[]>("agent.control", { action: "commands" }).catch(() => []);
     },
-    // Single source of truth for the model catalog: every path that can change
+    promptOverrideAt(nodeId: string | null): NodePromptOverride | null {
+      const projection = this.current?.projection;
+      if (!nodeId || nodeId === projection?.activeNodeId)
+        return projection?.activePromptOverride ?? null;
+      return projection?.nodes.find(node => node.id === nodeId)?.promptOverride ?? null;
+    },
+    // Refreshes the shared chat catalog: every path that can change
     // it (bootstrap, settings open, login/logout, catalog refresh, session
     // open) reloads through here so pickers never serve a stale list. The
     // catalog is global — project-less fetch is fine, the runtime serves model
     // actions without an open session.
-    async loadModels(): Promise<RuntimeModel[]> {
-      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
-      this.models = models;
+    async loadModels(allTypes = false): Promise<RuntimeModel[]> {
+      const models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels", ...(allTypes ? { allTypes: true } : {}) });
+      // Settings can inspect every type; prompt pickers only accept chat models.
+      this.models = models.filter(model => !model.type || model.type === "chat");
       return models;
     },
     // A deliberate pick in a model menu is what "last set" means: it becomes the
@@ -328,9 +386,18 @@ export const useSessionStore = defineStore("session", {
         useLayoutStore().showNotice(error instanceof Error ? error.message : String(error), "error");
       }
     },
+    // Errors surface in the settings section: a stale host or a rejected
+    // action must never look like an empty prompt.
+    async promptPreview(): Promise<SystemPromptPreview> {
+      const result = await desktop.invoke<SystemPromptPreview>("agent.control", { action: "systemPromptPreview" });
+      if (typeof result?.text !== "string" || typeof result.preamble !== "string" || !Array.isArray(result.sections))
+        throw new Error("Invalid system prompt preview; reconnect the host to update it");
+      return result;
+    },
     async open(path: string, request?: number) {
       request ??= ++this.viewRequest;
       if (request !== this.viewRequest) return;
+      this.creation = undefined;
       this.loading = true;
       try {
         const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
@@ -367,9 +434,18 @@ export const useSessionStore = defineStore("session", {
       const abortLabel = this.abortLabel(input);
       const sendLabel = this.sendPromptLabel(input);
       const result = await desktop.invoke<T>("agent.control", input);
-      if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path
-        && result && typeof result === "object" && "projection" in result)
-        this.applySnapshot(result as unknown as SessionSnapshot);
+      if (input.action === "reload" && project === this.activeProjectId
+        && path === this.current?.session.path && request === this.viewRequest)
+        this.promptPreviewRevision++;
+      if (result && typeof result === "object" && "projection" in result) {
+        const snapshot = result as unknown as SessionSnapshot;
+        const graph = this.current?.graph;
+        // Returning to the same runtime still needs its admission reply. A new
+        // graph epoch or a different session must never adopt that old result.
+        const sameGraph = input.action === "promptAt" && graph && snapshot.graph?.id === graph.id && snapshot.graph.epoch === graph.epoch;
+        if (project === this.activeProjectId && path === this.current?.session.path && (request === this.viewRequest || sameGraph))
+          this.applySnapshot(snapshot);
+      }
       if (abortLabel) trackEvent({ kind: "abortRun", label: abortLabel });
       if (sendLabel) trackEvent({ kind: "sendPrompt", label: sendLabel });
       return result;
@@ -406,11 +482,11 @@ export const useSessionStore = defineStore("session", {
         ? i18n.global.t("history.abortRun", { name: truncate(node.title) })
         : i18n.global.t("history.abort");
     },
-    // A submitted turn is irreversible: it seals the journal as a lock. Applies
-    // to both the plain prompt action and a pinned-column promptAt.
+    // Submitted input can start model/tool work, including input queued behind
+    // the current turn, so sending seals the history journal as a lock.
     sendPromptLabel(input: Record<string, unknown>): string | null {
       const action = String(input.action);
-      if (action !== "prompt" && action !== "promptAt") return null;
+      if (!["prompt", "promptAt", "steer", "followUp"].includes(action)) return null;
       const text = typeof input.text === "string" && input.text.trim() ? input.text : "";
       return i18n.global.t("history.sendPrompt", { text: truncate(text) || "…" });
     },
@@ -425,15 +501,17 @@ export const useSessionStore = defineStore("session", {
       const node = current.projection.nodes.find(item => item.id === id);
       const run = current.graph?.runs.find(run => `pending:${run.runId}` === id && run.pending);
       const pending = run?.pending;
-      const optimistic = this.pendingPrompt?.targetNodeId === id ? this.pendingPrompt.message : undefined;
-      const parent = pending ? current.projection.nodes.find(item => item.id === pending.parentNodeId) : node;
-      const history = cached(current.entries, parent?.leafEntryId ?? (pending ? null : current.projection.leafId),
-        Math.max(0, limit - (pending || optimistic ? 1 : 0)));
+      const optimistic = this.currentPendingPrompts.filter(pending => pending.targetNodeId === id || pending.message.entryId === id);
+      const optimisticGraph = optimistic.find(pending => pending.requestId);
+      const parent = pending ? current.projection.nodes.find(item => item.id === pending.parentNodeId)
+        : optimisticGraph ? current.projection.nodes.find(item => item.id === optimisticGraph.targetNodeId) : node;
+      const history = cached(current.entries, parent?.leafEntryId ?? (pending || optimisticGraph ? null : current.projection.leafId),
+        Math.max(0, limit - (pending ? 1 : optimistic.length)));
       if (pending) return { ...history, messages: [...history.messages, {
         entryId: `pending:${run!.runId}`, turnId: `pending:${run!.runId}`, role: "user" as const,
         text: pending.text, images: pending.images, timestamp: "",
       }] };
-      return optimistic ? { ...history, messages: [...history.messages, optimistic] } : history;
+      return optimistic.length ? { ...history, messages: [...history.messages, ...optimistic.map(pending => pending.message)] } : history;
     },
     async selectNode(id: string | null) {
       this.focusedNode = id;
@@ -479,8 +557,9 @@ export const useSessionStore = defineStore("session", {
       const target = targetNodeId === undefined
         ? this.current?.projection.activeNodeId ?? null
         : targetNodeId;
-      const id = `pending:${Date.now()}`;
+      const id = `pending:${crypto.randomUUID()}`;
       const pending: PendingPrompt = {
+        projectId: project, sessionPath: path ?? "",
         message: {
           entryId: id,
           turnId: id,
@@ -494,31 +573,67 @@ export const useSessionStore = defineStore("session", {
         model,
         thinkingLevel,
       };
-      this.pendingPrompt = pending;
+      this.pendingPrompts[id] = pending;
       this.focusedNode = null;
       try {
         await this.control({ action: "prompt", text: value, ...(images?.length ? { images } : {}) });
         if (request === this.viewRequest && project === this.activeProjectId && path === this.current?.session.path)
           this.focusedNode = this.current?.projection.activeNodeId ?? this.focusedNode;
       } finally {
-        if (this.pendingPrompt?.message.entryId === id) this.pendingPrompt = undefined;
+        delete this.pendingPrompts[id];
       }
     },
     // follow: false serves pinned chat columns: the submission starts on its
     // branch, but the primary column must keep showing the current selection.
-    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean }) {
+    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null }) {
       const current = this.current;
       const project = this.activeProjectId, request = this.viewRequest;
       if (!current || (!text.trim() && !images?.length)) return;
+      let promptOverride: PromptOverrideInput | undefined;
+      if (options?.promptOverride === null) promptOverride = { off: true };
+      else if (options?.promptOverride) {
+        const { name, mode } = options.promptOverride;
+        const persona = useLayoutStore().settings?.app.personas?.find(item => item.name === name);
+        if (!persona) throw new Error(`Unknown persona: ${name}`);
+        promptOverride = { name, mode, text: persona.text };
+      }
       if (current.graph) {
-        const requestId = crypto.randomUUID();
-        const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
-          provider: model?.provider, modelId: model?.id, thinkingLevel, images });
-        if (request !== this.viewRequest || project !== this.activeProjectId || current.session.path !== this.current?.session.path) return;
-        const run = result.graph?.runs.find(r => r.requestId === requestId);
-        const focus = run?.nodeId ?? (run?.status === "running" ? `pending:${run.runId}` : nodeId);
-        if (run && options?.follow !== false) this.focusedNode = focus;
-        return focus ?? undefined;
+        const requestId = options?.requestId ?? crypto.randomUUID();
+        const pending: PendingPrompt = {
+          projectId: project, sessionPath: current.session.path,
+          requestId, targetNodeId: nodeId, model, thinkingLevel,
+          columnId: options?.columnId,
+          columnDraft: options?.columnId ? useLayoutStore().chatColumnComposers[options.columnId]?.draft : undefined,
+          message: { entryId: `pending:${requestId}`, turnId: `pending:${requestId}`, role: "user",
+            text, images, timestamp: new Date().toISOString() },
+          knownEntryIds: current.entries.map(entry => entry.id),
+        };
+        this.pendingPrompts[pending.message.entryId] = pending;
+        if (options?.follow !== false) this.focusedNode = pending.message.entryId;
+        try {
+          const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
+            provider: model?.provider, modelId: model?.id, thinkingLevel, images,
+            ...(promptOverride ? { promptOverride } : {}) });
+          if (project !== this.activeProjectId || current.session.path !== this.current?.session.path
+            || current.graph.epoch !== this.current?.graph?.epoch) return;
+          // Progress broadcasts may already be newer than this remote reply.
+          const run = this.current?.graph?.runs.find(r => r.requestId === requestId)
+            ?? result.graph?.runs.find(r => r.requestId === requestId);
+          const focus = pending.resolvedNodeId ?? run?.nodeId ?? (run?.status === "running" ? `pending:${run.runId}` : nodeId);
+          if (focus && pending.columnId) {
+            const layout = useLayoutStore();
+            if (layout.chatColumnComposers[pending.columnId]?.draft === pending.columnDraft)
+              layout.advanceChatColumn(pending.columnId, focus);
+          }
+          if (request === this.viewRequest && run && options?.follow !== false
+            && (this.focusedNode === pending.message.entryId || this.focusedNode === `pending:${run.runId}`))
+            this.focusedNode = focus;
+          return focus ?? undefined;
+        } finally {
+          delete this.pendingPrompts[pending.message.entryId];
+          if (project === this.activeProjectId && current.session.path === this.current?.session.path
+            && this.focusedNode === pending.message.entryId) this.focusedNode = nodeId;
+        }
       }
       const node = nodeId ? current.projection.nodes.find((item) => item.id === nodeId) : undefined;
       if (nodeId && !node) return;
@@ -533,10 +648,42 @@ export const useSessionStore = defineStore("session", {
         await this.control({ action: "setModel", provider: model.provider, modelId: model.id });
       if (thinkingLevel && this.current?.runtime.thinkingLevel !== thinkingLevel)
         await this.control({ action: "setThinking", level: thinkingLevel });
+      if (promptOverride) await this.control({ action: "setPromptOverride", ...promptOverride });
       await this.prompt(text, nodeId, model, thinkingLevel, images);
       return this.current?.projection.activeNodeId ?? undefined;
     },
     async create() {
+      if (this.creating) return;
+      if (useWorkspaceStore().project && this.creation?.status !== "failed") {
+        const project = this.activeProjectId;
+        const current = this.current;
+        const candidates = current
+          ? [this.sessions.find(item => item.path === current.session.path) ?? current.session,
+            ...this.sessions.filter(item => item.path !== current.session.path)]
+          : this.sessions;
+        const isEmpty = (item: SessionSummary) => item.messageCount === 0 && !item.running
+          && !this.marks.archivedSessions.includes(item.path)
+          && !Object.values(this.pendingPrompts).some(pending =>
+            pending.projectId === project && pending.sessionPath === item.path);
+        const canReuse = (snapshot: SessionSnapshot) => isEmpty(snapshot.session)
+          // The summary counts the main file; entries also include graph branches.
+          && !snapshot.entries.some(entry => entry.type === "message")
+          && snapshot.runtime.available && !isSessionRunning(snapshot)
+          && !snapshot.graph?.storageError && !snapshot.graph?.recoveredInputs?.length;
+        for (const candidate of candidates) {
+          if (!isEmpty(candidate)) continue;
+          if (candidate.path === this.current?.session.path && !this.loading) {
+            // Keeping the current view also preserves its unsent composer draft.
+            if (canReuse(this.current)) return;
+            continue;
+          }
+          const request = ++this.viewRequest;
+          await this.open(candidate.path, request);
+          if (project !== this.activeProjectId || request !== this.viewRequest) return;
+          // Cached rows can become used, busy or read-only before they open.
+          if (this.current && canReuse(this.current)) return;
+        }
+      }
       const snapshot = await this.applyCreate();
       if (!snapshot) return;
       const createdPath = snapshot.session.path;
@@ -561,6 +708,7 @@ export const useSessionStore = defineStore("session", {
       });
     },
     async applyCreate(): Promise<SessionSnapshot | null> {
+      if (this.creating) return null;
       if (!useWorkspaceStore().project) {
         useLayoutStore().showNotice(
           i18n.global.t("notice.openProjectFirst"),
@@ -570,15 +718,31 @@ export const useSessionStore = defineStore("session", {
       }
       const request = ++this.viewRequest;
       const project = this.activeProjectId;
-      const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
-      if (request !== this.viewRequest || project !== this.activeProjectId) return null;
-      // The reply is authoritative for the new file, and the broadcast event may
-      // still be in flight: without adopting it here the list and slash commands
-      // would keep serving the session that was just replaced.
-      if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
-      this.focusedNode = this.current?.projection.activeNodeId ?? null;
-      await Promise.all([this.refresh(), this.loadCommands()]);
-      return snapshot;
+      this.loading = true;
+      this.creation = { request, status: "pending" };
+      try {
+        const snapshot = await this.control<SessionSnapshot>({ action: "newSession" });
+        // Only an actual session/project selection releases this creation.
+        // A failed navigation may advance viewRequest while leaving this view intact.
+        if (this.creation?.request !== request || project !== this.activeProjectId) return null;
+        // The reply is authoritative for the new file, and the broadcast event may
+        // still be in flight: without adopting it here the list and slash commands
+        // would keep serving the session that was just replaced.
+        if (snapshot.session.path !== this.current?.session.path) this.applySnapshot(snapshot);
+        this.creation = { request, status: "ready", path: snapshot.session.path };
+        this.focusedNode = this.current?.projection.activeNodeId ?? null;
+        await Promise.all([this.refresh(), this.loadCommands()]);
+        return snapshot;
+      } catch (error) {
+        if (this.creation?.request === request && this.creating)
+          this.creation = { request, status: "failed", error: error instanceof Error ? error.message : String(error) };
+        throw error;
+      } finally {
+        // A failed project switch can supersede the view without replacing it.
+        // Only this creation owns its pending flag.
+        if (this.creation?.request === request && this.creating) this.creation = undefined;
+        if (request === this.viewRequest) this.loading = false;
+      }
     },
     async importSession() {
       const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(
@@ -619,12 +783,14 @@ export const useSessionStore = defineStore("session", {
     },
     applyDeletion(path: string, sessions: SessionSummary[]) {
       this.sessions = sessions;
+      for (const pending of Object.values(this.pendingPrompts))
+        if (pending.projectId === this.activeProjectId && pending.sessionPath === path)
+          delete this.pendingPrompts[pending.message.entryId];
       if (this.current?.session.path === path) {
         this.current = undefined;
         this.focusedNode = null;
         this.highlightedNode = null;
         this.activity = undefined;
-        this.pendingPrompt = undefined;
         this.userThinking = undefined;
         this.commands = [];
       }

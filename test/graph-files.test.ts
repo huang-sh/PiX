@@ -1,10 +1,13 @@
 import test from "node:test";
+import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, type BranchRecord, type SessionData } from "../src/main/graph-files.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE } from "../src/shared/types.js";
 
 const header = { type: "session", version: 3, id: "test", cwd: "/test", timestamp: "2026-01-01" };
 const user = (id: string, parentId: string | null) => ({ type: "message", id, parentId, timestamp: "2026-01-01", message: { role: "user", content: id, timestamp: 1 } });
@@ -51,6 +54,31 @@ test("permanent deletion prunes branch sources, checkpoints, requests and backup
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("deleting an image turn removes its parent display marker and sanitizes the original-input receipt", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-delete-image-display-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  const image = { type: "image", mimeType: "image/png", data: "b3JpZ2luYWw=" };
+  const normalizedImage = { ...image, data: "cmVzaXplZA==" };
+  try {
+    graph.acquire();
+    durableWrite(graph.main, encodeSession({ header, entries: [
+      { type: "custom", id: "display", parentId: null, timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图", requestId: "image" } },
+      { type: "message", id: "image", parentId: "display", timestamp: "2026-01-01",
+        message: { role: "user", content: [{ type: "text", text: "model-only coordinate hint" }, normalizedImage], timestamp: 1 } },
+      { type: "message", id: "assistant", parentId: "image", timestamp: "2026-01-01",
+        message: fauxAssistantMessage("done") },
+    ] }));
+    durableWrite(join(graph.dir, "request-image.json"), JSON.stringify({ requestId: "image", state: "prepared",
+      nodeId: null, text: "检查截图", images: [image] }));
+
+    assert.equal(graph.deleteNode("image", "assistant"), null);
+    assert.deepEqual(readStrict(graph.main).entries, []);
+    assert.deepEqual(JSON.parse(readFileSync(join(graph.dir, "request-image.json"), "utf8")),
+      { requestId: "image", state: "cancelled" });
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("an interrupted deletion finishes on load and rejects paths outside its graph", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-delete-recovery-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));
@@ -78,7 +106,8 @@ test("deleting a main-tree fork removes dangling metadata while preserving the s
     const data: SessionData = { header, entries: [...initial.entries, user("remove", "root"),
       { type: "label", id: "label", parentId: "root", timestamp: "now", targetId: "remove", label: "deleted label" },
       { type: "branch_summary", id: "summary", parentId: "label", timestamp: "now", fromId: "remove", summary: "deleted summary" },
-      user("keep", "summary")] };
+      { type: "context_edit", id: "edit", parentId: "summary", timestamp: "now", targetId: "remove", replacement: { content: "deleted replacement" } },
+      user("keep", "edit")] };
     durableWrite(graph.main, encodeSession(data));
     graph.deleteNode("remove", "keep");
     const kept = parseStrict(readFileSync(graph.main, "utf8"));
@@ -138,11 +167,46 @@ test("an origin that collapses two entries onto one id is refused instead of cor
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("strict validation rejects malformed lines, duplicates, orphans and broken compaction refs", () => {
+test("strict validation rejects malformed lines, duplicates, orphans and dangling references", () => {
   for (const raw of [encodeSession(initial) + "{broken\n", encodeSession({ header, entries: [user("x", "missing")] }),
     encodeSession({ header, entries: [user("root", null), user("root", null)] }),
-    encodeSession({ header, entries: [...initial.entries, { type: "compaction", id: "c", parentId: "root", timestamp: "now", firstKeptEntryId: "absent" }] })])
+    encodeSession({ header, entries: [...initial.entries, { type: "compaction", id: "c", parentId: "root", timestamp: "now", firstKeptEntryId: "absent" }] }),
+    encodeSession({ header, entries: [...initial.entries, { type: "context_edit", id: "edit", parentId: "root", timestamp: "now", targetId: "absent", replacement: null }] })])
     assert.throws(() => parseStrict(raw));
+});
+
+test("SDK usage and context edits survive branch persistence and export without changing raw history", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-context-edits-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const manager = SessionManager.inMemory(dir, undefined, [a.header, ...a.baseline] as any);
+    const question = manager.appendMessage({ role: "user", content: "original question", timestamp: 1 });
+    const answer = manager.appendMessage(fauxAssistantMessage("original answer"));
+    manager.appendContextEdit("root", { content: "branch root" });
+    manager.appendContextEdit(question, { content: "edited question" });
+    manager.appendContextEdit(answer, null);
+    const usage = manager.appendUsage("cache_warm", "faux", "test", fauxAssistantMessage("").usage);
+    const data = { header: a.header, entries: manager.getEntries().map(entry => ({ ...entry })) };
+    graph.create(a, data);
+    assert.deepEqual(graph.seal(a, data), data);
+    graph.records.clear(); graph.load();
+    assert.deepEqual(graph.recoveryMessages, []);
+    const exported = graph.candidate(initial);
+    const restored = SessionManager.inMemory(dir, undefined, [exported.header, ...exported.entries] as any);
+    restored.branch(`A:${usage.id}`);
+    assert.deepEqual(restored.buildSessionContext(), manager.buildSessionContext());
+    assert.ok(JSON.stringify(restored.buildSessionContext()).includes("edited question"));
+    assert.ok(!JSON.stringify(restored.buildSessionContext()).includes("original answer"));
+    assert.ok(encodeSession(exported).includes("original answer"));
+    restored.branch("root");
+    const mainMessage = restored.buildSessionContext().messages[0];
+    assert.equal(mainMessage?.role === "user" && mainMessage.content, "root", "branch edits stay off the main branch");
+    const compact = manager.appendCompaction("summary only", null, 100);
+    const compacted = { header: a.header, entries: manager.getEntries().map(entry => ({ ...entry })) };
+    assert.equal(parseStrict(encodeSession(compacted)).entries.at(-1)?.firstKeptEntryId, compact);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("persistence checks use Pi JSON semantics but still reject changed or missing data", () => {
@@ -170,6 +234,30 @@ test("persistence checks use Pi JSON semantics but still reject changed or missi
     assert.equal(readFileSync(graph.path("A"), "utf8"), encodeSession(memory));
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
+test("prompt display metadata survives branch export with its target canonicalized", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-prompt-display-export-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    durableWrite(graph.main, encodeSession(initial)); graph.acquire();
+    const a = record("A");
+    const data: SessionData = { header: a.header, entries: [...initial.entries,
+      { type: "custom", id: "display", parentId: "root", timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图" } },
+      user("image", "display"),
+      user("legacy-image", "image"),
+      { type: "custom", id: "legacy-display", parentId: "legacy-image", timestamp: "2026-01-01",
+        customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { targetId: "legacy-image", text: "旧版截图" } },
+    ] };
+    graph.create(a, data);
+    const exported = graph.candidate(initial);
+    const display = exported.entries.find(entry => entry.id === "A:display");
+    assert.equal(display?.parentId, "root");
+    assert.equal(exported.entries.find(entry => entry.id === "A:image")?.parentId, "A:display");
+    const legacyDisplay = exported.entries.find(entry => entry.id === "A:legacy-display");
+    assert.equal((legacyDisplay?.data as { targetId?: string })?.targetId, "A:legacy-image");
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("nested branches export in dependency order without modifying any source", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-archive-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));
@@ -284,11 +372,89 @@ test("tree ownership is exclusive and released sessions can reopen", () => {
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a foreign-host lock explains recovery, stays intact, and an independent copy can reopen after removing it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-lock-foreign-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    mkdirSync(graph.dir, { recursive: true });
+    durableWrite(graph.main, encodeSession(initial));
+    const file = join(graph.dir, "owner.json");
+    const host = `${hostname()}-other`;
+    const lock = JSON.stringify({ pid: process.pid, host });
+    writeFileSync(file, lock);
+    assert.throws(() => graph.acquire(), (error: Error) => {
+      assert.ok(error.message.includes(host));
+      assert.ok(error.message.includes(hostname()));
+      assert.ok(error.message.includes(file));
+      assert.match(error.message, /shared.*close.*owning computer/);
+      assert.match(error.message, /independent copy.*remove only.*copied lock file/);
+      return true;
+    });
+    assert.equal(readFileSync(file, "utf8"), lock);
+    rmSync(file);
+    graph.acquire();
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).host, hostname());
+    assert.deepEqual(readStrict(graph.main), initial);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a stale lock whose pid was recycled by an unrelated process is taken over", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-lock-recycled-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    // A live process that is not Pi: whatever sleeper the platform gives us.
+    const holder =
+      process.platform === "win32"
+        ? spawn("ping", ["-n", "30", "127.0.0.1"], { windowsHide: true })
+        : spawn("sh", ["-c", "sleep 30"]);
+    try {
+      mkdirSync(graph.dir, { recursive: true });
+      writeFileSync(join(graph.dir, "owner.json"), JSON.stringify({ pid: holder.pid, host: hostname() }));
+      // The recycled holder must not keep the session hostage.
+      graph.acquire();
+    } finally {
+      holder.kill();
+    }
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a corrupt or shapeless lock guards nothing and is replaced", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-lock-corrupt-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    mkdirSync(graph.dir, { recursive: true });
+    writeFileSync(join(graph.dir, "owner.json"), "{not json");
+    graph.acquire();
+    graph.release();
+    writeFileSync(join(graph.dir, "owner.json"), JSON.stringify({ host: hostname() }));
+    graph.acquire();
+    graph.release();
+    writeFileSync(join(graph.dir, "owner.json"), JSON.stringify({ pid: "not-a-pid", host: hostname() }));
+    graph.acquire();
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("export rejects unresolved descendants instead of silently omitting them", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-missing-parent-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));
   try {
     graph.acquire(); graph.create(record("B", "A", "A:missing"), initial);
     assert.throws(() => graph.candidate(initial), /Missing export/);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("deleting a later task retains bookmarks on surviving ancestors", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-label-prune-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire();
+    const data = { header: initial.header, entries: [user("root", null), user("later", "root"),
+      { type: "label", id: "bookmark", parentId: "later", timestamp: "2026-10-25", targetId: "root", label: "keep me" }] };
+    durableWrite(graph.main, encodeSession(data));
+    graph.deleteNode("later", "bookmark");
+    const kept = parseStrict(readFileSync(graph.main, "utf8"));
+    assert.equal(kept.entries.find(entry => entry.id === "bookmark")?.parentId, "root");
+    assert.equal(kept.entries.find(entry => entry.id === "bookmark")?.label, "keep me");
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
