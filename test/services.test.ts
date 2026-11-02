@@ -473,6 +473,28 @@ test("shell service executes in active project", async () => {
   assert.equal(r.exitCode, 0);
   assert.match(r.output, /pix-shell/);
 });
+for (const action of ["abort", "dispose"] as const)
+test(`shell ${action} stops child commands and closes their output pipes`, { timeout: 15000 }, async t => {
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  let id = "";
+  const shell = new ShellService(root, event => {
+    const payload = (event as { payload: { id: string; chunk: string } }).payload;
+    id = payload.id;
+    if (payload.chunk) started();
+  });
+  t.after(() => shell.dispose());
+  // Keep the shell alive after its child so shells cannot optimize it into exec.
+  const running = shell.run(process.platform === "win32"
+    ? "ping.exe -n 60 127.0.0.1; Write-Output finished"
+    : "sleep 60 & printf started; wait; printf finished");
+  await ready;
+  if (action === "abort") assert.equal(shell.abort(id), true);
+  else shell.dispose();
+  const result = await running;
+  assert.equal(result.cancelled, true);
+  assert.equal(shell.running.size, 0);
+});
 test("terminal service runs an interactive PTY", async () => {
   let output = "";
   let resolveOutput: (() => void) | undefined;

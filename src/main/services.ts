@@ -740,7 +740,7 @@ export class GitService {
 }
 export class ShellService {
   root: string | null;
-  running = new Map<string, any>();
+  running = new Map<string, { kill(): void }>();
   terminals = new Map<string, IPty>();
   terminalRevision = 0;
   /** Like a terminal close warning, this checks child processes, not shell input. */
@@ -840,8 +840,21 @@ export class ShellService {
         cwd: this.root ?? undefined,
         env: process.env,
         windowsHide: true,
+        detached: !win,
       });
-      this.running.set(id, child);
+      let cancelled = false;
+      this.running.set(id, { kill() {
+        cancelled = true;
+        if (!child.pid) return;
+        if (win) {
+          const result = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"],
+            { windowsHide: true, stdio: "ignore", timeout: 5000 });
+          if (result.status !== 0) child.kill();
+        } else {
+          try { process.kill(-child.pid, "SIGTERM"); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        }
+      } });
       let output = "",
         truncated = false;
       const add = (c: unknown) => {
@@ -860,7 +873,7 @@ export class ShellService {
           command,
           output,
           exitCode: code,
-          cancelled: signal !== null,
+          cancelled: cancelled || signal !== null,
           truncated,
         });
       });
@@ -869,12 +882,12 @@ export class ShellService {
   abort(id: string) {
     const p = this.running.get(id);
     if (!p) return false;
-    p.kill("SIGTERM");
+    p.kill();
     return true;
   }
   dispose() {
     this.closeTerminals();
-    for (const process of this.running.values()) process.kill("SIGTERM");
+    for (const process of this.running.values()) process.kill();
     this.running.clear();
   }
 }
