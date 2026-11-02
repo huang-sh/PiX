@@ -4,7 +4,7 @@
 // test/gui-test.mjs, so the asar layout, preload, IPC, and the node-pty
 // native binary are all exercised in their packaged form.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -300,17 +300,41 @@ try {
   console.log(JSON.stringify(result, null, 2));
 } finally {
   await cdp?.close();
+  // Shut down only this test profile, including its GUI-created terminal.
+  // SIGTERM alone would leave the desktop waiting on its quit confirmation.
+  const addressFile = join(testHome, ".pix", "run", "host.json");
+  let cleanupError;
+  try { if (existsSync(addressFile)) {
+    const address = JSON.parse(readFileSync(addressFile, "utf8"));
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/?token=${encodeURIComponent(address.token)}`);
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Test host cleanup timed out")), 10000);
+        const finish = error => { clearTimeout(timer); error ? reject(error) : resolve(); };
+        socket.addEventListener("error", () => finish(new Error("Test host cleanup failed")), { once: true });
+        socket.addEventListener("open", () => socket.send(JSON.stringify({
+          type: "request", id: "cleanup", method: "shutdown", force: true, quitClients: true,
+        })), { once: true });
+        socket.addEventListener("message", event => {
+          const reply = JSON.parse(String(event.data));
+          if (reply.type === "reply" && reply.id === "cleanup")
+            finish(reply.result?.stopped === true ? undefined : new Error(reply.error ?? "Test host refused cleanup"));
+        });
+      });
+    } finally { socket.close(); }
+  } } catch (error) { cleanupError = error; }
   if (process.platform === "win32" && child.pid)
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
       stdio: "ignore",
     });
-  else child.kill("SIGTERM");
   if (child.exitCode === null)
     await Promise.race([
       new Promise((resolve) => child.once("close", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 1_000)),
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
     ]);
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.unref();
+  if (cleanupError) throw cleanupError;
 }
