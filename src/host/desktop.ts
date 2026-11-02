@@ -7,6 +7,7 @@ import { connectLocalHost, localHostStatus, restartLocalHost, type HostClient } 
 import { debugLog, logFile } from "../main/debug-log.js";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { canvasCommand, type CanvasCommand } from "../shared/canvas.js";
 
 /** Packaged clients keep their existing identity; dev worktrees own separate views. */
 export function desktopClientId(userData: string, appPath: string, isPackaged: boolean) {
@@ -25,9 +26,11 @@ export class DesktopHostController {
   private connectionAbort = new AbortController();
   private connectionError?: string;
   private quitting = false;
+  private canvasRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   hostShutdownRequested = false;
   private constructor(private client: HostClient | undefined, path: string | null, private platform: Platform, private readonly clientId: string, private legacyClientId?: string) {
     this.settings = new SettingsService(path);
+    this.platform = { ...platform, canvas: command => this.requestCanvas(command) };
     if (client) this.bind(client);
   }
   /** Create the window independently; a blocked host is recovered inside it. */
@@ -35,7 +38,10 @@ export class DesktopHostController {
     return new DesktopHostController(undefined, path, platform, clientId, legacyClientId);
   }
   static async connect(path: string | null, platform: Platform, clientId: string = randomUUID(), legacyClientId?: string) {
-    return new DesktopHostController(await connectLocalHost(path, platform, true, clientId, true, legacyClientId), path, platform, clientId);
+    const desktop = new DesktopHostController(undefined, path, platform, clientId);
+    desktop.client = await connectLocalHost(path, desktop.platform, true, clientId, true, legacyClientId);
+    desktop.bind(desktop.client);
+    return desktop;
   }
   private bind(client: HostClient) {
     client.onEvent(event => {
@@ -49,6 +55,7 @@ export class DesktopHostController {
       this.emit(event);
     });
     client.onDisconnect(error => {
+      if (this.client === client) this.cancelCanvasRequests();
       if (this.disposed || this.quitting || this.client !== client) return;
       void this.releaseKeepAwake();
       const recovery = this.reconnect();
@@ -59,6 +66,25 @@ export class DesktopHostController {
         this.emit({ type: "host.connection", payload: { connected: false } });
       });
     });
+  }
+  private requestCanvas(input: CanvasCommand): Promise<unknown> {
+    if (this.disposed || this.quitting) return Promise.reject(new Error("The canvas window is closing"));
+    const command = canvasCommand(input), id = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.canvasRequests.delete(id);
+        reject(new Error("Canvas request timed out; inspect before retrying an operation"));
+      }, 300_000);
+      this.canvasRequests.set(id, {
+        resolve: value => { clearTimeout(timer); resolve(value); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      });
+      this.emit({ type: "canvas.request", payload: { id, command } });
+    });
+  }
+  private cancelCanvasRequests() {
+    for (const request of this.canvasRequests.values()) request.reject(new Error("The canvas window disconnected; inspect before retrying an operation"));
+    this.canvasRequests.clear();
   }
   private reconnect() {
     if (this.reconnecting) return this.reconnecting;
@@ -102,6 +128,15 @@ export class DesktopHostController {
     void this.invoke("agent.control", { action: "getModels" }).catch(error => debugLog("prewarm: models", error));
   }
   async invoke(route: DesktopRoute, input?: unknown) {
+    if (route === "canvas.respond") {
+      const value = input as { id?: unknown; result?: unknown; error?: unknown } | undefined;
+      if (typeof value?.id !== "string" || (value.error !== undefined && typeof value.error !== "string")) throw new Error("Invalid canvas reply");
+      const pending = this.canvasRequests.get(value.id);
+      if (!pending) throw new Error("Canvas request expired");
+      this.canvasRequests.delete(value.id);
+      value.error !== undefined ? pending.reject(new Error(value.error as string)) : pending.resolve(value.result);
+      return { ok: true };
+    }
     if (route === "app.quit") {
       await this.platform.quit();
       return { ok: true };
@@ -148,6 +183,7 @@ export class DesktopHostController {
     catch (error) { debugLog("desktop: release keep awake", error); }
   }
   async detach() {
+    this.cancelCanvasRequests();
     this.disposed = true;
     this.connectionAbort.abort(new Error("PiX is quitting"));
     await Promise.all([this.client?.close(), this.releaseKeepAwake()]);
@@ -155,12 +191,14 @@ export class DesktopHostController {
   prepareForInstallQuit() {
     if (this.hostShutdownRequested) return;
     this.hostShutdownRequested = true;
+    this.cancelCanvasRequests();
     this.quitting = true;
     this.connectionAbort.abort(new Error("PiX is quitting"));
     this.emit({ type: "host.shutdown", payload: {} });
     void this.client?.close();
   }
   async disconnectForQuit() {
+    this.cancelCanvasRequests();
     this.quitting = true;
     this.connectionAbort.abort(new Error("PiX is quitting"));
     // A spawned host must publish its address before Quit inspects it again.
@@ -181,6 +219,7 @@ export class DesktopHostController {
     }
   }
   dispose() {
+    this.cancelCanvasRequests();
     this.disposed = true;
     this.connectionAbort.abort(new Error("PiX is quitting"));
     this.client?.close();

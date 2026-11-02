@@ -31,12 +31,15 @@ import { sessionImageData } from "../../lib/session-images";
 import type { GraphFilter, GraphNode, PromptImage, RuntimeModel } from "../../../shared/types";
 import DraftNode, { type DraftNodeData } from "./DraftNode.vue";
 import PromptNode, { type PromptNodeData } from "./PromptNode.vue";
+import { createCanvasActions } from "./canvas-actions";
+import { useCanvasStore } from "../../stores/canvas";
+import { composerSubmission } from "../../lib/composer-submission";
 
 const emit = defineEmits<{ newSession: [] }>();
 const layout = useLayoutStore();
 const session = useSessionStore();
 const { t } = useI18n();
-const { submitDraft: runDraftSubmit, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft } = useDraftSubmit();
+const { submitDraft: runDraftSubmit, submitError, acceptSubmittedNode: acceptSubmittedDraft, clearSubmittedDraft } = useDraftSubmit();
 type RenderNode = Node & { dimensions?: Dimensions; handleBounds?: FlowNode["handleBounds"] };
 const nodes = shallowRef<RenderNode[]>([]);
 const edges = shallowRef<Edge[]>([]);
@@ -444,17 +447,8 @@ function rebuild() {
       models: session.models,
       personas: layout.settings?.app.personas ?? [],
       promptOverride: session.promptOverrideAt(parent?.id ?? null),
-      onModel: (next: RuntimeModel) => {
-        draftModel.value = next;
-        if (next.reasoning === false) draftThinking.value = "off";
-        void session.setDefaultModel(next);
-        rebuild();
-      },
-      onThinking: (level: string, explicit: boolean) => {
-        if (explicit) session.setUserThinking(level);
-        draftThinking.value = level;
-        rebuild();
-      },
+      onModel: next => { void setDraftModel(next); },
+      onThinking: setDraftThinking,
       onCancel: parent ? cancelDraft : undefined,
       onSubmit: submitDraft,
     },
@@ -593,7 +587,7 @@ async function select(id: string, openChat = false) {
   if (!focusNodeVisible()) await center(id, false, false);
 }
 
-async function deleteNode(id: string) {
+async function deleteNode(id: string, propagate = false) {
   deleteError.value = "";
   const request = ++centerRequest;
   const view = session.viewRequest;
@@ -605,15 +599,17 @@ async function deleteNode(id: string) {
     await nextTick();
     if (request === centerRequest && view === session.viewRequest && key === sessionKey.value && !focusNodeVisible())
       await center(defaultFocusId(), false, false);
-  } catch (error) { deleteError.value = String(error); }
+  } catch (error) { deleteError.value = String(error); if (propagate) throw error; }
 }
 
-async function exportSession(id: string) {
+async function exportSession(id: string, propagate = false) {
   try {
     const result = await session.exportBranchSession(id);
     if (result?.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
+    return result;
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
+    if (propagate) throw error;
   }
 }
 
@@ -628,7 +624,7 @@ async function reopenSession() {
   finally { reopeningSession.value = false; }
 }
 
-async function compose(id: string, direction?: BranchDirection) {
+async function compose(id: string | null, direction?: BranchDirection) {
   ++retryRequest;
   if (draftParent.value !== id) draftState.value = emptyDraft();
   draftOrder = direction === "up" ? -++orderSequence : 0;
@@ -637,7 +633,19 @@ async function compose(id: string, direction?: BranchDirection) {
   draftModel.value = node?.footer?.model ?? session.current?.runtime.model ?? null;
   draftThinking.value = undefined;
   rebuild();
-  await center(`draft:${id}`, true);
+  await center(`draft:${id ?? "root"}`, true);
+}
+
+async function setDraftModel(model: RuntimeModel) {
+  draftModel.value = model;
+  if (model.reasoning === false) draftThinking.value = "off";
+  rebuild();
+  await session.setDefaultModel(model);
+}
+function setDraftThinking(level: string, explicit: boolean) {
+  if (explicit) session.setUserThinking(level);
+  draftThinking.value = level;
+  rebuild();
 }
 
 // Retry reopens the failed turn's prompt as a draft attached to its parent, so
@@ -726,6 +734,7 @@ async function submitDraft(text: string, images?: PromptImage[]) {
       : undefined,
   );
   if (!delivered) {
+    targetDraft.error = submitError.value;
     if (requestId && targetSession === sessionKey.value) rememberBranchOrder(`pending:${requestId}`, undefined);
     return false;
   }
@@ -1026,6 +1035,41 @@ watch(
   { immediate: true },
 );
 
+const unregisterCanvas = useCanvasStore().register(createCanvasActions({
+  context: () => sessionKey.value,
+  draft: () => ({ visible: nodes.value.some(node => node.type === "draft"), parentId: draftParent.value ?? null,
+    state: draftState.value, model: draftModel.value ?? session.current?.runtime.model,
+    thinkingLevel: draftThinking.value ?? inheritThinking(draftParent.value) }),
+  viewport: () => flow.value?.getViewport(),
+  positions: () => nodes.value.map(node => ({ id: node.id, ...node.position })),
+  filter: () => graphFilter.value,
+  search: () => ({ text: searchQuery.value, hits: searchHits.value }),
+  compose, rebuild, model: setDraftModel, thinking: level => setDraftThinking(level, true), cancel: cancelDraft,
+  submit: async () => {
+    const draft = draftState.value;
+    const { text, images } = composerSubmission(draft);
+    draft.busy = true;
+    try { return await submitDraft(text, images); }
+    finally { draft.busy = false; }
+  },
+  retry: retryTurn, select: id => select(id, true), openPanel: openChatColumn,
+  delete: id => deleteNode(id, true), export: id => exportSession(id, true),
+  canLabel: id => { const node = projection.value?.nodes.find(node => node.id === id); return Boolean(node && canEditLabel(node)); },
+  setFilter: filter => { graphFilter.value = filter; },
+  setSearch: async text => { searchOpen.value = Boolean(text); searchQuery.value = text; searchPosition.value = -1; await nextTick(); },
+  move: (id, x, y, branch) => {
+    dragged.set(id, { x, y, branch });
+    const node = nodes.value.find(node => node.id === id);
+    if (node) node.position = { x, y };
+    layoutBranches(nodes.value); nodes.value = [...nodes.value];
+  },
+  setViewport: async viewport => {
+    if (!flow.value) throw new Error("The canvas viewport is not ready");
+    return flow.value.setViewport(viewport);
+  },
+  center: id => center(id, true), tidy,
+}));
+onBeforeUnmount(unregisterCanvas);
 </script>
 
 <template>

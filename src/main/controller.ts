@@ -26,6 +26,7 @@ import { sessionEventEncoder } from "../shared/session-updates.js";
 import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import { PixieRuntime, pixieWorkspace } from "./pixie-runtime.js";
+import type { CanvasCommand } from "../shared/canvas.js";
 import { ExtensionDialogs } from "./extension-dialogs.js";
 import { GraphRuntime } from "./graph-runtime.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
@@ -48,6 +49,7 @@ import {
   WorkspaceService,
 } from "./services.js";
 export interface Platform {
+  canvas?(command: CanvasCommand): Promise<unknown>;
   pickProject(): Promise<string | undefined>;
   pickSession(): Promise<string | undefined>;
   confirm(message: string, detail?: string): Promise<boolean>;
@@ -730,7 +732,10 @@ export class MainController {
     // app-level and stays on the local host even in a remote workspace.
     if (route === "pixie.ensure") return this.pixie.ensure();
     if (route === "pixie.send")
-      return this.pixie.send(v as Parameters<PixieRuntime["send"]>[0]);
+      return this.pixie.send(v as Parameters<PixieRuntime["send"]>[0], command => {
+        if (!this.platform.canvas) throw new Error("This client has no canvas");
+        return this.platform.canvas(command);
+      });
     if (route === "pixie.stop") return this.pixie.stop();
     if (route === "pixie.newSession") return this.pixie.newSession();
     if (route === "pixie.reveal") {

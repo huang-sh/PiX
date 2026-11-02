@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { CanvasCommand } from "../shared/canvas.js";
 import type { DesktopEvent, PixieSettings, PromptImage, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
-import { PIXIE_IDENTITY } from "../shared/pixie-prompt.js";
+import { PIXIE_IDENTITY, PIXIE_CANVAS_GUIDANCE } from "../shared/pixie-prompt.js";
 import { debugLog } from "./debug-log.js";
 import { pixAgentDir } from "./paths.js";
 import { piPixieSystemPrompt } from "./pi-runtime.js";
@@ -77,7 +79,12 @@ interface RpcState {
  * are rebuilt cumulatively here before they are forwarded.
  */
 export class PixieRuntime {
-  private readonly rpc = new PixieRpc();
+  private canvas?: (command: CanvasCommand) => Promise<unknown>;
+  private sending = false;
+  private readonly rpc = new PixieRpc(command => {
+    if (!this.canvas) throw new Error("Ask Pixie from a connected desktop window to use its canvas");
+    return this.canvas(command);
+  });
   private starting?: Promise<SessionSnapshot>;
   /** Cumulative assistant content by part index, rebuilt from wire deltas. */
   private parts = new Map<number, { kind: "text" | "thinking"; body: string }>();
@@ -85,7 +92,7 @@ export class PixieRuntime {
   /** The in-flight turn's timing: prompt dispatch → first delta → settle. */
   private turnTiming?: { promptAt: number; firstDeltaAt?: number };
 
-  get busy(): boolean { return Boolean(this.starting || this.turnTiming); }
+  get busy(): boolean { return Boolean(this.starting || this.sending || this.turnTiming); }
 
   constructor(
     private readonly emit: (event: DesktopEvent) => void,
@@ -170,15 +177,18 @@ export class PixieRuntime {
 
   /**
    * Boots the subprocess with the system prompt set directly: Pi's own
-   * generated default with only the identity line swapped — the user's, or
-   * the built-in Pixie one. The subprocess still appends skills, context
+   * generated default with the identity line swapped — the user's, or the
+   * built-in Pixie one — plus the canvas tool guidance. The subprocess appends skills, context
    * files, and the working directory to whatever text this sets.
    */
   private async startAgent(): Promise<void> {
     const identity = this.settings().systemPrompt?.trim() || PIXIE_IDENTITY;
     const prompt = await piPixieSystemPrompt(pixieWorkspace(), identity);
+    const adjacent = new URL("./pixie-extension.js", import.meta.url);
+    const extension = existsSync(adjacent) ? adjacent : new URL("../pixie-extension.js", import.meta.url);
     await this.rpc.start(pixieWorkspace(), { PI_CODING_AGENT_DIR: pixAgentDir() }, [
-      "--system-prompt", prompt,
+      "--extension", fileURLToPath(extension),
+      "--system-prompt", `${prompt}\n\n${PIXIE_CANVAS_GUIDANCE}`,
     ]);
   }
 
@@ -258,7 +268,19 @@ export class PixieRuntime {
     provider?: string;
     modelId?: string;
     thinkingLevel?: string;
-  }): Promise<SessionSnapshot> {
+  }, canvas?: (command: CanvasCommand) => Promise<unknown>): Promise<SessionSnapshot> {
+    if (this.sending) throw new Error("Pixie is already answering another message");
+    this.sending = true;
+    this.canvas = canvas;
+    try {
+      return await this.sendTurn(input);
+    } finally {
+      this.canvas = undefined;
+      this.sending = false;
+    }
+  }
+
+  private async sendTurn(input: { text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }): Promise<SessionSnapshot> {
     await this.ensure();
     // Session-scoped switches, like the plain chat's promptAt: the profile
     // default stays put, so changing the Pixie model never leaks into new

@@ -37,18 +37,43 @@ and upgrading the SDK does not add automatic process-crash recovery to PiX.
 ## Desktop authority
 
 ```text
-Renderer -> isolated preload -> MainController
-                                |- PiRuntime (project: models, skills, login)
-                                |- SessionRegistry -> one GraphRuntime per open session
-                                |- RemoteSlot pool (WSL/SSH hosts, keyed by project)
-                                |- WorkspaceService
-                                |- GitService
-                                |- ShellService
-                                `- SettingsService
+Renderer -> isolated preload -> DesktopHostController -> local execution host
+                                                          MainController
+                                                          |- PiRuntime (models, skills, login)
+                                                          |- SessionRegistry -> GraphRuntime
+                                                          |- RemoteSlot pool (WSL/SSH)
+                                                          |- WorkspaceService
+                                                          |- GitService
+                                                          |- ShellService
+                                                          |- PixieRuntime -> Pi RPC subprocess
+                                                          `- SettingsService
 ```
 
 Routes are runtime-validated before dispatch. Workspace paths are confined to
 the active project. Browser content uses an isolated webview partition.
+
+## Pixie canvas control
+
+Pixie loads a bundled `canvas` tool in its own Pi subprocess. The tool uses a
+private inherited Node IPC channel; the execution host routes each call back
+through the desktop window that sent the current Pixie message. Renderer replies
+use `canvas.respond`, matched only against that window's pending request IDs.
+Disconnects reject pending requests and are never automatically retried.
+
+`inspect` returns the visible project/session, paginated nodes, draft, models,
+run queues and layout. Other actions require its context identifier; switching
+sessions invalidates that identifier. `compose`/`draft` prepare the same draft
+shown to the human, while `submit`/`send` use the existing `promptAt` admission
+path. Sending from an earlier node creates a conversation branch. Tool replies
+report submission, not task completion.
+
+The tool also supports reading node conversations, selection and side columns,
+retry, stopping a branch, follow-up/steering and queue editing, labels, deletion,
+branch export, recovery, search/filtering, moving nodes/branches, pan/zoom,
+centering, automatic layout and the minimap. These call the canvas/store actions
+used by the UI and retain their runtime/read-only restrictions. Pixie does not
+rewrite session files to manipulate the graph. Remote workspaces use the same
+renderer actions and existing SSH/WSL dispatch; Pixie itself stays local.
 
 ## Provider balances
 

@@ -17,6 +17,7 @@ export const hostRunDir = () => join(pixHome(), ".pix", "run");
 export const hostAddressFile = () => join(hostRunDir(), "host.json");
 
 export const headlessPlatform: Platform = {
+  async canvas() { throw new Error("This operation needs a desktop canvas"); },
   async pickProject() { throw new Error("Specify a project path"); },
   async pickSession() { throw new Error("Specify a session path"); },
   async confirm() { return false; },

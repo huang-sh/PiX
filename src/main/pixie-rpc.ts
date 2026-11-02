@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { debugLog } from "./debug-log.js";
 import { piCliEntry } from "./pi-runtime.js";
+import { canvasCommand, type CanvasCommand } from "../shared/canvas.js";
 
 export interface RpcLine {
   type: string;
@@ -17,6 +18,7 @@ export interface RpcLine {
  * packaged builds with no external runtime requirement.
  */
 export class PixieRpc {
+  constructor(private readonly canvas?: (command: CanvasCommand) => Promise<unknown>) {}
   private child?: ChildProcess;
   private pending = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void }>();
   private listeners = new Set<(event: RpcLine) => void>();
@@ -45,11 +47,25 @@ export class PixieRpc {
     const child = spawn(process.execPath, [piCliEntry(), "--mode", "rpc", ...args], {
       cwd,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...env },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
       windowsHide: true,
     });
     this.exitError = undefined;
+    this.buffer = "";
     this.child = child;
+    child.on("message", (value: unknown) => {
+      const message = value as { type?: string; id?: string; command?: unknown } | null;
+      if (message?.type !== "pixie.canvas.request" || typeof message.id !== "string") return;
+      void (async () => {
+        let reply: { result?: unknown; error?: string };
+        try {
+          if (!this.canvas) throw new Error("Canvas tools are unavailable");
+          reply = { result: await this.canvas(canvasCommand(message.command)) };
+        } catch (error) { reply = { error: error instanceof Error ? error.message : String(error) }; }
+        if (this.child === child && child.connected)
+          child.send({ type: "pixie.canvas.reply", id: message.id, ...reply }, () => {});
+      })();
+    });
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       this.buffer += chunk;
@@ -61,7 +77,11 @@ export class PixieRpc {
       }
     });
     child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", chunk => debugLog("pixie-rpc:", chunk.toString().trim()));
+    let stderr = "";
+    child.stderr?.on("data", chunk => {
+      stderr = (stderr + String(chunk)).slice(-2048);
+      debugLog("pixie-rpc:", chunk.toString().trim());
+    });
     const fail = (error: Error) => {
       if (this.child !== child) return;
       this.exitError ??= error;
@@ -69,7 +89,7 @@ export class PixieRpc {
     };
     child.once("exit", (code, signal) => {
       if (this.child !== child) return;
-      const error = this.exitError ??= new Error(`Pixie process exited (code=${code} signal=${signal})`);
+      const error = this.exitError ??= new Error(`Pixie process exited (code=${code} signal=${signal})${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
       this.rejectPending(error);
       for (const listener of [...this.exitListeners]) listener(error);
     });

@@ -651,6 +651,7 @@ export type AgentControl =
   | { action: "systemPromptPreview" }
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
+  | "canvas.respond"
   | "ui.respond"
   | "ui.pending"
   | "app.bootstrap"
@@ -722,7 +723,7 @@ export type DesktopRoute =
   | "settings.reset"
   | "layout.save";
 export interface DesktopEvent {
-  type: "agent" | "pixie" | "shell" | "terminal" | "sessions" | "notice" | "host.connection" | "host.shutdown" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
+  type: "agent" | "pixie" | "canvas.request" | "shell" | "terminal" | "sessions" | "notice" | "host.connection" | "host.shutdown" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";
   payload: unknown;
 }
 export interface ExtensionDialog {

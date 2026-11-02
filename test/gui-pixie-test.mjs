@@ -17,6 +17,52 @@ const testHome = join(artifacts, "gui-home-pixie");
 rmSync(testHome, { recursive: true, force: true });
 mkdirSync(join(testHome, ".pix"), { recursive: true });
 writeFileSync(join(testHome, ".pix", "gui.settings.json"), JSON.stringify({}));
+const agentDir = join(testHome, ".pix", "agent");
+const canvasWorkspace = join(testHome, "workspace");
+mkdirSync(canvasWorkspace, { recursive: true });
+mkdirSync(join(agentDir, "extensions"), { recursive: true });
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "faux", defaultModel: "canvas-test" }));
+// A real model/tool loop, entirely offline: Pixie controls the actual renderer,
+// while graph agents answer normally through their own runtime instances.
+writeFileSync(join(agentDir, "extensions", "canvas-test.js"), `
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai/providers/faux"))};
+export default pi => {
+  const faux = fauxProvider({ models: [{ id: "canvas-test", contextWindow: 128000 }] });
+  pi.registerProvider(faux.provider);
+  let stage = 0, attempts = 0;
+  const respond = async context => {
+    const user = context.messages.find(message => message.role === "user");
+    if (!JSON.stringify(user).includes("Pixie canvas integration")) {
+      faux.appendResponses([respond]);
+      return fauxAssistantMessage("Graph task completed.");
+    }
+    if (++attempts > 60) throw new Error("Canvas integration did not complete");
+    const last = [...context.messages].reverse().find(message => message.role === "toolResult");
+    if (last?.isError) return fauxAssistantMessage("Canvas tool failed: " + JSON.stringify(last));
+    const state = last ? JSON.parse(last.content.find(part => part.type === "text").text) : undefined;
+    const call = command => {
+      faux.appendResponses([respond]);
+      return fauxAssistantMessage([fauxToolCall("canvas", command)], { stopReason: "toolUse" });
+    };
+    if (stage === 0) { stage++; return call({ action: "inspect" }); }
+    if (stage === 1) { stage++; return call({ action: "newSession", context: state.context }); }
+    if (stage === 2) { stage++; return call({ action: "send", context: state.context, nodeId: null, text: "Canvas root", provider: "faux", modelId: "canvas-test" }); }
+    if (stage >= 3 && stage <= 5) {
+      const needed = stage - 2;
+      if (state.totalNodes < needed || state.runs?.some(run => run.status === "running")) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return call({ action: "inspect" });
+      }
+      const root = state.nodes.find(node => !node.parentId);
+      if (stage === 5) { stage++; return call({ action: "label", context: state.context, nodeId: root.id, text: "Created by Pixie" }); }
+      stage++;
+      return call({ action: "send", context: state.context, nodeId: root.id, text: "Canvas branch " + (stage - 3), provider: "faux", modelId: "canvas-test" });
+    }
+    return fauxAssistantMessage("Canvas integration complete.");
+  };
+  faux.setResponses([respond]);
+}
+`);
 const electron = process.env.ELECTRON_BINARY ?? electronBinary(root);
 if (!existsSync(electron)) throw new Error("Electron binary not found");
 
@@ -102,7 +148,7 @@ async function launch() {
     root,
   ], {
     cwd: root,
-    env: { ...process.env, PIX_HOME: testHome, PIX_PROJECT: join(root, "test", "workspace"), PI_OFFLINE: "1" },
+    env: { ...process.env, PIX_HOME: testHome, PIX_PROJECT: canvasWorkspace, PI_OFFLINE: "1" },
     windowsHide: true,
   });
   child.stderr.on("data", (chunk) => (stderr += String(chunk)));
@@ -331,11 +377,28 @@ try {
       if (!(await second.cdp.evaluate(`Boolean(document.querySelector("[data-pixie-sprite]"))`))) throw new Error("sprite not re-enabled");
     }, 8000);
     results.spriteReenabled = true;
+    const canvasResult = await second.cdp.evaluate(`(async () => {
+      const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;
+      const pixie = pinia._s.get('pixie');
+      pixie.model = { provider: 'faux', id: 'canvas-test' };
+      const sent = await pixie.send('Pixie canvas integration');
+      const session = pinia._s.get('session');
+      return { sent, error: pixie.error, nodes: session.current?.projection.nodes,
+        messages: pixie.snapshot?.projection.messages.map(message => message.text) };
+    })()`);
+    const rootNode = canvasResult.nodes?.find(node => node.label === "Created by Pixie");
+    if (!canvasResult.sent || !rootNode || canvasResult.nodes.some(node => node.hasError)
+      || canvasResult.nodes.filter(node => node.parentId === rootNode.id).length !== 2
+      || !canvasResult.messages.some(text => text.includes("Canvas integration complete.")))
+      throw new Error(`Pixie did not operate the real canvas: ${JSON.stringify(canvasResult)}`);
+    results.canvasCreatesNodesAndBranches = true;
+    await second.cdp.shot("gui-pixie-canvas.png");
     await second.cdp.close();
   } finally {
     second.child.kill();
   }
 } finally {
+  writeFileSync(join(artifacts, "gui-pixie-stderr.log"), stderr);
   if (first) first.child.kill();
 }
 

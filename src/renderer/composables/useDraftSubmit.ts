@@ -12,6 +12,7 @@ export function useDraftSubmit() {
   const session = useSessionStore();
   const layout = useLayoutStore();
   const { t } = useI18n();
+  const submitError = ref("");
 
   async function submitDraft(
     parentId: string | null,
@@ -21,6 +22,7 @@ export function useDraftSubmit() {
     images?: PromptImage[],
     options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null },
   ): Promise<{ nodeId?: string } | false> {
+    submitError.value = "";
     submitted.value = session.current?.graph ? undefined : {
       parentId,
       knownNodeIds: new Set(session.current?.projection.nodes.map((node) => node.id)),
@@ -32,6 +34,7 @@ export function useDraftSubmit() {
     } catch (error) {
       submitted.value = undefined;
       const message = error instanceof Error ? error.message : String(error);
+      submitError.value = message;
       layout.showNotice(
         message.includes("No API key found")
           ? t("graph.noApiKeyNotice")
@@ -57,5 +60,5 @@ export function useDraftSubmit() {
     submitted.value = undefined;
   }
 
-  return { submitDraft, acceptSubmittedNode, clearSubmittedDraft };
+  return { submitDraft, submitError, acceptSubmittedNode, clearSubmittedDraft };
 }

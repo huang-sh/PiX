@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { composerSubmission } from "../lib/composer-submission";
 import { ArrowUp, Brain, Check, ChevronDown, ChevronRight, CornerDownRight, FileText, ListEnd, Paperclip, Pencil, Square, Trash2, VenetianMask, X } from "@lucide/vue";
 import {
   DropdownMenuContent,
@@ -156,9 +157,9 @@ async function submit() {
     return;
   }
   const target = state.value;
-  const attachments = images.value.map((image) => ({ ...image }));
+  const { text: prompt, images: attached } = composerSubmission(target);
+  const attachments = attached ?? [];
   const documents = files.value;
-  const prompt = [text, ...documents.map(file => `Attached file: ${file.path}`)].filter(Boolean).join("\n\n");
   const deliver = queueing.value
     ? props.onQueue!
     : props.onSubmit;

@@ -90,6 +90,34 @@ test("desktop clients share Pixie, receive its events, and protect its active wo
   await assert.rejects(stopLocalHost(state.host!.id, false), /Stop running tasks/);
 });
 
+test("Pixie canvas requests return to the sending window and reject disconnected replies", async t => {
+  const { host, connectDesktop } = await fixture(t);
+  const a = await connectDesktop({ ...headlessPlatform }, "canvas-a");
+  const b = await connectDesktop({ ...headlessPlatform }, "canvas-b");
+  t.mock.method(host.owner.pixie, "send", async (...[_input, canvas]: Parameters<typeof host.owner.pixie.send>) => await canvas!({ action: "inspect" }) as SessionSnapshot);
+  const seen: string[] = [];
+  for (const [name, desktop] of [["a", a], ["b", b]] as const) desktop.onEvent(event => {
+    if (event.type !== "canvas.request") return;
+    const { id } = event.payload as { id: string };
+    seen.push(name);
+    void desktop.invoke("canvas.respond", { id, result: { window: name } });
+  });
+  assert.deepEqual(await a.invoke("pixie.send", { text: "inspect" }), { window: "a" });
+  assert.deepEqual(await b.invoke("pixie.send", { text: "inspect" }), { window: "b" });
+  assert.deepEqual(seen, ["a", "b"]);
+  await assert.rejects(b.invoke("canvas.respond", { id: "not-this-window", result: {} }), /expired/);
+
+  const c = await connectDesktop({ ...headlessPlatform }, "canvas-c");
+  let requestId: string | undefined;
+  c.onEvent(event => { if (event.type === "canvas.request") requestId = (event.payload as { id: string }).id; });
+  const pending = c.invoke("pixie.send", { text: "inspect" });
+  const rejected = assert.rejects(pending, /disconnect|closed/i);
+  await until(() => Boolean(requestId));
+  await c.detach();
+  await rejected;
+  await assert.rejects(c.invoke("canvas.respond", { id: requestId, result: {} }), /expired/);
+});
+
 test("full quit closes peer desktops without letting their reconnect loops restart the host", async t => {
   const { host, connectDesktop } = await fixture(t);
   let quits = 0;

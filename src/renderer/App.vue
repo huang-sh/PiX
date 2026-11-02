@@ -40,6 +40,7 @@ import WslConnectDialog from "./features/workbench/WslConnectDialog.vue";
 import Workbench from "./features/workbench/Workbench.vue";
 import { useLayoutStore } from "./stores/layout";
 import { usePixieStore } from "./stores/pixie";
+import { useCanvasStore } from "./stores/canvas";
 import { handleHistoryKeys, history, historyEnabled, HistoryButton, HistoryPanel, togglePanel } from "./experimental/history";
 import { useSessionStore } from "./stores/session";
 import { useWorkspaceStore } from "./stores/workspace";
@@ -60,6 +61,7 @@ const session = useSessionStore();
 const workspace = useWorkspaceStore();
 const layout = useLayoutStore();
 const pixie = usePixieStore();
+const canvas = useCanvasStore();
 const { locale, t } = useI18n();
 let unsubscribe: (() => void) | undefined;
 const wslOpen = ref(false);
@@ -531,6 +533,14 @@ watch(
 
 const decodeSessionEvent = sessionEventDecoder(() => desktop.invoke("session.snapshot"));
 function onEvent(wireEvent: DesktopEvent) {
+  if (wireEvent.type === "canvas.request") {
+    const request = wireEvent.payload as { id: string; command: unknown };
+    void canvas.execute(request.command).then(
+      result => desktop.invoke("canvas.respond", { id: request.id, result: JSON.parse(JSON.stringify(result)) }),
+      error => desktop.invoke("canvas.respond", { id: request.id, error: error instanceof Error ? error.message : String(error) }),
+    ).catch(error => console.error("Canvas reply failed", error));
+    return;
+  }
   // Pixie events are already scoped to their own runtime; they must not
   // reach the graph session store's decoder.
   if (wireEvent.type === "pixie") {
