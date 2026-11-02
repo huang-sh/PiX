@@ -153,6 +153,34 @@ test(`shutdown and immediate close during the handshake still quit the desktop (
   }
 });
 
+test("shutdown received while closing a version mismatch still quits the desktop", async t => {
+  const { host } = await fixture(t);
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  let peer!: WebSocket;
+  server.on("connection", socket => { peer = socket; });
+  await once(server, "listening");
+  writeFileSync(hostAddressFile(), JSON.stringify({ ...host.address,
+    port: (server.address() as { port: number }).port, version: "999.0.0" }));
+  const close = HostClient.prototype.close;
+  const closing = t.mock.method(HostClient.prototype, "close", async function (this: HostClient) {
+    peer.send(JSON.stringify({ type: "event", sequence: 1, event: { type: "host.shutdown", payload: {} } }));
+    await close.call(this);
+  });
+  let quits = 0;
+  const desktop = DesktopHostController.create(null, { ...headlessPlatform, quit() { quits++; } });
+  try {
+    await assert.rejects(desktop.invoke("app.bootstrap"), /quitting/);
+    assert.equal(desktop.hostShutdownRequested, true);
+    assert.equal(quits, 1);
+  } finally {
+    closing.mock.restore();
+    desktop.dispose();
+    writeFileSync(hostAddressFile(), JSON.stringify(host.address));
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("a failed full quit can resume the same desktop view", async t => {
   const { cwd, connectDesktop } = await fixture(t);
   const desktop = await connectDesktop();

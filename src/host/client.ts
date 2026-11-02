@@ -188,6 +188,8 @@ export class HostClient {
       if (signal?.aborted) abort();
       await client.close();
       signal?.throwIfAborted();
+      // A shutdown frame can arrive while the failed handshake is closing.
+      if (client.shutdownRequested) return client;
       throw error;
     } finally { signal?.removeEventListener("abort", abort); }
   }
