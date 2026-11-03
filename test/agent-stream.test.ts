@@ -113,3 +113,30 @@ test("marks a failed assistant message with its error detail", () => {
   assert.equal(failed?.errorMessage, '401: {"message":"Authentication Fails"}');
   assert.equal(activity?.currentAssistantId, undefined);
 });
+
+test("a mid-run user message starts a fresh live view for the new turn", () => {
+  let activity = reduceAgentActivity(undefined, { type: "agent_start" });
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "assistant", content: [{ type: "toolCall", id: "a", name: "toolA" }] },
+  });
+  for (const [id, name] of [["a", "toolA"], ["b", "toolB"], ["c", "toolC"]] as const) {
+    activity = reduceAgentActivity(activity, { type: "tool_execution_start", toolCallId: id, toolName: name, args: {} });
+    activity = reduceAgentActivity(activity, { type: "tool_execution_end", toolCallId: id, result: { content: [] }, isError: false });
+  }
+  // The steered user message lands between tool c and tool d.
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "urgent steer" }] },
+  });
+  assert.equal(activity?.active, true);
+  assert.equal(activity?.items.length, 0);
+  assert.equal(activity?.pass, 2);
+  activity = reduceAgentActivity(activity, {
+    type: "tool_execution_start", toolCallId: "d", toolName: "toolD", args: {},
+  });
+  assert.deepEqual(
+    activity?.items.map(item => (item as { title?: string }).title),
+    ["toolD"],
+  );
+});
