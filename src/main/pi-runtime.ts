@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, basename, join } from "node:path";
+import { dirname, basename, join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import type { ExtensionDialogs } from "./extension-dialogs.js";
@@ -42,7 +42,9 @@ import type {
   SessionSnapshot,
   SessionSummary,
 } from "../shared/types.js";
-import type { CreateAgentSessionServicesOptions, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type { CreateAgentSessionServicesOptions, InlineExtension, SessionManager } from "@earendil-works/pi-coding-agent";
+// Re-exported for graph-runtime so the SDK boundary stays in this adapter.
+export type { SessionManager };
 import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 import type { PromptCustomization, SystemPromptPreview } from "../shared/types.js";
 import { needsPromptDisplayBoundary, projectSession, summarizeSession } from "../shared/session.js";
@@ -62,6 +64,33 @@ import { usageScanCache } from "./usage-scan-cache.js";
 
 // One Git Bash probe per process; later sessions reuse the first result.
 const detectBash = memoizeOnce(detectWindowsBash);
+
+/** A cleanly closed file-backed manager parked for its next open: parsing a
+ * large session dominates open time, and an identity-checked unchanged file
+ * can skip it entirely. One slot — the most recently closed main session. */
+let parkedSession: { path: string; dir: string; ino: number; mtimeMs: number; size: number; manager: SessionManager } | undefined;
+
+function fileIdentity(path: string) {
+  try { const { ino, mtimeMs, size } = statSync(path); return { ino, mtimeMs, size }; }
+  catch { return undefined; }
+}
+
+function parkSessionManager(manager: SessionManager) {
+  const file = manager.getSessionFile?.();
+  if (!file) return;
+  const identity = fileIdentity(file);
+  if (identity) parkedSession = { path: file, dir: String(manager.getSessionDir?.() ?? ""), ...identity, manager };
+}
+
+/** Takes the parked manager for `path` when the file is unchanged since its runtime closed. */
+export function takeParkedSession(path: string, dir: string | null): SessionManager | undefined {
+  const parked = parkedSession;
+  parkedSession = undefined;
+  if (!parked || parked.path !== resolve(path) || parked.dir !== (dir ?? "")) return undefined;
+  const identity = fileIdentity(parked.path);
+  return identity && identity.ino === parked.ino && identity.mtimeMs === parked.mtimeMs && identity.size === parked.size
+    ? parked.manager : undefined;
+}
 // Branches share the services factory, but each live session owns its input queue.
 const inputQueueOwners = new WeakMap<object, PiRuntime>();
 export type QueuedInput = QueuedMessage & { images?: PromptImage[]; nodeId?: string | null };
@@ -769,13 +798,17 @@ export class PiRuntime {
     await Promise.allSettled([...this.pendingControls]);
     if (this.runtime?.session.isBashRunning) throw new Error("Session bash is still running");
   }
-  async openAt(path: string, leafId: string | null) {
+  /** Child and failed runtimes never park; their managers must not be reused. */
+  parkSessionManagers = true;
+
+  /** `manager` reuses entries the caller already parsed and validated, so the file is read once. */
+  async openAt(path: string, leafId: string | null, manager?: SessionManager) {
     const pi = await this.pi();
-    const manager = pi.SessionManager.open(path, this.dir, this.cwd);
-    if (leafId === null) manager.resetLeaf();
-    else manager.branch(leafId);
+    const session = manager ?? takeParkedSession(path, this.dir) ?? pi.SessionManager.open(path, this.dir, this.cwd);
+    if (leafId === null) session.resetLeaf();
+    else session.branch(leafId);
     this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
-      cwd: this.cwd, agentDir: this.agentDir(), sessionManager: manager,
+      cwd: this.cwd, agentDir: this.agentDir(), sessionManager: session,
     });
     this.bind();
   }
@@ -1583,7 +1616,10 @@ export class PiRuntime {
       // Drain controller calls before unlinking the session file.
       await Promise.allSettled([this.extensionStartup, ...this.pendingControls]);
       await runtime.dispose();
-      if (this.runtime === runtime) this.runtime = undefined;
+      if (this.runtime === runtime) {
+        this.runtime = undefined;
+        if (this.parkSessionManagers) parkSessionManager(runtime.session.sessionManager);
+      }
     } finally {
       this.unsubscribe?.();
       this.extensionSession = undefined;

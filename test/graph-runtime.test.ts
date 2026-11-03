@@ -261,6 +261,48 @@ test("manual compaction cannot change a completed turn's timing or block later p
   }
 });
 
+test("a closed session's parked manager serves its unchanged reopen", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-parked-manager-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: runtime.snapshot().projection.activeNodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("one", "first question");
+    const manager = runtime.runtime!.session.sessionManager;
+    const path = runtime.snapshot().session.path;
+    await runtime.close();
+    const reopened = await runtime.open(path);
+    assert.ok(reopened.entries.length > 0);
+    assert.equal(runtime.runtime!.session.sessionManager, manager,
+      "an unchanged file must reopen through its parked manager instead of re-parsing");
+    await prompt("two", "second question");
+    assert.ok(runtime.snapshot().projection.nodes.some(node => node.preview.includes("Reply to two")));
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("stopping automatic compaction saves a cancelled record across close and reopen", { timeout: 20000 }, async t => {
   for (const target of ["main", "branch"] as const) for (const action of ["abort", "close"] as const) await t.test(`${target}: ${action}`, async () => {
     const home = mkdtempSync(join(tmpdir(), "pix-close-compaction-"));
