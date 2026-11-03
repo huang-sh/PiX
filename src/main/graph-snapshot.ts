@@ -11,16 +11,24 @@ interface Source {
 
 /** Reuse the SDK's per-session projections; never re-project the merged graph. */
 export class GraphSnapshotCache {
+  /** Every source's full history, keyed by entry id. The wire only carries a
+   * bounded window, so lookups (search, windows, exports) must not read it. */
   readonly entriesById = new Map<string, RawSessionEntry>();
+  /** Flattened history shared by search, windows and exports. Rebuilt only when
+   * a source changes, so callers can key their own caches on its identity. */
+  private history?: RawSessionEntry[];
   private sources = new Map<string, Source>();
-  private entries: RawSessionEntry[] = [];
   private nodes: GraphNode[] = [];
   private edges: SessionProjection["edges"] = [];
   private runningNodes = new WeakMap<GraphNode, GraphNode>();
   private forkOnlyNodes = new WeakMap<GraphNode, GraphNode>();
   private viewCache?: { source: GraphNode[]; active: string; continuable: string; nodes: GraphNode[] };
 
-  update(graph: GraphFiles, main: SessionSnapshot, branches: Map<string, { snapshot?: SessionSnapshot }>) {
+  update(graph: GraphFiles, main: SessionSnapshot, branches: Map<string, { snapshot?: SessionSnapshot }>,
+    // Sources whose snapshots are already complete (tests, read-only graphs)
+    // need no resolver; the live graph supplies the runtime's full history.
+    fullEntries: (id: string) => RawSessionEntry[] =
+      id => id === "main" ? main.entries : branches.get(id)?.snapshot?.entries ?? []) {
     let changed = false;
     const snapshots = new Map<string, SessionSnapshot>([["main", main]]);
     for (const [id, worker] of branches) if (worker.snapshot && graph.records.has(id)) snapshots.set(id, worker.snapshot);
@@ -34,7 +42,8 @@ export class GraphSnapshotCache {
       const record = id === "main" ? undefined : graph.records.get(id)!;
       let entries: RawSessionEntry[] = [], nodes: GraphNode[] = [], error: string | undefined;
       try {
-        entries = record ? graph.delta(record, { header: {}, entries: snapshot.entries }, true) : snapshot.entries;
+        const history = fullEntries(id);
+        entries = record ? graph.delta(record, { header: {}, entries: history }, true) : history;
         const index = new Map(entries.map(entry => [entry.id, entry]));
         const previous = new Map(old?.nodes.map(node => [node.id, node]));
         const canonical = (entryId: string) => record ? graph.canonical(record, entryId) : entryId;
@@ -61,7 +70,7 @@ export class GraphSnapshotCache {
     if (changed) {
       // Flatten references only when a source changes. Payloads and node objects
       // in every unaffected branch retain their identity for the wire diff.
-      this.entries = [...this.sources.values()].flatMap(source => source.entries);
+      this.history = undefined;
       this.nodes = this.reattach([...this.sources.values()].flatMap(source => source.nodes));
       const edges = new Map(this.edges.map(edge => [edge.id, edge]));
       this.edges = this.nodes.filter(node => node.parentId).map(node => {
@@ -100,6 +109,14 @@ export class GraphSnapshotCache {
       : nodes;
   }
 
+  /** Every source's full history, in one array whose identity survives until a
+   * source changes. */
+  fullHistory() { return this.history ??= [...this.entriesById.values()]; }
+  /** The last projection `view` produced; search keys its blob cache on this
+   * identity, so an unchanged graph must keep returning the same object. */
+  get projection() { return this.viewProjection; }
+  private viewProjection?: SessionProjection;
+  private viewProjectionParts?: { main: SessionProjection; nodes: GraphNode[]; edges: SessionProjection["edges"]; active: string; continuable: string; activeNodeId: string | null };
   error(id: string) { return this.sources.get(id)?.error; }
 
   /** The projection the renderer sees: `active` marks live turns (never
@@ -122,7 +139,19 @@ export class GraphSnapshotCache {
         return forkOnly;
       });
     this.viewCache = { source: this.nodes, active: key, continuable: tips, nodes };
-    return { entries: this.entries, projection: { ...main.projection, nodes, edges: this.edges,
-      activeNodeId: main.projection.activeBranchNodeIds.at(-1) ?? nodes.at(-1)?.id ?? null } };
+    // The merged entries stay in this.entriesById for search and window
+    // fetches; the wire only carries the main line's bounded window, which
+    // already arrived inside `main` from PiRuntime.snapshot.
+    const activeNodeId = main.projection.activeBranchNodeIds.at(-1) ?? nodes.at(-1)?.id ?? null;
+    const cached = this.viewProjection;
+    const unchanged = cached && this.viewCache.source === this.viewProjectionParts?.nodes
+      && this.viewProjectionParts?.active === key && this.viewProjectionParts?.continuable === tips
+      && this.viewProjectionParts?.main === main.projection && this.viewProjectionParts?.edges === this.edges
+      && this.viewProjectionParts?.activeNodeId === activeNodeId;
+    if (!unchanged) {
+      this.viewProjection = { ...main.projection, nodes, edges: this.edges, activeNodeId };
+      this.viewProjectionParts = { main: main.projection, nodes: this.nodes, edges: this.edges, active: key, continuable: tips, activeNodeId };
+    }
+    return { entries: main.entries, projection: this.viewProjection! };
   }
 }

@@ -46,7 +46,11 @@ test("merged snapshots match full projection while unchanged branches never re-r
   const cache = new GraphSnapshotCache();
   cache.update(graph, main, branches);
   const initial = cache.view(main, new Set(), new Set());
-  const oracle = projectSession(initial.entries, main.projection.leafId);
+  // The wire carries the main line's window; the merged history the cache
+  // keeps internally is what projections are verified against.
+  const merged = [...cache.entriesById.values()];
+  const branch0Answer = cache.entriesById.get("branch0:a0");
+  const oracle = projectSession(merged, main.projection.leafId);
   const structural = (nodes: typeof oracle.nodes) => nodes.map(({ id, parentId, depth, title, preview, toolCallCount, hasError }) => ({ id, parentId, depth, title, preview, toolCallCount, hasError }));
   assert.deepEqual(structural(initial.projection.nodes), structural(oracle.nodes));
   assert.deepEqual(initial.projection.edges, oracle.edges);
@@ -58,19 +62,19 @@ test("merged snapshots match full projection while unchanged branches never re-r
   // No getters in another branch should be read on an unrelated update.
   Object.defineProperty(branches.get("branch7")!.snapshot.entries.at(-1)!, "message", { get() { throw Error("unrelated history was scanned"); } });
   cache.update(graph, main, branches);
-  assert.equal(cache.view(main, new Set(), new Set()).entries, initial.entries);
+  assert.equal(cache.view(main, new Set(), new Set()).entries, main.entries, "the wire window passes the main line through");
   assert.deepEqual(refreshed, []);
   const changed = branches.get("branch0")!;
   changed.snapshot = snapshot([...changed.snapshot.entries, entry("new", "a99", "assistant")]);
   cache.update(graph, main, branches);
   const next = cache.view(main, new Set(["turn:branch0:u99"]), new Set());
   assert.deepEqual(refreshed, ["branch0"]);
-  assert.equal(next.entries.find(e => e.id === "branch0:a0"), initial.entries.find(e => e.id === "branch0:a0"));
+  assert.equal(cache.entriesById.get("branch0:a0"), branch0Answer, "unchanged merged entries keep their identity");
   assert.equal(next.projection.nodes.find(n => n.id === "turn:branch7:u99"), initial.projection.nodes.find(n => n.id === "turn:branch7:u99"));
   assert.equal(next.projection.nodes.find(n => n.id === "turn:branch0:u99")?.running, true);
   assert.equal(cache.view(main, new Set(), new Set()).projection.nodes.find(n => n.id === "turn:branch0:u99")?.running, false);
   branches.delete("branch1"); graph.records.delete("branch1"); cache.update(graph, main, branches);
-  assert.ok(!cache.view(main, new Set(), new Set()).entries.some(e => e.id.startsWith("branch1:")));
+  assert.ok(![...cache.entriesById.values()].some(e => e.id.startsWith("branch1:")));
 });
 
 test("a node whose parent link no longer resolves attaches to the nearest surviving ancestor", () => {
@@ -109,4 +113,17 @@ test("only continuable tips keep the in-place continuation flag", () => {
   const running = cache.view(main, new Set(["turn:u1"]), tips).projection.nodes.find(node => node.id === "turn:u1")!;
   assert.equal(running.running, true);
   assert.equal(running.continuable, false, "a running tip cannot continue in place");
+});
+
+test("a bounded wire window still indexes every source's full history", () => {
+  const graph = new GraphFiles("main");
+  const history = [entry("root", null), entry("a0", "root", "assistant"), entry("u1", "a0"), entry("a1", "u1", "assistant")];
+  // The projection comes from the full history; only `entries` is bounded.
+  const main = { ...snapshot(history), entries: history.slice(-2) } as SessionSnapshot;
+  const cache = new GraphSnapshotCache();
+  cache.update(graph, main, new Map(), () => history.map(value => structuredClone(value)));
+  assert.deepEqual([...cache.entriesById.keys()], history.map(value => value.id), "lookups must not read the wire window");
+  const view = cache.view(main, new Set(), new Set());
+  assert.equal(view.entries, main.entries, "the wire still carries only the window");
+  assert.deepEqual(view.projection.nodes.map(node => node.id), ["turn:root", "turn:u1"]);
 });

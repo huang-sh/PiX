@@ -25,12 +25,16 @@ export function reuseGraphProjection(previous: SessionProjection, next: SessionP
 }
 
 export function createBranchMessageCache() {
-  const cache = new Map<string, { entries: RawSessionEntry[]; result: { messages: SessionProjection["messages"]; hasEarlier: boolean } }>();
+  const cache = new Map<string, { entries: RawSessionEntry[]; result: { messages: SessionProjection["messages"]; hasEarlier: boolean; complete: boolean } }>();
   return (entries: RawSessionEntry[], leaf: string | null, limit: number) => {
     const index = sessionEntryIndex(entries);
     const path: RawSessionEntry[] = [];
     const seen = new Set<string>();
     let entry = leaf ? index.get(leaf) : undefined;
+    // `complete` means the pool holds the whole ancestry this window was cut
+    // from — either the walk reached a true root or it spent its turn budget.
+    // Only a parent missing from the index is a pool boundary worth a fetch.
+    let broken = !entry;
     let turns = 0, cut = 0, hasEarlier = false;
     while (entry && !seen.has(entry.id)) {
       seen.add(entry.id);
@@ -39,15 +43,18 @@ export function createBranchMessageCache() {
         if (++turns > limit) { hasEarlier = true; break; }
         cut = path.length;
       }
-      entry = entry.parentId ? index.get(entry.parentId) : undefined;
+      if (!entry.parentId) break;
+      entry = index.get(entry.parentId);
+      if (!entry) broken = true;
     }
+    const complete = !broken;
     // Keep complete turns. In particular, never parse text in the older prefix
     // merely to decide whether the "load earlier" button should be visible.
     const window = (hasEarlier ? path.slice(0, cut) : path).reverse();
     const key = `${leaf}:${limit}`;
     const old = cache.get(key);
-    const result = old && old.result.hasEarlier === hasEarlier && sameData(old.entries, window)
-      ? old.result : { messages: projectSession(window, leaf).messages, hasEarlier };
+    const result = old && old.result.hasEarlier === hasEarlier && old.result.complete === complete && sameData(old.entries, window)
+      ? old.result : { messages: projectSession(window, leaf).messages, hasEarlier, complete };
     cache.delete(key);
     cache.set(key, { entries: window, result });
     // Bound view caching independently of the number of historical graph nodes;

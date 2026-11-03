@@ -34,16 +34,17 @@ const shortPath = (path: string) => path.startsWith(homedir() + "/") ? "~" + pat
 const branchName = (id?: string) => !id || id === "main" ? "main" : `branch ${id.slice(0, 8)}`;
 
 /** Project just the selected GraphRuntime ancestry, never a sibling branch. */
-export function conversationEntries(snapshot: SessionSnapshot, nodeId: string | null): RawSessionEntry[] {
+export function conversationEntries(snapshot: SessionSnapshot, nodeId: string | null,
+  entries: RawSessionEntry[] = snapshot.entries): RawSessionEntry[] {
   const nodes = new Map(snapshot.projection.nodes.map(node => [node.id, node]));
-  const entries = new Map(snapshot.entries.map(entry => [entry.id, entry]));
+  const index = new Map(entries.map(entry => [entry.id, entry]));
   const path = [], seen = new Set<string>();
   for (let node = nodeId ? nodes.get(nodeId) : undefined; node && !seen.has(node.id); node = node.parentId ? nodes.get(node.parentId) : undefined) {
     seen.add(node.id); path.unshift(node);
   }
   const ids = new Set<string>();
   return path.flatMap(node => node.rawEntryIds.flatMap(id => {
-    const entry = entries.get(id);
+    const entry = index.get(id);
     if (!entry || ids.has(id)) return [];
     ids.add(id); return [entry];
   }));
@@ -294,8 +295,28 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     ui.requestRender();
   }
   function notice(text: string) { if (!closed) { notices.setText(getMarkdownTheme().quote(text)); ui.requestRender(); } }
-  function loadHistory() {
-    conversation.load(conversationEntries(snapshot, node));
+  let historyToken = 0;
+  /** The snapshot carries a bounded window; the scrollback shows the whole
+   * branch, so read it back page by page (the route caps one page). */
+  async function branchHistory(session: string, leafId: string | null) {
+    const merged = new Map<string, RawSessionEntry>();
+    let cursor = leafId;
+    for (let page = 0; page < 64; page++) {
+      const result = await client.invoke<{ entries: RawSessionEntry[]; hasEarlier: boolean }>("session.branchWindow",
+        { session, leafId: cursor, limit: 500, bytes: 64 << 20 });
+      for (const entry of result.entries) merged.set(entry.id, entry);
+      const oldest = result.entries[0];
+      if (!result.hasEarlier || !oldest || oldest.id === cursor) break;
+      cursor = oldest.id;
+    }
+    return [...merged.values()];
+  }
+  async function loadHistory() {
+    const token = ++historyToken;
+    const leafId = snapshot.projection.nodes.find(item => item.id === node)?.leafEntryId ?? snapshot.projection.leafId;
+    const entries = await branchHistory(snapshot.session.path, leafId).catch(() => snapshot.entries);
+    if (closed || token !== historyToken) return;
+    conversation.load(conversationEntries(snapshot, node, entries));
     if (!conversation.children.length) {
       conversation.addChild(new Text(getMarkdownTheme().bold("What would you like to work on?"), 1, 1));
       conversation.addChild(new Text(getMarkdownTheme().quote("Ask about this project, describe a change, or type / for commands.\n/tree  branches    /sessions  resume    /model  choose model"), 1));

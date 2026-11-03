@@ -37,6 +37,8 @@ export interface PromptNodeData {
   filterContext?: boolean;
   onEditLabel?: () => void;
   content: () => NodeContent;
+  /** Resolves once this node's own history is in the renderer, if it was not. */
+  onLoadContent?: () => Promise<void>;
   onCompose: (direction?: BranchDirection) => void;
   /** Opens this node in a pinned chat column; graph sessions only. */
   onOpenPanel?: () => void;
@@ -202,9 +204,16 @@ function showPreview(event: MouseEvent, kind: "content" | "info" = "content") {
   }, 280);
 }
 
+let previewToken = 0;
 async function openPreview(kind: "content" | "info") {
+  const token = ++previewToken;
   previewKind.value = kind;
-  if (kind === "content") previewContent.value = props.data.content();
+  if (kind === "content") {
+    // Loading a windowed-out turn takes a round trip; a newer hover wins.
+    await props.data.onLoadContent?.();
+    if (token !== previewToken) return;
+    previewContent.value = props.data.content();
+  }
   previewing.value = true;
   await nextTick();
   if (typeof ResizeObserver !== "undefined" && preview.value) {

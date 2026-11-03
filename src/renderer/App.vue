@@ -640,6 +640,7 @@ onMounted(() => {
         current: session.current,
         commands: session.commands,
         focusedNode: session.focusedNode,
+        windowStates: [...session.windowStates.entries()],
         layout: layout.layout,
         contentSection: layout.contentSection,
         contentTabs: layout.contentTabs,
