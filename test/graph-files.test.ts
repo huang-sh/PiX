@@ -209,6 +209,38 @@ test("SDK usage and context edits survive branch persistence and export without 
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a refused replacement leaves no temp file behind", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-durable-write-"));
+  const file = join(dir, "value.json");
+  try {
+    durableWrite(file, "first\n");
+    durableWrite(file, "second\n");
+    assert.equal(readFileSync(file, "utf8"), "second\n");
+    assert.deepEqual(readdirSync(dir), ["value.json"]);
+    // A destination that cannot be replaced reports its own error, not litter.
+    rmSync(file); mkdirSync(file);
+    assert.throws(() => durableWrite(file, "third\n"));
+    assert.deepEqual(readdirSync(dir), ["value.json"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a checkpoint that cannot be refreshed leaves the branch usable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-checkpoint-locked-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const data = { header: a.header, entries: [...initial.entries, user("turn", "root")] };
+    // A locked or otherwise unreplaceable checkpoint path must not fail the
+    // write that actually carries the conversation.
+    mkdirSync(graph.checkpointPath(a.id));
+    graph.create(a, data);
+    assert.deepEqual(graph.seal(a, data), data);
+    assert.equal(readFileSync(graph.path(a.id), "utf8"), encodeSession(data));
+    assert.deepEqual(readStrict(graph.path(a.id)), data);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("persistence checks use Pi JSON semantics but still reject changed or missing data", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-json-equality-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));

@@ -261,6 +261,96 @@ test("manual compaction cannot change a completed turn's timing or block later p
   }
 });
 
+test("a closed session's parked manager serves its unchanged reopen", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-parked-manager-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: runtime.snapshot().projection.activeNodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("one", "first question");
+    const manager = runtime.runtime!.session.sessionManager;
+    const path = runtime.snapshot().session.path;
+    await runtime.close();
+    const reopened = await runtime.open(path);
+    assert.ok(reopened.entries.length > 0);
+    assert.equal(runtime.runtime!.session.sessionManager, manager,
+      "an unchanged file must reopen through its parked manager instead of re-parsing");
+    await prompt("two", "second question");
+    assert.ok(runtime.snapshot().projection.nodes.some(node => node.preview.includes("Reply to two")));
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a large graph streams branch transcripts after the open snapshot", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-lazy-branches-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  runtime["lazyBranchBytes"] = 0;
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string, nodeId?: string | null) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: nodeId === undefined ? runtime.snapshot().projection.activeNodeId : nodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("first", "first question");
+    await prompt("branch-1", "branch question", null);
+    const path = runtime.snapshot().session.path;
+    const branchId = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-1")!.branchId;
+    assert.notEqual(branchId, "main");
+    await runtime.close();
+    const opened = await runtime.open(path);
+    assert.equal(opened.graph!.runs.some(run => run.branchId === branchId), false,
+      "the open snapshot must carry only the main line");
+    await until(() => runtime.snapshot().graph!.runs.some(run => run.branchId === branchId));
+    const branchNode = runtime.snapshot().projection.nodes.find(node => node.branchId === branchId);
+    assert.ok(branchNode, "the hydrated branch must join the graph");
+    await prompt("branch-2", "follow-up", branchNode.id);
+    assert.ok(runtime.snapshot().graph!.runs.some(run => run.requestId === "branch-2"),
+      "forking from a hydrated branch must work");
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("stopping automatic compaction saves a cancelled record across close and reopen", { timeout: 20000 }, async t => {
   for (const target of ["main", "branch"] as const) for (const action of ["abort", "close"] as const) await t.test(`${target}: ${action}`, async () => {
     const home = mkdtempSync(join(tmpdir(), "pix-close-compaction-"));
