@@ -55,9 +55,9 @@
     "test:installation": "node --test test/packaged-cli-test.mjs test/linux-install-hooks.test.mjs test/windows-cli-path.test.mjs test/prune-dev-artifacts.test.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@lucide/vue": "^1.39.0",
     "@vue-flow/core": "^1.48.2",
     "@vue-flow/minimap": "^1.5.4",
