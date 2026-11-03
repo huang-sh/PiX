@@ -24,6 +24,7 @@ const settings = {
     preventSleepDuringTasks: true,
     keepScreenOnDuringTasks: false,
     canvasDotGrid: true,
+    nodeCardShowCommit: true,
     canvasDotGridSpacing: 24,
     canvasDotGridDotSize: 4,
   },
@@ -153,7 +154,7 @@ describe("SettingsPage auto-save", () => {
       await wrapper.get('[data-node-card-reset]').trigger('click');
       await flushPromises();
       expect(layout.settings?.app.nodeCardFields).toEqual(["branch", "context"]);
-      expect(layout.settings?.app.nodeCardShowCommit).toBe(true);
+      expect(layout.settings?.app.nodeCardShowCommit).toBe(false);
     } finally { wrapper.unmount(); }
   });
 

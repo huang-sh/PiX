@@ -255,9 +255,9 @@ function rebuild() {
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
     if (Array.isArray(saved)) for (const entry of saved) {
-      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] < 0) {
+      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] !== 0) {
         branchOrder.set(entry[0], entry[1]);
-        orderSequence = Math.max(orderSequence, -entry[1]);
+        orderSequence = Math.max(orderSequence, Math.abs(entry[1]));
       }
     }
     draftOrder = 0;
@@ -348,12 +348,9 @@ function rebuild() {
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
         ? () => { void retryTurn(node.id); }
         : undefined,
-      onExportSession: session.current?.graph ? () => { void exportSession(node.id); } : undefined,
-      // The export target is the node the chat panel shows: that node becomes
-      // the new session's tip and everything after it stays in the original
-      // graph. The chat column follows focusedNode, while the projection's
-      // activeNodeId is only the main branch's cursor, so the viewed id stays a
-      // live getter: focus moves never rebuild the cards.
+      onExportSession: session.current?.graph ? direction => { void exportSession(node.id, direction); } : undefined,
+      // The viewed node is the export boundary. Keep its id live:
+      // focus moves do not rebuild cards, and activeNodeId is the main cursor.
       viewedNodeId: session.current?.graph
         ? () => session.focusedNode && !session.focusedNode.startsWith("pending:")
           ? session.focusedNode : session.current?.projection.activeNodeId ?? null
@@ -608,9 +605,9 @@ async function deleteNode(id: string) {
   } catch (error) { deleteError.value = String(error); }
 }
 
-async function exportSession(id: string) {
+async function exportSession(id: string, direction: "ancestors" | "descendants") {
   try {
-    const result = await session.exportBranchSession(id);
+    const result = await session.exportBranchSession(id, direction);
     if (result?.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -631,7 +628,7 @@ async function reopenSession() {
 async function compose(id: string, direction?: BranchDirection) {
   ++retryRequest;
   if (draftParent.value !== id) draftState.value = emptyDraft();
-  draftOrder = direction === "up" ? -++orderSequence : 0;
+  draftOrder = direction === "up" ? -++orderSequence : direction === "down" ? ++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
   draftParent.value = id;
   draftModel.value = node?.footer?.model ?? session.current?.runtime.model ?? null;
@@ -668,6 +665,9 @@ async function retryTurn(id: string) {
   const parentNode = projection.value?.nodes.find((item) => item.id === parent);
   resetDraft();
   draftParent.value = parent;
+  // A retry continues the branch only from its tip; anywhere else it opens as
+  // an explicit branch below, not an unmarked fork in the mainline row.
+  draftOrder = parentNode?.continuable === false ? ++orderSequence : 0;
   draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
   draftThinking.value = undefined;
   draftState.value = { ...emptyDraft(), text: content.user, images };
@@ -722,7 +722,7 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
     requestId || targetDraft.promptOverride !== undefined
-      ? { ...(requestId ? { requestId } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
+      ? { ...(requestId ? { requestId, forceFork: true } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
       : undefined,
   );
   if (!delivered) {

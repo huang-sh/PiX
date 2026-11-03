@@ -604,7 +604,7 @@ export class MainController {
       if (error) graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${error}`);
     }
     if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
-    return { ...snapshot, ...cache.view(snapshot, new Set()) };
+    return { ...snapshot, ...cache.view(snapshot, new Set(), new Set()) };
   }
   invoke(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
     if (route !== "shell.run") return this.invokeRoute(route, raw, sessionPath);

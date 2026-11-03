@@ -191,6 +191,9 @@ export interface GraphNode {
   branchId?: string;
   running?: boolean;
   forkable?: boolean;
+  /** False when this node cannot continue its branch in place — composing
+   * there always forks. Plain sessions leave it unset: they continue anywhere. */
+  continuable?: boolean;
 }
 export type GraphFilter = "all" | "labeled" | "running" | "errors";
 export interface GraphEdge {
@@ -466,7 +469,7 @@ export interface AppSettings {
   canvasDotGridDotSize: number;
   /** Optional footer fields in priority order; model and thinking always appear. */
   nodeCardFields?: NodeCardField[];
-  /** Show a short commit SHA beside the branch in node footers; defaults to true. */
+  /** Show a short commit SHA beside the branch in node footers; defaults to false. */
   nodeCardShowCommit?: boolean;
   /**
    * Deploys this desktop's model API keys and custom models to remote hosts,
@@ -551,8 +554,8 @@ export interface RuntimeExtension {
 }
 export type AgentControl =
   | { action: "deleteNode"; nodeId: string; graphId: string }
-  | { action: "exportBranchSession"; nodeId: string; graphId: string }
-  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
+  | { action: "exportBranchSession"; nodeId: string; graphId: string; direction?: "ancestors" | "descendants" }
+  | { action: "promptAt"; requestId: string; nodeId: string | null; forceFork?: boolean; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
   | { action: "branchAbort"; branchId: string; runId: string }
   | { action: "prompt"; text: string; images?: PromptImage[]; submittedAt?: string }
   | { action: "steer" | "followUp"; text: string; images?: PromptImage[]; graphId?: string; branchId?: string; runId?: string }

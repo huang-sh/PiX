@@ -12,7 +12,7 @@ const { rows } = useSettingsDraftContext();
 </script>
 
 <template>
-  <div v-if="layout.settingsCategory === 'appearance'" class="appearance-settings">
+  <div v-if="layout.settingsCategory === 'appearance'" class="settings-stack">
     <section v-for="group in (['interface', 'canvas'] as const)" :key="group" class="settings-card" :data-appearance-group="group">
       <h2 class="settings-group-title">{{ t(`settings.appearanceGroups.${group}`) }}</h2>
       <SettingRow v-for="row in rows.filter(row => row.group === group)" :key="row.path" :row="row" :disabled="row.path === 'theme' && layout.themeSaving" />

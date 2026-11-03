@@ -323,13 +323,17 @@ export function validateRouteInput(
         return { action, ...(v.allTypes === undefined ? {} : { allTypes: booleanField(v.allTypes, "allTypes") }) };
       if (action === "deleteNode")
         return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId") };
-      if (action === "exportBranchSession")
-        return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId") };
+      if (action === "exportBranchSession") {
+        if (v.direction !== undefined && v.direction !== "ancestors" && v.direction !== "descendants")
+          throw new Error("Invalid export direction");
+        return { action, nodeId: str(v.nodeId, "nodeId"), graphId: str(v.graphId, "graphId"), direction: v.direction };
+      }
       if (action === "promptAt") {
         const requestId = str(v.requestId, "requestId")!;
         if (!/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new Error("Invalid request ID");
         const images = v.images === undefined ? undefined : validatePromptImages(v.images);
         return { action, requestId, nodeId: v.nodeId === null ? null : str(v.nodeId, "nodeId"),
+          ...(v.forceFork !== undefined ? { forceFork: booleanField(v.forceFork, "forceFork") } : {}),
           text: str(v.text, "text", !!images?.length) ?? "", ...(images?.length ? { images } : {}),
           provider: str(v.provider, "provider", true), modelId: str(v.modelId, "modelId", true),
           thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),

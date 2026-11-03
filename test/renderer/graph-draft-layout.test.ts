@@ -80,7 +80,7 @@ describe("draft placement", () => {
     checkOrder("turn:new");
   });
 
-  it("restores saved upward order in a fresh view and keeps subsequent upward branches above it", async () => {
+  it.each(["up", "down"] as const)("restores saved %s order in a fresh view and places later branches beyond it", async direction => {
     const { graph, session, wrapper } = setup();
     const invoke = vi.spyOn(desktop, "invoke");
     const promptAt = vi.spyOn(session, "promptAt").mockImplementation(async () => {
@@ -91,10 +91,10 @@ describe("draft placement", () => {
     });
     let savedLayout: LayoutState;
     try {
-      await graph.compose("turn:root", "up"); await graph.submitDraft("new"); await flushPromises();
+      await graph.compose("turn:root", direction); await graph.submitDraft("new"); await flushPromises();
       const lastSave = invoke.mock.calls.filter(([route]) => route === "layout.save").at(-1)!;
       savedLayout = structuredClone((lastSave[1] as { layout: LayoutState }).layout);
-      expect(Object.values(savedLayout.branchOrders!)).toContainEqual([["turn:new", -1]]);
+      expect(Object.values(savedLayout.branchOrders!)).toContainEqual([["turn:new", direction === "up" ? -1 : 1]]);
     } finally { promptAt.mockRestore(); invoke.mockRestore(); }
     const savedSession = session.current!;
     wrapper.unmount();
@@ -104,9 +104,9 @@ describe("draft placement", () => {
     const reopened = mount(GraphPanel, { global: { plugins: [fresh, i18n], stubs: { VueFlow: true } } });
     const restored = (reopened.vm as any).$.setupState;
     const y = (id: string) => restored.nodes.find((node: any) => node.id === id).position.y;
-    expect(y("turn:new")).toBeLessThan(y("turn:a"));
-    await restored.compose("turn:root", "up"); await flushPromises();
-    expect(y("draft:turn:root")).toBeLessThan(y("turn:new"));
+    expect((direction === "up" ? -1 : 1) * (y("turn:new") - y(direction === "up" ? "turn:a" : "turn:b"))).toBeGreaterThan(0);
+    await restored.compose("turn:root", direction); await flushPromises();
+    expect((direction === "up" ? -1 : 1) * (y("draft:turn:root") - y("turn:new"))).toBeGreaterThan(0);
     expectClear(restored, "draft:turn:root");
   });
 
@@ -360,4 +360,25 @@ describe("draft placement", () => {
     expect(draft.position.y + draft.dimensions.height / 2).toBe(parent.position.y + parent.dimensions.height / 2);
     expectClear(graph, draft.id);
   });
+});
+
+
+it("the first up/down child is a branch, while horizontal continuation stays on the parent lane", async () => {
+  const { graph, session } = setup();
+  const parent = "turn:c";
+  for (const direction of ["up", undefined, "down", undefined] as const) {
+    await graph.compose(parent, direction); await flushPromises();
+    const root = graph.nodes.find((n: any) => n.id === parent);
+    const draft = graph.nodes.find((n: any) => n.id === `draft:${parent}`);
+    const middle = (n: any) => n.position.y + n.dimensions.height / 2;
+    if (direction) expect((direction === "up" ? -1 : 1) * (middle(draft) - middle(root))).toBeGreaterThan(0);
+    else expect(middle(draft)).toBe(middle(root));
+    const submit = vi.spyOn(session, "promptAt").mockResolvedValue(undefined);
+    try {
+      await graph.submitDraft("next");
+      const options = submit.mock.calls[0]![5];
+      expect(options?.forceFork === true).toBe(Boolean(direction));
+    } finally { submit.mockRestore(); }
+    graph.cancelDraft();
+  }
 });

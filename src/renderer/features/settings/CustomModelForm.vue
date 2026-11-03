@@ -101,7 +101,7 @@ async function save() {
   <DialogRoot :open="true" @update:open="!$event && !working && emit('cancel')">
     <DialogOverlay class="dialog-overlay" />
     <DialogContent class="custom-model-dialog" :aria-describedby="undefined" @interact-outside.prevent @escape-key-down="working && $event.preventDefault()">
-  <form class="settings-card model-options" data-custom-model-form :aria-busy="working" @submit.prevent="save">
+  <form class="custom-model-form model-options" data-custom-model-form :aria-busy="working" @submit.prevent="save">
     <header class="model-options-header"><DialogTitle>{{ t(props.model ? "settings.editCustomModel" : "settings.addCustomModel") }}</DialogTitle></header>
     <fieldset :disabled="working" class="custom-model-fields">
       <template v-for="field in fields" :key="field.key">
@@ -140,11 +140,12 @@ async function save() {
 </template>
 
 <style scoped>
-.custom-model-dialog { position: fixed; z-index: 151; top: 5vh; left: 50%; transform: translateX(-50%); width: min(680px, calc(100vw - 40px)); max-height: 90vh; overflow: auto; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 90px rgba(14,38,31,.26); }
+.custom-model-dialog { position: fixed; z-index: 151; top: 5vh; left: 50%; transform: translateX(-50%); width: min(680px, calc(100vw - 40px)); overflow: hidden; border-radius: 14px; background: var(--surface); box-shadow: 0 30px 90px rgba(14,38,31,.26); }
+.custom-model-form { margin: 0; max-height: 90vh; overflow: auto; scrollbar-gutter: stable both-edges; }
 .custom-model-dialog h2 { margin: 0; font-size: var(--font-size-ui); }
 .custom-model-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
-.custom-model-note { padding: 14px 21px; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.6; }
-.model-discovery { padding: 14px 21px; border-bottom: 1px solid var(--border); }
+.custom-model-note { padding: 14px 18px; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.6; }
+.model-discovery { padding: 14px 18px; border-bottom: 1px solid var(--border); }
 .discovery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .discovery-actions > span, .discovery-hint, .discovered-model small, .discovered-models > p { color: var(--muted); font-size: var(--font-size-ui); }
 .discovery-hint { margin: 10px 0; line-height: 1.5; }

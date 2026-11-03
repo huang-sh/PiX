@@ -151,7 +151,7 @@ defineExpose({ requestClose });
     <p class="shortcut-scope">{{ t('shortcuts.scope') }}</p>
     <p v-if="error" class="settings-error" role="alert">{{ error }}</p>
     <div class="settings-card shortcut-list" :aria-busy="busy">
-      <article v-for="{ id } in filtered" :key="id" class="shortcut-row" :data-shortcut="id">
+      <article v-for="{ id } in filtered" :key="id" class="setting-row shortcut-row" :data-shortcut="id">
         <div class="shortcut-description"><strong>{{ t(`shortcuts.actions.${id}`) }}</strong><small>{{ t(`shortcuts.descriptions.${id}`) }}</small><span v-if="Object.hasOwn(draft, id)" class="shortcut-custom">{{ t('shortcuts.customized') }}</span></div>
         <div class="shortcut-bindings">
           <div v-for="(binding, index) in shortcutBindings(id, draft)" :key="binding" class="shortcut-binding">
@@ -190,13 +190,12 @@ defineExpose({ requestClose });
 </template>
 
 <style scoped>
-.shortcut-settings { max-width: 1120px; margin: auto; }
 .shortcut-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .shortcut-toolbar .settings-search { flex: 1; min-width: 190px; width: auto; height: 42px; border-radius: 24px; }
 .shortcut-scope, .shortcut-footnote { margin: 14px 0 20px; color: var(--muted); font-size: var(--font-size-ui); line-height: 1.7; }
-.shortcut-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(240px,.8fr); gap: 24px; align-items: center; padding: 22px 24px; border-bottom: 1px solid var(--border); }
+.shortcut-row { grid-template-columns: minmax(0,1fr) minmax(240px,.8fr); }
 .shortcut-row:last-child { border-bottom: 0; }
-.shortcut-description { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.shortcut-description { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
 .shortcut-description strong { font-size: var(--font-size-ui); font-weight: 600; }
 .shortcut-description small, .shortcut-unassigned { color: var(--muted); font-size: var(--font-size-ui); line-height: 1.6; }
 .shortcut-custom { color: var(--accent-strong); font-size: var(--font-size-caption); }
@@ -210,5 +209,5 @@ kbd { padding: 4px 11px; border: 1px solid var(--border); border-radius: 20px; b
 .shortcut-recorder { display: flex; align-items: center; justify-content: center; min-height: 95px; margin: 20px 0; padding: 14px; border: 1px dashed var(--border-strong); border-radius: 10px; color: var(--muted); font-size: var(--font-size-ui); }
 .shortcut-recorder:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .shortcut-dialog footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
-@media (max-width: 1100px) { .shortcut-row { grid-template-columns: minmax(0,1fr) minmax(200px,.8fr); padding: 18px; gap: 15px; } }
+@media (max-width: 1100px) { .shortcut-row { grid-template-columns: minmax(0,1fr) minmax(200px,.8fr); gap: 15px; } }
 </style>

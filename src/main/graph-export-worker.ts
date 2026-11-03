@@ -4,11 +4,12 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, samePersistedValue, type BranchRecord, type SessionData } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { exportSubtree } from "./graph-export.js";
 
 async function run() {
-  const { main, data, branches, leafId, outputPath, html, targetLeafId } = workerData as {
+  const { main, data, branches, leafId, outputPath, html, rootEntryId, targetLeafId, exportTitle } = workerData as {
     main: string; data: SessionData; branches: Array<{ record: BranchRecord; data: SessionData }>;
-    leafId: string | null; outputPath: string; html: boolean; targetLeafId?: string | null;
+    leafId: string | null; outputPath: string; html: boolean; rootEntryId?: string; targetLeafId?: string; exportTitle?: string;
   };
   // All inputs are cloned by worker_threads at dispatch. Never read a changing
   // live source or mutate the graph's files, locks, cursors, or runtime.
@@ -23,9 +24,11 @@ async function run() {
   const pi = await adapter.pi();
   let exported = result;
   let outputLeaf = leafId;
-  if (targetLeafId != null) {
-    // Let Pi copy the path and its latest bookmarks together. Labels may have
-    // been edited from a different tip, so walking parents alone loses them.
+  if (rootEntryId != null) {
+    exported = exportSubtree(result, rootEntryId);
+    outputLeaf = exported.entries.at(-1)?.id ?? null;
+  } else if (targetLeafId != null) {
+    // The SDK also carries bookmarks edited from other tips of the graph.
     const manager = pi.SessionManager.inMemory(String(result.header.cwd), undefined, [result.header, ...result.entries]);
     manager.createBranchedSession(targetLeafId);
     exported = { header: manager.getHeader(), entries: manager.getEntries() };
@@ -45,6 +48,12 @@ async function run() {
       throw new Error("Export changed main context");
   }
   const output: SessionData = { ...exported, header: { ...exported.header, id: randomUUID(), parentSession: main } };
+  if (exportTitle) {
+    const id = randomUUID();
+    output.entries = [...output.entries, { type: "session_info", id, parentId: outputLeaf,
+      timestamp: new Date().toISOString(), name: `${rootEntryId != null ? "↓" : "↑"} ${String(output.header.id).slice(0, 6)} · ${exportTitle}` }];
+    outputLeaf = id;
+  }
   const temp = mkdtempSync(join(dirname(outputPath), ".pix-export-"));
   try {
     const jsonl = join(temp, "tree.jsonl");

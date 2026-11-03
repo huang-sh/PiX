@@ -17,7 +17,8 @@ export class GraphSnapshotCache {
   private nodes: GraphNode[] = [];
   private edges: SessionProjection["edges"] = [];
   private runningNodes = new WeakMap<GraphNode, GraphNode>();
-  private viewCache?: { source: GraphNode[]; active: string; nodes: GraphNode[] };
+  private forkOnlyNodes = new WeakMap<GraphNode, GraphNode>();
+  private viewCache?: { source: GraphNode[]; active: string; continuable: string; nodes: GraphNode[] };
 
   update(graph: GraphFiles, main: SessionSnapshot, branches: Map<string, { snapshot?: SessionSnapshot }>) {
     let changed = false;
@@ -101,15 +102,26 @@ export class GraphSnapshotCache {
 
   error(id: string) { return this.sources.get(id)?.error; }
 
-  view(main: SessionSnapshot, active: Set<string>) {
+  /** The projection the renderer sees: `active` marks live turns (never
+   * forkable, never continuable); nodes outside `continuable` are
+   * explicit-fork-only. Both overlays keep node identity across views. */
+  view(main: SessionSnapshot, active: Set<string>, continuable: Set<string>) {
     const key = [...active].sort().join(";");
-    const nodes = this.viewCache?.source === this.nodes && this.viewCache.active === key ? this.viewCache.nodes : this.nodes.map(node => {
-      if (!active.has(node.id)) return node;
-      let running = this.runningNodes.get(node);
-      if (!running) { running = { ...node, running: true, forkable: false }; this.runningNodes.set(node, running); }
-      return running;
-    });
-    this.viewCache = { source: this.nodes, active: key, nodes };
+    const tips = [...continuable].sort().join(";");
+    const nodes = this.viewCache?.source === this.nodes && this.viewCache.active === key && this.viewCache.continuable === tips
+      ? this.viewCache.nodes
+      : this.nodes.map(node => {
+        if (active.has(node.id)) {
+          let running = this.runningNodes.get(node);
+          if (!running) { running = { ...node, running: true, forkable: false, continuable: false }; this.runningNodes.set(node, running); }
+          return running;
+        }
+        if (continuable.has(node.id)) return node;
+        let forkOnly = this.forkOnlyNodes.get(node);
+        if (!forkOnly) { forkOnly = { ...node, continuable: false }; this.forkOnlyNodes.set(node, forkOnly); }
+        return forkOnly;
+      });
+    this.viewCache = { source: this.nodes, active: key, continuable: tips, nodes };
     return { entries: this.entries, projection: { ...main.projection, nodes, edges: this.edges,
       activeNodeId: main.projection.activeBranchNodeIds.at(-1) ?? nodes.at(-1)?.id ?? null } };
   }

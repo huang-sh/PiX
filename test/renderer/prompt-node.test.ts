@@ -139,6 +139,7 @@ describe("PromptNode information", () => {
 describe("PromptNode branch action", () => {
   it("shows the recorded Git branch and commit, preserves legacy branches and hides missing history", async () => {
     const data = nodeData();
+    useLayoutStore().settings!.app.nodeCardShowCommit = true;
     const branch = "feature/Case-Sensitive-Long-Branch-Name";
     const commit = "0123456789abcdef0123456789abcdef01234567";
     const wrapper = mount(PromptNode, {
@@ -218,6 +219,7 @@ describe("PromptNode branch action", () => {
     await add.trigger("click");
     await wrapper.get('[data-direction="up"]').trigger("click");
     await wrapper.get('[data-direction="down"]').trigger("click");
+    await wrapper.get('[data-direction="right"]').trigger("click");
     expect(onCompose).not.toHaveBeenCalled();
     await wrapper.setProps({ data: { ...data, runnable: true } });
     expect(wrapper.findAll(".node-add")).toHaveLength(1);
@@ -243,8 +245,56 @@ describe("PromptNode branch action", () => {
     expect(down.classes()).not.toContain("is-visible");
     expect(add.find(".lucide-plus").exists()).toBe(true);
     await add.trigger("click");
-    expect(onCompose.mock.calls).toEqual([["up"], ["down"], ["down"]]);
+    expect(onCompose.mock.calls).toEqual([["up"], ["down"], [undefined]]);
+    const right = wrapper.get('[data-direction="right"]');
+    await controls.trigger("mousemove", { clientY: 141 });
+    expect(right.classes()).toContain("is-visible");
+    expect(right.find(".lucide-arrow-right").exists()).toBe(true);
+    expect(up.classes()).not.toContain("is-visible");
+    expect(down.classes()).not.toContain("is-visible");
+    await right.trigger("click");
+    expect(onCompose).toHaveBeenLastCalledWith(undefined);
+    await add.trigger("keydown", { key: "ArrowRight" });
+    expect(right.classes()).toContain("is-visible");
     await add.trigger("keydown", { key: "ArrowUp" });
+    await up.trigger("click");
+    expect(onCompose).toHaveBeenLastCalledWith("up");
+    for (const zoom of [0.25, 0.5, 1, 2]) {
+      box.mockReturnValue({ top: 100, height: 88 * zoom } as DOMRect);
+      for (const [direction, y] of [["up", 15], ["right", 44], ["down", 73]] as const) {
+        await controls.trigger("mousemove", { clientY: 100 + y * zoom });
+        expect(wrapper.get(`[data-direction="${direction}"]`).classes(), `direction ${direction} at zoom ${zoom}`).toContain("is-visible");
+        expect(wrapper.findAll(".node-branch-arrow.is-visible")).toHaveLength(1);
+      }
+    }
+    box.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("offers only explicit branch arrows off the mainline", async () => {
+    const onCompose = vi.fn();
+    const data = nodeData({ current: false, onCompose });
+    data.node.continuable = false;
+    const wrapper = mount(PromptNode, {
+      props: { id: "turn:1", data },
+      global: { plugins: [i18n], stubs: { Handle: true, Teleport: true, MarkdownRenderer: true } },
+    });
+    const add = wrapper.get(".node-add");
+    expect(add.attributes("aria-label")).toBe(i18n.global.t("graph.branchDown"));
+    const controls = wrapper.get(".node-branch-controls");
+    const up = wrapper.get('[data-direction="up"]');
+    const down = wrapper.get('[data-direction="down"]');
+    expect(wrapper.find('[data-direction="right"]').exists()).toBe(false);
+    const box = vi.spyOn(controls.element, "getBoundingClientRect").mockReturnValue({ top: 100, height: 90 } as DOMRect);
+    // The three-way split collapses to halves: the middle points down, never right.
+    await controls.trigger("mousemove", { clientY: 145 });
+    expect(down.classes()).toContain("is-visible");
+    expect(up.classes()).not.toContain("is-visible");
+    expect(controls.classes()).not.toContain("direction-right");
+    await wrapper.get(".node-add").trigger("click");
+    expect(onCompose).toHaveBeenLastCalledWith("down");
+    await wrapper.get(".node-add").trigger("keydown", { key: "ArrowRight" });
+    expect(controls.classes()).not.toContain("direction-right");
     await up.trigger("click");
     expect(onCompose).toHaveBeenLastCalledWith("up");
     box.mockRestore();

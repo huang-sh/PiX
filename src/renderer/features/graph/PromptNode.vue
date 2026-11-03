@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, ArrowUp, Brain, Check, Clock, Coins, FolderOutput, GitBranch, Hash, Image, LoaderCircle, MessageSquare, PieChart, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
-import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem } from "reka-ui";
+import { AlertCircle, ArrowDown, ArrowRight, ArrowUp, Brain, Check, ChevronRight, Clock, Coins, FolderOutput, GitBranch, Hash, Image, LoaderCircle, MessageSquare, PieChart, Plus, RotateCcw, Sparkles, Tag, Trash2, UserRound, Wrench } from "@lucide/vue";
+import { ContextMenuRoot, ContextMenuTrigger, ContextMenuPortal, ContextMenuContent, ContextMenuItem, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "reka-ui";
 import { Handle, Position } from "@vue-flow/core";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -42,8 +42,8 @@ export interface PromptNodeData {
   onOpenPanel?: () => void;
   /** Present only on failed turns: reopens the prompt as an editable draft. */
   onRetry?: () => void;
-  /** Copies the root-to-node path into a new standalone session; graph sessions only. */
-  onExportSession?: () => void;
+  /** Copies the conversation before or after this node into a standalone graph. */
+  onExportSession?: (direction: "ancestors" | "descendants") => void;
   /** Live id of the node the chat panel shows; focus moves do not re-render cards. */
   viewedNodeId?: () => string | null;
   exportBlockedReason?: string;
@@ -54,7 +54,7 @@ export interface PromptNodeData {
 const props = defineProps<{ id: string; data: PromptNodeData; selected?: boolean }>();
 const { t } = useI18n();
 const layout = useLayoutStore();
-const showCommit = computed(() => layout.settings?.app.nodeCardShowCommit !== false);
+const showCommit = computed(() => layout.settings?.app.nodeCardShowCommit === true);
 const root = ref<HTMLElement>();
 const footer = ref<HTMLElement>();
 const measure = ref<HTMLElement>();
@@ -63,7 +63,7 @@ const optionalWidths = ref<number[]>([]);
 const preview = ref<HTMLElement>();
 const previewing = ref(false);
 const previewKind = ref<"content" | "info">("content");
-const branchDirection = ref<BranchDirection>();
+const branchDirection = ref<BranchDirection | "right">();
 const previewContent = ref<NodeContent>({ user: "", assistant: "" });
 const previewStyle = ref<CSSProperties>({ visibility: "hidden", left: "0px", top: "0px" });
 let openTimer: number | undefined;
@@ -260,18 +260,28 @@ function onPointerDown(event: PointerEvent) {
   if (!preview.value?.contains(event.target as Node)) suppressPreview();
 }
 
-function compose(direction: BranchDirection = "down") {
+function compose(direction?: BranchDirection) {
   suppressPreview();
   if (!props.data.runnable) return;
-  props.data.onCompose(direction);
+  // A directionless compose keeps the mainline lane on continuation tips; other
+  // nodes open below, matching the arrows they offer.
+  props.data.onCompose(direction ?? (props.data.node.continuable === false ? "down" : undefined));
 }
+
+const arrowDirections = computed(() => props.data.node.continuable !== false
+  ? (["up", "right", "down"] as const)
+  : (["up", "down"] as const));
 
 function pointBranch(event: MouseEvent) {
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  branchDirection.value = event.clientY < box.top + box.height / 2 ? "up" : "down";
+  const offset = (event.clientY - box.top) / box.height;
+  const thirds = props.data.node.continuable !== false;
+  const edge = thirds ? 1 / 3 : 1 / 2;
+  branchDirection.value = offset < edge ? "up" : offset > 1 - edge || !thirds ? "down" : "right";
 }
 
-function focusBranch(direction: BranchDirection, event: KeyboardEvent) {
+function focusBranch(direction: BranchDirection | "right", event: KeyboardEvent) {
+  if (direction === "right" && props.data.node.continuable === false) return;
   branchDirection.value = direction;
   (event.currentTarget as HTMLElement).parentElement?.querySelector<HTMLButtonElement>(`[data-direction="${direction}"]`)?.focus();
 }
@@ -406,21 +416,22 @@ function relative(value: string) {
       class="node-add nodrag nowheel"
       :aria-disabled="!data.runnable"
       :title="data.runnable ? undefined : t(data.blockedReason)"
-      :aria-label="data.runnable ? t('graph.continueFromTurn') : t(data.blockedReason)"
+      :aria-label="data.runnable ? t(data.node.continuable === false ? 'graph.branchDown' : 'graph.continueFromTurn') : t(data.blockedReason)"
       @focus="suppressPreview"
       @keydown.up.prevent.stop="focusBranch('up', $event)"
       @keydown.down.prevent.stop="focusBranch('down', $event)"
+      @keydown.right.prevent.stop="focusBranch('right', $event)"
       @click.stop="compose()"
     ><Plus :size="15" /></button>
-    <button v-for="direction in (['up', 'down'] as const)" :key="direction"
+    <button v-for="direction in arrowDirections" :key="direction"
       type="button" class="node-branch-arrow" :data-direction="direction"
       :class="{ 'is-visible': branchDirection === direction }"
       :aria-disabled="!data.runnable"
       :title="data.runnable ? undefined : t(data.blockedReason)"
-      :aria-label="t(direction === 'up' ? 'graph.branchUp' : 'graph.branchDown')"
+      :aria-label="t(direction === 'up' ? 'graph.branchUp' : direction === 'down' ? 'graph.branchDown' : 'graph.continueMainline')"
       @focus="branchDirection = direction; suppressPreview()" @blur="branchDirection = undefined"
-      @click.stop="compose(direction)"
-    ><ArrowUp v-if="direction === 'up'" :size="18" :stroke-width="3" /><ArrowDown v-else :size="18" :stroke-width="3" /></button>
+      @click.stop="compose(direction === 'right' ? undefined : direction)"
+    ><ArrowUp v-if="direction === 'up'" :size="18" :stroke-width="3" /><ArrowDown v-else-if="direction === 'down'" :size="18" :stroke-width="3" /><ArrowRight v-else :size="18" :stroke-width="3" /></button>
     </div>
   </article>
   </ContextMenuTrigger>
@@ -442,14 +453,24 @@ function relative(value: string) {
         :title="t('graph.retryTurnHint')"
         @select="data.onRetry?.()"
       ><RotateCcw :size="14" />{{ t('graph.retryTurn') }}</ContextMenuItem>
-      <ContextMenuItem
-        v-if="data.onExportSession"
-        class="menu-item"
-        data-action="node-export-session"
-        :disabled="Boolean(exportBlocked)"
-        :title="exportBlocked || t('graph.exportBranchHint')"
-        @select="data.onExportSession()"
-      ><FolderOutput :size="14" />{{ t('graph.exportBranch') }}</ContextMenuItem>
+      <ContextMenuSub v-if="data.onExportSession">
+        <ContextMenuSubTrigger
+          class="menu-item"
+          data-action="node-export-session"
+          :disabled="Boolean(exportBlocked)"
+          :title="exportBlocked"
+        ><FolderOutput :size="14" />{{ t('graph.exportBranch') }}<ChevronRight :size="14" /></ContextMenuSubTrigger>
+        <ContextMenuPortal>
+          <ContextMenuSubContent class="menu-content" :side-offset="2">
+            <ContextMenuItem class="menu-item" data-action="node-export-ancestors"
+              :title="t('graph.exportAncestorsHint')" @select="data.onExportSession('ancestors')"
+            ><ArrowUp :size="14" />{{ t('graph.exportAncestors') }}</ContextMenuItem>
+            <ContextMenuItem class="menu-item" data-action="node-export-descendants"
+              :title="t('graph.exportDescendantsHint')" @select="data.onExportSession('descendants')"
+            ><ArrowDown :size="14" />{{ t('graph.exportDescendants') }}</ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuPortal>
+      </ContextMenuSub>
       <ContextMenuItem
         class="menu-item danger"
         data-action="node-delete"

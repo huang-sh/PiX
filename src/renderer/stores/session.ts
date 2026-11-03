@@ -538,12 +538,12 @@ export const useSessionStore = defineStore("session", {
         }
       } finally { this.deletingNode = false; }
     },
-    // Copies the root-to-node path into a new standalone session; the source
+    // Copies the chosen conversation range into a new standalone graph; the source
     // graph is untouched, so the list only gains one entry.
-    async exportBranchSession(id: string) {
+    async exportBranchSession(id: string, direction: "ancestors" | "descendants") {
       const graphId = this.current?.graph?.id;
       if (!graphId) return;
-      const result = await this.control<{ path: string }>({ action: "exportBranchSession", nodeId: id, graphId });
+      const result = await this.control<{ path: string }>({ action: "exportBranchSession", nodeId: id, graphId, direction });
       await this.refresh();
       return result;
     },
@@ -587,7 +587,7 @@ export const useSessionStore = defineStore("session", {
     },
     // follow: false serves pinned chat columns: the submission starts on its
     // branch, but the primary column must keep showing the current selection.
-    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null }) {
+    async promptAt(nodeId: string | null, text: string, model?: RuntimeModel | null, thinkingLevel?: string, images?: PromptImage[], options?: { forceFork?: boolean; follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null }) {
       const current = this.current;
       const project = this.activeProjectId, request = this.viewRequest;
       if (!current || (!text.trim() && !images?.length)) return;
@@ -615,6 +615,7 @@ export const useSessionStore = defineStore("session", {
         try {
           const result = await this.control<SessionSnapshot>({ action: "promptAt", requestId, nodeId, text,
             provider: model?.provider, modelId: model?.id, thinkingLevel, images,
+            ...(options?.forceFork ? { forceFork: true } : {}),
             ...(promptOverride ? { promptOverride } : {}) });
           if (project !== this.activeProjectId || current.session.path !== this.current?.session.path
             || current.graph.epoch !== this.current?.graph?.epoch) return;

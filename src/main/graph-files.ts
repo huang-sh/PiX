@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type PromptImage, type PromptOverrideInput } from "../shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE, type RawSessionEntry, type PromptImage, type PromptOverrideInput } from "../shared/types.js";
 import { debugLog } from "./debug-log.js";
 import { projectSession, promptDisplayTextMap } from "../shared/session.js";
 
@@ -31,42 +31,110 @@ export function samePersistedValue(a: unknown, b: unknown): boolean {
     && isDeepStrictEqual(JSON.parse(JSON.stringify(a)), JSON.parse(JSON.stringify(b))));
 }
 
-/** Validate before asking the SDK to interpret a file: its parser deliberately skips bad lines. */
-export function parseStrict(raw: string): SessionData {
-  const values = raw.split("\n").filter(line => line.trim()).map((line, i) => {
-    try { return JSON.parse(line); } catch { throw new Error(`Invalid session JSON at line ${i + 1}`); }
-  });
-  const header = values.shift();
+/**
+ * Structural validation of already-parsed session data: the same checks
+ * parseStrict runs on raw text, without a serialize-and-reparse round trip.
+ */
+export function validateSessionData(data: SessionData): void {
+  const { header, entries } = data;
   if (!header || header.type !== "session" || typeof header.id !== "string" || !header.id || header.version !== 3)
     throw new Error("Expected a Pi v3 session header");
   const byId = new Map<string, RawSessionEntry>();
   const types = new Set(["message", "model_change", "thinking_level_change", "usage", "compaction", "branch_summary", "custom", "custom_message", "context_edit", "label", "session_info"]);
-  for (const entry of values) {
+  for (const entry of entries) {
     if (!entry || !types.has(entry.type) || typeof entry.id !== "string" || !entry.id || byId.has(entry.id)
       || (entry.parentId !== null && typeof entry.parentId !== "string") || typeof entry.timestamp !== "string")
       throw new Error("Invalid or duplicate session entry");
     // Pi's append-only format always writes a parent before its children. Multiple roots are valid.
     if (entry.parentId !== null && !byId.has(entry.parentId)) throw new Error(`Missing or cyclic parent of ${entry.id}`);
-    if (entry.type === "message" && (!entry.message || typeof entry.message.role !== "string"))
+    if (entry.type === "message" && (!entry.message || typeof (entry.message as { role?: unknown }).role !== "string"))
       throw new Error(`Invalid message ${entry.id}`);
     byId.set(entry.id, entry);
   }
-  for (const entry of values) {
+  for (const entry of entries) {
     const hasTarget = entry.type === "label" || entry.type === "context_edit";
     const ref = hasTarget ? entry.targetId : entry.type === "compaction" ? entry.firstKeptEntryId : undefined;
     if ((hasTarget || entry.type === "compaction") && (typeof ref !== "string" || !byId.has(ref))) throw new Error(`Missing reference in ${entry.id}`);
     // branch_summary.fromId may name the abandoned path outside an SDK-extracted session.
   }
-  return { header, entries: values };
+}
+
+/** Validate before asking the SDK to interpret a file: its parser deliberately skips bad lines. */
+export function parseStrict(raw: string): SessionData {
+  const values = raw.split("\n").filter(line => line.trim()).map((line, i) => {
+    try { return JSON.parse(line); } catch { throw new Error(`Invalid session JSON at line ${i + 1}`); }
+  });
+  const header = values.shift() as SessionData["header"];
+  const entries = values as RawSessionEntry[];
+  validateSessionData({ header, entries });
+  return { header, entries };
 }
 export const readStrict = (file: string) => parseStrict(readFileSync(file, "utf8"));
+
+/**
+ * Parsed sidecar values memoized by file identity (inode/mtime/size). Reopening
+ * an unchanged graph skips re-reading and re-parsing its branch files; every
+ * write replaces the file (temp + rename), changing the identity. Values are
+ * treated as immutable: callers shallow-copy shells they mutate.
+ */
+const parsedFiles = new Map<string, { ino: number; mtimeMs: number; size: number; value: unknown }>();
+const PARSED_FILES_LIMIT = 64;
+const PARSED_FILES_BYTES = 96 << 20;
+let parsedFilesBytes = 0;
+function dropParsed(file: string) {
+  const entry = parsedFiles.get(file);
+  if (entry) { parsedFilesBytes -= entry.size; parsedFiles.delete(file); }
+}
+function readParsed<T>(file: string, read: () => T): T {
+  let identity: { ino: number; mtimeMs: number; size: number } | undefined;
+  try {
+    const { ino, mtimeMs, size } = statSync(file);
+    identity = { ino, mtimeMs, size };
+  } catch { dropParsed(file); }
+  if (identity) {
+    const cached = parsedFiles.get(file);
+    if (cached && cached.ino === identity.ino && cached.mtimeMs === identity.mtimeMs && cached.size === identity.size)
+      return cached.value as T;
+  }
+  const value = read();
+  if (identity) {
+    dropParsed(file);
+    parsedFiles.set(file, { ...identity, value });
+    parsedFilesBytes += identity.size;
+    // Oldest-first eviction by both file count and total bytes; the freshly
+    // cached file always stays, even alone above the byte budget.
+    while (parsedFiles.size > 1 && (parsedFiles.size > PARSED_FILES_LIMIT || parsedFilesBytes > PARSED_FILES_BYTES))
+      dropParsed(parsedFiles.keys().next().value!);
+  }
+  return value;
+}
+
+/**
+ * Replacing an existing file is refused while another process still holds it:
+ * Windows reports EPERM/EACCES/EBUSY when antivirus, cloud sync or the indexer
+ * has the destination or the fresh temp file open. Those holds last well under
+ * a second, so retry instead of failing a write that will succeed next try.
+ */
+const renameRetryDelays = [10, 20, 50, 100, 200, 400];
+const retryCell = new Int32Array(new SharedArrayBuffer(4));
 
 /** Same-directory replacement; never truncate the sole good copy. */
 export function durableWrite(file: string, text: string) {
   const temp = `${file}.${randomUUID()}.tmp`;
   const fd = openSync(temp, "wx");
   try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temp, file);
+  for (let attempt = 0; ; attempt++) {
+    try { renameSync(temp, file); return; }
+    catch (error) {
+      const locked = ["EPERM", "EACCES", "EBUSY"].includes((error as NodeJS.ErrnoException).code ?? "");
+      if (!locked || attempt === renameRetryDelays.length) {
+        // A temp nobody renames is litter; the caller's original error wins.
+        try { rmSync(temp, { force: true }); } catch { /* report the rename failure */ }
+        throw error;
+      }
+      Atomics.wait(retryCell, 0, 0, renameRetryDelays[attempt]!);
+    }
+  }
 }
 
 /** Branch sidecar next to the session file; removed together with it. */
@@ -137,14 +205,18 @@ function holderLooksLikePi(pid: number): boolean {
   return probe.status === 0 && /pix|electron|node/i.test(String(probe.stdout ?? ""));
 }
 
+/** Canonicalized clones keyed by source entry: branch entries are shared
+ * through the parse cache, so unchanged branches reuse identical clones. */
+const canonicalClones = new WeakMap<RawSessionEntry, RawSessionEntry>();
+
 export class GraphFiles {
   readonly dir: string;
   readonly records = new Map<string, BranchRecord>();
   leafId: string | null = null;
   hasSavedLeaf = false;
   private locked = false;
-  private deltaEntries = new WeakMap<BranchRecord, WeakMap<RawSessionEntry, RawSessionEntry>>();
   readonly recoveryMessages: string[] = [];
+  readonly unavailableBranchMetadata: string[] = [];
   readonly recoveredInputs: Array<{ requestId: string; text: string; nodeId?: string | null; images?: PromptImage[] }> = [];
   constructor(readonly main: string) {
     this.dir = graphDir(main);
@@ -220,19 +292,34 @@ export class GraphFiles {
       }
       catch { this.recoveryMessages.push("Saved selection unavailable; using the session's last persisted entry"); }
     }
-    for (const name of readdirSync(this.dir).filter(n => n.endsWith(".jsonl.origin.json"))) {
+    this.unavailableBranchMetadata.length = 0;
+    const origins = new Set<string>();
+    for (const name of readdirSync(this.dir)) {
+      if (/\.jsonl\.origin\.json(?:\.bak)?$/.test(name)) origins.add(name.replace(/\.bak$/, ""));
+      // A source/checkpoint without its origin still represents a branch. It
+      // must not disappear from exports just because load cannot identify it.
+      if (/^[a-zA-Z0-9-]+\.jsonl(?:\.checkpoint)?$/.test(name) && !/^main-(?:damaged|legacy)-/.test(name))
+        origins.add(`${name.replace(/\.checkpoint$/, "")}.origin.json`);
+    }
+    for (const name of origins) {
       let record: BranchRecord;
       try {
-        record = this.readJson(join(this.dir, name), readOnly);
+        const file = join(this.dir, name);
+        // Shallow-copy the shell: instances mutate status/error locally while
+        // the immutable baseline entries stay shared through the parse cache.
+        record = { ...readParsed(file, () => this.readJson(file, readOnly)) } as BranchRecord;
         if (basename(this.origin(record.id)) !== name || !record.inherited || typeof record.request?.text !== "string"
           || !inheritsConsistently(record)
           || !["prepared", "running", "idle", "interrupted"].includes(record.status)) throw new Error("Invalid branch origin");
-        parseStrict(encodeSession({ header: record.header, entries: record.baseline }));
+        validateSessionData({ header: record.header, entries: record.baseline });
       }
-      catch { this.recoveryMessages.push(`Branch metadata unavailable; original session retained: ${name}`); continue; }
+      catch {
+        this.unavailableBranchMetadata.push(name);
+        this.recoveryMessages.push(`Branch metadata unavailable; original session retained: ${name}`);
+        continue;
+      }
       if (!readOnly && record.status === "prepared" && !existsSync(this.path(record.id))) {
         const initial = encodeSession({ header: record.header, entries: record.baseline });
-        parseStrict(initial);
         durableWrite(this.path(record.id), initial);
         durableWrite(this.checkpointPath(record.id), initial);
       }
@@ -432,6 +519,29 @@ export class GraphFiles {
     this.finishDeletion();
     return ancestor(leafId);
   }
+  /**
+   * Non-empty line count of the main file, scanned as raw bytes without
+   * decoding. The SDK's parser silently skips malformed lines, so a manager
+   * opened through the SDK must account for every record on disk; null means
+   * the file is empty and the SDK will initialize it.
+   */
+  countMainLines(): number | null {
+    if (statSync(this.main).size === 0) return null;
+    const fd = openSync(this.main, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(1 << 16);
+      let count = 0, content = false, read: number;
+      while ((read = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+        for (let i = 0; i < read; i++) {
+          const byte = buffer[i]!;
+          if (byte === 10) { if (content) { count++; content = false; } }
+          else if (byte !== 32 && byte !== 9 && byte !== 11 && byte !== 12 && byte !== 13) content = true;
+        }
+      }
+      if (content) count++;
+      return count;
+    } finally { closeSync(fd); }
+  }
   readMain(migrate: (entries: unknown[]) => SessionData) {
     const original = readFileSync(this.main, "utf8");
     try { return parseStrict(original); } catch (e) { debugLog("graph-files: strict main parse failed, recovering", e); }
@@ -466,10 +576,10 @@ export class GraphFiles {
     // Parse and recover the same captured bytes while another process can append.
     let original: string | undefined;
     try {
-      original = readFileSync(file, "utf8");
-      return parseStrict(original);
+      return readParsed(file, () => parseStrict(readFileSync(file, "utf8")));
     }
     catch (error) {
+      try { original = readFileSync(file, "utf8"); } catch { /* source missing; checkpoint below */ }
       if (!readOnly) {
         record.error = `Source needs recovery; original retained: ${String(error)}`;
         record.status = "interrupted";
@@ -498,20 +608,29 @@ export class GraphFiles {
       return checkpoint;
     }
   }
+  /**
+   * The checkpoint only mirrors the source written or verified immediately
+   * before it, so a refused replacement costs recovery redundancy, not the
+   * session: fail the source write instead of the caller that already holds it.
+   */
+  private saveCheckpoint(record: BranchRecord, encoded: string) {
+    try { durableWrite(this.checkpointPath(record.id), encoded); }
+    catch (error) { debugLog(`graph-files: checkpoint for ${record.id} not refreshed`, error); }
+  }
   create(record: BranchRecord, data: SessionData) {
     const encoded = encodeSession(data);
     parseStrict(encoded);
     // Origin includes the initial snapshot, so a crash before file creation is recoverable.
     this.save(record);
     durableWrite(this.path(record.id), encoded);
-    durableWrite(this.checkpointPath(record.id), encoded);
+    this.saveCheckpoint(record, encoded);
   }
   seal(record: BranchRecord, memory: SessionData) {
     const disk = readStrict(this.path(record.id));
     if (!samePersistedValue(disk, memory)) throw new Error("Session persistence differs from memory; original retained");
     const fd = openSync(this.path(record.id), "r+");
     try { fsyncSync(fd); } finally { closeSync(fd); }
-    durableWrite(this.checkpointPath(record.id), encodeSession(disk));
+    this.saveCheckpoint(record, encodeSession(disk));
     return disk;
   }
   canonical(record: BranchRecord, id: string) { return Object.hasOwn(record.inherited, id) ? record.inherited[id]! : `${record.id}:${id}`; }
@@ -520,8 +639,7 @@ export class GraphFiles {
     for (const entry of record.baseline)
       if (!samePersistedValue(entry, byId.get(entry.id))) throw new Error(`Branch baseline changed: ${record.id}`);
     const base = new Set(record.baseline.map(e => e.id));
-    let cached = reuse ? this.deltaEntries.get(record) : undefined;
-    if (reuse && !cached) { cached = new WeakMap(); this.deltaEntries.set(record, cached); }
+    const cached = reuse ? canonicalClones : undefined;
     return data.entries.filter(e => !base.has(e.id)).map(entry => {
       const previous = cached?.get(entry);
       if (previous) return previous;
@@ -561,7 +679,7 @@ export class GraphFiles {
           const source = checkpoints ? checkpoints.get(id)! : readStrict(this.checkpointPath(id));
           if (source instanceof Error) throw source;
           delta = this.delta(record, source);
-          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", PROMPT_DISPLAY_CUSTOM_TYPE, "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
+          if (delta.some(e => (e.type === "custom" && !["pix.node-footer", PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE, "pix.git-branch", "pix.branch-metadata"].includes(String(e.customType)))
             || e.type === "custom_message")) throw new Error("Extension state needs a compatible export adapter; source retained");
         } catch (error) {
           throw new Error(`Cannot export branch ${id}: ${String(error)}`);
