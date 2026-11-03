@@ -29,7 +29,9 @@ async function until(check: () => boolean) {
   throw new Error("Timed out waiting for graph state");
 }
 
-test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 30000 }, async t => {
+// The parent budget covers 21 sequential subtests that each open a runtime;
+// under the full suite's parallel load their cumulative duration passes 30s.
+test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 60000 }, async t => {
   for (const stage of ["startup", "model", "model failure", "startup abort", "model abort", "open abort", "startup direct abort", "model direct abort"]) for (const target of ["main", "branch", "continuation"]) {
     if (stage === "open abort" && target === "main") continue;
     if (stage.includes("direct") && target !== "main") continue;
