@@ -79,12 +79,18 @@ export const readStrict = (file: string) => parseStrict(readFileSync(file, "utf8
  */
 const parsedFiles = new Map<string, { ino: number; mtimeMs: number; size: number; value: unknown }>();
 const PARSED_FILES_LIMIT = 64;
+const PARSED_FILES_BYTES = 96 << 20;
+let parsedFilesBytes = 0;
+function dropParsed(file: string) {
+  const entry = parsedFiles.get(file);
+  if (entry) { parsedFilesBytes -= entry.size; parsedFiles.delete(file); }
+}
 function readParsed<T>(file: string, read: () => T): T {
   let identity: { ino: number; mtimeMs: number; size: number } | undefined;
   try {
     const { ino, mtimeMs, size } = statSync(file);
     identity = { ino, mtimeMs, size };
-  } catch { parsedFiles.delete(file); }
+  } catch { dropParsed(file); }
   if (identity) {
     const cached = parsedFiles.get(file);
     if (cached && cached.ino === identity.ino && cached.mtimeMs === identity.mtimeMs && cached.size === identity.size)
@@ -92,9 +98,13 @@ function readParsed<T>(file: string, read: () => T): T {
   }
   const value = read();
   if (identity) {
-    parsedFiles.delete(file);
+    dropParsed(file);
     parsedFiles.set(file, { ...identity, value });
-    while (parsedFiles.size > PARSED_FILES_LIMIT) parsedFiles.delete(parsedFiles.keys().next().value!);
+    parsedFilesBytes += identity.size;
+    // Oldest-first eviction by both file count and total bytes; the freshly
+    // cached file always stays, even alone above the byte budget.
+    while (parsedFiles.size > 1 && (parsedFiles.size > PARSED_FILES_LIMIT || parsedFilesBytes > PARSED_FILES_BYTES))
+      dropParsed(parsedFiles.keys().next().value!);
   }
   return value;
 }
