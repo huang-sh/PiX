@@ -165,6 +165,47 @@ describe("MarkdownRenderer", () => {
   });
 
   it.each([
+    // A binary project file the built-in viewer cannot show: the system's
+    // default application takes it instead of a "not found" notice.
+    ["binary project file", "[data](./assets/model.onnx)", "./assets/model.onnx", "Binary file"],
+    // Absolute targets outside the project root resolve as root-relative in
+    // the built-in viewer; the miss hands them to the system handler.
+    ["outside project", "[manual](</Users/foo/Downloads/manual.docx>)", "/Users/foo/Downloads/manual.docx", "ENOENT: no such file"],
+  ])("opens what the built-in viewer cannot show with the system app: %s", async (_name, markdown, expectedHref, readError) => {
+    const layout = useLayoutStore(); layout.settings = settingsWith(true);
+    const workspace = useWorkspaceStore(); workspace.project = macProject;
+    const invoke = vi.mocked(window.pix!.invoke).mockImplementation(async route => {
+      if (route === "workspace.read") throw new Error(readError);
+      return {};
+    });
+    const wrapper = await mountWithLink(markdown);
+    try {
+      await wrapper.get("a").trigger("click");
+      await flushPromises();
+      expect(invoke).toHaveBeenCalledWith("app.openFileLink", { href: expectedHref });
+      expect(layout.notice).toBeUndefined();
+      expect(workspace.tabs).toHaveLength(0);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("still reports not found when no application path works", async () => {
+    const layout = useLayoutStore(); layout.settings = settingsWith(true);
+    const workspace = useWorkspaceStore(); workspace.project = macProject;
+    vi.mocked(window.pix!.invoke).mockImplementation(async route => {
+      if (route === "workspace.read") throw new Error("ENOENT: no such file or directory");
+      throw new Error("Path was not found or is inaccessible");
+    });
+    const wrapper = await mountWithLink("[missing](./nope.yaml)");
+    try {
+      await wrapper.get("a").trigger("click");
+      await flushPromises();
+      expect(window.pix!.invoke).toHaveBeenCalledWith("app.openFileLink", { href: "./nope.yaml" });
+      expect(layout.notice?.message).toContain("nope.yaml");
+      expect(layout.notice?.level).toBe("warning");
+    } finally { wrapper.unmount(); }
+  });
+
+  it.each([
     [macProject, "[report](<./My Report.pdf>)"],
     [macProject, "[report](</Users/foo/project/My Report.pdf:12>)"],
     [macProject, "[literal](./report%3A12)"],
@@ -348,7 +389,7 @@ describe("MarkdownRenderer", () => {
     wrapper.unmount();
   });
 
-  it("warns for drive-letter links outside the project root", async () => {
+  it("hands drive-letter links outside the project root to the system app", async () => {
     useLayoutStore().settings = settingsWith(true);
     useWorkspaceStore().project = project;
     const layout = useLayoutStore();
@@ -358,8 +399,8 @@ describe("MarkdownRenderer", () => {
     await flushPromises();
 
     expect(useWorkspaceStore().tabs).toHaveLength(0);
-    expect(layout.notice?.message).toContain("QC_overview.png");
-    expect(layout.notice?.level).toBe("warning");
+    expect(window.pix!.invoke).toHaveBeenCalledWith("app.openFileLink", { href: "D:/project/shuang/QC_overview.png" });
+    expect(layout.notice).toBeUndefined();
     wrapper.unmount();
   });
 
@@ -465,7 +506,10 @@ describe("MarkdownRenderer", () => {
       await flushPromises();
       expect(window.pix!.invoke).not.toHaveBeenCalledWith("workspace.read", { path: "report" });
       expect(useWorkspaceStore().tabs).toHaveLength(0);
-      expect(layout.notice?.message).toContain("report:12");
+      // Unreadable for the built-in viewer, but the file exists: the system's
+      // default application takes over instead of a "not found" notice.
+      expect(window.pix!.invoke).toHaveBeenCalledWith("app.openFileLink", { href: "/Users/foo/project/report:12" });
+      expect(layout.notice).toBeUndefined();
     } finally { wrapper.unmount(); }
   });
 
@@ -485,7 +529,8 @@ describe("MarkdownRenderer", () => {
       await flushPromises();
       expect(window.pix!.invoke).not.toHaveBeenCalledWith("workspace.read", { path: name });
       expect(workspace.tabs).toHaveLength(0);
-      expect(layout.notice?.message).toContain(`${name}:12`);
+      expect(window.pix!.invoke).toHaveBeenCalledWith("app.openFileLink", { href: `/Users/foo/project/${name}:12` });
+      expect(layout.notice).toBeUndefined();
     } finally { wrapper.unmount(); }
   });
 
@@ -530,6 +575,11 @@ describe("MarkdownRenderer", () => {
     useLayoutStore().settings = settingsWith(true);
     useWorkspaceStore().project = project;
     const layout = useLayoutStore();
+    // The main process refuses escaping paths on the system route too.
+    vi.mocked(window.pix!.invoke).mockImplementation(async route => {
+      if (route === "app.openFileLink") throw new Error("Path escapes project");
+      return {};
+    });
     const wrapper = await mountWithLink("steal [secrets](../../outside/secrets.txt)");
 
     expect(await clickFirstLink(wrapper)).toBe(true);
@@ -545,7 +595,10 @@ describe("MarkdownRenderer", () => {
     useLayoutStore().settings = settingsWith(true);
     useWorkspaceStore().project = project;
     const layout = useLayoutStore();
-    vi.mocked(window.pix!.invoke).mockRejectedValueOnce(new Error("not found"));
+    vi.mocked(window.pix!.invoke).mockImplementation(async route => {
+      if (route === "workspace.read") throw new Error("not found");
+      throw new Error("Path was not found or is inaccessible");
+    });
     const wrapper = await mountWithLink("see [ghost](missing.md)");
 
     await wrapper.get("a").trigger("click");

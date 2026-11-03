@@ -137,7 +137,9 @@ onBeforeUnmount(() => listObserver?.disconnect());
 // filesystem paths, #anchors — renders without a target, so its default
 // action would navigate the app window itself; those resolve against the
 // project and open as workspace files (anchors scroll within the message),
-// regardless of modifiers.
+// regardless of modifiers. What the built-in viewer cannot show — binary
+// formats, files outside the project — falls through to the system's default
+// application; only a missing file reports "not found".
 async function onContentClick(event: MouseEvent) {
   if (!(event.target instanceof Element)) return;
   const href = event.target.closest("a[href]")?.getAttribute("href");
@@ -171,7 +173,21 @@ async function onContentClick(event: MouseEvent) {
   const suffix = /:([1-9]\d*)$/.exec(href);
   const line = suffix && Number.isSafeInteger(Number(suffix[1])) ? Number(suffix[1]) : undefined;
   event.preventDefault();
+  // The built-in viewer owns project text, images and PDFs. Anything it cannot
+  // show — a binary format, a file outside the project — may still exist on
+  // disk, so hand the link to the system's default application before giving
+  // up; only a link with no file behind it reports "not found". Remote
+  // workspaces refuse the route and keep the notice.
+  const openWithSystem = async () => {
+    try {
+      await desktop.invoke("app.openFileLink", { href });
+      return true;
+    } catch {
+      return false;
+    }
+  };
   if (!path) {
+    if (await openWithSystem()) return;
     layout.showNotice(t("links.fileNotFound", { path: href }), "warning");
     return;
   }
@@ -195,8 +211,9 @@ async function onContentClick(event: MouseEvent) {
     }
     if (workspace.project === project) await layout.openTool("files");
   } catch {
-    if (workspace.project === project)
-      layout.showNotice(t("links.fileNotFound", { path }), "warning");
+    if (workspace.project !== project) return;
+    if (await openWithSystem()) return;
+    layout.showNotice(t("links.fileNotFound", { path }), "warning");
   }
 }
 
