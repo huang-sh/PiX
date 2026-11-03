@@ -1337,12 +1337,19 @@ test("explicit branches fork main and child tips while ordinary prompts keep con
   }
 });
 
-test("a long session ships a bounded window while paging, search and lookups see the whole history", { timeout: 30000 }, async t => {
+test("a long session ships a bounded window while paging, search, lookups and forks see the whole history", { timeout: 30000 }, async t => {
   const home = mkdtempSync(join(tmpdir(), "pix-window-"));
   const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
   process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
   mkdirSync(join(home, "sessions"), { recursive: true });
   const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
   t.after(async () => {
     await runtime.close();
     if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
@@ -1374,4 +1381,18 @@ test("a long session ships a bounded window while paging, search and lookups see
   assert.equal(page.hasEarlier, true, "a short page reports the older history it left behind");
   assert.equal(turns(page.entries), 10);
   assert.ok(runtime.searchEntries("needle 0").length > 0, "search reads beyond the window");
+  // Forking from a node the window paged out must still find the branch point
+  // and copy the full prefix up to it, not the wire's bounded window.
+  const oldNode = snapshot.projection.nodes.find(n => n.leafEntryId === "a5")!;
+  assert.ok(oldNode, "the projection still exposes paged-out nodes");
+  faux.setResponses([fauxAssistantMessage("fork reply")]);
+  await runtime.control({ action: "promptAt", requestId: "old-fork", text: "old fork", nodeId: oldNode.id, forceFork: true, provider: "faux", modelId: "test" });
+  await until(() => runtime.snapshot().projection.nodes.some(n => n.title === "old fork"));
+  await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+  const fork = runtime.snapshot().projection.nodes.find(n => n.title === "old fork")!;
+  assert.notEqual(fork.branchId, "main");
+  const baseline = runtime.graph!.records.get(fork.branchId!)!.baseline;
+  assert.ok(baseline.some(e => e.id === "u0"), "the fork copies history from before the window");
+  assert.ok(baseline.some(e => e.id === "a5"), "the fork copies its branch point");
+  assert.ok(!baseline.some(e => e.id === "u20"), "the fork stops at the branch point");
 });
