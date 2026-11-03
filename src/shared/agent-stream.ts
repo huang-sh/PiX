@@ -91,6 +91,13 @@ export function reduceAgentActivity(
 
   const message = event.message;
   const role = record(message)?.role;
+  if (type === "message_start" && role === "user" && activity.active) {
+    // A steered or queued user message starts a new turn inside the same run.
+    // Earlier items are already committed to the persisted history; dropping
+    // them keeps the live view from rendering that output again under the
+    // new message.
+    return { startedAt: new Date().toISOString(), pass: activity.pass + 1, active: true, items: [] };
+  }
   if (type === "message_start" && role === "assistant") {
     const id = `assistant:${activity.pass}:${activity.items.length}`;
     return {

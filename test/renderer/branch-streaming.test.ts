@@ -84,3 +84,47 @@ it("updates every branch immediately, renders once per frame, and supersedes que
     vi.unstubAllGlobals();
   }
 });
+
+it("keeps pre-steer tool output out of the steered message's live view", async () => {
+  const pinia = createPinia(); setActivePinia(pinia);
+  const layout = useLayoutStore(); layout.layout.collapsed.chat = false;
+  const session = useSessionStore();
+  const entry = (id: string, parent: string | null, message: Record<string, unknown>): RawSessionEntry =>
+    ({ id, type: "message", parentId: parent, timestamp: "2026-01-01T00:00:0" + id.length + "Z", message }) as RawSessionEntry;
+  const user1 = entry("u1", null, { role: "user", content: "task one" });
+  const toolA = entry("ta", "u1", { role: "toolResult", toolCallId: "a", toolName: "toolA", content: "a done" });
+  const toolB = entry("tb", "ta", { role: "toolResult", toolCallId: "b", toolName: "toolB", content: "b done" });
+  const toolC = entry("tc", "tb", { role: "toolResult", toolCallId: "c", toolName: "toolC", content: "c done" });
+  const user2 = entry("u2", "tc", { role: "user", content: "urgent steer" });
+  const entries = [user1, toolA, toolB, toolC, user2];
+  session.applySnapshot({ session: { path: "s" }, entries, projection: projectSession(entries, "u2"),
+    runtime: { available: true, isStreaming: true }, graph: { id: "s", epoch: "e", revision: 1,
+      runs: [{ branchId: "main", runId: "r1", nodeId: "turn:u2", status: "running" }] },
+  } as SessionSnapshot);
+  session.focusedNode = "turn:u2";
+  // Live events the renderer saw before the steer, then the steer, then tool d.
+  session.onAgentEvent({ graphId: "s", branchId: "main", runId: "r1", type: "agent_start" });
+  session.onAgentEvent({ graphId: "s", branchId: "main", runId: "r1", type: "tool_execution_start", toolCallId: "c", toolName: "toolC", args: {} });
+  session.onAgentEvent({ graphId: "s", branchId: "main", runId: "r1", type: "tool_execution_end", toolCallId: "c", result: { content: [] }, isError: false });
+  session.onAgentEvent({ graphId: "s", branchId: "main", runId: "r1", type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "urgent steer" }] } });
+  session.onAgentEvent({ graphId: "s", branchId: "main", runId: "r1", type: "tool_execution_start", toolCallId: "d", toolName: "toolD", args: {} });
+  session.onAgentEvent({ graphId: "s", branchId: "main", runId: "r1", type: "tool_execution_update", toolCallId: "d",
+    partialResult: { content: [{ type: "text", text: "d running" }] } });
+  const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { PromptComposer: true } } });
+  try {
+    await flushPromises(); await nextTick(); await flushPromises();
+    const turns = wrapper.findAll(".chat-turn");
+    expect(turns.length).toBe(2);
+    turns[0]!.get("details.agent-process").element.open = true; // history rows render only inside an open disclosure
+    await turns[0]!.get("details.agent-process").trigger("toggle");
+    await nextTick();
+    expect(turns[0]!.findAll(".process-tool strong").map(row => row.text())).toEqual(["toolA", "toolB", "toolC"]);
+    // The steered turn shows only the live view, which must hold post-steer tools alone.
+    expect(turns[1]!.find("details.agent-process").exists()).toBe(false);
+    const live = wrapper.get("details.agent-process.live");
+    expect(live.findAll(".process-tool strong").map(row => row.text())).toEqual(["toolD"]);
+    // The reducer kept only the post-steer items in the live activity.
+    expect(session.branchActivities.main!.activity!.items.map(item => (item as { title?: string }).title)).toEqual(["toolD"]);
+  } finally { wrapper.unmount(); }
+});
