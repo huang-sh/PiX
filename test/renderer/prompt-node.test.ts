@@ -139,6 +139,7 @@ describe("PromptNode information", () => {
 describe("PromptNode branch action", () => {
   it("shows the recorded Git branch and commit, preserves legacy branches and hides missing history", async () => {
     const data = nodeData();
+    useLayoutStore().settings!.app.nodeCardShowCommit = true;
     const branch = "feature/Case-Sensitive-Long-Branch-Name";
     const commit = "0123456789abcdef0123456789abcdef01234567";
     const wrapper = mount(PromptNode, {
