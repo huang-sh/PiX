@@ -360,7 +360,7 @@ try {
   const footerReport = [];
   const fieldOrders = [[], ['branch', 'context'], ['duration', 'cost', 'tokens', 'context', 'branch'], ['branch', 'duration', 'tokens', 'cost', 'context'], ['context', 'branch', 'tokens', 'cost', 'duration'], ['tokens', 'cost', 'duration', 'branch', 'context']];
   for (const density of ['comfortable', 'compact']) for (const fields of fieldOrders) {
-    await evaluate(`window.pix.invoke('settings.update', { scope: 'app', patch: ${JSON.stringify({ nodeCardFields: fields, density })} })`);
+    await evaluate(`window.pix.invoke('settings.update', { scope: 'app', patch: ${JSON.stringify({ nodeCardFields: fields, nodeCardShowCommit: true, density })} })`);
     await send('Page.reload');
     await send('Page.bringToFront');
     await retry(async () => assert.equal(await evaluate("window.__pixTest?.state().loading === false && Boolean(document.querySelector('.shell'))"), true));

@@ -469,7 +469,7 @@ export interface AppSettings {
   canvasDotGridDotSize: number;
   /** Optional footer fields in priority order; model and thinking always appear. */
   nodeCardFields?: NodeCardField[];
-  /** Show a short commit SHA beside the branch in node footers; defaults to true. */
+  /** Show a short commit SHA beside the branch in node footers; defaults to false. */
   nodeCardShowCommit?: boolean;
   /**
    * Deploys this desktop's model API keys and custom models to remote hosts,

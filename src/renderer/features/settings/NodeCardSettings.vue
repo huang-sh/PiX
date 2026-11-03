@@ -21,12 +21,12 @@ function toggle(field: NodeCardField) {
 }
 function toggleCommit() {
   if (!draft.value) return;
-  draft.value.app.nodeCardShowCommit = draft.value.app.nodeCardShowCommit === false;
+  draft.value.app.nodeCardShowCommit = draft.value.app.nodeCardShowCommit !== true;
   save("app");
 }
 function reset() {
   if (!draft.value) return;
-  draft.value.app.nodeCardShowCommit = true;
+  draft.value.app.nodeCardShowCommit = false;
   update(DEFAULT_NODE_CARD_FIELDS);
 }
 function move(field: NodeCardField, offset: number) {
@@ -57,7 +57,7 @@ function move(field: NodeCardField, offset: number) {
         </div>
       </li>
       <li data-node-card-show-commit>
-        <label><input type="checkbox" :checked="draft?.app.nodeCardShowCommit !== false" @change="toggleCommit" /><span>{{ t('settings.nodeCard.showCommit') }}</span></label>
+        <label><input type="checkbox" :checked="draft?.app.nodeCardShowCommit === true" @change="toggleCommit" /><span>{{ t('settings.nodeCard.showCommit') }}</span></label>
       </li>
     </ol>
   </section>

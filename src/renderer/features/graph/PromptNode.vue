@@ -54,7 +54,7 @@ export interface PromptNodeData {
 const props = defineProps<{ id: string; data: PromptNodeData; selected?: boolean }>();
 const { t } = useI18n();
 const layout = useLayoutStore();
-const showCommit = computed(() => layout.settings?.app.nodeCardShowCommit !== false);
+const showCommit = computed(() => layout.settings?.app.nodeCardShowCommit === true);
 const root = ref<HTMLElement>();
 const footer = ref<HTMLElement>();
 const measure = ref<HTMLElement>();
