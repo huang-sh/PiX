@@ -99,12 +99,32 @@ function readParsed<T>(file: string, read: () => T): T {
   return value;
 }
 
+/**
+ * Replacing an existing file is refused while another process still holds it:
+ * Windows reports EPERM/EACCES/EBUSY when antivirus, cloud sync or the indexer
+ * has the destination or the fresh temp file open. Those holds last well under
+ * a second, so retry instead of failing a write that will succeed next try.
+ */
+const renameRetryDelays = [10, 20, 50, 100, 200, 400];
+const retryCell = new Int32Array(new SharedArrayBuffer(4));
+
 /** Same-directory replacement; never truncate the sole good copy. */
 export function durableWrite(file: string, text: string) {
   const temp = `${file}.${randomUUID()}.tmp`;
   const fd = openSync(temp, "wx");
   try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temp, file);
+  for (let attempt = 0; ; attempt++) {
+    try { renameSync(temp, file); return; }
+    catch (error) {
+      const locked = ["EPERM", "EACCES", "EBUSY"].includes((error as NodeJS.ErrnoException).code ?? "");
+      if (!locked || attempt === renameRetryDelays.length) {
+        // A temp nobody renames is litter; the caller's original error wins.
+        try { rmSync(temp, { force: true }); } catch { /* report the rename failure */ }
+        throw error;
+      }
+      Atomics.wait(retryCell, 0, 0, renameRetryDelays[attempt]!);
+    }
+  }
 }
 
 /** Branch sidecar next to the session file; removed together with it. */
@@ -578,20 +598,29 @@ export class GraphFiles {
       return checkpoint;
     }
   }
+  /**
+   * The checkpoint only mirrors the source written or verified immediately
+   * before it, so a refused replacement costs recovery redundancy, not the
+   * session: fail the source write instead of the caller that already holds it.
+   */
+  private saveCheckpoint(record: BranchRecord, encoded: string) {
+    try { durableWrite(this.checkpointPath(record.id), encoded); }
+    catch (error) { debugLog(`graph-files: checkpoint for ${record.id} not refreshed`, error); }
+  }
   create(record: BranchRecord, data: SessionData) {
     const encoded = encodeSession(data);
     parseStrict(encoded);
     // Origin includes the initial snapshot, so a crash before file creation is recoverable.
     this.save(record);
     durableWrite(this.path(record.id), encoded);
-    durableWrite(this.checkpointPath(record.id), encoded);
+    this.saveCheckpoint(record, encoded);
   }
   seal(record: BranchRecord, memory: SessionData) {
     const disk = readStrict(this.path(record.id));
     if (!samePersistedValue(disk, memory)) throw new Error("Session persistence differs from memory; original retained");
     const fd = openSync(this.path(record.id), "r+");
     try { fsyncSync(fd); } finally { closeSync(fd); }
-    durableWrite(this.checkpointPath(record.id), encodeSession(disk));
+    this.saveCheckpoint(record, encodeSession(disk));
     return disk;
   }
   canonical(record: BranchRecord, id: string) { return Object.hasOwn(record.inherited, id) ? record.inherited[id]! : `${record.id}:${id}`; }
