@@ -395,7 +395,7 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .node-thinking-value { gap: 0; }
 .node-thinking-value > svg { margin-right: 3px; }
 .node-branch-value { min-width: calc(5ch + 24px); max-width: 100%; justify-self: start; text-transform: none; }
-.node-branch-value:has(.node-git-commit) { min-width: calc(13ch + 24px); }
+.node-branch-value:has(.node-git-commit) { min-width: calc(10ch + 24px); }
 .node-git-commit { flex: none; }
 .node-context-usage { gap: 2px; justify-self: end; }
 .node-context-usage i { --usage: 0deg; position: relative; flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(var(--accent) var(--usage), var(--border) 0); }
