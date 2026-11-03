@@ -7,7 +7,7 @@ import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useSessionStore } from "../../src/renderer/stores/session";
 import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
-import { graphNodeBlobs, searchGraphNodeIds } from "../../src/renderer/lib/graph-search";
+import { graphNodeBlobs, searchGraphNodeIds } from "../../src/shared/session";
 import { PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry, type SessionSnapshot, type SettingsBundle } from "../../src/shared/types";
 
 vi.mock("../../src/renderer/lib/frame", () => ({
@@ -73,7 +73,15 @@ function mountGraph() {
 }
 
 describe("graph search panel", () => {
-  beforeEach(() => { vi.mocked(window.pix!.invoke).mockReset().mockResolvedValue({}); });
+  // Search runs main-side; mirror it locally so panels behave as in production.
+  const searchRoute = async (route: string, input: { query?: string }) => {
+    if (route !== "session.search") return {};
+    const current = useSessionStore().current;
+    return current ? { nodeIds: searchGraphNodeIds(current.projection, current.entries, String(input.query)) } : { nodeIds: [] };
+  };
+  beforeEach(() => {
+    vi.mocked(window.pix!.invoke).mockReset().mockImplementation(((route: string, input: { query?: string }) => searchRoute(route, input)) as unknown as typeof window.pix!.invoke);
+  });
 
   it("highlights matching cards and shows the hit count while typing", async () => {
     const { wrapper } = mountGraph(); await flushPromises();
@@ -81,13 +89,13 @@ describe("graph search panel", () => {
     await flushPromises();
     const input = wrapper.get('[data-action="graph-search-input"]');
     await input.setValue("login");
-    await flushPromises();
+    await vi.waitFor(() => expect(useSessionStore().searchResults).toEqual(["turn:u1"]));
     expect(wrapper.get(".graph-search-count").text()).toBe("1 match");
     const state = (wrapper.vm as unknown as { $: { setupState: Record<string, any> } }).$.setupState;
     expect(state.nodes.find((node: { id: string }) => node.id === "turn:u1").data.searchHit).toBe(true);
     expect(state.nodes.find((node: { id: string }) => node.id === "turn:u2").data.searchHit).toBeFalsy();
     await input.setValue("nothing matches this");
-    await flushPromises();
+    await vi.waitFor(() => expect(useSessionStore().searchResults).toEqual([]));
     expect(wrapper.get(".graph-search-count").text()).toBe("No matches");
   });
 
@@ -97,7 +105,7 @@ describe("graph search panel", () => {
     await flushPromises();
     const input = wrapper.get('[data-action="graph-search-input"]');
     await input.setValue("the");
-    await flushPromises();
+    await vi.waitFor(() => expect(useSessionStore().searchResults.length).toBe(2));
     // "the" matches both turns ("fix the login bug", "write the README").
     await input.trigger("keydown.enter");
     await flushPromises();
@@ -114,7 +122,7 @@ describe("graph search panel", () => {
     await wrapper.find('.graph-controls button[aria-expanded]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-action="graph-search-input"]').setValue("login");
-    await flushPromises();
+    await vi.waitFor(() => expect(useSessionStore().searchResults).toEqual(["turn:u1"]));
     expect(state.nodes.find((node: { id: string }) => node.id === "turn:u1").data.searchHit).toBe(true);
     await wrapper.find('.graph-controls button[aria-expanded]').trigger("click");
     await flushPromises();

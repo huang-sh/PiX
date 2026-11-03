@@ -18,11 +18,10 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRe
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
-import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
+import { projectSession, sessionEntryIndex, clipText, SNAPSHOT_TURN_LIMIT } from "../../../shared/session";
 import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualPosition } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
-import { searchGraphNodeIds } from "../../lib/graph-search";
 import { shortcutForEvent } from "../../keyboard-shortcuts";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
@@ -155,9 +154,17 @@ const projection = computed(() => preparingSession.value ? projectSession([], nu
 const searchHits = computed<string[]>(() => {
   const value = projection.value;
   if (!searchOpen.value || !value || !session.current) return [];
+  // Text matching runs main-side over the full merged history; the local
+  // pass only narrows results to the active filter.
   const matched = new Set(value.nodes.filter(node => matchesGraphFilter(node, graphFilter.value)).map(node => node.id));
-  return searchGraphNodeIds(value, session.current.entries, searchQuery.value).filter(id => matched.has(id));
+  return session.searchResults.filter(id => matched.has(id));
 });
+watch([searchQuery, graphFilter, () => session.current?.session.path, () => session.current?.graph?.epoch], () => {
+  const query = searchQuery.value.trim();
+  if (!searchOpen.value || !query) { void session.runGraphSearch(""); return; }
+  const timer = setTimeout(() => void session.runGraphSearch(query), 150);
+  return () => clearTimeout(timer);
+}, { flush: "post" });
 const searchHitIds = computed(() => new Set(searchHits.value));
 const searchCount = computed(() => {
   if (!searchOpen.value || !searchQuery.value.trim()) return "";
@@ -231,6 +238,16 @@ function nodeContent(id: string) {
     images: messages.find((message) => message.role === "user")?.images,
     assistant: [...messages].reverse().find((message) => message.role === "assistant")?.text ?? node.preview,
   };
+}
+/** Older nodes live outside the snapshot window; load their turn before
+ * showing or resending it, or the card would fall back to clipped text. */
+function contentWindowRequest(node: GraphNode): Promise<void> | null {
+  const index = sessionEntryIndex(session.current?.entries ?? []);
+  if (node.rawEntryIds.every(id => index.has(id))) return null;
+  return session.fetchWindow(node.leafEntryId, SNAPSHOT_TURN_LIMIT);
+}
+async function loadNodeContent(node: GraphNode) {
+  await contentWindowRequest(node);
 }
 
 function rebuild() {
@@ -339,6 +356,7 @@ function rebuild() {
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
+      onLoadContent: () => loadNodeContent(node),
       activity: () => session.activityFor(node.id),
       searchHit: searchHitIds.value.has(node.id),
       filterContext: !matchesGraphFilter(node, graphFilter.value),
@@ -644,6 +662,9 @@ async function compose(id: string, direction?: BranchDirection) {
 async function retryTurn(id: string) {
   const node = projection.value?.nodes.find((item) => item.id === id);
   if (!node) return;
+  // Only a windowed-out turn waits; a local retry must start synchronously.
+  const loading = contentWindowRequest(node);
+  if (loading) await loading;
   const content = nodeContent(id);
   if (!content.user.trim() && !content.images?.length) return;
   const graph = session.current?.graph;

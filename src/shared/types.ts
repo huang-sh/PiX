@@ -249,6 +249,8 @@ export interface SessionProjection {
   activeBranchNodeIds: string[];
   activeBranchEntryIds: string[];
   messages: BranchMessage[];
+  /** True when older turns than the snapshot window exist; they load on demand. */
+  messagesHasEarlier?: boolean;
   leafId: string | null;
   activeNodeId: string | null;
   /** Override in force at the active leaf, null once an `off` record is set, undefined before any record. */
@@ -671,6 +673,9 @@ export type DesktopRoute =
   | "remote.revoke"
   | "session.list"
   | "session.image"
+  | "session.branchWindow"
+  | "session.search"
+  | "session.prompts"
   | "session.snapshot"
   | "session.open"
   | "session.stop"

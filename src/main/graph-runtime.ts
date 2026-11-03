@@ -8,7 +8,7 @@ import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
 import { descendantIds } from "./graph-export.js";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, validateSessionData, type BranchRecord, type SessionData } from "./graph-files.js";
-import { projectSession } from "../shared/session.js";
+import { projectSession, promptRecall, SNAPSHOT_WINDOW_BYTES, searchGraphNodeIds, windowEntries } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 
@@ -322,6 +322,35 @@ export class GraphRuntime extends PiRuntime {
       runtime: { ...runtime, pendingMessageCount: queue?.pendingMessageCount ?? 0, queuedMessages: queue?.queuedMessages ?? [],
         isStreaming: false, isCompacting: false, isRetrying: false } };
   }
+  /** The merged history every read-side route walks. Before the first snapshot
+   * the cache is empty; fall back to the base session so a caller that arrives
+   * early sees history instead of an empty session. */
+  private historyEntries(): RawSessionEntry[] {
+    const cached = this.graph ? this.snapshotCache.fullHistory() : [];
+    return cached.length ? cached : super.fullEntries();
+  }
+  override branchWindow(leafId: string | null, limit: number, byteLimit = SNAPSHOT_WINDOW_BYTES) {
+    // Branch transcripts arrive lazily; the merged canonical entries carry both
+    // the live branch's turns and the ones forked into their own files.
+    if (!this.graph) return super.branchWindow(leafId, limit, byteLimit);
+    return windowEntries(this.historyEntries(), leafId, limit, byteLimit);
+  }
+  override entryById(id: string): RawSessionEntry | undefined {
+    return (this.graph ? this.snapshotCache.entriesById.get(id) : undefined) ?? super.entryById(id);
+  }
+  override fullEntries(): RawSessionEntry[] {
+    return this.graph ? this.historyEntries() : super.fullEntries();
+  }
+  override searchEntries(query: string): string[] {
+    if (!this.graph) return super.searchEntries(query);
+    // Reuse the view's projection identity so the blob cache survives: a fresh
+    // snapshot() object would rebuild every node's search text on each query.
+    const projection = this.snapshotCache.projection ?? this.snapshot().projection;
+    return searchGraphNodeIds(projection, this.historyEntries(), query);
+  }
+  override promptRecall(): string[] {
+    return promptRecall(this.historyEntries());
+  }
   override snapshot(): SessionSnapshot {
     if (this.deletionRecovery) {
       const snapshot = this.deletionRecovery.snapshot;
@@ -330,7 +359,12 @@ export class GraphRuntime extends PiRuntime {
     const main = this.runtime ? super.snapshot() : this.lastMain;
     if (!main || !this.graph) return main ?? super.snapshot();
     this.lastMain = main;
-    this.snapshotCache.update(this.graph, main, this.workers);
+    this.snapshotCache.update(this.graph, main, this.workers, id => {
+      if (id === "main") return this.runtime ? super.fullEntries() : main.entries;
+      const worker = this.workers.get(id);
+      // A worker that has not opened its branch yet only has its file snapshot.
+      return worker?.pi.runtime ? worker.pi.fullEntries() : worker?.snapshot?.entries ?? [];
+    });
     const entries = this.snapshotCache.entriesById;
     const runs: NonNullable<SessionSnapshot["graph"]>["runs"] = [];
     const mainNode = main.projection.nodes.find(n => n.id === main.projection.activeNodeId);
@@ -848,7 +882,9 @@ export class GraphRuntime extends PiRuntime {
     }
     // A damaged descendant can be absent from the projection. Its fork still
     // identifies it as required, so exportSources must refuse a missing source.
-    const rawDescendants = direction === "descendants" ? descendantIds(snapshot.entries, node.userEntryId) : new Set<string>();
+    // The snapshot's entries are a bounded window; descendant detection
+    // needs the full merged history the runtime keeps in memory.
+    const rawDescendants = direction === "descendants" ? descendantIds(this.snapshotCache.fullHistory(), node.userEntryId) : new Set<string>();
     for (const record of graph.records.values())
       if (rawDescendants.has(record.forkEntryId)) records.set(record.id, record);
     // Follow the current conversation path: deletion can reparent a branch

@@ -2,7 +2,7 @@
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { promptDisplayTextMap, sessionEntryDisplayText, withoutToolLabels } from "../../../shared/session";
+import { promptRecall, withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import type { CompactionRecord } from "../../../shared/run-timing";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
@@ -34,16 +34,14 @@ const selectedRun = computed(() => session.runFor(panelNodeId.value));
 // consecutive duplicates collapsed. Session-wide so a fork can recall the
 // latest phrasing even when another branch sent it.
 const promptHistory = computed(() => {
-  const entries = session.current?.entries ?? [];
-  const texts = promptDisplayTextMap(entries);
-  const history: string[] = [];
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i]!;
-    if (entry.type !== "message" || (entry.message as { role?: string } | undefined)?.role !== "user") continue;
-    const text = sessionEntryDisplayText(entry, texts).trim();
-    if (text && text !== history.at(-1)) history.push(text);
-  }
-  return history;
+  const local = promptRecall(session.current?.entries ?? []);
+  const older = session.promptRecall;
+  if (!older.length) return local;
+  // The pool covers the newest turns; the main process adds the older ones.
+  const merged = [...local];
+  const seen = new Set(local);
+  for (const text of older) if (!seen.has(text)) { seen.add(text); merged.push(text); }
+  return merged;
 });
 const liveCompactions = computed<CompactionRecord[] | undefined>(() => {
   const run = selectedRun.value;
@@ -63,6 +61,8 @@ const content = ref<HTMLElement>();
 const followingOutput = ref(true);
 const expandedProcesses = ref(new Set<string>());
 const visibleTurnCount = ref(40);
+// Older turns may be fetched from the main process on demand; the button says so.
+const loadingEarlier = ref(false);
 const liveTextLimit = ref(32768);
 const expandedLiveTools = ref(new Set<string>());
 let resizeObserver: ResizeObserver | undefined;
@@ -157,6 +157,11 @@ const composerTarget = computed(() =>
     ? t("branch.composerFrom", { title: panelNode.value.title })
     : t("branch.composerRoot"));
 
+watch(
+  () => session.current?.session.path,
+  () => void session.loadPromptRecall(),
+  { immediate: true },
+);
 watch(
   [() => session.current?.session.path, () => panelNode.value?.id],
   () => {
@@ -279,15 +284,55 @@ const processMessages = computed(() => {
   return messages;
 });
 
+/** Pages one window of earlier turns in: fetched first so the scroll anchor
+ * measures the final height, then rendered above with the reading position
+ * restored. Reached automatically when the user scrolls to the top. */
 async function showEarlierTurns() {
+  if (loadingEarlier.value || !history.value.hasEarlier) return;
   const version = viewVersion;
   const root = scroll.value;
-  const height = root?.scrollHeight ?? 0;
-  const top = root?.scrollTop ?? 0;
-  followingOutput.value = false;
-  visibleTurnCount.value += 40;
+  if (!root) return;
+  const height = root.scrollHeight;
+  const top = root.scrollTop;
+  // Only a real scroll releases following; paging in a window shorter than
+  // the panel (byte-capped pages) never interrupts the pinned tip.
+  if (root.scrollHeight > root.clientHeight) followingOutput.value = false;
+  const target = visibleTurnCount.value + 40;
+  const plan = session.windowPlanFor(panelNodeId.value, target);
+  if (plan?.request) {
+    // These turns are not in the pool yet. Fetch before rendering so the anchor
+    // restore below measures the final height instead of jumping afterwards.
+    loadingEarlier.value = true;
+    try { await session.fetchWindow(plan.leaf, plan.request.limit, plan.request.bytes); }
+    finally { loadingEarlier.value = false; }
+    if (version !== viewVersion) return;
+  }
+  visibleTurnCount.value = target;
   await nextTick();
-  if (root && version === viewVersion) root.scrollTop = top + root.scrollHeight - height;
+  const element = scroll.value;
+  if (element) element.scrollTop = top + element.scrollHeight - height;
+  pageIfUnfilled();
+}
+
+/** True once the history overflows the panel. A short panel stuck with more
+ * history (a failed fetch or a byte cap repeating its page) has no top to
+ * scroll to, so its only affordance is the retry row. */
+const historyScrollable = ref(true);
+
+/** A byte-capped window can arrive shorter than the panel itself; nothing
+ * would ever be scrollable, so keep paging until history fills the view.
+ * Stops as soon as a page stops growing the rendered turns — a byte cap
+ * repeating its newest turn must not loop. */
+let lastCascadeRendered = -1;
+function pageIfUnfilled() {
+  const root = scroll.value;
+  const overflow = root ? root.scrollHeight - root.clientHeight : 0;
+  historyScrollable.value = overflow > 96;
+  if (!root || loadingEarlier.value || !history.value.hasEarlier || overflow >= 96) return;
+  const rendered = history.value.messages.length;
+  if (rendered === lastCascadeRendered) return;
+  lastCascadeRendered = rendered;
+  void showEarlierTurns();
 }
 
 function duration(turn: Turn) {
@@ -326,7 +371,15 @@ function updateScrollFollow() {
   lastScrollTop = root.scrollTop;
   // A user scroll between selection and DOM commit supersedes restoration.
   if (restoringPosition) { viewVersion++; restoringPosition = false; }
-  followingOutput.value = root.scrollHeight - root.scrollTop - root.clientHeight < 48;
+  const overflow = root.scrollHeight - root.clientHeight;
+  followingOutput.value = overflow - root.scrollTop < 48;
+  historyScrollable.value = overflow > 96;
+  // Reaching the top pages older history in automatically; the anchor restore
+  // in showEarlierTurns keeps the reading position in place while it lands.
+  // Only a genuinely scrollable list has a "top" to reach: with less than a
+  // page of overflow the programmatic follow-scroll would otherwise page (and
+  // unpin following) while a run streams — pageIfUnfilled owns that regime.
+  if (root.scrollTop <= 96 && overflow > 96) void showEarlierTurns();
 }
 
 function scrollLatest() {
@@ -344,6 +397,9 @@ function scrollLatest() {
       // The scroll event can arrive after content has grown again.
       lastScrollTop = root.scrollTop;
     }
+    // Streaming growth can push a short panel past a full page; the retry
+    // row must retire the moment there is a top to scroll to.
+    historyScrollable.value = root.scrollHeight - root.clientHeight > 96;
   });
 }
 
@@ -361,6 +417,7 @@ watch([() => JSON.stringify([session.current?.session.path, session.current?.gra
   if (readingPositions.size > 16) readingPositions.delete(readingPositions.keys().next().value!);
   expandedProcesses.value = new Set(saved?.expanded);
   visibleTurnCount.value = saved?.count ?? 40;
+  lastCascadeRendered = -1;
   followingOutput.value = saved?.following ?? true;
   const ticket = ++restoreTicket;
   restoringPosition = true;
@@ -379,6 +436,9 @@ watch([() => JSON.stringify([session.current?.session.path, session.current?.gra
       lastScrollTop = root.scrollTop;
     }
     restoringPosition = false;
+    // A first window shorter than the panel (byte-capped pages) has nothing
+    // to scroll; fill it before the user ever meets a dead end.
+    pageIfUnfilled();
   });
 }, { immediate: true });
 
@@ -459,8 +519,16 @@ onBeforeUnmount(() => {
           <CopyButton :text="input.text" />
         </article>
       </details>
-      <button v-if="history.hasEarlier" type="button" class="load-earlier-turns" @click="showEarlierTurns">
-        {{ t('branch.loadEarlier') }}
+      <!-- Older history pages in as the user scrolls to the top; this row only
+         marks the (remote-slow) fetch in flight. -->
+      <p v-if="history.hasEarlier && loadingEarlier" class="load-earlier-status" role="status">
+        {{ t('branch.loadingEarlier') }}
+      </p>
+      <!-- A panel too short to scroll (a failed fetch, or a byte cap repeating
+         its page) has no top to reach; retrying is its only way forward. -->
+      <button v-else-if="history.hasEarlier && !historyScrollable" type="button"
+        class="load-earlier-status" @click="showEarlierTurns">
+        {{ t('branch.retryEarlier') }}
       </button>
       <!-- Keep a few recently viewed histories mounted: switching back should
            not parse and mount all their Markdown again. Inactive views receive

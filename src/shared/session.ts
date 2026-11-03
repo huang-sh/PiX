@@ -135,6 +135,20 @@ function promptDisplayState(entries: RawSessionEntry[]) {
 export function promptDisplayTextMap(entries: RawSessionEntry[]) {
   return promptDisplayState(entries).texts;
 }
+/** Recent prompt texts, newest first, across every branch: the composer's
+ * recall list. Older turns sit outside a snapshot window, so the main process
+ * answers this from the full history. */
+export function promptRecall(entries: RawSessionEntry[], limit = 200): string[] {
+  const texts = promptDisplayTextMap(entries);
+  const history: string[] = [];
+  for (let i = entries.length - 1; i >= 0 && history.length < limit; i--) {
+    const entry = entries[i]!;
+    if (entry.type !== "message" || (entry.message as { role?: string } | undefined)?.role !== "user") continue;
+    const text = sessionEntryDisplayText(entry, texts).trim();
+    if (text && text !== history.at(-1)) history.push(text);
+  }
+  return history;
+}
 export function needsPromptDisplayBoundary(entries: RawSessionEntry[], leafId: string | null) {
   const byId = new Map(entries.map(entry => [entry.id, entry]));
   const seen = new Set<string>();
@@ -571,6 +585,115 @@ export function entryAnchorForNode(p: SessionProjection, nodeId: string) {
   }
   return n.leafEntryId;
 }
+/** Conversation turns a snapshot carries. The branch panel's first page is 40
+ * turns, so the window opens fully rendered without a follow-up fetch. */
+export const SNAPSHOT_TURN_LIMIT = 40;
+/** Byte ceiling for one wire window. Measured on real sessions, serializing a
+ * window costs about 4ms/MB, so this keeps the wire work near 40ms per request
+ * and lets a median session cross whole; larger ones page from here. */
+export const SNAPSHOT_WINDOW_BYTES = 4 << 20;
+
+/** A history window ships tool metadata only as far as anything renders it.
+ * A workspace accessibility dump is hundreds of kilobytes per turn and has no
+ * reader on the wire, so each field is capped instead of dominating the window. */
+const MAX_DETAIL_FIELD_BYTES = 64 << 10;
+const wireEntries = new WeakMap<RawSessionEntry, { entry: RawSessionEntry; bytes: number }>();
+/** The wire copy of one entry, with its serialized size: snapshots recount the
+ * window on every notify, and re-stringifying a megabyte tool result each
+ * time would dominate them. */
+function wireEntry(entry: RawSessionEntry): { entry: RawSessionEntry; bytes: number } {
+  const cached = wireEntries.get(entry);
+  if (cached) return cached;
+  const details = (entry.message as { details?: unknown } | undefined)?.details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) {
+    const whole = { entry, bytes: JSON.stringify(entry).length };
+    wireEntries.set(entry, whole);
+    return whole;
+  }
+  let changed = false;
+  const trimmed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(details as Record<string, unknown>)) {
+    if (typeof value === "string") {
+      if (value.length > MAX_DETAIL_FIELD_BYTES) {
+        // Keep both ends: a tool log's outcome sits at its tail, its context
+        // at its head — the unreadable middle is what gets dropped.
+        const head = MAX_DETAIL_FIELD_BYTES >> 1, tail = MAX_DETAIL_FIELD_BYTES - head;
+        const omitted = value.length - MAX_DETAIL_FIELD_BYTES;
+        trimmed[key] = `${value.slice(0, head)}\n… (${omitted} characters omitted for display) …\n${value.slice(-tail)}`;
+        changed = true;
+      } else trimmed[key] = value;
+      continue;
+    }
+    // Structured tool data (accessibility trees, DOM dumps) is machine payload:
+    // keep it while it is small, otherwise leave it out of the window entirely.
+    if ((JSON.stringify(value)?.length ?? 0) > MAX_DETAIL_FIELD_BYTES) changed = true;
+    else trimmed[key] = value;
+  }
+  if (!changed) { const whole = { entry, bytes: JSON.stringify(entry).length }; wireEntries.set(entry, whole); return whole; }
+  const copy = { ...entry, message: { ...entry.message as object, details: trimmed } } as RawSessionEntry;
+  const whole = { entry: copy, bytes: JSON.stringify(copy).length };
+  wireEntries.set(entry, whole);
+  return whole;
+}
+
+/**
+ * The last `limit` complete turns of the root-to-leaf path ending at `leafId`
+ * (or the newest entry). Shared by snapshot payloads and window fetches so
+ * both agree on where a turn boundary falls.
+ */
+export function windowEntries(entries: RawSessionEntry[], leafId: string | null, limit: number,
+  byteLimit = Number.POSITIVE_INFINITY): { entries: RawSessionEntry[]; hasEarlier: boolean } {
+  const index = sessionEntryIndex(entries);
+  const path: RawSessionEntry[] = [];
+  const seen = new Set<string>();
+  let entry = leafId ? index.get(leafId) : entries.at(-1);
+  let turns = 0, cut = 0, hasEarlier = false, bytes = 0;
+  while (entry && !seen.has(entry.id)) {
+    seen.add(entry.id);
+    const shipped = wireEntry(entry);
+    path.push(shipped.entry);
+    bytes += shipped.bytes;
+    if (entry.type === "message" && (entry.message as { role?: string })?.role === "user") {
+      // At least one complete turn always ships; beyond that, either limit bounds the window.
+      if (turns >= limit || (bytes > byteLimit && turns >= 1)) { hasEarlier = true; break; }
+      turns++;
+      cut = path.length;
+    }
+    entry = entry.parentId ? index.get(entry.parentId) : undefined;
+  }
+  // Keep complete turns; never parse text in the older prefix merely to
+  // decide whether the "load earlier" affordance should exist.
+  return { entries: (hasEarlier ? path.slice(0, cut) : path).reverse(), hasEarlier };
+}
+
+// Per-node text blobs are built once per (projection, entries) pair; every
+// search afterwards is a substring scan. Shared so the main process serves
+// graph search over the full merged history the renderer no longer holds.
+const graphBlobCache = new WeakMap<SessionProjection, { entries: RawSessionEntry[]; blobs: string[] }>();
+
+export function graphNodeBlobs(projection: SessionProjection, entries: RawSessionEntry[]): string[] {
+  const cached = graphBlobCache.get(projection);
+  if (cached && cached.entries === entries) return cached.blobs;
+  const index = sessionEntryIndex(entries);
+  const promptTexts = promptDisplayTextMap(entries);
+  const blobs = projection.nodes.map(node =>
+    [node.title, node.label, ...node.rawEntryIds.flatMap(id => index.get(id) ?? []).map(entry => entrySearchText(entry, promptTexts))]
+      .filter(Boolean)
+      .join("\n"),
+  );
+  graphBlobCache.set(projection, { entries, blobs });
+  return blobs;
+}
+
+export function searchGraphNodeIds(projection: SessionProjection, entries: RawSessionEntry[], query: string): string[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const blobs = graphNodeBlobs(projection, entries);
+  return projection.nodes
+    .filter((_, i) => blobs[i]!.toLowerCase().includes(needle))
+    .map(node => node.id);
+}
+
 export function parseSessionJsonl(raw: string) {
   const all = raw
     .split(/\r?\n/)
