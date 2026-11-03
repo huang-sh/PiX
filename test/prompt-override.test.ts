@@ -20,6 +20,24 @@ const record = (over: Partial<PromptOverrideRecord>): PromptOverrideRecord => ({
 
 const options = { cwd: "/tmp/work", selectedTools: ["read"], toolSnippets: { read: "reads a file" } };
 
+/**
+ * The SDK's stock preamble and docs text, derived from the installed package.
+ * Assertions compare against these instead of pinned literals, so a future
+ * Pi rewording its prompts cannot break the suite — only structural drift
+ * (the preamble no longer being a section, or no longer sitting at the top
+ * of the composed prompt) fails these tests, which is exactly the invariant
+ * PiX's override modes rely on.
+ */
+async function sdkStock(): Promise<{ preamble: string; docs: string }> {
+  const { buildSystemPromptState } = await import(new URL("core/system-prompt.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
+    buildSystemPromptState: (input: Record<string, unknown>) => { sections?: Record<string, string> };
+  };
+  const sections = buildSystemPromptState({ cwd: "/tmp", selectedTools: [], toolSnippets: {} }).sections;
+  assert.ok(typeof sections?.preamble === "string" && sections.preamble.length > 20, "the SDK must expose a stock preamble section");
+  assert.ok(typeof sections?.docs === "string" && sections.docs.includes("<docs>"), "the SDK must expose a stock docs section");
+  return { preamble: sections.preamble, docs: sections.docs };
+}
+
 test("composeSystemPrompt composes each mode and preserves the stock sections", async () => {
   const stock = await composeSystemPrompt(options, undefined, null);
   const appended = await composeSystemPrompt(options, undefined, record({ mode: "append" }));
@@ -82,17 +100,19 @@ test("prompt admission validates persona snapshots", () => {
   assert.deepEqual(validateRouteInput("agent.control", { ...input, promptOverride: { off: true } }).promptOverride, { off: true });
 });
 
-test("pi 1.4 system prompt structure backs each mode", async () => {
+test("pi 1.5 system prompt structure backs each mode", async () => {
   // Guards the modes against SDK changes: customPrompt must own the prefix
   // (dropping tools/rules/docs), forceSystemPrompt must replace everything,
   // and the stock preamble must stay unwrapped at the very top for append.
+  // Expected text is derived from the SDK itself so prompt rewording in a
+  // future Pi cannot break these tests — only structural changes can.
   const { buildSystemPrompt, buildSystemPromptState } = await import(new URL("core/system-prompt.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
     buildSystemPrompt: (input: Record<string, unknown>) => string;
     buildSystemPromptState: (input: Record<string, unknown>) => { content: string; sections?: Record<string, string> };
   };
   const base = { cwd: "/tmp/work", selectedTools: ["read"], toolSnippets: { read: "reads a file" } };
   const stock = buildSystemPrompt(base);
-  assert.ok(stock.startsWith("You are an expert coding assistant"));
+  assert.ok(stock.startsWith((await sdkStock()).preamble), "stock preamble sits unwrapped at the top");
   assert.ok(stock.includes("<tools>"));
 
   const replaced = buildSystemPromptState({ ...base, customPrompt: persona });
@@ -168,8 +188,9 @@ test("previewSystemPrompt renders without an open session", { timeout: 60000 }, 
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });
   });
+  const stockPreamble = (await sdkStock()).preamble;
   const { text } = await runtime.previewSystemPrompt();
-  assert.ok(text.startsWith("You are an expert coding assistant"), "stock preamble renders without a session");
+  assert.ok(text.startsWith(stockPreamble), "stock preamble renders without a session");
   assert.ok(text.includes("<tools>"), "tool section renders from the project services");
   assert.ok(text.includes("<cwd>"), "working directory section renders");
   assert.ok(text.includes("Always answer briefly."), "project AGENTS.md is part of the preview");
@@ -227,8 +248,9 @@ test("controller defaults reach background projects, future sessions and shared 
   await controller.invoke("agent.control", { action: "newSession" });
   await controller.invoke("settings.update", { scope: "app", patch: { promptCustomization: { rules: "New rules" } } });
   assert.deepEqual(controller.settings.bundle().app.promptCustomization, { rules: "New rules" }, "omitted preamble resets instead of merging back");
+  const stockPreamble = (await sdkStock()).preamble;
   const updated = await background.previewSystemPrompt();
-  assert.ok(updated.preamble.startsWith("You are an expert coding assistant"));
+  assert.ok(updated.preamble.startsWith(stockPreamble));
   assert.equal(updated.sections.find(s => s.name === "rules")?.content, "New rules");
   controller.configure(cwd);
   assert.equal((await background.previewSystemPrompt()).text, updated.text, "restoring a project needs no renderer sync");
@@ -241,7 +263,7 @@ test("controller defaults reach background projects, future sessions and shared 
   for (const entry of controller.registry.liveEntries())
     assert.equal((await entry.runtime!.previewSystemPrompt()).preamble, "Synced host default");
   await view.invoke("agent.control", { action: "setPromptCustomization", customization: {} });
-  assert.ok((await background.previewSystemPrompt()).preamble.startsWith("You are an expert coding assistant"));
+  assert.ok((await background.previewSystemPrompt()).preamble.startsWith(stockPreamble));
 });
 
 test("runtime persona pick rewrites the next turn and forks inherit it", { timeout: 60000 }, async t => {
@@ -284,9 +306,10 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
     return runtime.snapshot().projection.nodes.find(node => node.title === text)!;
   };
 
+  const stockPreamble = (await sdkStock()).preamble, stockDocs = (await sdkStock()).docs;
   const root = await prompt("stock turn", null);
   assert.equal(root.promptOverride, undefined);
-  assert.ok(sentSystemPrompt.startsWith("You are an expert coding assistant"));
+  assert.ok(sentSystemPrompt.startsWith(stockPreamble));
 
   // Persona definitions live in desktop settings; the action carries the text.
   await runtime.control({ action: "setPromptOverride", mode: "replace", name: "reviewer", text: persona });
@@ -297,7 +320,7 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
   assert.equal(sentSystemMessageCount, 1, "the provider must not receive the old system prompt alongside the replacement");
   assert.deepEqual(under.promptOverride, { mode: "replace", name: "reviewer" });
   assert.ok(sentSystemPrompt.startsWith(persona), "the run must compose the persona");
-  assert.ok(!sentSystemPrompt.includes("You are an expert coding assistant"), "replace swaps the preamble only");
+  assert.ok(!sentSystemPrompt.includes(stockPreamble), "replace swaps the preamble only");
   assert.ok(sentSystemPrompt.includes("<tools>"), "replace keeps every other section");
 
   // A fork from before the override stays stock; from after it inherits.
@@ -309,13 +332,13 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
   await runtime.control({ action: "setPromptOverride", off: true });
   const off = await prompt("off turn", child.id);
   assert.equal(off.promptOverride, undefined);
-  assert.ok(sentSystemPrompt.startsWith("You are an expert coding assistant"));
+  assert.ok(sentSystemPrompt.startsWith(stockPreamble));
 
   // Desktop-level customization outlives persona switches: the rules section
   // swaps while the preamble stays stock.
   await runtime.control({ action: "setPromptCustomization", customization: { rules: "- Always answer in rhyme" } });
   const tuned = await prompt("tuned turn", off.id);
-  assert.ok(sentSystemPrompt.startsWith("You are an expert coding assistant"));
+  assert.ok(sentSystemPrompt.startsWith(stockPreamble));
   assert.ok(sentSystemPrompt.includes("<rules>\n- Always answer in rhyme\n</rules>"));
   assert.ok(!sentSystemPrompt.includes("Be concise"));
   assert.equal(tuned.promptOverride, undefined);
@@ -330,15 +353,15 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
   assert.ok(sentSystemPrompt.startsWith(customization.preamble));
   assert.ok(sentSystemPrompt.includes(`<rules>\n${customization.rules}\n</rules>`));
   assert.ok(sentSystemPrompt.includes(`<docs>\n${customization.docs}\n</docs>`));
-  assert.ok(!sentSystemPrompt.includes("You are an expert coding assistant"));
-  assert.ok(!sentSystemPrompt.includes("Pi documentation (read only when"));
+  assert.ok(!sentSystemPrompt.includes(stockPreamble));
+  assert.ok(!sentSystemPrompt.includes(stockDocs), "customized docs replace the stock docs");
   assert.ok(!sentSystemPrompt.includes("Always answer in rhyme"));
   assert.ok(sentSystemPrompt.includes("<tools>"), "section edits preserve the dynamic tool instructions");
   assert.ok(sentSystemPrompt.includes(`<cwd>\n${promptCwd}\n</cwd>`));
   await runtime.control({ action: "setPromptCustomization", customization: {} });
   await prompt("restore all default sections", customized.id);
-  assert.ok(sentSystemPrompt.startsWith("You are an expert coding assistant"));
-  assert.ok(sentSystemPrompt.includes("Pi documentation (read only when"));
+  assert.ok(sentSystemPrompt.startsWith(stockPreamble));
+  assert.ok(sentSystemPrompt.includes(stockDocs));
   for (const marker of Object.values(customization)) assert.ok(!sentSystemPrompt.includes(marker));
 
   // A draft attached to history applies its persona only after the branch is
@@ -353,7 +376,7 @@ test("runtime persona pick rewrites the next turn and forks inherit it", { timeo
   assert.ok(sentSystemPrompt.startsWith("Fork persona"));
   const disabled = await prompt("fork persona off", continuation.id, { off: true });
   assert.equal(disabled.promptOverride, undefined);
-  assert.ok(sentSystemPrompt.startsWith("You are an expert coding assistant"));
+  assert.ok(sentSystemPrompt.startsWith(stockPreamble));
   const main = await prompt("main persona after first turn", tuned.id, { mode: "append", name: "main", text: "Main persona" });
   assert.deepEqual(main.promptOverride, { mode: "append", name: "main" });
   assert.ok(sentSystemPrompt.startsWith("Main persona"));
