@@ -142,6 +142,14 @@ export class GraphRuntime extends PiRuntime {
     const manager = pi.runtime.session.sessionManager;
     return structuredClone({ header: manager.getHeader(), entries: manager.getEntries() });
   }
+  /** A branch's full transcript. Snapshots carry only a bounded window, so
+   * read the live runtime's entries, falling back to the worker's file
+   * snapshot (or the window itself before the main runtime opens). */
+  private fullEntriesOf(id: string, windowed: SessionSnapshot): RawSessionEntry[] {
+    if (id === "main") return this.runtime ? super.fullEntries() : windowed.entries;
+    const worker = this.workers.get(id);
+    return worker?.pi.runtime ? worker.pi.fullEntries() : worker?.snapshot?.entries ?? [];
+  }
   override open(path: string): Promise<SessionSnapshot> {
     return this.exclusive(() => this.openInternal(path));
   }
@@ -359,12 +367,7 @@ export class GraphRuntime extends PiRuntime {
     const main = this.runtime ? super.snapshot() : this.lastMain;
     if (!main || !this.graph) return main ?? super.snapshot();
     this.lastMain = main;
-    this.snapshotCache.update(this.graph, main, this.workers, id => {
-      if (id === "main") return this.runtime ? super.fullEntries() : main.entries;
-      const worker = this.workers.get(id);
-      // A worker that has not opened its branch yet only has its file snapshot.
-      return worker?.pi.runtime ? worker.pi.fullEntries() : worker?.snapshot?.entries ?? [];
-    });
+    this.snapshotCache.update(this.graph, main, this.workers, id => this.fullEntriesOf(id, main));
     const entries = this.snapshotCache.entriesById;
     const runs: NonNullable<SessionSnapshot["graph"]>["runs"] = [];
     const mainNode = main.projection.nodes.find(n => n.id === main.projection.activeNodeId);
@@ -699,16 +702,19 @@ export class GraphRuntime extends PiRuntime {
     const parent = parentId === "main" ? root : this.workers.get(parentId)?.snapshot;
     if (!parent) throw new Error("Branch source is unavailable");
     const parentRecord = graph.records.get(parentId);
+    // The fork point can sit beyond the snapshot's bounded window; scan and
+    // copy the parent's full transcript, not the window the wire carries.
+    const parentEntries = this.fullEntriesOf(parentId, parent);
     if (!input.forceFork && parentRecord && !parentRecord.error && !this.workers.get(parentId)?.work && parent.projection.activeNodeId
       && input.nodeId === `turn:${graph.canonical(parentRecord, parent.projection.activeNodeId.slice(5))}`) {
       parentRecord.requestId = input.requestId; parentRecord.request = input; parentRecord.runId = randomUUID();
       return this.launchBranch(parentRecord, input, node?.footer?.model ?? parent.runtime.model, node?.footer?.thinkingLevel ?? parent.runtime.thinkingLevel);
     }
-    const localLeaf = node ? parent.entries.find(e => (parentRecord ? graph.canonical(parentRecord, e.id) : e.id) === node.leafEntryId)?.id : null;
+    const localLeaf = node ? parentEntries.find(e => (parentRecord ? graph.canonical(parentRecord, e.id) : e.id) === node.leafEntryId)?.id : null;
     if (node && !localLeaf) throw new Error("Branch point was not found in source session");
     const pi = await this.pi();
     const sourceData: SessionData = parentId === "main" ? this.data(this) : {
-      header: { type: "session", version: 3, id: parent.session.id, cwd: this.cwd, timestamp: parent.session.created }, entries: parent.entries,
+      header: { type: "session", version: 3, id: parent.session.id, cwd: this.cwd, timestamp: parent.session.created }, entries: parentEntries,
     };
     const manager = pi.SessionManager.inMemory(this.cwd, undefined, structuredClone([sourceData.header, ...sourceData.entries]));
     if (localLeaf) manager.createBranchedSession(localLeaf);
@@ -727,7 +733,7 @@ export class GraphRuntime extends PiRuntime {
     const data: SessionData = { header: { ...manager.getHeader(), parentSession: parent.session.path },
       entries: trimInterturnOverrides(copied, localNode) };
     const inherited: Record<string, string> = {};
-    const sourceIds = new Set(parent.entries.map(e => e.id));
+    const sourceIds = new Set(parentEntries.map(e => e.id));
     for (const entry of data.entries) {
       if (!sourceIds.has(entry.id)) throw new Error("Copied history has no source identity");
       inherited[entry.id] = parentRecord ? graph.canonical(parentRecord, entry.id) : entry.id;

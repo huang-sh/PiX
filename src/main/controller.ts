@@ -558,6 +558,17 @@ export class MainController {
       return decorate(files.list());
     }
   }
+  /** The snapshot a full-history read (paging, search, recall) falls back to
+   * when no runtime serves the session: the view's own snapshot or a session
+   * entry's read-only one. A live window whose runtime is gone cannot answer
+   * those reads — serving it would fabricate the end of history — so it counts
+   * as not open and the caller keeps its state and retries. */
+  private readableSnapshotOf(session: string, entry?: SessionEntry): SessionSnapshot {
+    const snapshot = this.current?.session.path === resolve(session) ? this.current
+      : entry ? this.registry.snapshotOf(entry) : undefined;
+    if (snapshot && !snapshot.projection.messagesHasEarlier) return snapshot;
+    throw new Error("Session is not open");
+  }
   fallback(path: string, files = this.files, warn?: (message: string) => void): SessionSnapshot {
     const x = files.read(path),
       summary = files.list().find((s) => s.path === resolve(path)) ?? {
@@ -647,29 +658,21 @@ export class MainController {
         ?? (this.current?.session.path === resolve(String(v.session)) ? this.activeEntry() : undefined);
       const byteLimit = typeof v.bytes === "number" ? v.bytes : undefined;
       if (entry?.runtime) return entry.runtime.branchWindow(leafId, Number(v.limit), byteLimit);
-      const snapshot = this.current?.session.path === resolve(String(v.session)) ? this.current
-        : entry ? this.registry.snapshotOf(entry) : undefined;
-      if (!snapshot) throw new Error("Session is not open");
       // A read-only fallback keeps its full entries; window them the same way.
-      return windowEntries(snapshot.entries, leafId, Number(v.limit), byteLimit);
+      return windowEntries(this.readableSnapshotOf(String(v.session), entry).entries, leafId, Number(v.limit), byteLimit);
     }
     if (route === "session.search") {
       const entry = this.entryFor(String(v.session))?.entry
         ?? (this.current?.session.path === resolve(String(v.session)) ? this.activeEntry() : undefined);
       if (entry?.runtime) return { nodeIds: entry.runtime.searchEntries(String(v.query)) };
-      const snapshot = this.current?.session.path === resolve(String(v.session)) ? this.current
-        : entry ? this.registry.snapshotOf(entry) : undefined;
-      if (!snapshot) throw new Error("Session is not open");
+      const snapshot = this.readableSnapshotOf(String(v.session), entry);
       return { nodeIds: searchGraphNodeIds(snapshot.projection, snapshot.entries, String(v.query)) };
     }
     if (route === "session.prompts") {
       const entry = this.entryFor(String(v.session))?.entry
         ?? (this.current?.session.path === resolve(String(v.session)) ? this.activeEntry() : undefined);
       if (entry?.runtime) return { prompts: entry.runtime.promptRecall() };
-      const snapshot = this.current?.session.path === resolve(String(v.session)) ? this.current
-        : entry ? this.registry.snapshotOf(entry) : undefined;
-      if (!snapshot) throw new Error("Session is not open");
-      return { prompts: promptRecall(snapshot.entries) };
+      return { prompts: promptRecall(this.readableSnapshotOf(String(v.session), entry).entries) };
     }
     const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
       ? ++this.viewRequest : this.viewRequest;
