@@ -254,8 +254,6 @@ const visibleTurns = computed<Turn[]>(() =>
     const compactions = selected && liveCompactions.value !== undefined ? liveCompactions.value : node?.metrics?.compactions;
     return {
       id,
-      gitBranch: node?.gitBranch,
-      gitCommit: node?.gitCommit,
       fileChanges: node?.fileChanges,
       user,
       terminal,

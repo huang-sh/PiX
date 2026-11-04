@@ -754,9 +754,6 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .agent-markdown .node-slot:last-of-type .paragraph-node { margin-bottom: 0; }
 .process-item .agent-markdown { color: var(--text); --markdown-body-size: var(--font-size-ui); }
 .chat-turn { margin-bottom: 4px; }
-.chat-git-branch { display: flex; align-items: center; gap: 5px; min-width: 0; margin: -7px 0 12px; color: var(--muted); font-size: var(--font-size-caption); }
-.chat-git-branch > svg { flex-shrink: 0; }
-.chat-git-branch > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-turn:has(> .file-changes) + .chat-turn { margin-top: 24px; }
 .agent-process { margin: -4px 0 17px; }
 .agent-process > summary { display: flex; align-items: center; gap: 7px; min-height: 37px; padding: 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--font-size-caption); cursor: pointer; list-style: none; }
