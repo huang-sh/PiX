@@ -813,7 +813,14 @@ export class GraphRuntime extends PiRuntime {
         branchId: record.id, runId: record.runId, state: "settled" }) + "\n"));
     } catch (error) {
       record.status = "interrupted"; record.error = String(error);
-      try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
+      try {
+        // Retain the branch's full history, not the window the live snapshot
+        // carried: a windowed snapshot would truncate branchWindow, search
+        // and prompts for this branch until the next reopen.
+        const data = this.data(worker.pi);
+        await worker.pi.close();
+        worker.snapshot = this.fileSnapshot(record, data);
+      } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
     } finally {
       worker.work = undefined;
       try { this.persist(() => graph.save(record)); }

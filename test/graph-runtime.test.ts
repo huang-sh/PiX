@@ -1440,3 +1440,63 @@ test("a long session ships a bounded window while paging, search, lookups and fo
   assert.ok(baseline.some(e => e.id === "a5"), "the fork copies its branch point");
   assert.ok(!baseline.some(e => e.id === "u20"), "the fork stops at the branch point");
 });
+
+test("a failed branch run keeps the branch's full history paged and searchable", { timeout: 30000 }, async t => {
+  const home = mkdtempSync(join(tmpdir(), "pix-failed-branch-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, home, () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  t.after(async () => {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  });
+  const history: RawSessionEntry[] = [];
+  let parentId: string | null = null;
+  for (let i = 0; i < SNAPSHOT_TURN_LIMIT + 20; i++) {
+    history.push({ type: "message", id: `u${i}`, parentId, timestamp: String(i), message: { role: "user", content: [{ type: "text", text: `needle ${i}` }] } });
+    history.push({ type: "message", id: `a${i}`, parentId: `u${i}`, timestamp: String(i), message: { role: "assistant", content: [{ type: "text", text: `answer ${i}` }] } });
+    parentId = `a${i}`;
+  }
+  const header = { type: "session", version: 3, id: "failed-branch", timestamp: "2026-01-01T00:00:00.000Z", cwd };
+  const baseline = history.slice(0, 2); // the fork point stays on main
+  const path = join(home, "failed-branch.jsonl");
+  const files = new GraphFiles(path);
+  files.acquire();
+  durableWrite(path, encodeSession({ header, entries: baseline }));
+  files.create({ id: "long", parentId: "main", forkEntryId: "", requestId: "seeded", request: { text: "needle 1" },
+    inherited: Object.fromEntries(baseline.map(entry => [entry.id, entry.id])), header, baseline,
+    status: "idle", runId: "seeded-run" } as BranchRecord, { header, entries: history });
+  files.release();
+
+  await runtime.open(path);
+  const tip = runtime.snapshot().projection.nodes.filter(node => node.branchId === "long").at(-1)!;
+  assert.ok(tip, "the seeded branch hydrates into the graph");
+  assert.ok(runtime.searchEntries("needle 1").length > 0, "search covers the branch's oldest turn before the failure");
+
+  // The prompt itself succeeds; sealing fails after it, which routes the run
+  // through executeBranch's failure path with the branch file already long.
+  const graph = runtime["graph"] as GraphFiles;
+  const seal = graph.seal.bind(graph);
+  graph.seal = ((record: BranchRecord, data: unknown) => { throw new Error("simulated seal failure"); }) as typeof graph.seal;
+  faux.setResponses([fauxAssistantMessage("sealed never")]);
+  await runtime.control({ action: "promptAt", requestId: "boom", nodeId: tip.id, text: "fail here", provider: "faux", modelId: "test" });
+  await until(() => runtime.snapshot().graph!.runs.find(run => run.branchId === "long")?.status === "interrupted");
+  graph.seal = seal;
+  // The failed run must retain the branch's full history, not its live window.
+  assert.ok(runtime.searchEntries("needle 1").length > 0, "search still covers the branch's oldest turn");
+  const all = runtime.branchWindow(tip.leafEntryId, SNAPSHOT_TURN_LIMIT + 40);
+  assert.equal(all.hasEarlier, false, "the walk reaches the true root, not a truncated one");
+  // Branch-owned entries carry their canonical branch prefix in the merged history.
+  assert.ok(all.entries.some(entry => entry.id === "long:u1"), "paging back reaches the branch's oldest own turn");
+  assert.ok(all.entries.some(entry => entry.id === "u0"), "paging back crosses into the inherited baseline");
+});
