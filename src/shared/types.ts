@@ -237,6 +237,10 @@ export interface AgentActivityItem {
 export interface AgentActivity {
   /** The view joined mid-run; persisted history still contains its earlier output. */
   partial?: boolean;
+  /** This pass has already consumed its opening user message (Pi echoes the
+   * prompt right after agent_start); a later user message in the same pass
+   * is a steered turn. */
+  promptEchoed?: boolean;
   startedAt: string;
   pass: number;
   active: boolean;
