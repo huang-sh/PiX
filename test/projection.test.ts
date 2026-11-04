@@ -14,7 +14,7 @@ test("history window matches the selected ancestry without including sibling tur
   assert.equal(branch.messages.length, 2);
   assert.equal(branch.hasEarlier, false);
   assert.deepEqual(branch.messages, projectSession(entries, "u1999").messages);
-  assert.deepEqual(window(entries, null, 40), { messages: [], hasEarlier: false });
+  assert.deepEqual(window(entries, null, 40), { messages: [], hasEarlier: false, complete: false });
 });
 const e: RawSessionEntry[] = [
   {

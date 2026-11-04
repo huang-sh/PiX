@@ -47,7 +47,7 @@ import type { CreateAgentSessionServicesOptions, InlineExtension, SessionManager
 export type { SessionManager };
 import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 import type { PromptCustomization, SystemPromptPreview } from "../shared/types.js";
-import { needsPromptDisplayBoundary, projectSession, summarizeSession } from "../shared/session.js";
+import { needsPromptDisplayBoundary, projectSession, promptRecall, summarizeSession, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES, searchGraphNodeIds, windowEntries } from "../shared/session.js";
 import type { RunTiming } from "../shared/run-timing.js";
 import {
   aggregateUsage,
@@ -288,7 +288,10 @@ export class PiRuntime {
   private stopStartupDialogs?: () => void;
   private controlEpoch = 0;
   private closeTask?: Promise<void>;
-  private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"] };
+  private projectionCache?: { manager: any; count: number; leaf: string | null; projection: SessionSnapshot["projection"];
+    /** The wire form of `projection`: its messages cut to the entry window.
+     * Cached with it so idle snapshots keep one stable projection identity. */
+    wire: SessionSnapshot["projection"]; entries: RawSessionEntry[] };
   /** Standalone defaults; controller-owned sessions and graph workers share
    * their owner's accessor so background runs always see current settings. */
   promptCustomization: PromptCustomization | undefined;
@@ -1053,8 +1056,21 @@ export class PiRuntime {
     const m = s.sessionManager,
       entries = m.getEntries() as RawSessionEntry[],
       leaf = m.getLeafId();
-    if (!this.projectionCache || this.projectionCache.manager !== m || this.projectionCache.count !== entries.length || this.projectionCache.leaf !== leaf)
-      this.projectionCache = { manager: m, count: entries.length, leaf, projection: projectSession(entries, leaf) };
+    if (!this.projectionCache || this.projectionCache.manager !== m || this.projectionCache.count !== entries.length || this.projectionCache.leaf !== leaf) {
+      const projection = projectSession(entries, leaf);
+      const window = windowEntries(entries, leaf, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES);
+      // Messages ride the same turn boundary as the entry window; the ids the
+      // window kept decide which of the projection's messages cross the wire.
+      const windowIds = new Set(window.entries.map(entry => entry.id));
+      const messages = projection.messages.filter(message => windowIds.has(message.entryId));
+      this.projectionCache = { manager: m, count: entries.length, leaf, projection,
+        wire: { ...projection, messages, ...(window.hasEarlier ? { messagesHasEarlier: true } : {}) },
+        // Compaction records ride along regardless of depth: they are small and
+        // the branch context panel resolves their summaries from the entries.
+        entries: window.entries.some(e => e.type === "compaction") || !entries.some(e => e.type === "compaction")
+          ? window.entries
+          : [...window.entries, ...entries.filter(e => e.type === "compaction")] };
+    }
     return {
       session: {
         ...summarizeSession(
@@ -1067,10 +1083,37 @@ export class PiRuntime {
         name: m.getSessionName?.(),
         cwd: m.getCwd(),
       },
-      entries,
-      projection: this.projectionCache.projection,
+      // Snapshots carry a bounded window; older history arrives through
+      // session.branchWindow so large sessions stop crossing the wire whole.
+      entries: this.projectionCache.entries,
+      projection: this.projectionCache.wire,
       runtime: this.state(),
     };
+  }
+  /** A turn-complete window of one branch's history, fetched on demand. */
+  branchWindow(leafId: string | null, limit: number, byteLimit = SNAPSHOT_WINDOW_BYTES) {
+    const s = this.runtime?.session;
+    if (!s) throw new Error("No Pi session open");
+    return windowEntries(s.sessionManager.getEntries() as RawSessionEntry[], leafId ?? s.sessionManager.getLeafId(), limit, byteLimit);
+  }
+  /** Looks up an entry in the full in-memory session, beyond the snapshot window. */
+  entryById(id: string): RawSessionEntry | undefined {
+    return this.runtime?.session.sessionManager.getEntry?.(id) as RawSessionEntry | undefined;
+  }
+  /** The full in-memory history; read-side routes that must see beyond the wire window. */
+  fullEntries(): RawSessionEntry[] {
+    return this.runtime ? this.runtime.session.sessionManager.getEntries() as RawSessionEntry[] : [];
+  }
+  /** Graph search over the full in-memory history; the wire window cannot serve it. */
+  searchEntries(query: string): string[] {
+    const s = this.runtime?.session;
+    const snapshot = this.snapshot();
+    return searchGraphNodeIds(snapshot.projection,
+      s ? s.sessionManager.getEntries() as RawSessionEntry[] : snapshot.entries, query);
+  }
+  /** Composer recall over the full in-memory history, not just the window. */
+  promptRecall(): string[] {
+    return promptRecall(this.runtime ? this.fullEntries() : this.snapshot().entries);
   }
   async validate(path: string) {
     const pi = await this.pi();

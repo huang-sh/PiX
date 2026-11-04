@@ -7,17 +7,33 @@ import { randomUUID } from "node:crypto";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
+import type { RawSessionEntry } from "../src/shared/types.js";
+
+/** Snapshots carry the main line's window; branch history arrives via branchWindow. */
+function allRuntimeEntries(runtime: GraphRuntime): RawSessionEntry[] {
+  const snapshot = runtime.snapshot();
+  const merged = new Map(snapshot.entries.map(entry => [entry.id, entry]));
+  const branches = new Set(snapshot.projection.nodes.map(node => node.branchId).filter(id => id && id !== "main"));
+  for (const id of branches) {
+    // Walk from each branch's newest node so the window covers its whole line.
+    const leaf = snapshot.projection.nodes.filter(node => node.branchId === id).at(-1)!.leafEntryId;
+    for (const entry of runtime.branchWindow(leaf, 500).entries) merged.set(entry.id, entry);
+  }
+  return [...merged.values()];
+}
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord } from "../src/main/graph-files.js";
 import { readFileChange } from "../src/main/file-changes.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
-import { projectSession } from "../src/shared/session.js";
+import { projectSession, SNAPSHOT_TURN_LIMIT } from "../src/shared/session.js";
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(r => setTimeout(r, 20)); }
   throw new Error("Timed out waiting for graph state");
 }
 
-test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 30000 }, async t => {
+// The parent budget covers 21 sequential subtests that each open a runtime;
+// under the full suite's parallel load their cumulative duration passes 30s.
+test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 60000 }, async t => {
   for (const stage of ["startup", "model", "model failure", "startup abort", "model abort", "open abort", "startup direct abort", "model direct abort"]) for (const target of ["main", "branch", "continuation"]) {
     if (stage === "open abort" && target === "main") continue;
     if (stage.includes("direct") && target !== "main") continue;
@@ -118,17 +134,17 @@ test("admitted prompts stay pending and busy throughout startup and model config
           const node = snapshot.projection.nodes.find(node => node.id === run.nodeId)!;
           assert.equal(node.title, "pending question");
           assert.equal(node.parentId, parentId);
-          assert.match(JSON.stringify(snapshot.entries), /new reply/);
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /new reply/);
         }
         if (cancelled) {
           assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
-          assert.ok(!JSON.stringify(snapshot.entries).includes("new reply"), "no model call may start after stop");
+          assert.ok(!JSON.stringify(allRuntimeEntries(runtime)).includes("new reply"), "no model call may start after stop");
           block = false;
           faux.setResponses([fauxAssistantMessage("after cancellation")]);
           await runtime.control({ action: "promptAt", requestId: "after-stop", nodeId: parentId,
             text: "fresh question", provider: "faux", modelId: "test" });
           await until(() => !runtime.busy);
-          assert.match(JSON.stringify(runtime.snapshot().entries), /after cancellation/);
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /after cancellation/);
         }
       } finally {
         release();
@@ -498,7 +514,7 @@ test("broker model preflight respects cancellation before a prompt starts", { ti
           faux.setResponses([fauxAssistantMessage("reply after stop")]);
           await runtime.control({ action: "promptAt", requestId: "after-broker-stop", nodeId: null, text: "fresh question" });
           await until(() => !runtime.busy);
-          assert.match(JSON.stringify(runtime.snapshot().entries), /reply after stop/);
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /reply after stop/);
         }
       }
     } finally {
@@ -612,14 +628,14 @@ test("restart can continue main and branch turns left without a reply or tool re
           assert.equal(node.running, false);
           assert.equal(node.forkable, true, "the restored turn must unlock the composer and pass promptAt admission");
           if (branch) assert.equal(restored.graph!.runs.find(run => run.branchId === "crashed")?.status, "interrupted");
-          const retained = structuredClone(restored.entries);
+          const retained = structuredClone(allRuntimeEntries(runtime));
           faux.setResponses([fauxAssistantMessage("continued after restart")]);
           await runtime.control({ action: "promptAt", requestId: "followup", nodeId, text: "continue", provider: "faux", modelId: "test" });
           await until(() => !runtime.busy);
-          const continued = runtime.snapshot();
-          assert.match(JSON.stringify(continued.entries), /continued after restart/);
-          for (const entry of retained) assert.deepEqual(continued.entries.find(value => value.id === entry.id), entry);
-          assert.ok(continued.projection.nodes.some(node => node.title === "continue" && node.parentId === nodeId));
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /continued after restart/);
+          const all = allRuntimeEntries(runtime);
+          for (const entry of retained) assert.deepEqual(all.find(value => value.id === entry.id), entry);
+          assert.ok(runtime.snapshot().projection.nodes.some((node: { title?: string; parentId?: string | null }) => node.title === "continue" && node.parentId === nodeId));
           assert.ok(!JSON.stringify(events).includes('"tool_execution_start"'), "old tool calls must not be replayed");
           await runtime.close();
           assert.equal((await runtime.open(path)).projection.nodes.find(node => node.id === nodeId)?.forkable, true);
@@ -667,7 +683,7 @@ test("interrupted turns resume and retain native bookmarks across branches, rest
     await runtime.control({ action: "promptAt", requestId: "followup", nodeId: target, text: "second", provider: "faux", modelId: "test" });
     await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "second")
       && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
-    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after interrupt"));
+    assert.ok(JSON.stringify(allRuntimeEntries(runtime)).includes("after interrupt"));
 
     let branchStarted = false;
     faux.setResponses([
@@ -693,7 +709,7 @@ test("interrupted turns resume and retain native bookmarks across branches, rest
       text: "branch second", provider: "faux", modelId: "test" });
     await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "branch second")
       && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
-    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("branch after interrupt"));
+    assert.ok(JSON.stringify(allRuntimeEntries(runtime)).includes("branch after interrupt"));
     const tree = runtime.snapshot(), path = tree.session.path;
     const main = tree.projection.nodes.find(node => node.title === "first")!;
     const label = async (entryId: string, value?: string) => runtime.control({ action: "setLabel", entryId, label: value }) as Promise<SessionSnapshot>;
@@ -781,7 +797,7 @@ test("failed persistence after abort blocks writes until the graph is reopened",
     await runtime.control({ action: "promptAt", requestId: "recovered", nodeId: runtime.snapshot().projection.activeNodeId,
       text: "safe again", provider: "faux", modelId: "test" });
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
-    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after reopen"));
+    assert.ok(JSON.stringify(allRuntimeEntries(runtime)).includes("after reopen"));
     const failedCursor = t.mock.method(runtime.graph!, "saveLeaf", () => { throw new Error("simulated cursor EIO"); });
     await assert.rejects(runtime.close(), /simulated cursor EIO/);
     assert.equal(runtime.graph, undefined, "a failed close releases graph ownership");
@@ -1363,4 +1379,64 @@ test("explicit branches fork main and child tips while ordinary prompts keep con
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("a long session ships a bounded window while paging, search, lookups and forks see the whole history", { timeout: 30000 }, async t => {
+  const home = mkdtempSync(join(tmpdir(), "pix-window-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  t.after(async () => {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  });
+  const history: RawSessionEntry[] = [];
+  let parentId: string | null = null;
+  for (let i = 0; i < SNAPSHOT_TURN_LIMIT + 20; i++) {
+    history.push({ type: "message", id: `u${i}`, parentId, timestamp: String(i), message: { role: "user", content: [{ type: "text", text: `needle ${i}` }] } });
+    history.push({ type: "message", id: `a${i}`, parentId: `u${i}`, timestamp: String(i), message: { role: "assistant", content: [{ type: "text", text: `answer ${i}` }] } });
+    parentId = `a${i}`;
+  }
+  const path = join(home, "sessions", "long.jsonl");
+  writeFileSync(path, encodeSession({ header: { type: "session", version: 3, id: "long", timestamp: "2026-01-01T00:00:00.000Z", cwd: home }, entries: history }));
+  await runtime.open(path);
+  // A read-side route that arrives before the first snapshot still sees history.
+  assert.ok(runtime.branchWindow(null, SNAPSHOT_TURN_LIMIT).entries.length > 0, "an early window is not empty");
+  const snapshot = runtime.snapshot();
+  const turns = (list: RawSessionEntry[]) => list.filter(entry => entry.type === "message" && (entry.message as { role?: string }).role === "user").length;
+  assert.equal(turns(snapshot.entries), SNAPSHOT_TURN_LIMIT, "the wire carries only the newest turns");
+  assert.equal(snapshot.projection.messagesHasEarlier, true);
+  assert.equal(turns(runtime.fullEntries()), SNAPSHOT_TURN_LIMIT + 20, "the runtime keeps the whole history");
+  assert.equal(runtime.entryById("u0")?.id, "u0", "an entry outside the window still resolves");
+  const all = runtime.branchWindow(snapshot.projection.leafId, SNAPSHOT_TURN_LIMIT + 40);
+  assert.equal(all.hasEarlier, false);
+  assert.equal(turns(all.entries), SNAPSHOT_TURN_LIMIT + 20, "paging back reaches the true root");
+  const page = runtime.branchWindow(snapshot.projection.leafId, 10);
+  assert.equal(page.hasEarlier, true, "a short page reports the older history it left behind");
+  assert.equal(turns(page.entries), 10);
+  assert.ok(runtime.searchEntries("needle 0").length > 0, "search reads beyond the window");
+  // Forking from a node the window paged out must still find the branch point
+  // and copy the full prefix up to it, not the wire's bounded window.
+  const oldNode = snapshot.projection.nodes.find(n => n.leafEntryId === "a5")!;
+  assert.ok(oldNode, "the projection still exposes paged-out nodes");
+  faux.setResponses([fauxAssistantMessage("fork reply")]);
+  await runtime.control({ action: "promptAt", requestId: "old-fork", text: "old fork", nodeId: oldNode.id, forceFork: true, provider: "faux", modelId: "test" });
+  await until(() => runtime.snapshot().projection.nodes.some(n => n.title === "old fork"));
+  await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+  const fork = runtime.snapshot().projection.nodes.find(n => n.title === "old fork")!;
+  assert.notEqual(fork.branchId, "main");
+  const baseline = runtime.graph!.records.get(fork.branchId!)!.baseline;
+  assert.ok(baseline.some(e => e.id === "u0"), "the fork copies history from before the window");
+  assert.ok(baseline.some(e => e.id === "a5"), "the fork copies its branch point");
+  assert.ok(!baseline.some(e => e.id === "u20"), "the fork stops at the branch point");
 });

@@ -267,6 +267,16 @@ export function validateRouteInput(
       return { session: str(v.session, "session"), entryId: str(v.entryId, "entryId"),
         index: integer(v.index, "index", 0, Number.MAX_SAFE_INTEGER), epoch: str(v.epoch, "epoch", true), digest, thumbnail: v.thumbnail === true };
     }
+    case "session.branchWindow": {
+      const leafId = str(v.leafId, "leafId", true);
+      return { session: str(v.session, "session"), leafId, limit: integer(v.limit, "limit", 1, 500),
+        bytes: integer(v.bytes, "bytes", 4 << 20, 64 << 20) };
+    }
+    case "session.search": {
+      return { session: str(v.session, "session"), query: str(v.query, "query") };
+    }
+    case "session.prompts":
+      return { session: str(v.session, "session") };
     case "changes.read":
       return { session: str(v.session, "session"), ref: str(v.ref, "ref") };
     case "shell.run":

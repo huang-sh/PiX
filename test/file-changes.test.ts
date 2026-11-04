@@ -88,7 +88,7 @@ test("snapshots survive abort/reopen and render historical content after later d
   const snapshot = f.runtime.snapshot();
   const ref = f.changes()[0]!.ref;
   writeFileSync(join(f.root, "one.txt"), "later unrelated content");
-  const patch = await readFileChange(snapshot.session.path, snapshot.entries, ref);
+  const patch = await readFileChange(snapshot.session.path, f.runtime.fullEntries(), ref);
   assert.match(patch, /\+one\n\+two/);
   assert.doesNotMatch(patch, /unrelated/);
   // Force persistence of the synthetic conversation, just as an assistant response does.
@@ -98,7 +98,7 @@ test("snapshots survive abort/reopen and render historical content after later d
   await f.runtime.close();
   await f.runtime.open(snapshot.session.path);
   assert.equal(f.changes()[0]!.ref, ref);
-  assert.equal(await readFileChange(snapshot.session.path, f.runtime.snapshot().entries, ref), patch);
+  assert.equal(await readFileChange(snapshot.session.path, f.runtime.fullEntries(), ref), patch);
   await assert.rejects(readFileChange(snapshot.session.path, snapshot.entries, "../secret"), /Unknown/);
   await assert.rejects(readFileChange(snapshot.session.path, snapshot.entries, randomUUID()), /Unknown/);
 });
@@ -258,9 +258,9 @@ test("real graph workers preserve root snapshot references across forks and rest
   await prompt("main edit", root.id, "main.txt");
   const branch = await prompt("branch edit", root.id, "branch.txt");
   const path = runtime.snapshot().session.path;
-  assert.match(await readFileChange(path, runtime.snapshot().entries, branch.fileChanges![0]!.ref), /\+branch edit/);
+  assert.match(await readFileChange(path, runtime.fullEntries(), branch.fileChanges![0]!.ref), /\+branch edit/);
   await runtime.close(); await runtime.open(path);
   const next = await prompt("after restart", root.id, "restart.txt");
-  assert.match(await readFileChange(path, runtime.snapshot().entries, next.fileChanges![0]!.ref), /\+after restart/);
+  assert.match(await readFileChange(path, runtime.fullEntries(), next.fileChanges![0]!.ref), /\+after restart/);
   assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === branch.id)!.fileChanges![0]!.path, "branch.txt");
 });
