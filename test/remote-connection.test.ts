@@ -2115,3 +2115,102 @@ test("a host that never started is not redialed", async (t) => {
   await assert.rejects(controller.connectSsh("old", "/old"), /connect refused/);
   assert.equal(reattach.mock.callCount(), 0);
 });
+
+for (const kind of ["ssh", "wsl"] as const) test(`${kind} history reads reach the remote host and paged images remain readable`, async t => {
+  const { controller, old, project } = controllerFixture(t);
+  if (kind === "wsl") {
+    controller.project = { ...project, remote: { kind, distro: "Ubuntu" } };
+    controller.installSlot(old as never, controller.project, controller.settings.bundle());
+  }
+  const path = "/old/history.jsonl";
+  const image = { type: "image", mimeType: "image/png", data: "aGVsbG8=" };
+  const entry = { type: "message", id: "branch-image", parentId: null, timestamp: "2026-01-01",
+    message: { role: "user", content: [image] } };
+  const current = { session: { path }, entries: [], projection: { nodes: [], edges: [], messages: [] },
+    runtime: { available: true }, graph: { id: path, epoch: "remote-epoch", revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  controller.current = current;
+  const original = old.request.bind(old);
+  old.request = async (route, input) => {
+    old.calls.push([route, input]);
+    if (route === "session.branchWindow") return { entries: [entry], hasEarlier: false, session: path, epoch: "remote-epoch" };
+    if (route === "session.search") return { nodeIds: ["turn:branch-image"] };
+    if (route === "session.prompts") return { prompts: ["remote prompt"] };
+    assert.notEqual(route, "session.image", "older hosts need no new image route");
+    return original(route, input);
+  };
+  const page = await controller.invoke("session.branchWindow", { session: path, leafId: entry.id, limit: 1, bytes: 4 << 20 });
+  assert.deepEqual((page as { entries: unknown[] }).entries, [entry]);
+  assert.deepEqual(await controller.invoke("session.search", { session: path, query: "remote" }), { nodeIds: ["turn:branch-image"] });
+  assert.deepEqual(await controller.invoke("session.prompts", { session: path }), { prompts: ["remote prompt"] });
+  assert.deepEqual(await controller.invoke("session.image", { session: path, entryId: entry.id, index: 0, epoch: "remote-epoch" }), image);
+  assert.equal(controller.current, current, "a page response is not a session snapshot");
+});
+
+function remoteImageFixture(t: TestContext) {
+  const fixture = controllerFixture(t);
+  const path = "/old/images.jsonl";
+  const snapshot = remoteSnapshot(path);
+  snapshot.entries = [];
+  snapshot.graph = { id: path, epoch: "images-1", revision: 1, runs: [] };
+  fixture.controller.current = snapshot;
+  const images = ["first", "second", "third"].map(text => ({ type: "image", mimeType: "image/png", data: Buffer.from(text).toString("base64") }));
+  const entry = { type: "message", id: "images", parentId: null, timestamp: "2026-01-01", message: { role: "user", content: images } };
+  const page = { entries: [entry], hasEarlier: false, session: path, epoch: snapshot.graph.epoch };
+  const request = { session: path, entryId: entry.id, epoch: snapshot.graph.epoch, index: 0 };
+  return { ...fixture, snapshot, images, page, request };
+}
+
+test("remote images share pending and completed pages across image indices and preview sizes", async t => {
+  const { controller, old, images, page, request } = remoteImageFixture(t);
+  let calls = 0, release!: (value: unknown) => void;
+  const original = old.request.bind(old);
+  old.request = async (route, input) => {
+    if (route !== "session.branchWindow") return original(route, input);
+    calls++;
+    return new Promise(resolve => { release = resolve; });
+  };
+  const pending = images.map((_, index) => controller.invoke("session.image", { ...request, index, thumbnail: true }));
+  assert.equal(calls, 1);
+  release(page);
+  assert.deepEqual(await Promise.all(pending), images);
+  assert.deepEqual(await controller.invoke("session.image", { ...request, index: 1 }), images[1]);
+  assert.equal(calls, 1, "opening the original uses the same entry as its thumbnail");
+  assert.deepEqual(controller.current!.entries, [], "image caching does not mutate the wire snapshot baseline");
+});
+
+for (const change of ["epoch", "session", "host", "page-epoch", "page-session"] as const)
+test(`remote image reads reject a changed ${change} during IO`, async t => {
+  const { controller, old, snapshot, page, request } = remoteImageFixture(t);
+  const original = old.request.bind(old);
+  old.request = async (route, input) => {
+    if (route !== "session.branchWindow") return original(route, input);
+    if (change === "epoch") controller.current = { ...snapshot, graph: { ...snapshot.graph!, epoch: "images-2" } };
+    if (change === "session") controller.current = remoteSnapshot("/old/other.jsonl");
+    if (change === "host") {
+      const project: ProjectInfo = { name: "other", path: "/old", remote: { kind: "ssh", host: "other" } };
+      controller.project = project;
+      controller.installSlot(candidate(controller) as never, project, controller.settings.bundle());
+    }
+    return { ...page, ...(change === "page-epoch" ? { epoch: "images-2" } : {}),
+      ...(change === "page-session" ? { session: "/old/other.jsonl" } : {}) };
+  };
+  await assert.rejects(controller.invoke("session.image", request), /Session changed/);
+});
+
+test("remote image pages retry failures, support older hosts, and invalidate after reopening", async t => {
+  const { controller, old, snapshot, images, page, request } = remoteImageFixture(t);
+  let calls = 0;
+  const original = old.request.bind(old);
+  old.request = async (route, input) => {
+    if (route !== "session.branchWindow") return original(route, input);
+    if (++calls === 1) throw new Error("temporary transport failure");
+    return { entries: page.entries, hasEarlier: false };
+  };
+  await assert.rejects(controller.invoke("session.image", request), /temporary transport failure/);
+  assert.deepEqual(await controller.invoke("session.image", request), images[0]);
+  assert.equal(calls, 2);
+  controller.current = { ...snapshot, graph: { ...snapshot.graph!, epoch: "images-2" } };
+  await assert.rejects(controller.invoke("session.image", request), /Session changed/);
+  assert.deepEqual(await controller.invoke("session.image", { ...request, epoch: "images-2" }), images[0]);
+  assert.equal(calls, 3, "a new epoch cannot reuse the old image entry");
+});

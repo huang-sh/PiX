@@ -46,6 +46,19 @@ test("a single appended message does not serialize unchanged history or images",
   assert.deepEqual(wire(applySessionPatch(wire(before), wire(patch))), wire(next));
 });
 
+test("patches preserve and revoke full-history certification independently of message paging", () => {
+  let current = snapshot([user("one")], 1);
+  const complete = { ...snapshot([user("one")], 2), entriesComplete: true as const };
+  const windowed = snapshot([user("one")], 3);
+  for (const next of [complete, windowed]) {
+    const patch = sessionPatch(current, next)!;
+    const received = applySessionPatch(wire(current), wire(patch))!;
+    assert.deepEqual(wire(received), wire(next));
+    current = received;
+  }
+  assert.equal(current.entriesComplete, undefined);
+});
+
 test("subscribers start with full state and recover a missed patch without using RPC state as their baseline", async () => {
   const encoder = sessionEventEncoder();
   const first = snapshot([user("one")], 1), second = snapshot([user("one"), user("two")], 2);
@@ -68,4 +81,18 @@ test("subscribers start with full state and recover a missed patch without using
   assert.deepEqual(wire((decoder(wire(encoder(event(next))))!.payload as SessionUpdate).current), wire(next));
   assert.equal(decoder(wire(gap)), undefined, "late patches never roll state back");
   assert.ok((sessionEventEncoder()(event(next)).payload as SessionUpdate).current, "new subscribers get their own checkpoint");
+});
+
+test("patches synchronize persona and window metadata, including removal", () => {
+  let current = snapshot([user("one")], 1);
+  const active = snapshot([user("one")], 2);
+  active.projection.activePromptOverride = { mode: "append", name: "writer" };
+  active.projection.messagesHasEarlier = true;
+  const disabled = snapshot([user("one")], 3);
+  disabled.projection.activePromptOverride = null;
+  const unset = snapshot([user("one")], 4);
+  for (const next of [active, disabled, unset]) {
+    current = applySessionPatch(wire(current), wire(sessionPatch(current, next)!))!;
+    assert.deepEqual(wire(current), wire(next));
+  }
 });

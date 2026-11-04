@@ -306,15 +306,27 @@ export interface RuntimeState {
   pendingMessageCount: number;
   queuedMessages?: QueuedMessage[];
 }
+/** Identity is optional for compatibility with older remote hosts. */
+export interface SessionHistoryWindow {
+  entries: RawSessionEntry[];
+  hasEarlier: boolean;
+  session?: string;
+  epoch?: string;
+}
+
 export interface SessionSnapshot {
   session: SessionSummary;
   entries: RawSessionEntry[];
+  /** Set only by a full-history source; a wire window cannot certify completeness. */
+  entriesComplete?: true;
   projection: SessionProjection;
   runtime: RuntimeState;
   graph?: {
     id: string;
     revision: number;
     epoch?: string;
+    /** Persisted branches, including transcripts not hydrated yet. */
+    branchCount?: number;
     runs: Array<{
       branchId: string;
       runId: string;

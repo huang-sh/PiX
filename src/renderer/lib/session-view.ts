@@ -1,4 +1,5 @@
 import type { RawSessionEntry, SessionProjection } from "../../shared/types.js";
+import { PROMPT_DISPLAY_CUSTOM_TYPE } from "../../shared/types.js";
 import { projectSession, sessionEntryIndex } from "../../shared/session.js";
 
 // Snapshots cross IPC as JSON-shaped data. Compare without serializing large
@@ -25,7 +26,7 @@ export function reuseGraphProjection(previous: SessionProjection, next: SessionP
 }
 
 export function createBranchMessageCache() {
-  const cache = new Map<string, { entries: RawSessionEntry[]; result: { messages: SessionProjection["messages"]; hasEarlier: boolean; complete: boolean } }>();
+  const cache = new Map<string, { entries: RawSessionEntry[]; result: { messages: SessionProjection["messages"]; hasEarlier: boolean; complete: boolean; missingParentId: string | null } }>();
   return (entries: RawSessionEntry[], leaf: string | null, limit: number) => {
     const index = sessionEntryIndex(entries);
     const path: RawSessionEntry[] = [];
@@ -34,27 +35,33 @@ export function createBranchMessageCache() {
     // `complete` means the pool holds the whole ancestry this window was cut
     // from — either the walk reached a true root or it spent its turn budget.
     // Only a parent missing from the index is a pool boundary worth a fetch.
-    let broken = !entry;
-    let turns = 0, cut = 0, hasEarlier = false;
+    let missingParentId = entry ? null : leaf;
+    let turns = 0, cut = 0, hasEarlier = false, promptPrefix = false;
     while (entry && !seen.has(entry.id)) {
       seen.add(entry.id);
       path.push(entry);
+      if (promptPrefix && (entry.type === "compaction"
+        || (entry.type === "custom" && entry.customType === PROMPT_DISPLAY_CUSTOM_TYPE)))
+        cut = path.length;
+      if (entry.type === "message") promptPrefix = false;
       if (entry.type === "message" && (entry.message as { role?: string })?.role === "user") {
         if (++turns > limit) { hasEarlier = true; break; }
         cut = path.length;
+        promptPrefix = true;
       }
       if (!entry.parentId) break;
-      entry = index.get(entry.parentId);
-      if (!entry) broken = true;
+      const parentId = entry.parentId;
+      entry = index.get(parentId);
+      if (!entry) missingParentId = parentId;
     }
-    const complete = !broken;
+    const complete = !missingParentId;
     // Keep complete turns. In particular, never parse text in the older prefix
     // merely to decide whether the "load earlier" button should be visible.
     const window = (hasEarlier ? path.slice(0, cut) : path).reverse();
     const key = `${leaf}:${limit}`;
     const old = cache.get(key);
-    const result = old && old.result.hasEarlier === hasEarlier && old.result.complete === complete && sameData(old.entries, window)
-      ? old.result : { messages: projectSession(window, leaf).messages, hasEarlier, complete };
+    const result = old && old.result.hasEarlier === hasEarlier && old.result.missingParentId === missingParentId && sameData(old.entries, window)
+      ? old.result : { messages: projectSession(window, leaf).messages, hasEarlier, complete, missingParentId };
     cache.delete(key);
     cache.set(key, { entries: window, result });
     // Bound view caching independently of the number of historical graph nodes;

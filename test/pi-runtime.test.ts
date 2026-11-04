@@ -1028,3 +1028,28 @@ test("a snapshot summary carries the file's mtime, not the moment of the snapsho
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("snapshot keeps older compactions when the window already contains a recent one", () => {
+  const entries: import("../src/shared/types.js").RawSessionEntry[] = [];
+  let parentId: string | null = null;
+  for (let i = 0; i < 50; i++) {
+    if (i === 10 || i === 49) {
+      entries.push({ type: "compaction", id: `c${i}`, parentId, timestamp: String(i), summary: `summary ${i}`, firstKeptEntryId: `u${i - 5}` });
+      parentId = `c${i}`;
+    }
+    entries.push({ type: "message", id: `u${i}`, parentId, timestamp: String(i), message: { role: "user", content: `prompt ${i}` } });
+    entries.push({ type: "message", id: `a${i}`, parentId: `u${i}`, timestamp: String(i), message: { role: "assistant", content: `answer ${i}` } });
+    parentId = `a${i}`;
+  }
+  const runtime = new PiRuntime(tmpdir(), tmpdir(), () => undefined, async () => undefined);
+  runtime.runtime = { session: { sessionId: "s", sessionManager: {
+    getEntries: () => entries, getLeafId: () => parentId, getCwd: () => tmpdir(),
+  } } };
+  const snapshot = runtime.snapshot();
+  assert.equal(snapshot.entries.find(entry => entry.type === "message")!.id, "u10");
+  assert.deepEqual(snapshot.entries.filter(entry => entry.type === "compaction").map(entry => entry.id).sort(), ["c10", "c49"]);
+  assert.equal(snapshot.entries.find(entry => entry.id === "c10")!.summary, "summary 10");
+  const again = runtime.snapshot();
+  assert.equal(again.entries, snapshot.entries, "idle snapshots preserve the cached entry identity");
+  assert.equal(again.projection, snapshot.projection, "idle snapshots preserve the cached projection identity");
+});

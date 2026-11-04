@@ -65,17 +65,17 @@ it("loads an older node's turn before showing or resending it", async () => {
     expect(data.content().user.length).toBeLessThan("prompt 0 ".length + 120);
     await data.onLoadContent();
     await flushPromises();
-    expect(desktop.invoke).toHaveBeenCalledWith("session.branchWindow", expect.objectContaining({ leafId: "a0" }));
+    expect(desktop.invoke).toHaveBeenCalledWith("session.branchWindow", expect.objectContaining({ leafId: "a0", limit: 1 }));
     expect(data.content().user).toBe("prompt 0 " + "x".repeat(120));
     expect(data.content().assistant).toBe("answer 0 " + "y".repeat(400));
   } finally { wrapper.unmount(); }
 });
 
-it("recalls prompts from beyond the window by merging the main process list", async () => {
+it("uses the full recall list in chronological order even when the newest prompt is off-main", async () => {
   const pinia = createPinia(); setActivePinia(pinia);
   useLayoutStore().layout.collapsed.chat = false;
   vi.mocked(desktop.invoke).mockImplementation(async route => route === "session.prompts"
-    ? { prompts: ["older prompt", "prompt 1 " + "x".repeat(120)] } : {});
+    ? { prompts: ["new branch prompt", `prompt 2 ${"x".repeat(120)}`, `prompt 1 ${"x".repeat(120)}`, "older prompt"] } : {});
   const session = useSessionStore();
   const snapshot = windowedSnapshot();
   session.applySnapshot(snapshot);
@@ -88,9 +88,34 @@ it("recalls prompts from beyond the window by merging the main process list", as
     await wrapper.get(".composer-collapsed").trigger("click");
     await flushPromises();
     const history = wrapper.findComponent(PromptComposer).props("history") as string[];
-    // Newest local prompts first, then whatever only the main process knows.
-    expect(history.slice(0, 2)).toEqual([`prompt 2 ${"x".repeat(120)}`, `prompt 1 ${"x".repeat(120)}`]);
+    expect(history.slice(0, 2)).toEqual(["new branch prompt", `prompt 2 ${"x".repeat(120)}`]);
     expect(history).toContain("older prompt");
     expect(history.filter(text => text.startsWith("prompt 1 "))).toHaveLength(1);
+  } finally { wrapper.unmount(); }
+});
+
+it("refreshes composer recall after deletion rebuilds the same session", async () => {
+  const pinia = createPinia(); setActivePinia(pinia);
+  useLayoutStore().layout.collapsed.chat = false;
+  let prompts = ["deleted prompt outside the window"];
+  vi.mocked(desktop.invoke).mockImplementation(async route => route === "session.prompts" ? { prompts } : {});
+  const session = useSessionStore();
+  const before = windowedSnapshot();
+  session.applySnapshot(before);
+  const MarkdownRenderer = defineComponent({ props: ["content"], template: "<div>{{ content }}</div>" });
+  const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer } } });
+  try {
+    await wrapper.get(".composer-collapsed").trigger("click");
+    await flushPromises();
+    expect(wrapper.findComponent(PromptComposer).props("history")).toContain("deleted prompt outside the window");
+    prompts = [];
+    session.applySnapshot({ ...before, entries: [], projection: projectSession([], null),
+      graph: { ...before.graph!, epoch: "deleted-root", revision: before.graph!.revision + 1 } });
+    // No session navigation or explicit recall refresh: the panel watches the
+    // new history epoch and must not merge its previously cached deleted text.
+    expect(session.promptRecall).toEqual([]);
+    await flushPromises();
+    expect(vi.mocked(desktop.invoke).mock.calls.filter(([route]) => route === "session.prompts")).toHaveLength(2);
+    expect(wrapper.findComponent(PromptComposer).props("history")).toEqual([]);
   } finally { wrapper.unmount(); }
 });

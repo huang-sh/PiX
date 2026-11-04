@@ -70,8 +70,8 @@ describe("graph node context menu deletion", () => {
 
   it("deletes the right-clicked subtree immediately, updates chat and removes its draft", async () => {
     const pinia = createPinia(); setActivePinia(pinia);
-    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
-    const next = snapshot(); next.entries = next.entries.slice(0, 1); next.projection = projectSession(next.entries, "a"); next.graph!.revision++;
+    const session = useSessionStore(); session.applySnapshot(snapshot()); session.focusedNode = "turn:c";
+    const next = snapshot(); next.entries = next.entries.slice(0, 1); next.projection = projectSession(next.entries, "a"); next.graph!.revision++; next.graph!.epoch = "after-deletion";
     const invoke = vi.mocked(window.pix!.invoke).mockResolvedValueOnce(next);
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
@@ -99,7 +99,7 @@ describe("graph node context menu deletion", () => {
     const session = useSessionStore(); session.current = forkedSnapshot(); session.focusedNode = "turn:d";
     const next = forkedSnapshot();
     next.entries = next.entries.filter((entry) => entry.id !== "c");
-    next.projection = projectSession(next.entries as never, "a"); next.graph!.revision++;
+    next.projection = projectSession(next.entries as never, "a"); next.graph!.revision++; next.graph!.epoch = "after-deletion";
     vi.mocked(window.pix!.invoke).mockResolvedValueOnce(next);
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
@@ -122,8 +122,8 @@ describe("graph node context menu deletion", () => {
 
   it.each([true, false])("keeps a visible surviving focus still, or brings it into view without animation (visible: %s)", async visible => {
     const pinia = createPinia(); setActivePinia(pinia);
-    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
-    const next = snapshot(); next.entries = next.entries.slice(0, 1); next.projection = projectSession(next.entries, "a"); next.graph!.revision++;
+    const session = useSessionStore(); session.applySnapshot(snapshot()); session.focusedNode = "turn:c";
+    const next = snapshot(); next.entries = next.entries.slice(0, 1); next.projection = projectSession(next.entries, "a"); next.graph!.revision++; next.graph!.epoch = "after-deletion";
     vi.mocked(window.pix!.invoke).mockResolvedValueOnce(next);
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });
     await flushPromises();
@@ -148,7 +148,7 @@ describe("graph node context menu deletion", () => {
 
   it("does not recenter a different session when a pending deletion completes", async () => {
     const pinia = createPinia(); setActivePinia(pinia);
-    const session = useSessionStore(); session.current = snapshot(); session.focusedNode = "turn:c";
+    const session = useSessionStore(); session.applySnapshot(snapshot()); session.focusedNode = "turn:c";
     let resolve!: (value: SessionSnapshot) => void;
     vi.mocked(window.pix!.invoke).mockImplementationOnce(() => new Promise<SessionSnapshot>(done => { resolve = done; }));
     const wrapper = mount(GraphPanel, { attachTo: document.body, global: { plugins: [pinia, i18n] } });

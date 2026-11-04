@@ -2,7 +2,7 @@
 import { Brain, ChevronDown, ChevronRight, ChevronUp, LoaderCircle, MessageSquare, MessageSquarePlus, Square, Terminal, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { promptRecall, withoutToolLabels } from "../../../shared/session";
+import { promptRecall, sessionEntryIndex, withoutToolLabels } from "../../../shared/session";
 import type { AgentActivity, BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
 import type { CompactionRecord } from "../../../shared/run-timing";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
@@ -33,16 +33,8 @@ const selectedRun = computed(() => session.runFor(panelNodeId.value));
 // Composer recall list: the session's user prompts, newest first, with
 // consecutive duplicates collapsed. Session-wide so a fork can recall the
 // latest phrasing even when another branch sent it.
-const promptHistory = computed(() => {
-  const local = promptRecall(session.current?.entries ?? []);
-  const older = session.promptRecall;
-  if (!older.length) return local;
-  // The pool covers the newest turns; the main process adds the older ones.
-  const merged = [...local];
-  const seen = new Set(local);
-  for (const text of older) if (!seen.has(text)) { seen.add(text); merged.push(text); }
-  return merged;
-});
+const promptHistory = computed(() => session.promptRecall.length
+  ? session.promptRecall : promptRecall(session.current?.entries ?? []));
 const liveCompactions = computed<CompactionRecord[] | undefined>(() => {
   const run = selectedRun.value;
   if (run?.status !== "running") return undefined;
@@ -63,6 +55,7 @@ const expandedProcesses = ref(new Set<string>());
 const visibleTurnCount = ref(40);
 // Older turns may be fetched from the main process on demand; the button says so.
 const loadingEarlier = ref(false);
+let earlierRequest = 0;
 const liveTextLimit = ref(32768);
 const expandedLiveTools = ref(new Set<string>());
 let resizeObserver: ResizeObserver | undefined;
@@ -158,7 +151,7 @@ const composerTarget = computed(() =>
     : t("branch.composerRoot"));
 
 watch(
-  () => session.current?.session.path,
+  [() => session.poolGeneration, () => session.current?.projection.nodes.length],
   () => void session.loadPromptRecall(),
   { immediate: true },
 );
@@ -237,16 +230,28 @@ const turns = computed(() => {
   return grouped;
 });
 
-const compactionEntries = computed(() => new Map((session.current?.entries ?? [])
-  .filter(entry => entry.type === "compaction").map(entry => [entry.timestamp, entry])));
-function compactionDetails(record: CompactionRecord): CompactionRecord {
-  const entry = record.entryTimestamp ? compactionEntries.value.get(record.entryTimestamp) : undefined;
+const historyEntries = computed(() => sessionEntryIndex(session.current?.entries ?? []));
+function compactionEntry(record: CompactionRecord, leaf?: string) {
+  if (!record.entryTimestamp) return undefined;
+  const seen = new Set<string>();
+  let entry = leaf ? historyEntries.value.get(leaf) : undefined;
+  // Timestamps identify old timing records but are not unique across branches.
+  // Resolve them along the owning turn's ancestry, never in a session-wide map.
+  while (entry && !seen.has(entry.id)) {
+    if (entry.type === "compaction" && entry.timestamp === record.entryTimestamp) return entry;
+    seen.add(entry.id);
+    entry = entry.parentId ? historyEntries.value.get(entry.parentId) : undefined;
+  }
+}
+function compactionDetails(record: CompactionRecord, leaf?: string): CompactionRecord {
+  const entry = compactionEntry(record, leaf);
   return { ...record, ...(typeof entry?.summary === "string" ? { summary: entry.summary } : {}) };
 }
 const claimedCompactions = computed(() => new Set([
-  ...(session.current?.projection.nodes.flatMap(node => node.metrics?.compactions ?? []) ?? []),
-  ...(liveCompactions.value ?? []),
-].map(record => record.entryTimestamp).filter(Boolean)));
+  ...(session.current?.projection.nodes.flatMap(node => (node.metrics?.compactions ?? [])
+    .map(record => compactionEntry(record, node.leafEntryId)?.id)) ?? []),
+  ...(liveCompactions.value ?? []).map(record => compactionEntry(record, panelNode.value?.leafEntryId)?.id),
+].filter(Boolean)));
 
 const visibleTurns = computed<Turn[]>(() =>
   turns.value.slice(-visibleTurnCount.value).map(({ id, user, body }) => {
@@ -263,8 +268,8 @@ const visibleTurns = computed<Turn[]>(() =>
       user,
       terminal,
       running: selectedRun.value?.status === "running" && selected,
-      compactions: compactions?.map(compactionDetails),
-      trailingCompactions: body.filter(message => message.compaction && !claimedCompactions.value.has(message.compaction.entryTimestamp))
+      compactions: compactions?.map(record => compactionDetails(record, node?.leafEntryId)),
+      trailingCompactions: body.filter(message => message.compaction && !claimedCompactions.value.has(message.entryId))
         .map(message => ({ ...message.compaction!, summary: message.text })),
       process: body.filter((message) => message !== terminal && !message.compaction),
     };
@@ -285,7 +290,7 @@ const processMessages = computed(() => {
 /** Pages one window of earlier turns in: fetched first so the scroll anchor
  * measures the final height, then rendered above with the reading position
  * restored. Reached automatically when the user scrolls to the top. */
-async function showEarlierTurns() {
+async function showEarlierTurns(singlePage = false) {
   if (loadingEarlier.value || !history.value.hasEarlier) return;
   const version = viewVersion;
   const root = scroll.value;
@@ -300,9 +305,10 @@ async function showEarlierTurns() {
   if (plan?.request) {
     // These turns are not in the pool yet. Fetch before rendering so the anchor
     // restore below measures the final height instead of jumping afterwards.
+    const request = ++earlierRequest;
     loadingEarlier.value = true;
-    try { await session.fetchWindow(plan.leaf, plan.request.limit, plan.request.bytes); }
-    finally { loadingEarlier.value = false; }
+    try { await session.fetchWindow(plan.leaf, plan.request.limit, plan.request.bytes, singlePage); }
+    finally { if (request === earlierRequest) loadingEarlier.value = false; }
     if (version !== viewVersion) return;
   }
   visibleTurnCount.value = target;
@@ -313,14 +319,14 @@ async function showEarlierTurns() {
 }
 
 /** True once the history overflows the panel. A short panel stuck with more
- * history (a failed fetch or a byte cap repeating its page) has no top to
+ * history (a failed fetch or a stale response) has no top to
  * scroll to, so its only affordance is the retry row. */
 const historyScrollable = ref(true);
 
 /** A byte-capped window can arrive shorter than the panel itself; nothing
  * would ever be scrollable, so keep paging until history fills the view.
- * Stops as soon as a page stops growing the rendered turns — a byte cap
- * repeating its newest turn must not loop. */
+ * Stops as soon as a page stops growing the rendered turns — a stale read
+ * returning the same entries must not loop. */
 let lastCascadeRendered = -1;
 function pageIfUnfilled() {
   const root = scroll.value;
@@ -330,7 +336,7 @@ function pageIfUnfilled() {
   const rendered = history.value.messages.length;
   if (rendered === lastCascadeRendered) return;
   lastCascadeRendered = rendered;
-  void showEarlierTurns();
+  void showEarlierTurns(true);
 }
 
 function duration(turn: Turn) {
@@ -404,6 +410,8 @@ function scrollLatest() {
 watch([() => JSON.stringify([session.current?.session.path, session.current?.graph?.epoch]),
   () => panelNodeId.value], ([scope, id], previous) => {
   const version = ++viewVersion;
+  earlierRequest++;
+  loadingEarlier.value = false;
   if (scrollFrame !== undefined) { cancelAnimationFrame(scrollFrame); scrollFrame = undefined; }
   if (readingScope !== scope) { readingPositions.clear(); readingScope = scope; }
   else if (previous?.[1]) readingPositions.set(previous[1], {
@@ -460,7 +468,7 @@ watch(
       .map((item) => `${item.text.length}:${item.thinking?.length ?? 0}:${item.status}`)
       .join(":"),
   ],
-  scrollLatest,
+  () => { scrollLatest(); void nextTick(pageIfUnfilled); },
 );
 
 onMounted(() => {
@@ -522,10 +530,10 @@ onBeforeUnmount(() => {
       <p v-if="history.hasEarlier && loadingEarlier" class="load-earlier-status" role="status">
         {{ t('branch.loadingEarlier') }}
       </p>
-      <!-- A panel too short to scroll (a failed fetch, or a byte cap repeating
-         its page) has no top to reach; retrying is its only way forward. -->
+      <!-- A panel too short to scroll (a failed fetch or stale response)
+         has no top to reach; retrying is its only way forward. -->
       <button v-else-if="history.hasEarlier && !historyScrollable" type="button"
-        class="load-earlier-status" @click="showEarlierTurns">
+        class="load-earlier-status" @click="showEarlierTurns()">
         {{ t('branch.retryEarlier') }}
       </button>
       <!-- Keep a few recently viewed histories mounted: switching back should

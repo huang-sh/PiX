@@ -1067,9 +1067,7 @@ export class PiRuntime {
         wire: { ...projection, messages, ...(window.hasEarlier ? { messagesHasEarlier: true } : {}) },
         // Compaction records ride along regardless of depth: they are small and
         // the branch context panel resolves their summaries from the entries.
-        entries: window.entries.some(e => e.type === "compaction") || !entries.some(e => e.type === "compaction")
-          ? window.entries
-          : [...window.entries, ...entries.filter(e => e.type === "compaction")] };
+        entries: [...window.entries, ...entries.filter(e => e.type === "compaction" && !windowIds.has(e.id))] };
     }
     return {
       session: {
@@ -1094,7 +1092,8 @@ export class PiRuntime {
   branchWindow(leafId: string | null, limit: number, byteLimit = SNAPSHOT_WINDOW_BYTES) {
     const s = this.runtime?.session;
     if (!s) throw new Error("No Pi session open");
-    return windowEntries(s.sessionManager.getEntries() as RawSessionEntry[], leafId ?? s.sessionManager.getLeafId(), limit, byteLimit);
+    return { ...windowEntries(s.sessionManager.getEntries() as RawSessionEntry[], leafId ?? s.sessionManager.getLeafId(), limit, byteLimit),
+      session: String(s.sessionFile ?? "") };
   }
   /** Looks up an entry in the full in-memory session, beyond the snapshot window. */
   entryById(id: string): RawSessionEntry | undefined {

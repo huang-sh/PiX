@@ -12,8 +12,8 @@ import {
   type Component, type Focusable, type SelectItem, type TerminalColors, type TUI,
 } from "@earendil-works/pi-tui";
 import type { HostClient } from "../host/client.js";
-import type { ExtensionDialog, GraphFilter, RawSessionEntry, RuntimeCommand, RuntimeModel, SessionSnapshot, SessionSummary } from "../shared/types.js";
-import { promptDisplayTextMap } from "../shared/session.js";
+import type { ExtensionDialog, GraphFilter, RawSessionEntry, RuntimeCommand, RuntimeModel, SessionHistoryWindow, SessionSnapshot, SessionSummary } from "../shared/types.js";
+import { promptDisplayTextMap, validateHistoryWindow } from "../shared/session.js";
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../shared/graph-filter.js";
 import { runTask, type Run, type RunOptions } from "./run.js";
 
@@ -48,6 +48,50 @@ export function conversationEntries(snapshot: SessionSnapshot, nodeId: string | 
     if (!entry || ids.has(id)) return [];
     ids.add(id); return [entry];
   }));
+}
+
+/** Read complete ancestry with a cursor outside the previous page. */
+export async function branchHistory(client: Pick<HostClient, "invoke">, session: string, leafId: string | null, epoch?: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const merged = new Map<string, RawSessionEntry>();
+  let cursor = leafId;
+  while (cursor) {
+    if (merged.has(cursor)) throw new Error("History contains a cycle; reopen the session");
+    const result = await client.invoke<SessionHistoryWindow>("session.branchWindow",
+      { session, leafId: cursor, limit: 500, bytes: 64 << 20 });
+    signal?.throwIfAborted();
+    validateHistoryWindow(result, session, epoch);
+    const index = new Map(result.entries.map(entry => [entry.id, entry]));
+    if (!index.has(cursor)) throw new Error("History is unavailable; reopen the session and retry");
+    // Follow ancestry rather than trusting a page's end flag or entry order.
+    while (cursor && index.has(cursor)) {
+      if (merged.has(cursor)) throw new Error("History contains a cycle; reopen the session");
+      const entry: RawSessionEntry = index.get(cursor)!;
+      merged.set(cursor, entry);
+      cursor = entry.parentId;
+    }
+  }
+  return [...merged.values()].reverse();
+}
+
+/** One selected ancestry: background updates share the read, while switching
+ * or submitting stops obsolete requests before they fetch another page. */
+export function branchHistoryReader(client: Pick<HostClient, "invoke">) {
+  let cached: { session: string; leaf: string | null; epoch?: string;
+    abort: AbortController; promise: Promise<RawSessionEntry[]> } | undefined;
+  const clear = () => { cached?.abort.abort(); cached = undefined; };
+  return {
+    clear,
+    read(session: string, leaf: string | null, epoch?: string) {
+      if (epoch && cached?.session === session && cached.leaf === leaf && cached.epoch === epoch) return cached.promise;
+      clear();
+      const abort = new AbortController();
+      const entry = { session, leaf, epoch, abort, promise: branchHistory(client, session, leaf, epoch, abort.signal) };
+      cached = entry;
+      void entry.promise.catch(() => { if (cached === entry) cached = undefined; });
+      return entry.promise;
+    },
+  };
 }
 
 /** Pi's tree selector presents PiX graph nodes; it never owns persistence. */
@@ -296,25 +340,20 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
   }
   function notice(text: string) { if (!closed) { notices.setText(getMarkdownTheme().quote(text)); ui.requestRender(); } }
   let historyToken = 0;
-  /** The snapshot carries a bounded window; the scrollback shows the whole
-   * branch, so read it back page by page (the route caps one page). */
-  async function branchHistory(session: string, leafId: string | null) {
-    const merged = new Map<string, RawSessionEntry>();
-    let cursor = leafId;
-    for (let page = 0; page < 64; page++) {
-      const result = await client.invoke<{ entries: RawSessionEntry[]; hasEarlier: boolean }>("session.branchWindow",
-        { session, leafId: cursor, limit: 500, bytes: 64 << 20 });
-      for (const entry of result.entries) merged.set(entry.id, entry);
-      const oldest = result.entries[0];
-      if (!result.hasEarlier || !oldest || oldest.id === cursor) break;
-      cursor = oldest.id;
-    }
-    return [...merged.values()];
-  }
+  const historyReader = branchHistoryReader(client);
+  const viewedLeaf = (value: SessionSnapshot) => node ? value.projection.nodes.find(item => item.id === node)?.leafEntryId ?? null : null;
   async function loadHistory() {
     const token = ++historyToken;
-    const leafId = snapshot.projection.nodes.find(item => item.id === node)?.leafEntryId ?? snapshot.projection.leafId;
-    const entries = await branchHistory(snapshot.session.path, leafId).catch(() => snapshot.entries);
+    const leafId = viewedLeaf(snapshot);
+    let entries: RawSessionEntry[];
+    try { entries = await historyReader.read(snapshot.session.path, leafId, snapshot.graph?.epoch); }
+    catch (error) {
+      if (closed || token !== historyToken) return;
+      conversation.load([]);
+      notice(error instanceof Error ? error.message : String(error));
+      renderStatus();
+      return;
+    }
     if (closed || token !== historyToken) return;
     conversation.load(conversationEntries(snapshot, node, entries));
     if (!conversation.children.length) {
@@ -348,6 +387,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
   function close() {
     if (closed) return;
     closed = true;
+    historyReader.clear();
     dialogReject?.(new Error("Terminal detached; input request remains pending in the Host"));
     loader.stop(); finish();
   }
@@ -448,6 +488,8 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
       }
       return;
     }
+    historyToken++;
+    historyReader.clear();
     busy = true; abort = new AbortController();
     notices.setText("");
     conversation.addChild(new UserMessageComponent(text));
@@ -487,8 +529,10 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     if (event.type !== "sessions") return;
     const current = (event.payload as { current?: SessionSnapshot }).current;
     if (current?.session.path !== snapshot.session.path) return;
+    const historyChanged = !current.graph?.epoch || current.graph.epoch !== snapshot.graph?.epoch
+      || viewedLeaf(current) !== viewedLeaf(snapshot);
     snapshot = current; treePanel?.update(current);
-    if (!busy) loadHistory(); else renderStatus();
+    if (!busy && historyChanged) loadHistory(); else renderStatus();
   });
   const disconnected = client.onDisconnect(error => { if (!closed) notice(error.message + " · /exit to detach and reconnect"); });
   ui.addInputListener(data => {
@@ -522,7 +566,7 @@ export async function interactive(client: HostClient, initial: SessionSnapshot, 
     }).catch(() => {});
     await finished;
   } finally {
-    closed = true; loader.stop(); unsubscribe(); disconnected();
+    closed = true; historyReader.clear(); loader.stop(); unsubscribe(); disconnected();
     process.removeListener("SIGTERM", signal); process.removeListener("SIGHUP", signal);
     await terminal.drainInput(200);
     ui.stop();

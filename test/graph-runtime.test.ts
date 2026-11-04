@@ -350,17 +350,31 @@ test("a large graph streams branch transcripts after the open snapshot", { timeo
     await prompt("branch-1", "branch question", null);
     const path = runtime.snapshot().session.path;
     const branchId = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-1")!.branchId;
+    const branchLeaf = runtime.snapshot().projection.nodes.find(node => node.branchId === branchId)!.leafEntryId;
     assert.notEqual(branchId, "main");
     await runtime.close();
     const opened = await runtime.open(path);
+    assert.equal(opened.graph!.branchCount, 1, "unloaded branches still make the graph nonempty");
     assert.equal(opened.graph!.runs.some(run => run.branchId === branchId), false,
       "the open snapshot must carry only the main line");
+    const requested = runtime.branchWindow(branchLeaf, 40);
+    assert.ok(requested.entries.some(entry => entry.id === branchLeaf), "paging hydrates the requested source before background loading runs");
     await until(() => runtime.snapshot().graph!.runs.some(run => run.branchId === branchId));
     const branchNode = runtime.snapshot().projection.nodes.find(node => node.branchId === branchId);
     assert.ok(branchNode, "the hydrated branch must join the graph");
     await prompt("branch-2", "follow-up", branchNode.id);
     assert.ok(runtime.snapshot().graph!.runs.some(run => run.requestId === "branch-2"),
       "forking from a hydrated branch must work");
+    await prompt("nested-branch", "nested question", branchNode.id);
+    const childRun = runtime.snapshot().graph!.runs.find(run => run.requestId === "nested-branch")!;
+    assert.notEqual(childRun.branchId, branchId);
+    const childLeaf = runtime.snapshot().projection.nodes.find(node => node.id === childRun.nodeId)!.leafEntryId;
+    // Directory order can hydrate a child before its parent after a cold open.
+    runtime["workers"].get(branchId)!.snapshot = undefined;
+    runtime.snapshot();
+    assert.equal(runtime["snapshotCache"].entriesById.has(branchNode.userEntryId), false);
+    assert.ok(runtime.branchWindow(childLeaf, 40).entries.some(entry => entry.id === branchNode.userEntryId),
+      "a page must hydrate missing ancestor sources too");
   } finally {
     await runtime.close();
     if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
@@ -863,6 +877,7 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
       return t.mock.method(worker.pi, "close", async () => { closing++; await closeGate; await close(); });
     });
     const remove = t.mock.method(runtime.graph!, "deleteNode");
+    const beforeDeletion = runtime.snapshot();
     const deletion = runtime.control({ action: "deleteNode", graphId, nodeId: a2 });
     try {
       await until(() => closing === workers.length);
@@ -873,6 +888,10 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
       closes.forEach(close => close.mock.restore());
       remove.mock.restore();
     }
+    assert.notEqual(runtime.snapshot().graph!.epoch, beforeDeletion.graph!.epoch, "deletion invalidates every client's history pool");
+    assert.equal(broadcast?.graph?.epoch, runtime.snapshot().graph!.epoch, "other clients receive the new epoch too");
+    const afterDeletionEpoch = runtime.snapshot().graph!.epoch;
+    assert.equal((await runtime.open(graphId)).graph!.epoch, afterDeletionEpoch, "an unchanged open keeps its epoch");
     assert.deepEqual(runtime.runtime.session.getActiveToolNames(), ["read"]);
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === a));
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === b));
@@ -898,7 +917,9 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     const exported = await runtime.control({ action: "exportJsonl" }) as { path: string };
     assert.ok(!readFileSync(exported.path, "utf8").includes("DELETE_"));
     const ids = runtime.snapshot().projection.nodes.map(node => node.id).sort();
+    const beforeReopen = runtime.snapshot().graph!.epoch;
     await runtime.close(); await runtime.open(graphId);
+    assert.notEqual(runtime.snapshot().graph!.epoch, beforeReopen, "a reloaded history must not reuse the old pool");
     assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.id).sort(), ids);
     await retryOldRequests();
     const mainNode = runtime.snapshot().projection.nodes.find(node => node.title === "main")!;

@@ -157,6 +157,9 @@ export class GraphRuntime extends PiRuntime {
     if (this.graph?.main === path && this.runtime && !this.deletionRecovery && !this.writeFailure) return this.snapshot();
     const recovery = this.deletionRecovery?.snapshot.session.path === path ? this.deletionRecovery : undefined;
     await this.closeInternal();
+    // Reopening can recover or replace persisted history in the same runtime.
+    // Only the unchanged, already-open fast path keeps its entry-pool epoch.
+    this.epoch = randomUUID();
     this.deletionRecovery = recovery;
     this.stopping = false;
     const graph = new GraphFiles(path);
@@ -341,7 +344,19 @@ export class GraphRuntime extends PiRuntime {
     // Branch transcripts arrive lazily; the merged canonical entries carry both
     // the live branch's turns and the ones forked into their own files.
     if (!this.graph) return super.branchWindow(leafId, limit, byteLimit);
-    return windowEntries(this.historyEntries(), leafId, limit, byteLimit);
+    let page = windowEntries(this.historyEntries(), leafId, limit, byteLimit);
+    // A known canonical ID may arrive before its source's background hydrate,
+    // including an ancestor of an already-visible child branch.
+    while (!page.hasEarlier && !this.stopping) {
+      const missing = page.entries.length ? page.entries[0]!.parentId : leafId;
+      if (!missing || this.snapshotCache.entriesById.has(missing)) break;
+      const record = this.graph.records.get(missing.slice(0, missing.indexOf(":")));
+      const worker = record && this.workers.get(record.id);
+      if (!record || !worker || worker.snapshot || worker.work || worker.loadFailed) break;
+      this.hydrate(record);
+      page = windowEntries(this.historyEntries(), leafId, limit, byteLimit);
+    }
+    return { ...page, session: this.graph.main, epoch: this.epoch };
   }
   override entryById(id: string): RawSessionEntry | undefined {
     return (this.graph ? this.snapshotCache.entriesById.get(id) : undefined) ?? super.entryById(id);
@@ -419,7 +434,7 @@ export class GraphRuntime extends PiRuntime {
     }) } : projection;
     return { ...main, runtime: this.writeFailure ? { ...main.runtime, available: false } : main.runtime,
       entries: values, projection: timedProjection,
-      graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, runs, storageError: this.storageError,
+      graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, branchCount: this.graph.records.size, runs, storageError: this.storageError,
         recoveredInputs: [...this.graph.recoveredInputs] } };
   }
   override control(input: AgentControl): Promise<unknown> {
@@ -610,6 +625,9 @@ export class GraphRuntime extends PiRuntime {
       graph.load();
       this.workers.clear();
       this.snapshotCache = new GraphSnapshotCache(); this.lastMain = undefined;
+      // Deletion breaks append-only history: invalidate renderer pools and
+      // in-flight reads before publishing any snapshot of the rebuilt sources.
+      this.epoch = randomUUID();
       this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
       await super.openAt(graph.main, failure ? manager.getLeafId() : graph.hasSavedLeaf ? graph.leafId : manager.getLeafId());
       this.runtime.session.setActiveToolsByName(activeTools);

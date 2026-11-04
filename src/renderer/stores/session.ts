@@ -13,12 +13,13 @@ import type {
   RuntimeModel,
   PromptImage,
   SessionSnapshot,
+  SessionHistoryWindow,
   SessionSummary,
   SettingsBundle,
 } from "../../shared/types";
 import { projectId } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
-import { entryAnchorForNode, isSessionRunning, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES } from "../../shared/session";
+import { entryAnchorForNode, isSessionRunning, validateHistoryWindow, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES } from "../../shared/session";
 import { desktop } from "../api";
 import type { ComposerDraft } from "../components/PromptComposer.vue";
 import { i18n } from "../i18n";
@@ -108,15 +109,16 @@ export const useSessionStore = defineStore("session", {
     // through history; bumping poolRevision re-runs pool-derived computeds.
     entryPool: markRaw(new Map<string, RawSessionEntry>()),
     poolRevision: 0,
-    windowStates: markRaw(new Map<string, { limit: number; hasEarlier: boolean; bytes?: number; attempted?: boolean }>()),
+    poolGeneration: 0,
+    windowAttempts: markRaw(new Set<string>()),
     windowInFlight: markRaw(new Map<string, Promise<void>>()),
     poolKey: "",
     searchResults: [] as string[],
     searchToken: 0,
-    // Composer recall served by the main process: the pool only holds the
-    // newest turns, and recall reaches every branch.
+    // Composer recall spans every branch; the pool only holds loaded windows.
     promptRecall: [] as string[],
     promptRecallKey: "",
+    promptRecallRequest: 0,
     // Last explicit pick, used when a draft has no parent thinking setting.
     userThinking: undefined as string | undefined,
     query: "",
@@ -274,6 +276,9 @@ export const useSessionStore = defineStore("session", {
       const previousProjection = this.current?.projection;
       const previousGraph = this.current?.graph;
       if (previousGraph && snapshot.graph && previousGraph.id === snapshot.graph.id && previousGraph.epoch === snapshot.graph.epoch && previousGraph.revision > snapshot.graph.revision) return;
+      // The decoder owns the received snapshot as its next patch baseline.
+      // Keep pooled history and projection reuse private to the view.
+      snapshot = { ...snapshot, projection: { ...snapshot.projection } };
       const graphChanged = this.current?.session.path !== snapshot.session.path;
       // Queued input creates another turn in the same run. Follow that run only
       // while viewing its live node; selecting history must keep its position.
@@ -301,24 +306,21 @@ export const useSessionStore = defineStore("session", {
       // The entry pool resets per session and graph epoch; snapshots and
       // patches merge into it by id — the session log is append-only within
       // an epoch, so a sliding snapshot window never removes live history.
-      const poolKey = `${snapshot.session.path}\0${snapshot.graph?.epoch ?? ""}`;
-      if (this.poolKey !== poolKey) {
+      const poolKey = `${this.activeProjectId}\0${snapshot.session.path}\0${snapshot.graph?.epoch ?? ""}`;
+      // Full read-only snapshots replace history, including removals; they
+      // have no runtime epoch to invalidate an append-only pool.
+      if (this.poolKey !== poolKey || snapshot.entriesComplete) {
         this.poolKey = poolKey;
+        this.poolGeneration++;
         this.entryPool.clear();
-        this.windowStates.clear();
+        this.windowAttempts.clear();
         this.windowInFlight.clear();
+        this.promptRecall = [];
+        this.promptRecallKey = "";
+        this.searchToken++;
+        this.searchResults = [];
       }
       for (const entry of snapshot.entries) this.entryPool.set(entry.id, entry);
-      // Seed only a windowed-with-more snapshot. An absent flag may also mean
-      // a full unwindowed snapshot (the read-only fallback); the local walk
-      // decides those — reaching a true root is authoritative on its own.
-      const leafKey = snapshot.projection.leafId ?? "";
-      if (snapshot.projection.messagesHasEarlier && !this.windowStates.has(leafKey)) {
-        // A byte cap can cut the window below the turn limit; seed what shipped.
-        const turns = snapshot.entries.filter(entry => entry.type === "message"
-          && (entry.message as { role?: string } | undefined)?.role === "user").length;
-        this.windowStates.set(leafKey, { limit: turns, hasEarlier: true, bytes: SNAPSHOT_WINDOW_BYTES });
-      }
       // Session records/projections are immutable snapshots, replaced together.
       // Deep proxies on every historical entry make large-tree navigation costly.
       snapshot.entries = markRaw(poolEntries(this.entryPool));
@@ -480,6 +482,7 @@ export const useSessionStore = defineStore("session", {
     },
     async control<T = SessionSnapshot>(input: Record<string, unknown>) {
       const project = this.activeProjectId, path = this.current?.session.path, request = this.viewRequest;
+      const originGraph = this.current?.graph;
       // Abort/lock entries are captured before the IPC settles: the abort run
       // disappears from the snapshot, so its name must be read from the pre-stop graph.
       const abortLabel = this.abortLabel(input);
@@ -493,8 +496,10 @@ export const useSessionStore = defineStore("session", {
         const graph = this.current?.graph;
         // Returning to the same runtime still needs its admission reply. A new
         // graph epoch or a different session must never adopt that old result.
-        const sameGraph = input.action === "promptAt" && graph && snapshot.graph?.id === graph.id && snapshot.graph.epoch === graph.epoch;
-        if (project === this.activeProjectId && path === this.current?.session.path && (request === this.viewRequest || sameGraph))
+        const sameOrigin = originGraph?.id === graph?.id && originGraph?.epoch === graph?.epoch;
+        const sameGraph = graph && snapshot.graph?.id === graph.id && snapshot.graph.epoch === graph.epoch;
+        if (project === this.activeProjectId && path === this.current?.session.path
+          && (request === this.viewRequest ? sameOrigin || sameGraph : input.action === "promptAt" && sameGraph))
           this.applySnapshot(snapshot);
       }
       if (abortLabel) trackEvent({ kind: "abortRun", label: abortLabel });
@@ -555,12 +560,8 @@ export const useSessionStore = defineStore("session", {
       const plan = this.windowPlanFor(id, adjusted, true);
       if (!plan) return { messages: [] as BranchMessage[], hasEarlier: false };
       const { leaf, history, request } = plan;
-      // A fetched window state is authoritative for its leaf. So is a local walk
-      // that consumed the ancestry (it reached the root or its own turn budget);
-      // only a walk that stopped at a missing parent asks the main process.
-      if (request) void this.fetchWindow(leaf, request.limit, request.bytes);
-      const known = this.windowStates.get(leaf ?? "");
-      const hasEarlier = known ? known.hasEarlier : history.hasEarlier;
+      if (request) void this.fetchWindow(leaf, request.limit, request.bytes, true);
+      const hasEarlier = history.hasEarlier || !history.complete;
       if (pending) return { ...history, hasEarlier, messages: [...history.messages, {
         entryId: `pending:${run!.runId}`, turnId: `pending:${run!.runId}`, role: "user" as const,
         text: pending.text, images: pending.images, timestamp: "",
@@ -581,20 +582,11 @@ export const useSessionStore = defineStore("session", {
         : optimisticGraph ? current.projection.nodes.find(item => item.id === optimisticGraph.targetNodeId) : node;
       return parent?.leafEntryId ?? (pending || optimisticGraph ? null : current.projection.leafId);
     },
-    /** The fetch that would extend `leaf` to `turns` turns, or null when the
-     * pool already covers it. A byte cap can deliver fewer turns than asked,
-     * so pages grow by turns and a doubled budget to keep paging moving. */
+    /** Only a missing ancestor needs IPC; locally buffered turns can always
+     * be revealed, even after a previous fetch reached the root. */
     windowRequestFor(leaf: string | null, turns: number, complete: boolean, automatic = false) {
-      if (!leaf) return null;
-      const known = this.windowStates.get(leaf);
-      if (!known) return complete ? null : { limit: Math.max(turns, SNAPSHOT_TURN_LIMIT), bytes: SNAPSHOT_WINDOW_BYTES };
-      if (turns <= known.limit || !known.hasEarlier) return null;
-      // A byte-capped window can deliver the same turns again. Automatic top-ups
-      // run once per leaf; deeper pages come from an explicit request, otherwise
-      // every render would repeat the same transfer.
-      if (automatic && known.attempted) return null;
-      return { limit: Math.max(turns, known.limit + SNAPSHOT_TURN_LIMIT),
-        bytes: Math.min(64 << 20, Math.max(SNAPSHOT_WINDOW_BYTES, (known.bytes ?? SNAPSHOT_WINDOW_BYTES) * 2)) };
+      if (!leaf || complete || (automatic && this.windowAttempts.has(leaf))) return null;
+      return { limit: Math.max(turns, SNAPSHOT_TURN_LIMIT), bytes: SNAPSHOT_WINDOW_BYTES };
     },
     /** Everything one panel page needs: the leaf it shows, its local window,
      * and the fetch that would extend it — or null with no session open. */
@@ -603,38 +595,75 @@ export const useSessionStore = defineStore("session", {
       if (!current) return null;
       const leaf = this.windowLeafFor(id);
       const history = branchCache(this)(current.entries, leaf, turns);
-      return { leaf, history, request: this.windowRequestFor(leaf, turns, history.complete, automatic) };
+      const covered = history.complete || history.messages.filter(message => message.role === "user").length >= turns;
+      return { leaf, history, request: this.windowRequestFor(leaf, turns, covered, automatic) };
     },
-    /** Fetches one branch's history window from the main process into the pool. */
-    fetchWindow(leafId: string | null, limit: number, byteLimit = SNAPSHOT_WINDOW_BYTES) {
+    /** Fills a branch window by paging backward from its first missing ancestor.
+     * Automatic loads take one page, then let the panel measure whether it needs
+     * more. Explicit loads can cross the per-request turn and byte ceilings. */
+    fetchWindow(leafId: string | null, limit: number, byteLimit = SNAPSHOT_WINDOW_BYTES, singlePage = false) {
       const current = this.current;
       if (!current) return Promise.resolve();
-      const key = `${leafId ?? ""}:${limit}:${byteLimit}`;
-      // One request per page: later callers wait on the same promise instead of
+      const generation = this.poolGeneration;
+      // Automatic top-ups and viewport fill checks share a page already in
+      // flight; neither promises to fill its entire requested turn count.
+      const initial = branchCache(this)(current.entries, leafId, limit);
+      // A response can update Vue before its promise settles. A newly exposed
+      // ancestor must not join the completed read of the previous page.
+      const key = `${leafId ?? ""}:${initial.missingParentId ?? ""}:${singlePage ? "page" : limit}:${byteLimit}`;
+      // One load per window: later callers wait on the same promise instead of
       // returning before the entries they asked about exist.
       const inFlight = this.windowInFlight.get(key);
       if (inFlight) return inFlight;
+      if (leafId) this.windowAttempts.add(leafId);
       const task = (async () => {
         try {
-          const result = await desktop.invoke<{ entries: RawSessionEntry[]; hasEarlier: boolean }>("session.branchWindow",
-            { session: current.session.path, leafId, limit, bytes: byteLimit });
-          const now = this.current;
-          if (!now || now.session.path !== current.session.path || now.graph?.epoch !== current.graph?.epoch) return;
-          for (const entry of result.entries) this.entryPool.set(entry.id, entry);
-          // Record the turns actually delivered: a byte cap may cut a page short,
-          // and trusting the requested limit would stall later paging.
-          const delivered = result.entries.filter(entry => entry.type === "message"
-            && (entry.message as { role?: string } | undefined)?.role === "user").length;
-          this.windowStates.set(leafId ?? "", { limit: Math.min(limit, delivered), hasEarlier: result.hasEarlier, bytes: byteLimit, attempted: true });
-          now.entries = markRaw(poolEntries(this.entryPool));
-          this.poolRevision++;
+          let history = initial;
+          while (history.missingParentId) {
+            const cursor = history.missingParentId;
+            const turns = history.messages.filter(message => message.role === "user").length;
+            const result = await desktop.invoke<SessionHistoryWindow>("session.branchWindow",
+              { session: current.session.path, leafId: cursor,
+                limit: Math.min(500, Math.max(1, limit - turns)), bytes: byteLimit });
+            const now = this.current;
+            if (!now || generation !== this.poolGeneration || now.session.path !== current.session.path || now.graph?.epoch !== current.graph?.epoch) return;
+            validateHistoryWindow(result, current.session.path, current.graph?.epoch);
+            for (const entry of result.entries) this.entryPool.set(entry.id, entry);
+            now.entries = markRaw(poolEntries(this.entryPool));
+            this.poolRevision++;
+            history = branchCache(this)(now.entries, leafId, limit);
+            // A failed/stale read must not fabricate a root or spin. Keep the
+            // missing ancestor retryable even if the server reports no more.
+            if (singlePage || history.missingParentId === cursor
+              || history.messages.filter(message => message.role === "user").length >= limit) break;
+          }
         } catch {
-          // Keep the local answer: a failed fetch must never fabricate the end
-          // of history, and writing no state lets a later attempt retry.
+          // Leave the ancestry incomplete so an explicit request can retry.
         }
-      })().finally(() => this.windowInFlight.delete(key));
+      })().finally(() => {
+        if (this.windowInFlight.get(key) === task) this.windowInFlight.delete(key);
+      });
       this.windowInFlight.set(key, task);
       return task;
+    },
+    /** Find the main line's last reply even when an unanswered prompt fills the wire window. */
+    async lastAssistantText(): Promise<string | undefined> {
+      const current = this.current, generation = this.poolGeneration;
+      if (!current) return undefined;
+      const visible = [...current.projection.messages].reverse().find(message => message.role === "assistant");
+      if (visible) return visible.text;
+      const leaf = current.projection.leafId;
+      let history = branchCache(this)(current.entries, leaf, Infinity);
+      for (;;) {
+        const answer = [...history.messages].reverse().find(message => message.role === "assistant");
+        if (answer) return answer.text;
+        if (!history.missingParentId) return undefined;
+        const cursor = history.missingParentId;
+        await this.fetchWindow(cursor, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES, true);
+        if (generation !== this.poolGeneration || this.current?.session.path !== current.session.path) return undefined;
+        history = branchCache(this)(this.current.entries, leaf, Infinity);
+        if (history.missingParentId === cursor) throw new Error(i18n.global.t("notice.historyUnavailable"));
+      }
     },
     /** Graph search runs main-side over the full merged history. */
     async runGraphSearch(query: string) {
@@ -648,19 +677,23 @@ export const useSessionStore = defineStore("session", {
         if (token === this.searchToken) this.searchResults = [];
       }
     },
-    /** Composer recall over every branch's history, fetched once per session. */
+    /** Composer recall over every branch, refreshed as prompts arrive or history is rebuilt. */
     async loadPromptRecall() {
+      const request = ++this.promptRecallRequest, generation = this.poolGeneration;
       const current = this.current;
       if (!current) { this.promptRecall = []; this.promptRecallKey = ""; return; }
-      // A switched session must not keep serving the previous list while its
-      // own request is in flight.
-      if (this.promptRecallKey !== current.session.path) {
-        this.promptRecallKey = current.session.path;
+      const key = `${this.poolKey}\0${current.projection.nodes.length}`;
+      // Switching or rebuilding history must not serve the previous list
+      // while its replacement is in flight.
+      if (this.promptRecallKey !== key) {
+        this.promptRecallKey = key;
         this.promptRecall = [];
       }
       try {
         const result = await desktop.invoke<{ prompts?: string[] }>("session.prompts", { session: current.session.path });
-        if (this.current?.session.path === current.session.path && this.promptRecallKey === current.session.path)
+        if (request === this.promptRecallRequest && generation === this.poolGeneration
+          && this.current?.session.path === current.session.path && this.current?.graph?.epoch === current.graph?.epoch
+          && this.promptRecallKey === key)
           this.promptRecall = Array.isArray(result?.prompts) ? result.prompts : [];
       } catch {
         // Recall is a convenience: a failed lookup keeps the local pool's list.
@@ -820,7 +853,8 @@ export const useSessionStore = defineStore("session", {
           && !Object.values(this.pendingPrompts).some(pending =>
             pending.projectId === project && pending.sessionPath === item.path);
         const canReuse = (snapshot: SessionSnapshot) => isEmpty(snapshot.session)
-          // The summary counts the main file; entries also include graph branches.
+          // Main-line windows can be empty while branches exist or are still loading.
+          && !snapshot.projection.nodes.length && !snapshot.graph?.branchCount
           && !snapshot.entries.some(entry => entry.type === "message")
           && snapshot.runtime.available && !isSessionRunning(snapshot)
           && !snapshot.graph?.storageError && !snapshot.graph?.recoveredInputs?.length;

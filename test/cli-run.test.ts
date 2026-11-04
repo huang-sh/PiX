@@ -79,3 +79,94 @@ for (const windows of [false, true]) test(`branch input requests use ${windows ?
     if (joinMock) syncBuiltinESMExports();
   }
 });
+
+for (const retry of [false, true]) test(`a windowed branch reports its final model failure${retry ? " when reattached" : ""}`, async () => {
+  const before = snapshot("previous"), after = snapshot("current");
+  after.graph!.runs[0]!.branchId = "branch";
+  after.projection.nodes[0]!.leafEntryId = "branch-error";
+  after.projection.nodes[0]!.rawEntryIds = ["branch-error"];
+  after.entries = [];
+  const fake = { ...client(after), async invoke(route: string, input?: unknown) {
+    if (route === "session.branchWindow") {
+      assert.deepEqual(input, { session: after.session.path, leafId: "branch-error", limit: 1, bytes: 4 << 20 });
+      return { entries: [{ id: "branch-error", type: "message", message: { role: "assistant", stopReason: "error", errorMessage: "Branch model failure" } }] };
+    }
+    return after;
+  } } as unknown as HostClient;
+  await assert.rejects(runTask(fake, retry ? after : before, "task", null, { requestId: "current" }, view()), /Branch model failure/);
+});
+
+test("reattaching to a completed windowed branch prints its saved reply", async t => {
+  const current = snapshot("current");
+  current.graph!.runs[0]!.branchId = "branch";
+  current.projection.nodes[0]!.leafEntryId = "branch-answer";
+  current.projection.nodes[0]!.rawEntryIds = ["branch-answer"];
+  current.entries = [];
+  const output: string[] = [];
+  t.mock.method(process.stdout, "write", (text: string) => { output.push(text); return true; });
+  t.mock.method(process.stderr, "write", () => true);
+  const fake = { ...client(current), async invoke(route: string) {
+    if (route === "session.branchWindow") return { entries: [{ id: "branch-answer", type: "message", message: {
+      role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Saved branch reply" }],
+    } }] };
+    return current;
+  } } as unknown as HostClient;
+  await runTask(fake, current, "task", null, { requestId: "current" });
+  assert.equal(output.join(""), "Saved branch reply\n");
+});
+
+test("a command without a new turn ignores a windowed branch's earlier failure", async () => {
+  const before = snapshot("previous"), after = snapshot("current");
+  before.entries = []; after.entries = [];
+  after.graph!.runs[0]!.branchId = "branch";
+  const fake = { ...client(after), async invoke(route: string) {
+    assert.notEqual(route, "session.branchWindow", "old entries are known through the full graph projection");
+    return after;
+  } } as unknown as HostClient;
+  await runTask(fake, before, "/command", "cancelled-turn", { requestId: "current" }, view());
+});
+
+test("an unavailable final turn cannot be reported as success", async () => {
+  const before = snapshot("previous"), after = snapshot("current");
+  after.entries = [];
+  after.projection.nodes[0]!.leafEntryId = "missing";
+  after.projection.nodes[0]!.rawEntryIds = ["missing"];
+  const fake = { ...client(after), async invoke(route: string) {
+    return route === "session.branchWindow" ? { entries: [] } : after;
+  } } as unknown as HostClient;
+  await assert.rejects(runTask(fake, before, "task", null, { requestId: "current" }, view()), /final turn is unavailable/);
+});
+
+test("JSON results include the saved branch reply fetched outside the snapshot window", async t => {
+  const current = snapshot("current");
+  current.graph!.runs[0]!.branchId = "branch";
+  current.projection.nodes[0]!.leafEntryId = "branch-answer";
+  current.projection.nodes[0]!.rawEntryIds = ["branch-answer"];
+  current.entries = [];
+  const answer = { id: "branch-answer", type: "message", parentId: null, timestamp: "", message: {
+    role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Saved branch reply" }],
+  } };
+  const output: string[] = [];
+  t.mock.method(process.stdout, "write", (text: string) => { output.push(text); return true; });
+  const fake = { ...client(current), async invoke(route: string) {
+    return route === "session.branchWindow" ? { entries: [answer] } : current;
+  } } as unknown as HostClient;
+  const returned = await runTask(fake, current, "task", null, { requestId: "current", json: true });
+  const result = output.join("").trim().split("\n").map(line => JSON.parse(line)).find(item => item.type === "result");
+  assert.deepEqual(result.snapshot.entries, [answer]);
+  assert.deepEqual(returned.snapshot.entries, [answer]);
+  assert.deepEqual(current.entries, [], "the transport snapshot remains immutable");
+});
+
+for (const replacement of [{ session: "/tmp/other.jsonl", epoch: "e" }, { session: "/tmp/session.jsonl", epoch: "new" }])
+test(`CLI refuses a final turn from a replacement history ${JSON.stringify(replacement)}`, async () => {
+  const current = snapshot("current");
+  current.graph!.epoch = "e";
+  current.projection.nodes[0]!.leafEntryId = "cancelled-message";
+  const entries = current.entries;
+  current.entries = [];
+  const fake = { ...client(current), async invoke(route: string) {
+    return route === "session.branchWindow" ? { entries, ...replacement, hasEarlier: false } : current;
+  } } as unknown as HostClient;
+  await assert.rejects(runTask(fake, current, "task", null, { requestId: "current" }, view()), /Session changed/);
+});

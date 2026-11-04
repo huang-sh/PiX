@@ -7,7 +7,7 @@ import { desktop } from "../../src/renderer/api";
 import { useSessionStore } from "../../src/renderer/stores/session";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { i18n } from "../../src/renderer/i18n";
-import { projectSession } from "../../src/shared/session";
+import { projectSession, windowEntries } from "../../src/shared/session";
 import type { RawSessionEntry, SessionSnapshot } from "../../src/shared/types";
 
 function turns(count: number) {
@@ -62,6 +62,23 @@ const pagingCalls = () => vi.mocked(desktop.invoke).mock.calls.filter(([route]) 
 
 afterEach(() => { vi.mocked(desktop.invoke).mockReset(); vi.mocked(desktop.invoke).mockImplementation(async () => ({})); });
 
+it("measures after each automatic page and stops once the panel is filled", async () => {
+  const entries = turns(100);
+  vi.mocked(desktop.invoke).mockImplementation(async (route, input) => {
+    if (route !== "session.branchWindow") return {};
+    const request = input as { leafId: string; bytes: number };
+    // Each byte-limited page holds two turns, regardless of the turn limit.
+    return windowEntries(entries, request.leafId, 2, request.bytes);
+  });
+  const wrapper = await mountOnSnapshot(windowed(entries, entries.slice(-4)));
+  try {
+    expect(wrapper.findAll(".chat-turn")).toHaveLength(6);
+    expect(pagingCalls()).toHaveLength(2);
+    await flushPromises();
+    expect(pagingCalls()).toHaveLength(2);
+  } finally { wrapper.unmount(); }
+});
+
 it("pages history that is already local without asking the main process", async () => {
   const entries = turns(100);
   const wrapper = await mountOnSnapshot(windowed(entries, entries));
@@ -101,17 +118,22 @@ it("waits for older turns before rendering them and keeps the reading position",
     // view keeps the content the reader was looking at instead of jumping.
     expect(root.scrollTop).toBe(40 + 4_000);
     expect(wrapper.find(".load-earlier-status").exists()).toBe(false);
+    // Server exhaustion must not hide the last 20 buffered turns.
+    root.dispatchEvent(new Event("scroll")); // jsdom does not emit the restored scroll position
+    scrollToTop(wrapper);
+    await flushPromises();
+    expect(wrapper.findAll(".chat-turn")).toHaveLength(100);
   } finally { wrapper.unmount(); }
 });
 
-it("stops auto-paging when a byte-capped page stops growing, and a panel with no scroll room never scroll-pages", async () => {
+it("stops auto-paging when a stale page stops growing, and a panel with no scroll room never scroll-pages", async () => {
   const entries = turns(100);
   let calls = 0;
   vi.mocked(desktop.invoke).mockImplementation(async route => {
     if (route !== "session.branchWindow") return {};
     calls++;
-    // The byte cap returns the same newest turn every time: paging again can
-    // only repeat that transfer, so the automatic cascade must stop.
+    // A stale response returns the same newest turn every time, even though
+    // the request targets its ancestor. The automatic cascade must stop.
     return { entries: entries.slice(-2), hasEarlier: true };
   });
   const wrapper = await mountOnSnapshot(windowed(entries, entries.slice(-2)));
@@ -128,11 +150,33 @@ it("stops auto-paging when a byte-capped page stops growing, and a panel with no
     await flushPromises();
     expect(calls).toBe(settled);
     // The stuck short panel offers its only way forward: a retry row whose
-    // click is an explicit request, so the byte budget doubles and asks again.
+    // click explicitly retries the missing ancestor.
     const retry = wrapper.get("button.load-earlier-status");
     expect(retry.text()).toBe(i18n.global.t("branch.retryEarlier"));
     await retry.trigger("click");
     await flushPromises();
     expect(calls).toBe(settled + 1);
+  } finally { wrapper.unmount(); }
+});
+
+it("a slow page from the previous view does not block paging in the new view", async () => {
+  const entries = turns(100);
+  let release!: (value: unknown) => void;
+  vi.mocked(desktop.invoke).mockImplementation(async (route, input) => {
+    if (route !== "session.branchWindow") return {};
+    const request = input as { session: string; leafId: string; bytes: number };
+    if (request.session === "s.jsonl") return new Promise(resolve => { release = resolve; });
+    return windowEntries(entries, request.leafId, 2, request.bytes);
+  });
+  const wrapper = await mountOnSnapshot(windowed(entries, entries.slice(-80)));
+  try {
+    scrollToTop(wrapper); await flushPromises();
+    const next = windowed(entries, entries.slice(-4));
+    next.session = { ...next.session, path: "next.jsonl" };
+    next.graph = { ...next.graph!, id: "next.jsonl", epoch: "new" };
+    useSessionStore().applySnapshot(next); await flushPromises();
+    await vi.waitFor(() => expect(wrapper.findAll(".chat-turn").length).toBeGreaterThanOrEqual(6));
+    release(windowEntries(entries, "a59", 40)); await flushPromises();
+    expect(wrapper.find(".load-earlier-status").exists()).toBe(false);
   } finally { wrapper.unmount(); }
 });

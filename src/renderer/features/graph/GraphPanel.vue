@@ -18,7 +18,7 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRe
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
-import { projectSession, sessionEntryIndex, clipText, SNAPSHOT_TURN_LIMIT } from "../../../shared/session";
+import { projectSession, sessionEntryIndex, clipText } from "../../../shared/session";
 import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualPosition } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
@@ -159,12 +159,36 @@ const searchHits = computed<string[]>(() => {
   const matched = new Set(value.nodes.filter(node => matchesGraphFilter(node, graphFilter.value)).map(node => node.id));
   return session.searchResults.filter(id => matched.has(id));
 });
-watch([searchQuery, graphFilter, () => session.current?.session.path, () => session.current?.graph?.epoch], () => {
+// Query/view changes invalidate results. History updates queue another read,
+// but let the current read finish so a busy graph cannot starve remote search.
+let refreshSearch = () => {};
+watch([searchQuery, searchOpen, () => session.poolGeneration], (_value, _old, onCleanup) => {
+  void session.runGraphSearch("");
   const query = searchQuery.value.trim();
-  if (!searchOpen.value || !query) { void session.runGraphSearch(""); return; }
-  const timer = setTimeout(() => void session.runGraphSearch(query), 150);
-  return () => clearTimeout(timer);
+  let active = true, running = false, dirty = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (!active || !searchOpen.value || !query) return;
+    dirty = true;
+    if (running || timer) return;
+    timer = setTimeout(async () => {
+      timer = undefined;
+      dirty = false;
+      running = true;
+      try { await session.runGraphSearch(query); }
+      finally { running = false; if (active && dirty) schedule(); }
+    }, 150);
+  };
+  refreshSearch = schedule;
+  schedule();
+  onCleanup(() => {
+    active = false;
+    clearTimeout(timer);
+    session.searchToken++;
+    refreshSearch = () => {};
+  });
 }, { flush: "post" });
+watch(() => projection.value?.nodes, () => refreshSearch(), { flush: "post" });
 const searchHitIds = computed(() => new Set(searchHits.value));
 const searchCount = computed(() => {
   if (!searchOpen.value || !searchQuery.value.trim()) return "";
@@ -244,7 +268,7 @@ function nodeContent(id: string) {
 function contentWindowRequest(node: GraphNode): Promise<void> | null {
   const index = sessionEntryIndex(session.current?.entries ?? []);
   if (node.rawEntryIds.every(id => index.has(id))) return null;
-  return session.fetchWindow(node.leafEntryId, SNAPSHOT_TURN_LIMIT);
+  return session.fetchWindow(node.leafEntryId, 1);
 }
 async function loadNodeContent(node: GraphNode) {
   await contentWindowRequest(node);
@@ -662,22 +686,30 @@ async function compose(id: string, direction?: BranchDirection) {
 async function retryTurn(id: string) {
   const node = projection.value?.nodes.find((item) => item.id === id);
   if (!node) return;
-  // Only a windowed-out turn waits; a local retry must start synchronously.
-  const loading = contentWindowRequest(node);
-  if (loading) await loading;
-  const content = nodeContent(id);
-  if (!content.user.trim() && !content.images?.length) return;
   const graph = session.current?.graph;
   const request = ++retryRequest, view = session.viewRequest, key = sessionKey.value;
   const draft = draftState.value, text = draft.text, attached = [...draft.images];
   const model = draftModel.value, thinking = draftThinking.value;
   const focus = session.focusedNode;
+  const generation = session.poolGeneration;
   const isCurrent = () => request === retryRequest && view === session.viewRequest && key === sessionKey.value
+    && generation === session.poolGeneration
     && graph?.epoch === session.current?.graph?.epoch && focus === session.focusedNode
     && draftState.value === draft && draft.text === text
     && !draft.busy && !draft.readingImages && draftModel.value === model && draftThinking.value === thinking
     && draft.images.length === attached.length && draft.images.every((image, index) => image === attached[index])
     && session.current?.runtime.available && projection.value?.nodes.some(node => node.id === id);
+  // Capture the draft before either history or image IO can yield.
+  const loading = contentWindowRequest(node);
+  if (loading) await loading;
+  if (!isCurrent()) return;
+  const index = sessionEntryIndex(session.current?.entries ?? []);
+  if (!node.rawEntryIds.every(entryId => index.has(entryId))) {
+    layout.showNotice(t("notice.historyUnavailable"), "error");
+    return;
+  }
+  const content = nodeContent(id);
+  if (!content.user.trim() && !content.images?.length) return;
   let images: PromptImage[];
   try { images = await Promise.all((content.images ?? []).map(sessionImageData)); }
   catch (error) { if (isCurrent()) layout.showNotice(error instanceof Error ? error.message : String(error), "error"); return; }

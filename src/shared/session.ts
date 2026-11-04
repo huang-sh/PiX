@@ -8,6 +8,7 @@ import type {
   SessionProjection,
   SessionSummary,
   SessionSnapshot,
+  SessionHistoryWindow,
 } from "./types.js";
 import { GIT_BRANCH_CUSTOM_TYPE, NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "./types.js";
 import { turnFileChanges } from "./file-changes.js";
@@ -141,9 +142,12 @@ export function promptDisplayTextMap(entries: RawSessionEntry[]) {
 export function promptRecall(entries: RawSessionEntry[], limit = 200): string[] {
   const texts = promptDisplayTextMap(entries);
   const history: string[] = [];
-  for (let i = entries.length - 1; i >= 0 && history.length < limit; i--) {
-    const entry = entries[i]!;
-    if (entry.type !== "message" || (entry.message as { role?: string } | undefined)?.role !== "user") continue;
+  // Merged graph sources are stored branch-by-branch, not chronologically.
+  const users = entries.filter(entry => entry.type === "message"
+    && (entry.message as { role?: string } | undefined)?.role === "user")
+    .sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
+  for (let i = users.length - 1; i >= 0 && history.length < limit; i--) {
+    const entry = users[i]!;
     const text = sessionEntryDisplayText(entry, texts).trim();
     if (text && text !== history.at(-1)) history.push(text);
   }
@@ -636,6 +640,13 @@ function wireEntry(entry: RawSessionEntry): { entry: RawSessionEntry; bytes: num
   return whole;
 }
 
+/** Never merge a page from a replacement history, even if entry IDs overlap. */
+export function validateHistoryWindow(page: SessionHistoryWindow, session: string, epoch?: string): void {
+  if ((page.session !== undefined && page.session !== session)
+    || (page.epoch !== undefined && page.epoch !== epoch))
+    throw new Error("Session changed; reopen the session");
+}
+
 /**
  * The last `limit` complete turns of the root-to-leaf path ending at `leafId`
  * (or the newest entry). Shared by snapshot payloads and window fetches so
@@ -647,17 +658,24 @@ export function windowEntries(entries: RawSessionEntry[], leafId: string | null,
   const path: RawSessionEntry[] = [];
   const seen = new Set<string>();
   let entry = leafId ? index.get(leafId) : entries.at(-1);
-  let turns = 0, cut = 0, hasEarlier = false, bytes = 0;
+  let turns = 0, cut = 0, hasEarlier = false, bytes = 0, promptPrefix = false;
   while (entry && !seen.has(entry.id)) {
     seen.add(entry.id);
     const shipped = wireEntry(entry);
     path.push(shipped.entry);
     bytes += shipped.bytes;
+    // Pre-prompt compactions and image display markers belong with the
+    // retained user turn, without admitting the previous turn's messages.
+    if (promptPrefix && (entry.type === "compaction"
+      || (entry.type === "custom" && entry.customType === PROMPT_DISPLAY_CUSTOM_TYPE)))
+      cut = path.length;
+    if (entry.type === "message") promptPrefix = false;
     if (entry.type === "message" && (entry.message as { role?: string })?.role === "user") {
       // At least one complete turn always ships; beyond that, either limit bounds the window.
       if (turns >= limit || (bytes > byteLimit && turns >= 1)) { hasEarlier = true; break; }
       turns++;
       cut = path.length;
+      promptPrefix = true;
     }
     entry = entry.parentId ? index.get(entry.parentId) : undefined;
   }
