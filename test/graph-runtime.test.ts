@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord } from "../src/main/graph-files.js";
+import { readFileChange } from "../src/main/file-changes.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
 import { projectSession } from "../src/shared/session.js";
 
@@ -931,6 +933,46 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     assert.deepEqual(runtime.runtime.session.getActiveToolNames(), ["read"]);
   } finally {
     release?.(); await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+test("exports carry stored file-change diffs", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-export-diffs-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    faux.setResponses([fauxAssistantMessage("done")]);
+    await runtime.control({ action: "prompt", text: "change a file" });
+    await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+    // Drive the real write tool through the same agent hooks a live run uses,
+    // so the file-changes extension appends its entry and snapshot.
+    writeFileSync(join(cwd, "a.txt"), "before\n");
+    const toolCall = { id: randomUUID(), name: "write", arguments: { path: "a.txt", content: "after\n" } };
+    await runtime.runtime.session.agent.beforeToolCall({ toolCall, args: toolCall.arguments });
+    const result = await (await runtime.pi()).createWriteTool(cwd).execute(toolCall.id, toolCall.arguments);
+    await runtime.runtime.session.agent.afterToolCall({ toolCall, args: toolCall.arguments, result, isError: false });
+    const snapshot = runtime.snapshot();
+    const change = snapshot.projection.nodes.at(-1)!.fileChanges![0]!;
+    const exported = await runtime.control({ action: "exportJsonl" }) as { path: string };
+    const entries = parseStrict(readFileSync(exported.path, "utf8")).entries;
+    assert.equal(await readFileChange(exported.path, entries, change.ref),
+      await readFileChange(snapshot.session.path, snapshot.entries, change.ref));
+    assert.match(await readFileChange(exported.path, entries, change.ref), /\+after/);
+  } finally {
+    await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { open, mkdir, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, open, mkdir, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { formatPatch, structuredPatch } from "diff";
 import { durableWrite } from "./graph-files.js";
@@ -87,6 +88,29 @@ export async function readFileChange(session: string, entries: RawSessionEntry[]
   if (!snapshot) throw new Error("The saved diff for this change is unavailable");
   if (typeof snapshot.patch !== "string") throw new Error("Text diff is unavailable for this change");
   return snapshot.patch;
+}
+
+/** Copy the snapshots referenced by exported entries next to the exported
+ * session, so stored diffs open from the standalone copy. A source without a
+ * snapshot (an imported session) stays copyless and degrades exactly like
+ * readFileChange does; an existing target is never overwritten. Returns the
+ * number of snapshots copied. */
+export async function copyFileChangeSnapshots(fromSession: string, toSession: string, entries: RawSessionEntry[]): Promise<number> {
+  const refs = new Set(entries.flatMap(entry => {
+    const change = fileChange(entry);
+    return change ? [change.ref] : [];
+  }));
+  if (!refs.size) return 0;
+  await mkdir(fileChangeDir(toSession), { recursive: true });
+  let copied = 0;
+  for (const ref of refs) {
+    try { await copyFile(snapshotPath(fromSession, ref), snapshotPath(toSession, ref), constants.COPYFILE_EXCL); copied++; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "EEXIST") throw error;
+    }
+  }
+  return copied;
 }
 
 export class FileChangeTracker {

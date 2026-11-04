@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, samePersistedValue, type BranchRecord, type SessionData } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { exportSubtree } from "./graph-export.js";
+import { copyFileChangeSnapshots } from "./file-changes.js";
+import { debugLog } from "./debug-log.js";
 
 async function run() {
   const { main, data, branches, leafId, outputPath, html, rootEntryId, targetLeafId, exportTitle } = workerData as {
@@ -13,6 +15,8 @@ async function run() {
   };
   // All inputs are cloned by worker_threads at dispatch. Never read a changing
   // live source or mutate the graph's files, locks, cursors, or runtime.
+  // File-change snapshots are the exception: each is settled before the entry
+  // referencing it is appended, so reading them from the live graph cannot race.
   const graph = new GraphFiles(main);
   const sources = new Map<string, SessionData>();
   for (const branch of branches) {
@@ -65,6 +69,12 @@ async function run() {
     const source = html ? await adapter.exportSnapshotHtml(manager, join(temp, "tree.html")) : jsonl;
     // Exclusive installation also protects a destination created after dispatch.
     linkSync(source, outputPath);
+    if (!html) {
+      // Stored diffs are history enrichment for the installed copy: a failed
+      // copy costs "diff unavailable", never the already-installed export.
+      try { await copyFileChangeSnapshots(main, outputPath, output.entries); }
+      catch (error) { debugLog(`graph-export: file-change snapshots not copied to ${outputPath}`, error); }
+    }
     return { path: outputPath };
   } finally { rmSync(temp, { recursive: true, force: true }); }
 }

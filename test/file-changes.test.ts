@@ -7,8 +7,8 @@ import { randomUUID } from "node:crypto";
 import { PiRuntime } from "../src/main/pi-runtime.js";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { fileChange, turnFileChanges } from "../src/shared/file-changes.js";
-import { readFileChange, summarizeChange } from "../src/main/file-changes.js";
+import { fileChange, turnFileChanges, FILE_CHANGE_CUSTOM_TYPE } from "../src/shared/file-changes.js";
+import { copyFileChangeSnapshots, fileChangeDir, readFileChange, summarizeChange } from "../src/main/file-changes.js";
 import { projectSession } from "../src/shared/session.js";
 
 async function fixture(t: test.TestContext, home?: string) {
@@ -101,6 +101,44 @@ test("snapshots survive abort/reopen and render historical content after later d
   assert.equal(await readFileChange(snapshot.session.path, f.runtime.snapshot().entries, ref), patch);
   await assert.rejects(readFileChange(snapshot.session.path, snapshot.entries, "../secret"), /Unknown/);
   await assert.rejects(readFileChange(snapshot.session.path, snapshot.entries, randomUUID()), /Unknown/);
+});
+
+test("snapshot copies open stored diffs from an exported session", async t => {
+  const f = await fixture(t);
+  await f.tool("write", { path: "one.txt", content: "one\ntwo\n" });
+  const snapshot = f.runtime.snapshot();
+  const ref = f.changes()[0]!.ref;
+  const exported = join(f.root, "exported.jsonl");
+  assert.equal(await copyFileChangeSnapshots(snapshot.session.path, exported, snapshot.entries), 1);
+  assert.equal(await readFileChange(exported, snapshot.entries, ref),
+    await readFileChange(snapshot.session.path, snapshot.entries, ref));
+  // A later source change never reaches an already-copied snapshot.
+  writeFileSync(join(fileChangeDir(snapshot.session.path), `${ref}.json`), "{\"patch\":\"tampered\"}");
+  assert.equal(await copyFileChangeSnapshots(snapshot.session.path, exported, snapshot.entries), 0);
+  assert.match(await readFileChange(exported, snapshot.entries, ref), /\+one\n\+two/);
+});
+
+test("snapshot copying skips invalid records and absent sources without creating a sidecar", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pix-copy-"));
+  try {
+    const ref = randomUUID();
+    mkdirSync(join(root, "src.jsonl.file-changes"), { recursive: true });
+    writeFileSync(join(root, "src.jsonl.file-changes", `${ref}.json`), "{\"patch\":\"p\"}");
+    const record = (data: Record<string, unknown>) =>
+      ({ type: "custom", id: "x", parentId: null, timestamp: "t", customType: FILE_CHANGE_CUSTOM_TYPE, data });
+    const entries = [
+      record({ path: "kept", ref, status: "modified", added: 1, removed: 0 }),
+      record({ path: "absent", ref: randomUUID(), status: "modified", added: 1, removed: 0 }),
+      record({ path: "invalid", ref: "not-a-ref", status: "modified", added: 1, removed: 0 }),
+    ] as any[];
+    const dst = join(root, "dst.jsonl");
+    assert.equal(await copyFileChangeSnapshots(join(root, "src.jsonl"), dst, entries), 1);
+    assert.ok(existsSync(join(root, "dst.jsonl.file-changes", `${ref}.json`)));
+    assert.ok(!existsSync(join(root, "dst.jsonl.file-changes", `${randomUUID()}.json`)));
+    const empty = join(root, "empty.jsonl");
+    assert.equal(await copyFileChangeSnapshots(join(root, "src.jsonl"), empty, [entries[2]!]), 0);
+    assert.ok(!existsSync(fileChangeDir(empty)));
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("interleaved sessions are flagged and independent directories are isolated", async t => {
