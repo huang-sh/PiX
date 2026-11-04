@@ -70,7 +70,7 @@ it("opens an existing empty session in the active project even when search hides
   expect(invoke).not.toHaveBeenCalledWith("agent.control", { action: "newSession" });
 });
 
-it.each(["used", "readonly", "running", "recovery", "branch messages"])(
+it.each(["used", "readonly", "running", "recovery", "branch messages", "windowed branches", "unloaded branches"])(
   "checks the opened snapshot before reusing a cached empty session that is now %s", async kind => {
     const session = setup();
     const cached = snapshot("cached.jsonl");
@@ -79,11 +79,15 @@ it.each(["used", "readonly", "running", "recovery", "branch messages"])(
     if (kind === "used") opened.session.messageCount = 1;
     if (kind === "readonly") opened.runtime.available = false;
     if (kind === "running") opened.runtime.isStreaming = true;
-    if (kind === "branch messages") {
+    if (kind === "branch messages" || kind === "windowed branches") {
       opened.entries = [{ type: "message", id: "branch-user", parentId: null, timestamp: "",
         message: { role: "user", content: "branch prompt" } }];
       opened.projection = projectSession(opened.entries, "branch-user");
+      if (kind === "windowed branches") opened.entries = [];
     }
+    if (kind === "unloaded branches") opened.graph = {
+      id: opened.session.path, revision: 1, runs: [], branchCount: 1,
+    } as NonNullable<SessionSnapshot["graph"]>;
     if (kind === "recovery") opened.graph = {
       id: opened.session.path, revision: 1, runs: [],
       recoveredInputs: [{ requestId: "input", text: "recover this prompt" }],

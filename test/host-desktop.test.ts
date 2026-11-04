@@ -624,6 +624,25 @@ test("desktop IPC sends image references, keeps subscriber baselines independent
   assert.equal(lateEvents.length, lateCount);
 });
 
+test("desktop history pages defer image bytes until session.image is requested", async t => {
+  const { cwd, desktop, controller } = await desktopView(t);
+  const image = { type: "image", mimeType: "image/png", data: "aGVsbG8=".repeat(250_000) };
+  const entries: RawSessionEntry[] = [{ type: "message", id: "prompt", parentId: null,
+    timestamp: "2026-10-27", message: { role: "user", content: [image] } }];
+  const path = join(cwd, "readonly.jsonl");
+  controller.current = {
+    session: { id: "s", path, cwd, created: "", modified: "", messageCount: 1, firstMessage: "" },
+    entries, entriesComplete: true, projection: projectSession(entries, "prompt"),
+    runtime: { available: false } as SessionSnapshot["runtime"],
+  };
+  const page = await desktop.invoke("session.branchWindow",
+    { session: path, leafId: "prompt", limit: 1, bytes: 4 << 20 }) as { entries: RawSessionEntry[] };
+  assert.ok(JSON.stringify(page).length < 5000);
+  const reference = projectSession(page.entries, "prompt").messages[0]!.images![0]!;
+  assert.ok("reference" in reference);
+  assert.deepEqual(await desktop.invoke("session.image", reference.reference), image);
+});
+
 test("CLI clients keep inline images in snapshots and events without opting into references", async t => {
   const { cwd, connect } = await fixture(t);
   let controller!: MainController;

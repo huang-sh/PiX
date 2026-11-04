@@ -15,7 +15,7 @@ describe("real layoutGraph with measured sizes", () => {
     expect(P.y + P.height <= Q.y || Q.y + Q.height <= P.y).toBe(true);
   });
 
-  it("gives every branch a disjoint vertical band: 300 random trees × random measured heights", () => {
+  it.each([false, true])("gives every branch a disjoint vertical band: 300 random trees × random measured heights (explicit directions: %s)", explicit => {
     let seed = 42;
     const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
     let overlaps = 0, interleaves = 0, minMargin = Infinity;
@@ -33,7 +33,9 @@ describe("real layoutGraph with measured sizes", () => {
       grow("r", 1, 4);
       const sizes = new Map<string, { width: number; height: number }>(
         nodes.map(m => [m.id, { width: 280, height: 120 + Math.floor(rnd() * 200) }]));
-      const placed = layoutGraph({ nodes }, sizes).nodes;
+      const order = new Map<string, number>();
+      if (explicit) for (const m of nodes) order.set(m.id, Math.floor(rnd() * 3) - 1);
+      const placed = layoutGraph({ nodes }, sizes, order).nodes;
       for (let i = 0; i < placed.length; i++) for (let j = i + 1; j < placed.length; j++) {
         const a = placed[i]!, b = placed[j]!;
         if (a.x !== b.x) continue;

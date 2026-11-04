@@ -7,7 +7,7 @@ import { useSessionStore } from "../../src/renderer/stores/session";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
 import { i18n } from "../../src/renderer/i18n";
-import { projectSession } from "../../src/shared/session";
+import { projectSession, searchGraphNodeIds } from "../../src/shared/session";
 import type { SessionSnapshot } from "../../src/shared/types";
 import type { CanvasCommand } from "../../src/shared/canvas";
 
@@ -128,6 +128,11 @@ it("controls selection, panels, search, filters and manual layout through the li
   expect(layout.chatColumns).toContain("turn:root");
   await execute({ action: "closePanel", nodeId: "turn:root" });
   expect(layout.chatColumns).not.toContain("turn:root");
+  // Search runs main-side; mirror it locally so the canvas API behaves as in production.
+  vi.mocked(window.pix!.invoke).mockImplementation(((route: string, input: { query?: string }) => {
+    const current = route === "session.search" ? useSessionStore().current : null;
+    return current ? { nodeIds: searchGraphNodeIds(current.projection, current.entries, String(input.query)) } : [];
+  }) as unknown as typeof window.pix!.invoke);
   await execute({ action: "search", text: "child" });
   expect((await inspect()).search.hits).toContain("turn:child");
   await execute({ action: "filter", filter: "errors" });

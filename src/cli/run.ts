@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { HostClient } from "../host/client.js";
+import { validateHistoryWindow } from "../shared/session.js";
 import { agentMessageContent } from "../shared/agent-stream.js";
-import type { ExtensionDialog, SessionSnapshot } from "../shared/types.js";
+import type { ExtensionDialog, SessionHistoryWindow, SessionSnapshot } from "../shared/types.js";
 
 export type Run = NonNullable<SessionSnapshot["graph"]>["runs"][number];
 export interface RunOptions {
@@ -29,7 +30,8 @@ export async function runTask(client: HostClient, before: SessionSnapshot, text:
   const requestId = options.requestId ?? randomUUID();
   // A command can finish without appending a new turn. Inspect only this
   // request's messages, while retries still inspect the original saved run.
-  const previousEntries = new Set(before.graph?.runs.some(run => run.requestId === requestId) ? [] : before.entries.map(entry => entry.id));
+  const previousEntries = new Set(before.graph?.runs.some(run => run.requestId === requestId) ? []
+    : before.projection.nodes.flatMap(node => node.rawEntryIds));
   let run: Run | undefined;
   let disconnected: Error | undefined;
   let interrupted = false;
@@ -97,7 +99,20 @@ export async function runTask(client: HostClient, before: SessionSnapshot, text:
       if (latest.status !== "running") {
         const target = current.projection.nodes.find(item => item.id === latest.nodeId);
         const own = new Set(target?.rawEntryIds ?? []);
-        const messages = current.entries.filter(entry => own.has(entry.id) && !previousEntries.has(entry.id) && entry.type === "message")
+        const entries = new Map(current.entries.map(entry => [entry.id, entry]));
+        if (target && target.rawEntryIds.some(id => !previousEntries.has(id) && !entries.has(id))) {
+          // Merged snapshots carry only the main line's window. Read the run's
+          // final turn before deciding whether a branch succeeded or printing it.
+          const result = await client.invoke<SessionHistoryWindow>("session.branchWindow",
+            { session: path, leafId: target.leafEntryId, limit: 1, bytes: 4 << 20 });
+          validateHistoryWindow(result, path, current.graph?.epoch);
+          if (!result.entries.some(entry => entry.id === target.leafEntryId))
+            throw new Error("The run's final turn is unavailable; reopen the session and retry");
+          for (const entry of result.entries) entries.set(entry.id, entry);
+          current = { ...current, entries: [...entries.values()] };
+        }
+        const messages = [...own].flatMap(id => entries.get(id) ?? [])
+          .filter(entry => !previousEntries.has(entry.id) && entry.type === "message")
           .map(entry => entry.message as Record<string, any>);
         const lastAssistant = messages.filter(message => message.role === "assistant").at(-1);
         const failed = lastAssistant && ["error", "aborted"].includes(lastAssistant.stopReason) ? lastAssistant : undefined;

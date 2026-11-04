@@ -116,10 +116,13 @@ it("restores each branch's history page, expanded output and scroll position", a
     setup() { onMounted(() => markdownMounts++); }, template: "<div>{{ content }}</div>" });
   const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer, PromptComposer: true } } });
   try {
-    await flushPromises();
+    // Geometry must exist before the first await: the restore tick checks
+    // whether the history fills the panel, and jsdom reports zero heights.
     const root = wrapper.get(".branch-messages").element as HTMLElement;
     Object.defineProperties(root, { scrollHeight: { value: 5000, configurable: true }, clientHeight: { value: 500, configurable: true } });
-    await wrapper.get(".load-earlier-turns").trigger("click");
+    await flushPromises();
+    // Scrolling up to the top pages the next window in.
+    root.scrollTop = 40; await wrapper.get(".branch-messages").trigger("scroll");
     const details = wrapper.get("details.agent-process");
     (details.element as HTMLDetailsElement).open = true; await details.trigger("toggle");
     root.scrollTop = 123; await wrapper.get(".branch-messages").trigger("scroll");
@@ -152,6 +155,11 @@ it("loads older turns and collapsed processes on demand without losing history",
   });
   const wrapper = mount(BranchContextPanel, { global: { plugins: [pinia, i18n], stubs: { MarkdownRenderer: true, PromptComposer: true } } });
   try {
+    // Geometry before the first await keeps the fill check out of jsdom's
+    // zero-height world; each rendered turn counts as 100px.
+    const root = wrapper.get(".branch-messages").element as HTMLElement;
+    Object.defineProperty(root, "scrollHeight", { configurable: true, get: () => root.querySelectorAll(".chat-turn").length * 100 });
+    Object.defineProperty(root, "clientHeight", { configurable: true, value: 500 });
     expect(wrapper.findAll(".chat-turn")).toHaveLength(40);
     expect(wrapper.findAll(".process-tool pre")).toHaveLength(0);
     expect(wrapper.findAll("markdown-renderer-stub")).toHaveLength(40);
@@ -169,11 +177,11 @@ it("loads older turns and collapsed processes on demand without losing history",
     await disclosure.trigger("toggle");
     expect(wrapper.findAll(".process-tool pre")).toHaveLength(0);
     const beforePaging = cleanedOutputs;
-    await wrapper.get(".load-earlier-turns").trigger("click");
+    root.scrollTop = 40; await wrapper.get(".branch-messages").trigger("scroll");
     expect(wrapper.findAll(".chat-turn")).toHaveLength(80);
-    await wrapper.get(".load-earlier-turns").trigger("click");
+    root.scrollTop = 20; await wrapper.get(".branch-messages").trigger("scroll");
     expect(wrapper.findAll(".chat-turn")).toHaveLength(100);
-    expect(wrapper.find(".load-earlier-turns").exists()).toBe(false);
+    expect(wrapper.find(".load-earlier-status").exists()).toBe(false);
     expect(wrapper.text()).toContain("prompt 0");
     await session.selectNode("turn:u98"); await nextTick();
     expect(wrapper.findAll(".chat-turn")).toHaveLength(40);
@@ -200,6 +208,10 @@ it("reuses expanded history during streaming and refreshes it when its content c
     return (split as any).apply(this, args);
   });
   try {
+    // Fill-check geometry before the first await (jsdom reports zero heights).
+    const scrolled = wrapper.get(".branch-messages").element as HTMLElement;
+    Object.defineProperty(scrolled, "scrollHeight", { configurable: true, get: () => scrolled.querySelectorAll(".chat-turn").length * 100 });
+    Object.defineProperty(scrolled, "clientHeight", { configurable: true, value: 500 });
     const details = wrapper.find("details.agent-process:not(.live)");
     (details.element as HTMLDetailsElement).open = true;
     await details.trigger("toggle"); await flushPromises();

@@ -22,7 +22,6 @@ import { projectSession, sessionEntryIndex, clipText } from "../../../shared/ses
 import { layoutGraph, reserveManualPositions, type BranchDirection, type ManualPosition } from "../../graph-layout";
 import { useDraftSubmit } from "../../composables/useDraftSubmit";
 import { nextFrame, whenTransitionsSettle, whenVisible } from "../../lib/frame";
-import { searchGraphNodeIds } from "../../lib/graph-search";
 import { shortcutForEvent } from "../../keyboard-shortcuts";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
@@ -158,9 +157,41 @@ const projection = computed(() => preparingSession.value ? projectSession([], nu
 const searchHits = computed<string[]>(() => {
   const value = projection.value;
   if (!searchOpen.value || !value || !session.current) return [];
+  // Text matching runs main-side over the full merged history; the local
+  // pass only narrows results to the active filter.
   const matched = new Set(value.nodes.filter(node => matchesGraphFilter(node, graphFilter.value)).map(node => node.id));
-  return searchGraphNodeIds(value, session.current.entries, searchQuery.value).filter(id => matched.has(id));
+  return session.searchResults.filter(id => matched.has(id));
 });
+// Query/view changes invalidate results. History updates queue another read,
+// but let the current read finish so a busy graph cannot starve remote search.
+let refreshSearch = () => {};
+watch([searchQuery, searchOpen, () => session.poolGeneration], (_value, _old, onCleanup) => {
+  void session.runGraphSearch("");
+  const query = searchQuery.value.trim();
+  let active = true, running = false, dirty = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (!active || !searchOpen.value || !query) return;
+    dirty = true;
+    if (running || timer) return;
+    timer = setTimeout(async () => {
+      timer = undefined;
+      dirty = false;
+      running = true;
+      try { await session.runGraphSearch(query); }
+      finally { running = false; if (active && dirty) schedule(); }
+    }, 150);
+  };
+  refreshSearch = schedule;
+  schedule();
+  onCleanup(() => {
+    active = false;
+    clearTimeout(timer);
+    session.searchToken++;
+    refreshSearch = () => {};
+  });
+}, { flush: "post" });
+watch(() => projection.value?.nodes, () => refreshSearch(), { flush: "post" });
 const searchHitIds = computed(() => new Set(searchHits.value));
 const searchCount = computed(() => {
   if (!searchOpen.value || !searchQuery.value.trim()) return "";
@@ -235,6 +266,16 @@ function nodeContent(id: string) {
     assistant: [...messages].reverse().find((message) => message.role === "assistant")?.text ?? node.preview,
   };
 }
+/** Older nodes live outside the snapshot window; load their turn before
+ * showing or resending it, or the card would fall back to clipped text. */
+function contentWindowRequest(node: GraphNode): Promise<void> | null {
+  const index = sessionEntryIndex(session.current?.entries ?? []);
+  if (node.rawEntryIds.every(id => index.has(id))) return null;
+  return session.fetchWindow(node.leafEntryId, 1);
+}
+async function loadNodeContent(node: GraphNode) {
+  await contentWindowRequest(node);
+}
 
 function rebuild() {
   const value = projection.value;
@@ -258,9 +299,9 @@ function rebuild() {
     orderSequence = 0;
     const saved = layout.layout.branchOrders?.[sessionKey.value];
     if (Array.isArray(saved)) for (const entry of saved) {
-      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] < 0) {
+      if (Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] !== 0) {
         branchOrder.set(entry[0], entry[1]);
-        orderSequence = Math.max(orderSequence, -entry[1]);
+        orderSequence = Math.max(orderSequence, Math.abs(entry[1]));
       }
     }
     draftOrder = 0;
@@ -342,6 +383,7 @@ function rebuild() {
         ? "graph.blockedStreaming"
         : "graph.blockedReadonly",
       content: () => nodeContent(node.id),
+      onLoadContent: () => loadNodeContent(node),
       activity: () => session.activityFor(node.id),
       searchHit: searchHitIds.value.has(node.id),
       filterContext: !matchesGraphFilter(node, graphFilter.value),
@@ -351,12 +393,9 @@ function rebuild() {
       onRetry: node.hasError && Boolean(session.current?.runtime.available && !busy && node.forkable !== false)
         ? () => { void retryTurn(node.id); }
         : undefined,
-      onExportSession: session.current?.graph ? () => { void exportSession(node.id); } : undefined,
-      // The export target is the node the chat panel shows: that node becomes
-      // the new session's tip and everything after it stays in the original
-      // graph. The chat column follows focusedNode, while the projection's
-      // activeNodeId is only the main branch's cursor, so the viewed id stays a
-      // live getter: focus moves never rebuild the cards.
+      onExportSession: session.current?.graph ? direction => { void exportSession(node.id, direction); } : undefined,
+      // The viewed node is the export boundary. Keep its id live:
+      // focus moves do not rebuild cards, and activeNodeId is the main cursor.
       viewedNodeId: session.current?.graph
         ? () => session.focusedNode && !session.focusedNode.startsWith("pending:")
           ? session.focusedNode : session.current?.projection.activeNodeId ?? null
@@ -602,9 +641,9 @@ async function deleteNode(id: string, propagate = false) {
   } catch (error) { deleteError.value = String(error); if (propagate) throw error; }
 }
 
-async function exportSession(id: string, propagate = false) {
+async function exportSession(id: string, direction: "ancestors" | "descendants", propagate = false) {
   try {
-    const result = await session.exportBranchSession(id);
+    const result = await session.exportBranchSession(id, direction);
     if (result?.path) layout.showNotice(t("notice.exportedTo", { path: result.path }));
     return result;
   } catch (error) {
@@ -627,7 +666,7 @@ async function reopenSession() {
 async function compose(id: string | null, direction?: BranchDirection) {
   ++retryRequest;
   if (draftParent.value !== id) draftState.value = emptyDraft();
-  draftOrder = direction === "up" ? -++orderSequence : 0;
+  draftOrder = direction === "up" ? -++orderSequence : direction === "down" ? ++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
   draftParent.value = id;
   draftModel.value = node?.footer?.model ?? session.current?.runtime.model ?? null;
@@ -655,19 +694,30 @@ function setDraftThinking(level: string, explicit: boolean) {
 async function retryTurn(id: string) {
   const node = projection.value?.nodes.find((item) => item.id === id);
   if (!node) return;
-  const content = nodeContent(id);
-  if (!content.user.trim() && !content.images?.length) return;
   const graph = session.current?.graph;
   const request = ++retryRequest, view = session.viewRequest, key = sessionKey.value;
   const draft = draftState.value, text = draft.text, attached = [...draft.images];
   const model = draftModel.value, thinking = draftThinking.value;
   const focus = session.focusedNode;
+  const generation = session.poolGeneration;
   const isCurrent = () => request === retryRequest && view === session.viewRequest && key === sessionKey.value
+    && generation === session.poolGeneration
     && graph?.epoch === session.current?.graph?.epoch && focus === session.focusedNode
     && draftState.value === draft && draft.text === text
     && !draft.busy && !draft.readingImages && draftModel.value === model && draftThinking.value === thinking
     && draft.images.length === attached.length && draft.images.every((image, index) => image === attached[index])
     && session.current?.runtime.available && projection.value?.nodes.some(node => node.id === id);
+  // Capture the draft before either history or image IO can yield.
+  const loading = contentWindowRequest(node);
+  if (loading) await loading;
+  if (!isCurrent()) return;
+  const index = sessionEntryIndex(session.current?.entries ?? []);
+  if (!node.rawEntryIds.every(entryId => index.has(entryId))) {
+    layout.showNotice(t("notice.historyUnavailable"), "error");
+    return;
+  }
+  const content = nodeContent(id);
+  if (!content.user.trim() && !content.images?.length) return;
   let images: PromptImage[];
   try { images = await Promise.all((content.images ?? []).map(sessionImageData)); }
   catch (error) { if (isCurrent()) layout.showNotice(error instanceof Error ? error.message : String(error), "error"); return; }
@@ -676,6 +726,9 @@ async function retryTurn(id: string) {
   const parentNode = projection.value?.nodes.find((item) => item.id === parent);
   resetDraft();
   draftParent.value = parent;
+  // A retry continues the branch only from its tip; anywhere else it opens as
+  // an explicit branch below, not an unmarked fork in the mainline row.
+  draftOrder = parentNode?.continuable === false ? ++orderSequence : 0;
   draftModel.value = node.footer?.model ?? parentNode?.footer?.model ?? session.current?.runtime.model ?? null;
   draftThinking.value = undefined;
   draftState.value = { ...emptyDraft(), text: content.user, images };
@@ -730,7 +783,7 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
     requestId || targetDraft.promptOverride !== undefined
-      ? { ...(requestId ? { requestId } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
+      ? { ...(requestId ? { requestId, forceFork: true } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
       : undefined,
   );
   if (!delivered) {
@@ -1053,10 +1106,10 @@ const unregisterCanvas = useCanvasStore().register(createCanvasActions({
     finally { draft.busy = false; }
   },
   retry: retryTurn, select: id => select(id, true), openPanel: openChatColumn,
-  delete: id => deleteNode(id, true), export: id => exportSession(id, true),
+  delete: id => deleteNode(id, true), export: id => exportSession(id, "descendants", true),
   canLabel: id => { const node = projection.value?.nodes.find(node => node.id === id); return Boolean(node && canEditLabel(node)); },
   setFilter: filter => { graphFilter.value = filter; },
-  setSearch: async text => { searchOpen.value = Boolean(text); searchQuery.value = text; searchPosition.value = -1; await nextTick(); },
+  setSearch: async text => { searchOpen.value = Boolean(text); searchQuery.value = text; searchPosition.value = -1; await nextTick(); await session.runGraphSearch(text.trim()); },
   move: (id, x, y, branch) => {
     dragged.set(id, { x, y, branch });
     const node = nodes.value.find(node => node.id === id);

@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Worker as ExportWorker } from "node:worker_threads";
 import { sessionModifiedAt } from "./graph-files.js";
-import { PiRuntime, type QueuedInput, type QueuedInputState } from "./pi-runtime.js";
+import { PiRuntime, type QueuedInput, type QueuedInputState, type SessionManager, takeParkedSession } from "./pi-runtime.js";
 import { debugLog } from "./debug-log.js";
 import { GraphSnapshotCache } from "./graph-snapshot.js";
-import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord, type SessionData } from "./graph-files.js";
-import { projectSession } from "../shared/session.js";
+import { descendantIds } from "./graph-export.js";
+import { GraphFiles, durableWrite, encodeSession, parseStrict, readStrict, validateSessionData, type BranchRecord, type SessionData } from "./graph-files.js";
+import { projectSession, promptRecall, SNAPSHOT_WINDOW_BYTES, searchGraphNodeIds, windowEntries } from "../shared/session.js";
 import type { AgentControl, RawSessionEntry, RuntimeModel, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 
@@ -15,7 +16,7 @@ type PromptAt = Extract<AgentControl, { action: "promptAt" }> & { timestamp?: st
 // Internal correlation only; the public agent.control validator intentionally
 // does not accept requestId on direct prompt actions.
 type CorrelatedPrompt = Extract<AgentControl, { action: "prompt" }> & { requestId: string };
-type Worker = { pi: PiRuntime; work?: Promise<void>; snapshot?: SessionSnapshot; before?: Set<string> };
+type Worker = { pi: PiRuntime; work?: Promise<void>; snapshot?: SessionSnapshot; before?: Set<string>; loadFailed?: boolean };
 function pendingPrompt(request: BranchRecord["request"], parentNodeId: string | null, runtime: RuntimeState) {
   const model = request.provider && request.modelId
     ? runtime.model?.provider === request.provider && runtime.model.id === request.modelId
@@ -106,6 +107,8 @@ export class GraphRuntime extends PiRuntime {
   private failStorage(error: unknown) {
     this.writeFailure ??= `Reopen this session to recover a storage failure: ${String(error)}`;
     this.storageError = this.writeFailure;
+    // Memory no longer matches disk; the manager must never be parked for reuse.
+    this.parkSessionManagers = false;
     this.notify();
   }
   private persist<T>(write: () => T): T {
@@ -139,6 +142,14 @@ export class GraphRuntime extends PiRuntime {
     const manager = pi.runtime.session.sessionManager;
     return structuredClone({ header: manager.getHeader(), entries: manager.getEntries() });
   }
+  /** A branch's full transcript. Snapshots carry only a bounded window, so
+   * read the live runtime's entries, falling back to the worker's file
+   * snapshot (or the window itself before the main runtime opens). */
+  private fullEntriesOf(id: string, windowed: SessionSnapshot): RawSessionEntry[] {
+    if (id === "main") return this.runtime ? super.fullEntries() : windowed.entries;
+    const worker = this.workers.get(id);
+    return worker?.pi.runtime ? worker.pi.fullEntries() : worker?.snapshot?.entries ?? [];
+  }
   override open(path: string): Promise<SessionSnapshot> {
     return this.exclusive(() => this.openInternal(path));
   }
@@ -146,6 +157,9 @@ export class GraphRuntime extends PiRuntime {
     if (this.graph?.main === path && this.runtime && !this.deletionRecovery && !this.writeFailure) return this.snapshot();
     const recovery = this.deletionRecovery?.snapshot.session.path === path ? this.deletionRecovery : undefined;
     await this.closeInternal();
+    // Reopening can recover or replace persisted history in the same runtime.
+    // Only the unchanged, already-open fast path keeps its entry-pool epoch.
+    this.epoch = randomUUID();
     this.deletionRecovery = recovery;
     this.stopping = false;
     const graph = new GraphFiles(path);
@@ -154,23 +168,49 @@ export class GraphRuntime extends PiRuntime {
       graph.load();
       this.storageError = graph.recoveryMessages.join("; ") || undefined;
       const pi = await this.pi();
-      const data = graph.readMain(entries => {
-        const manager = pi.SessionManager.inMemory(this.cwd, undefined, entries);
-        return { header: manager.getHeader(), entries: manager.getEntries() };
-      });
-      const leaf = graph.hasSavedLeaf && (graph.leafId === null || data.entries.some(e => e.id === graph.leafId))
-        ? graph.leafId : data.entries.at(-1)?.id ?? null;
-      this.graph = graph;
-      await super.openAt(path, leaf);
-      if (recovery) this.runtime.session.setActiveToolsByName(recovery.tools);
-      for (const record of graph.records.values()) {
-        try {
-          const data = graph.readBranch(record);
-          this.workers.set(record.id, { pi: this.child(record), snapshot: this.fileSnapshot(record, data) });
-        } catch (error) {
-          record.error = String(error);
-        }
+      // Parse the main file once, through the same SDK manager openAt will run
+      // on: validate its entries in place instead of a second strict parse of
+      // identical bytes whose result would only be discarded. The SDK parser
+      // silently skips bad lines, so the disk line count must still match. A
+      // parked manager already validated these exact bytes and the file
+      // identity proves they are unchanged, so both steps are skipped.
+      let manager: SessionManager | undefined, entries: RawSessionEntry[] | undefined;
+      const parked = takeParkedSession(path, this.dir);
+      if (parked) {
+        manager = parked;
+        entries = manager.getEntries() as RawSessionEntry[];
       }
+      else try {
+        const lineCount = graph.countMainLines();
+        const opened: SessionManager = pi.SessionManager.open(path, this.dir, this.cwd);
+        const parsed = opened.getEntries() as RawSessionEntry[];
+        validateSessionData({ header: (opened.getHeader?.() ?? {}) as Record<string, unknown>, entries: parsed });
+        if (lineCount !== null && parsed.length + 1 !== lineCount)
+          throw new Error("Some session records failed to load");
+        manager = opened;
+        entries = parsed;
+      } catch (error) {
+        debugLog("graph-runtime: strict main load after SDK parse", error);
+        manager = undefined;
+        entries = undefined;
+      }
+      if (!manager || !entries)
+        entries = graph.readMain(list => {
+          const memory = pi.SessionManager.inMemory(this.cwd, undefined, list);
+          return { header: memory.getHeader(), entries: memory.getEntries() };
+        }).entries;
+      const leaf = graph.hasSavedLeaf && (graph.leafId === null || entries.some(e => e.id === graph.leafId))
+        ? graph.leafId : entries.at(-1)?.id ?? null;
+      this.graph = graph;
+      await super.openAt(path, leaf, manager);
+      if (recovery) this.runtime.session.setActiveToolsByName(recovery.tools);
+      for (const record of graph.records.values())
+        this.workers.set(record.id, { pi: this.child(record) });
+      // Small graphs load every branch eagerly as before; a large one returns
+      // its main line first and streams branch transcripts in afterwards, so
+      // big opens stop gating the first snapshot on every branch file.
+      if (this.branchBytes(graph) > this.lazyBranchBytes) void this.hydrateBranches(graph);
+      else for (const record of graph.records.values()) this.hydrate(record, true);
       this.storageError = graph.recoveryMessages.join("; ") || undefined;
       this.writeFailure = undefined;
       this.deletionRecovery = undefined;
@@ -187,6 +227,42 @@ export class GraphRuntime extends PiRuntime {
       this.stopping = false;
       return this.openInternal(await this.createSessionFile());
     });
+  }
+  /** Branch transcripts beyond this total size load lazily after the open snapshot. */
+  private lazyBranchBytes = 4 << 20;
+  private branchBytes(graph: GraphFiles) {
+    let total = 0;
+    for (const record of graph.records.values()) {
+      try { total += statSync(graph.path(record.id)).size; } catch { /* missing source */ }
+    }
+    return total;
+  }
+  /** Reads an idle branch transcript once, on demand. Running branches get
+   * their snapshot from their own event stream; a failed read never retries. */
+  private hydrate(record: BranchRecord, silent = false) {
+    const worker = this.workers.get(record.id), graph = this.graph;
+    if (!worker || worker.snapshot || worker.work || worker.loadFailed || this.stopping
+      || !graph || graph.records.get(record.id) !== record) return;
+    try {
+      worker.snapshot = this.fileSnapshot(record, graph.readBranch(record));
+    } catch (error) {
+      worker.loadFailed = true;
+      record.error = String(error);
+    }
+    if (!silent) this.notify();
+  }
+  /** Fills in lazy branch transcripts one at a time, yielding between reads. */
+  private async hydrateBranches(graph: GraphFiles) {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    while (this.graph === graph && !this.stopping) {
+      const pending = [...graph.records.values()].find(record => {
+        const worker = this.workers.get(record.id);
+        return worker && !worker.snapshot && !worker.work && !worker.loadFailed;
+      });
+      if (!pending) return;
+      this.hydrate(pending);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
   }
   /** SDK fork semantics without moving the runtime other clients are using. */
   copySession(entryId?: string): Promise<string> {
@@ -235,6 +311,8 @@ export class GraphRuntime extends PiRuntime {
       }
     }, this.openExternal, this.dialogs);
     child.mod = this.mod;
+    // Workers close constantly; the single park slot serves the main session.
+    child.parkSessionManagers = false;
     child.onQueuedInput = (message, state) => this.saveQueuedInput(record.id, message, state);
     child.factory = this.factory.bind(this);
     child.modelBroker = this.modelBroker;
@@ -255,6 +333,47 @@ export class GraphRuntime extends PiRuntime {
       runtime: { ...runtime, pendingMessageCount: queue?.pendingMessageCount ?? 0, queuedMessages: queue?.queuedMessages ?? [],
         isStreaming: false, isCompacting: false, isRetrying: false } };
   }
+  /** The merged history every read-side route walks. Before the first snapshot
+   * the cache is empty; fall back to the base session so a caller that arrives
+   * early sees history instead of an empty session. */
+  private historyEntries(): RawSessionEntry[] {
+    const cached = this.graph ? this.snapshotCache.fullHistory() : [];
+    return cached.length ? cached : super.fullEntries();
+  }
+  override branchWindow(leafId: string | null, limit: number, byteLimit = SNAPSHOT_WINDOW_BYTES) {
+    // Branch transcripts arrive lazily; the merged canonical entries carry both
+    // the live branch's turns and the ones forked into their own files.
+    if (!this.graph) return super.branchWindow(leafId, limit, byteLimit);
+    let page = windowEntries(this.historyEntries(), leafId, limit, byteLimit);
+    // A known canonical ID may arrive before its source's background hydrate,
+    // including an ancestor of an already-visible child branch.
+    while (!page.hasEarlier && !this.stopping) {
+      const missing = page.entries.length ? page.entries[0]!.parentId : leafId;
+      if (!missing || this.snapshotCache.entriesById.has(missing)) break;
+      const record = this.graph.records.get(missing.slice(0, missing.indexOf(":")));
+      const worker = record && this.workers.get(record.id);
+      if (!record || !worker || worker.snapshot || worker.work || worker.loadFailed) break;
+      this.hydrate(record);
+      page = windowEntries(this.historyEntries(), leafId, limit, byteLimit);
+    }
+    return { ...page, session: this.graph.main, epoch: this.epoch };
+  }
+  override entryById(id: string): RawSessionEntry | undefined {
+    return (this.graph ? this.snapshotCache.entriesById.get(id) : undefined) ?? super.entryById(id);
+  }
+  override fullEntries(): RawSessionEntry[] {
+    return this.graph ? this.historyEntries() : super.fullEntries();
+  }
+  override searchEntries(query: string): string[] {
+    if (!this.graph) return super.searchEntries(query);
+    // Reuse the view's projection identity so the blob cache survives: a fresh
+    // snapshot() object would rebuild every node's search text on each query.
+    const projection = this.snapshotCache.projection ?? this.snapshot().projection;
+    return searchGraphNodeIds(projection, this.historyEntries(), query);
+  }
+  override promptRecall(): string[] {
+    return promptRecall(this.historyEntries());
+  }
   override snapshot(): SessionSnapshot {
     if (this.deletionRecovery) {
       const snapshot = this.deletionRecovery.snapshot;
@@ -263,7 +382,7 @@ export class GraphRuntime extends PiRuntime {
     const main = this.runtime ? super.snapshot() : this.lastMain;
     if (!main || !this.graph) return main ?? super.snapshot();
     this.lastMain = main;
-    this.snapshotCache.update(this.graph, main, this.workers);
+    this.snapshotCache.update(this.graph, main, this.workers, id => this.fullEntriesOf(id, main));
     const entries = this.snapshotCache.entriesById;
     const runs: NonNullable<SessionSnapshot["graph"]>["runs"] = [];
     const mainNode = main.projection.nodes.find(n => n.id === main.projection.activeNodeId);
@@ -296,7 +415,12 @@ export class GraphRuntime extends PiRuntime {
         status: running ? "running" : record.status === "interrupted" ? "interrupted" : "idle",
         error: record.error, runtime: snap.runtime });
     }
-    const { entries: values, projection } = this.snapshotCache.view(main, active);
+    // Tips of idle branches are the only nodes that continue in place — every
+    // other compose forks. The projection carries this so the renderer never
+    // re-derives it from run states.
+    const continuable = new Set<string>();
+    for (const run of runs) if (run.nodeId && run.status === "idle" && !run.error) continuable.add(run.nodeId);
+    const { entries: values, projection } = this.snapshotCache.view(main, active, continuable);
     // The SDK appends the user entry after pre-prompt compaction. Keep the
     // admission clock through that handoff until the completion footer saves it.
     const timings = new Map(runs.filter(run => run.status === "running" && run.nodeId).map(run => {
@@ -310,7 +434,7 @@ export class GraphRuntime extends PiRuntime {
     }) } : projection;
     return { ...main, runtime: this.writeFailure ? { ...main.runtime, available: false } : main.runtime,
       entries: values, projection: timedProjection,
-      graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, runs, storageError: this.storageError,
+      graph: { id: this.graph.main, epoch: this.epoch, revision: ++this.revision, branchCount: this.graph.records.size, runs, storageError: this.storageError,
         recoveredInputs: [...this.graph.recoveredInputs] } };
   }
   override control(input: AgentControl): Promise<unknown> {
@@ -414,6 +538,7 @@ export class GraphRuntime extends PiRuntime {
       this.persist(() => graph.saveLeaf(this.runtime.session.sessionManager.getLeafId()));
     } else {
       const record = graph.records.get(branchId);
+      if (record) this.hydrate(record);
       if (!record || !worker?.snapshot) throw new Error("Branch source is unavailable");
       const pi = await this.pi();
       const manager = pi.SessionManager.open(graph.path(branchId), this.dir, this.cwd);
@@ -500,6 +625,9 @@ export class GraphRuntime extends PiRuntime {
       graph.load();
       this.workers.clear();
       this.snapshotCache = new GraphSnapshotCache(); this.lastMain = undefined;
+      // Deletion breaks append-only history: invalidate renderer pools and
+      // in-flight reads before publishing any snapshot of the rebuilt sources.
+      this.epoch = randomUUID();
       this.rootRunId = ""; this.rootRequest = undefined; this.rootBefore.clear(); this.eventScope = undefined;
       await super.openAt(graph.main, failure ? manager.getLeafId() : graph.hasSavedLeaf ? graph.leafId : manager.getLeafId());
       this.runtime.session.setActiveToolsByName(activeTools);
@@ -541,11 +669,12 @@ export class GraphRuntime extends PiRuntime {
     const snapshot = this.snapshot();
     const node = input.nodeId ? snapshot.projection.nodes.find(n => n.id === input.nodeId) : undefined;
     if (input.nodeId && (!node || !node.forkable)) throw new Error("Choose a node that is not running to branch from");
+    if (input.forceFork && !node) throw new Error("Choose an existing node to create a branch");
     const limit = Math.min(64, Math.max(1, Number.parseInt(process.env.PIX_MAX_PARALLEL_RUNS ?? "8", 10) || 8));
     if ([...this.workers.values()].filter(w => w.work).length + (this.mainWork ? 1 : 0) >= limit)
       throw new Error(`${limit} branches are running. Stop one before starting another.`);
     const root = super.snapshot();
-    const onMain = !this.mainWork && !root.runtime.isStreaming && (input.nodeId === root.projection.activeNodeId || (!input.nodeId && !root.entries.some(e => e.type === "message")));
+    const onMain = !input.forceFork && !this.mainWork && !root.runtime.isStreaming && (input.nodeId === root.projection.activeNodeId || (!input.nodeId && !root.entries.some(e => e.type === "message")));
     if (onMain) {
       this.persist(() => durableWrite(intentFile, JSON.stringify({ ...input, state: "prepared" }) + "\n"));
       this.rootRunId = randomUUID();
@@ -583,19 +712,27 @@ export class GraphRuntime extends PiRuntime {
       return this.snapshot();
     }
     const parentId = node?.branchId ?? "main";
+    // Forking through an unhydrated branch loads its transcript first.
+    if (parentId !== "main") {
+      const source = graph.records.get(parentId);
+      if (source) this.hydrate(source);
+    }
     const parent = parentId === "main" ? root : this.workers.get(parentId)?.snapshot;
     if (!parent) throw new Error("Branch source is unavailable");
     const parentRecord = graph.records.get(parentId);
-    if (parentRecord && !parentRecord.error && !this.workers.get(parentId)?.work && parent.projection.activeNodeId
+    // The fork point can sit beyond the snapshot's bounded window; scan and
+    // copy the parent's full transcript, not the window the wire carries.
+    const parentEntries = this.fullEntriesOf(parentId, parent);
+    if (!input.forceFork && parentRecord && !parentRecord.error && !this.workers.get(parentId)?.work && parent.projection.activeNodeId
       && input.nodeId === `turn:${graph.canonical(parentRecord, parent.projection.activeNodeId.slice(5))}`) {
       parentRecord.requestId = input.requestId; parentRecord.request = input; parentRecord.runId = randomUUID();
       return this.launchBranch(parentRecord, input, node?.footer?.model ?? parent.runtime.model, node?.footer?.thinkingLevel ?? parent.runtime.thinkingLevel);
     }
-    const localLeaf = node ? parent.entries.find(e => (parentRecord ? graph.canonical(parentRecord, e.id) : e.id) === node.leafEntryId)?.id : null;
+    const localLeaf = node ? parentEntries.find(e => (parentRecord ? graph.canonical(parentRecord, e.id) : e.id) === node.leafEntryId)?.id : null;
     if (node && !localLeaf) throw new Error("Branch point was not found in source session");
     const pi = await this.pi();
     const sourceData: SessionData = parentId === "main" ? this.data(this) : {
-      header: { type: "session", version: 3, id: parent.session.id, cwd: this.cwd, timestamp: parent.session.created }, entries: parent.entries,
+      header: { type: "session", version: 3, id: parent.session.id, cwd: this.cwd, timestamp: parent.session.created }, entries: parentEntries,
     };
     const manager = pi.SessionManager.inMemory(this.cwd, undefined, structuredClone([sourceData.header, ...sourceData.entries]));
     if (localLeaf) manager.createBranchedSession(localLeaf);
@@ -614,7 +751,7 @@ export class GraphRuntime extends PiRuntime {
     const data: SessionData = { header: { ...manager.getHeader(), parentSession: parent.session.path },
       entries: trimInterturnOverrides(copied, localNode) };
     const inherited: Record<string, string> = {};
-    const sourceIds = new Set(parent.entries.map(e => e.id));
+    const sourceIds = new Set(parentEntries.map(e => e.id));
     for (const entry of data.entries) {
       if (!sourceIds.has(entry.id)) throw new Error("Copied history has no source identity");
       inherited[entry.id] = parentRecord ? graph.canonical(parentRecord, entry.id) : entry.id;
@@ -694,7 +831,14 @@ export class GraphRuntime extends PiRuntime {
         branchId: record.id, runId: record.runId, state: "settled" }) + "\n"));
     } catch (error) {
       record.status = "interrupted"; record.error = String(error);
-      try { worker.snapshot = worker.pi.snapshot(); await worker.pi.close(); } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
+      try {
+        // Retain the branch's full history, not the window the live snapshot
+        // carried: a windowed snapshot would truncate branchWindow, search
+        // and prompts for this branch until the next reopen.
+        const data = this.data(worker.pi);
+        await worker.pi.close();
+        worker.snapshot = this.fileSnapshot(record, data);
+      } catch (e) { debugLog("graph-runtime: worker close after failure", e); }
     } finally {
       worker.work = undefined;
       try { this.persist(() => graph.save(record)); }
@@ -703,13 +847,16 @@ export class GraphRuntime extends PiRuntime {
   }
   // Capture completed SDK entries in one synchronous turn. Streaming partial
   // tokens are not session records yet. No runtime is closed or source rewritten.
-  private exportSources() {
-    return [...this.graph!.records.values()].map(record => {
+  private async exportSources(records: Iterable<BranchRecord> = this.graph!.records.values()) {
+    const list = [...records];
+    // Export needs every source readable; hydrate before checking availability.
+    for (const record of list) this.hydrate(record);
+    return list.map(record => {
       const worker = this.workers.get(record.id);
       if (!worker?.snapshot) throw new Error(`Branch source unavailable: ${record.id}`);
-      return { record, data: worker.pi.runtime ? this.data(worker.pi) : {
-        header: record.header, entries: worker.snapshot.entries,
-      } };
+      // An idle snapshot can be a recovered prefix or checkpoint. Export only
+      // the strictly validated source, never silently substitute that preview.
+      return { record, data: worker.pi.runtime ? this.data(worker.pi) : readStrict(this.graph!.path(record.id)) };
     });
   }
   private runExportWorker(workerData: Record<string, unknown>) {
@@ -725,35 +872,72 @@ export class GraphRuntime extends PiRuntime {
       worker.once("exit", code => { if (!delivered) reject(new Error(`Export worker exited (${code})`)); });
     });
   }
-  private exportTree(input: Extract<AgentControl, { action: "exportHtml" }> | { action: "exportJsonl" }) {
+  private async exportTree(input: Extract<AgentControl, { action: "exportHtml" }> | { action: "exportJsonl" }) {
     const graph = this.graph;
     if (!graph || !this.runtime) throw new Error("Open a session before exporting");
     if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
       throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
-    const branches = this.exportSources();
+    const branches = await this.exportSources();
     const outputPath = input.action === "exportHtml" && input.outputPath
       ? resolve(this.cwd ?? ".", input.outputPath) : join(this.cwd ?? resolve(graph.main, ".."), `pix-tree-${randomUUID()}.${input.action === "exportHtml" ? "html" : "jsonl"}`);
     if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
     return this.runExportWorker({ main: graph.main, data: this.data(this), branches,
       leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: input.action === "exportHtml" });
   }
-  /** Copy the root-to-node path into a new standalone session; the graph itself stays untouched. */
-  private exportBranch(input: Extract<AgentControl, { action: "exportBranchSession" }>) {
+  /** Copy the selected conversation range into a new standalone graph. */
+  private async exportBranch(input: Extract<AgentControl, { action: "exportBranchSession" }>) {
     const graph = this.graph;
     if (!graph || !this.runtime) throw new Error("Open a session before exporting");
     if (input.graphId !== graph.main) throw new Error("Open the same graph before exporting");
-    if (graph.recoveryMessages.length || [...graph.records.values()].some(r => r.error))
-      throw new Error("Some source data needs recovery; export cancelled to avoid omitting data. Original files are retained.");
     const snapshot = this.snapshot();
     const node = snapshot.projection.nodes.find(n => n.id === input.nodeId);
     if (!node) throw new Error("Node no longer exists");
-    // The exported session ends at the selected node; anything after it stays
-    // behind in the original graph. A running turn has no complete records yet.
-    if (node.running) throw new Error("Wait for this turn to finish before exporting it");
+    const direction = input.direction ?? "descendants";
+    // Without origin metadata we cannot determine whether the hidden branch
+    // belongs to this subtree. Refuse rather than export an incomplete graph.
+    if (direction === "descendants" && graph.unavailableBranchMetadata.length)
+      throw new Error(`Branch metadata unavailable; export cancelled to avoid omitting descendants: ${graph.unavailableBranchMetadata.join(", ")}`);
+    const descendants = direction === "descendants" ? descendantIds(snapshot.projection.nodes, node.id) : new Set([node.id]);
+    if (snapshot.projection.nodes.some(node => descendants.has(node.id) && node.running)
+      || direction === "descendants" && snapshot.graph?.runs.some(run => run.status === "running" && run.pending?.parentNodeId
+        && descendants.has(run.pending.parentNodeId)))
+      throw new Error("Wait for all turns in this subtree to finish before exporting it");
+    // Compose only contributing sources, then cut the selected range in the
+    // worker. Unrelated branch errors do not veto this export.
+    const records = new Map<string, BranchRecord>();
+    const nodes = new Map(snapshot.projection.nodes.map(node => [node.id, node]));
+    const visited = new Set<string>();
+    for (const descendant of snapshot.projection.nodes) if (descendants.has(descendant.id) && descendant.branchId !== "main") {
+      const record = graph.records.get(descendant.branchId!);
+      if (record) records.set(record.id, record);
+    }
+    // A damaged descendant can be absent from the projection. Its fork still
+    // identifies it as required, so exportSources must refuse a missing source.
+    // The snapshot's entries are a bounded window; descendant detection
+    // needs the full merged history the runtime keeps in memory.
+    const rawDescendants = direction === "descendants" ? descendantIds(this.snapshotCache.fullHistory(), node.userEntryId) : new Set<string>();
+    for (const record of graph.records.values())
+      if (rawDescendants.has(record.forkEntryId)) records.set(record.id, record);
+    // Follow the current conversation path: deletion can reparent a branch
+    // while its origin record still names the original parent session.
+    for (let id: string | null = node.id; id;) {
+      const ancestor = nodes.get(id);
+      if (!ancestor || visited.has(id)) throw new Error(`Missing or cyclic export ancestor: ${id}`);
+      visited.add(id);
+      if (ancestor.branchId && ancestor.branchId !== "main") {
+        const record = graph.records.get(ancestor.branchId);
+        if (!record) throw new Error(`Branch source unavailable: ${ancestor.branchId}`);
+        records.set(record.id, record);
+      }
+      id = ancestor.parentId;
+    }
+    const branches = await this.exportSources(records.values());
     const outputPath = join(this.dir ?? dirname(graph.main), `pix-branch-${randomUUID()}.jsonl`);
     if (existsSync(outputPath)) throw new Error("Export destination already exists; choose a new file");
-    return this.runExportWorker({ main: graph.main, data: this.data(this), branches: this.exportSources(),
-      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: false, targetLeafId: node.leafEntryId });
+    return this.runExportWorker({ main: graph.main, data: this.data(this), branches,
+      leafId: this.runtime.session.sessionManager.getLeafId(), outputPath, html: false,
+      ...(direction === "ancestors" ? { targetLeafId: node.leafEntryId } : { rootEntryId: node.userEntryId }),
+      exportTitle: node.label || node.title });
   }
   override close(): Promise<void> {
     this.stopping = true;

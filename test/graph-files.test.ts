@@ -209,6 +209,38 @@ test("SDK usage and context edits survive branch persistence and export without 
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a refused replacement leaves no temp file behind", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-durable-write-"));
+  const file = join(dir, "value.json");
+  try {
+    durableWrite(file, "first\n");
+    durableWrite(file, "second\n");
+    assert.equal(readFileSync(file, "utf8"), "second\n");
+    assert.deepEqual(readdirSync(dir), ["value.json"]);
+    // A destination that cannot be replaced reports its own error, not litter.
+    rmSync(file); mkdirSync(file);
+    assert.throws(() => durableWrite(file, "third\n"));
+    assert.deepEqual(readdirSync(dir), ["value.json"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a checkpoint that cannot be refreshed leaves the branch usable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-checkpoint-locked-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    const data = { header: a.header, entries: [...initial.entries, user("turn", "root")] };
+    // A locked or otherwise unreplaceable checkpoint path must not fail the
+    // write that actually carries the conversation.
+    mkdirSync(graph.checkpointPath(a.id));
+    graph.create(a, data);
+    assert.deepEqual(graph.seal(a, data), data);
+    assert.equal(readFileSync(graph.path(a.id), "utf8"), encodeSession(data));
+    assert.deepEqual(readStrict(graph.path(a.id)), data);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("persistence checks use Pi JSON semantics but still reject changed or missing data", () => {
   const dir = mkdtempSync(join(tmpdir(), "pix-json-equality-"));
   const graph = new GraphFiles(join(dir, "main.jsonl"));
@@ -319,6 +351,34 @@ test("restart restores prepared branches and unfinished inputs without replaying
     assert.equal(graph.records.get("A")?.status, "interrupted");
     assert.equal(graph.recoveredInputs[0]?.text, "saved input");
     assert.deepEqual(parseStrict(readFileSync(graph.path("A"), "utf8")).entries, initial.entries);
+  } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("missing branch origins recover from backup or remain explicitly unavailable instead of disappearing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pix-missing-origin-"));
+  const graph = new GraphFiles(join(dir, "main.jsonl"));
+  try {
+    graph.acquire(); durableWrite(graph.main, encodeSession(initial));
+    const a = record("A");
+    graph.create(a, { header: a.header, entries: [...initial.entries, user("child", "root")] });
+    graph.save(a);
+    const origin = `${graph.path("A")}.origin.json`;
+    rmSync(origin);
+    const recovered = new GraphFiles(graph.main);
+    recovered.load();
+    assert.equal(recovered.records.has("A"), true);
+    assert.deepEqual(recovered.unavailableBranchMetadata, []);
+    assert.ok(existsSync(origin));
+
+    rmSync(origin); rmSync(`${origin}.bak`);
+    for (const checkpointOnly of [false, true]) {
+      if (checkpointOnly) rmSync(graph.path("A"));
+      const unavailable = new GraphFiles(graph.main);
+      unavailable.load({ readOnly: true });
+      assert.equal(unavailable.records.has("A"), false);
+      assert.deepEqual(unavailable.unavailableBranchMetadata, ["A.jsonl.origin.json"]);
+      assert.ok(existsSync(graph.checkpointPath("A")));
+    }
   } finally { graph.release(); rmSync(dir, { recursive: true, force: true }); }
 });
 

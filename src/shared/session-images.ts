@@ -6,13 +6,11 @@ import { createHash } from "node:crypto";
 export function sessionImageEncoder() {
   const sources = new WeakMap<RawSessionEntry[], { session: string; epoch?: string; entries: RawSessionEntry[]; images: Map<string, SessionImage[]> }>();
   const projections = new WeakMap<object, { source: object; projection: SessionSnapshot["projection"] }>();
-  function snapshot(value: SessionSnapshot): SessionSnapshot {
-    const session = value.session.path;
-    if (!session) return value;
-    let source = sources.get(value.entries);
-    if (!source || source.session !== session || source.epoch !== value.graph?.epoch) {
+  function entrySource(raw: RawSessionEntry[], session: string, epoch?: string) {
+    let source = sources.get(raw);
+    if (!source || source.session !== session || source.epoch !== epoch) {
       const images = new Map<string, SessionImage[]>();
-      const entries = value.entries.map(entry => {
+      const entries = raw.map(entry => {
         const message = entry.message as { content?: unknown } | undefined;
         if (!Array.isArray(message?.content)) return entry;
         let changed = false;
@@ -22,9 +20,9 @@ export function sessionImageEncoder() {
           changed = true;
           // Read-only sessions have no runtime epoch. Content identity prevents
           // a reopen or a different remote host from reusing stale image bytes.
-          const digest = value.graph?.epoch ? undefined : createHash("sha256").update(image.mimeType).update("\0").update(image.data).digest("hex");
+          const digest = epoch ? undefined : createHash("sha256").update(image.mimeType).update("\0").update(image.data).digest("hex");
           const reference: SessionImage = { type: "image", mimeType: image.mimeType, reference: {
-            session, entryId: entry.id, index, epoch: value.graph?.epoch, ...(digest ? { digest } : {}),
+            session, entryId: entry.id, index, epoch, ...(digest ? { digest } : {}),
           } };
           messageImages.push(reference);
           return reference;
@@ -33,9 +31,15 @@ export function sessionImageEncoder() {
         images.set(entry.id, messageImages);
         return { ...entry, message: { ...message, content } };
       });
-      source = { session, epoch: value.graph?.epoch, entries, images };
-      sources.set(value.entries, source);
+      source = { session, epoch, entries, images };
+      sources.set(raw, source);
     }
+    return source;
+  }
+  function snapshot(value: SessionSnapshot): SessionSnapshot {
+    const session = value.session.path;
+    if (!session) return value;
+    const source = entrySource(value.entries, session, value.graph?.epoch);
     const cached = projections.get(value.projection);
     let projection = cached?.source === source ? cached.projection : undefined;
     if (!projection) {
@@ -52,6 +56,12 @@ export function sessionImageEncoder() {
     const object = value as Record<string, unknown>;
     if (object.session && Array.isArray(object.entries) && object.projection && object.runtime)
       return snapshot(value as unknown as SessionSnapshot) as T;
+    if (typeof object.session === "string" && object.session && Array.isArray(object.entries)
+      && typeof object.hasEarlier === "boolean") {
+      const source = entrySource(object.entries as RawSessionEntry[], object.session,
+        typeof object.epoch === "string" ? object.epoch : undefined);
+      return { ...object, entries: source.entries } as T;
+    }
     if (object.current) return { ...object, current: encode(object.current) } as T;
     if (object.type === "sessions" && object.payload)
       return { ...object, payload: encode(object.payload) } as T;

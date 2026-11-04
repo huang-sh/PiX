@@ -135,3 +135,16 @@ test("image references preserve Windows, UNC and WSL paths without local filesys
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("paged history uses lazy image references with the same identity as snapshots", () => {
+  const original = snapshot(), encode = sessionImageEncoder();
+  const page = { session: original.session.path, epoch: original.graph!.epoch, entries: original.entries, hasEarlier: true };
+  const wire = encode(page);
+  assert.ok(JSON.stringify(wire).length < 5000);
+  assert.deepEqual(projectSession(wire.entries, "user").messages[0]!.images, encode(original).projection.messages[0]!.images);
+  assert.equal((original.entries[0]!.message as { content: unknown[] }).content[1], image);
+  assert.equal(encode(page).entries, wire.entries);
+  const readonly = encode({ ...page, epoch: undefined });
+  const ref = projectSession(readonly.entries, "user").messages[0]!.images![0]!;
+  assert.ok("reference" in ref && ref.reference.digest, "unversioned pages carry content identity");
+});

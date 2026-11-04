@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { entryAnchorForNode, needsPromptDisplayBoundary, projectSession, summarizeSession } from "../src/shared/session.js";
+import { entryAnchorForNode, needsPromptDisplayBoundary, projectSession, promptRecall, summarizeSession, windowEntries } from "../src/shared/session.js";
 import { createBranchMessageCache } from "../src/renderer/lib/session-view.js";
 import { GIT_BRANCH_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, type RawSessionEntry } from "../src/shared/types.js";
 test("history window matches the selected ancestry without including sibling turns", () => {
@@ -14,7 +14,7 @@ test("history window matches the selected ancestry without including sibling tur
   assert.equal(branch.messages.length, 2);
   assert.equal(branch.hasEarlier, false);
   assert.deepEqual(branch.messages, projectSession(entries, "u1999").messages);
-  assert.deepEqual(window(entries, null, 40), { messages: [], hasEarlier: false });
+  assert.deepEqual(window(entries, null, 40), { messages: [], hasEarlier: false, complete: true, missingParentId: null });
 });
 const e: RawSessionEntry[] = [
   {
@@ -497,4 +497,28 @@ test("node metrics aggregate only owned usage and end at the saved completion", 
   assert.equal(child.costs?.anthropic, null);
   assert.equal(child.usage?.output, 3);
   assert.equal(p.nodes.find(node => node.userEntryId === "sibling")!.metrics!.usage?.output, 500);
+});
+
+test("wire and rendered windows retain the first prompt's display metadata", () => {
+  const entries: RawSessionEntry[] = [
+    { type: "message", id: "old", parentId: null, timestamp: "1", message: { role: "user", content: "old" } },
+    { type: "custom", id: "display", parentId: "old", timestamp: "2", customType: PROMPT_DISPLAY_CUSTOM_TYPE, data: { text: "检查截图" } },
+    { type: "message", id: "image", parentId: "display", timestamp: "3", message: { role: "user", content: "model-only coordinate hint\n检查截图" } },
+    { type: "message", id: "latest", parentId: "image", timestamp: "4", message: { role: "user", content: "latest" } },
+  ];
+  const wire = windowEntries(entries, "latest", 2);
+  assert.deepEqual(wire.entries.map(entry => entry.id), ["display", "image", "latest"]);
+  const cache = createBranchMessageCache();
+  for (const source of [entries, wire.entries]) {
+    assert.equal(cache(source, "latest", 2).messages.find(message => message.entryId === "image")!.text, "检查截图");
+  }
+});
+
+test("prompt recall orders merged branches by time and only collapses consecutive duplicates", () => {
+  const user = (id: string, timestamp: string, content: string): RawSessionEntry =>
+    ({ type: "message", id, parentId: null, timestamp, message: { role: "user", content } });
+  assert.deepEqual(promptRecall([
+    user("main-old", "1", "again"), user("main-new", "4", "again"),
+    user("branch-old", "2", "middle"), user("branch-new", "3", "again"),
+  ]), ["again", "middle", "again"]);
 });

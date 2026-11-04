@@ -2,7 +2,7 @@ import type { DesktopEvent, DesktopRoute } from "./types.js";
 
 // Installers compare protocol and product version so outdated hosts are upgraded.
 export const PIX_REMOTE_PROTOCOL = 17;
-export const PIX_HOST_VERSION = "0.0.33";
+export const PIX_HOST_VERSION = "0.0.35";
 // Session snapshots and broker contexts include base64 images from prior turns.
 export const MAX_REMOTE_PAYLOAD = 128 * 1024 * 1024;
 
@@ -13,6 +13,9 @@ export const PROJECT_ROUTES = [
   "session.snapshot",
   "session.open",
   "session.stop",
+  "session.branchWindow",
+  "session.search",
+  "session.prompts",
   "session.rename",
   "session.delete",
   "usage.overview",

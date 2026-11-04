@@ -71,7 +71,9 @@ export function reduceAgentActivity(
   // A view may miss the start while a reused branch's new run is being
   // admitted. Cumulative progress must recover instead of being lost forever.
   if (!activity && (assistantEvent || toolEvent)) {
-    activity = { startedAt: new Date().toISOString(), pass: 1, active: true, items: [], partial: true };
+    // Output exists, so this pass's opening echo already happened before the
+    // view attached; a user message from here on is a steered turn.
+    activity = { startedAt: new Date().toISOString(), pass: 1, active: true, items: [], partial: true, promptEchoed: true };
   }
   if (type === "agent_start") {
     if (!activity || !activity.active) {
@@ -82,7 +84,10 @@ export function reduceAgentActivity(
         items: [],
       };
     }
-    return { ...activity, pass: activity.pass + 1 };
+    // An auto-retry or continuation begins a new pass over the same visible
+    // output, so the next user message on an empty pass is that pass's own
+    // opening echo, not a steer.
+    return { ...activity, pass: activity.pass + 1, promptEchoed: undefined };
   }
   if (!activity) return undefined;
   if (type === "agent_settled") {
@@ -91,6 +96,15 @@ export function reduceAgentActivity(
 
   const message = event.message;
   const role = record(message)?.role;
+  if (type === "message_start" && role === "user" && activity.active) {
+    // Pi echoes the pass's own opening prompt right after agent_start, before
+    // any user-visible output; any later user message in the same pass is
+    // steered in. Output from before the steer is already committed to the
+    // persisted history, so dropping it keeps the live view from rendering
+    // that output again under the new message.
+    if (!activity.promptEchoed && !activity.items.length) return { ...activity, promptEchoed: true };
+    return { startedAt: new Date().toISOString(), pass: activity.pass + 1, active: true, items: [], promptEchoed: true };
+  }
   if (type === "message_start" && role === "assistant") {
     const id = `assistant:${activity.pass}:${activity.items.length}`;
     return {

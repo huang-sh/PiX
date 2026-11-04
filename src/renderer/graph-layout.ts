@@ -140,12 +140,18 @@ export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new
   const row = new Map<string, number>();
   const seen = new Set<string>();
   const place = (seeds: T[]) => {
-    const stack = [...seeds].reverse().map((node) => ({ node, exit: false, height: size(node).height }));
+    const stack: Array<{ node: T; exit: boolean; height: number; anchor?: boolean }> = [...seeds].reverse().map((node) => ({ node, exit: false, height: size(node).height }));
     while (stack.length) {
-      const { node, exit, height } = stack.pop()!;
-      if (exit) {
+      const { node, exit, height, anchor } = stack.pop()!;
+      if (anchor) {
+        row.set(node.id, next + height / 2);
+        next += height + rg;
+      } else if (exit) {
+        if (row.has(node.id)) continue;
+        const descendants = children.get(node.id) ?? [];
+        const mainline = descendants.filter(child => !order.get(child.id));
         let min = Infinity, max = -Infinity;
-        for (const child of children.get(node.id) ?? []) {
+        for (const child of mainline.length ? mainline : descendants) {
           const r = row.get(child.id);
           if (r !== undefined) { min = Math.min(min, r); max = Math.max(max, r); }
         }
@@ -154,8 +160,15 @@ export function layoutGraph<T extends LayoutNode>(p: { nodes: T[] }, sizes = new
       } else if (!seen.has(node.id)) {
         seen.add(node.id);
         stack.push({ node, exit: true, height });
-        for (const child of [...(children.get(node.id) ?? [])].reverse())
-          stack.push({ node: child, exit: false, height: Math.max(height, size(child).height) });
+        const descendants = children.get(node.id) ?? [];
+        // Explicit branches leave the parent's continuation lane available,
+        // even when the first child is already a branch.
+        const reserveLane = descendants.length > 0 && descendants.every(child => order.get(child.id));
+        const before = descendants.filter(child => (order.get(child.id) ?? 0) < 0);
+        const after = descendants.filter(child => (order.get(child.id) ?? 0) >= 0);
+        for (const child of [...after].reverse()) stack.push({ node: child, exit: false, height: Math.max(height, size(child).height) });
+        if (reserveLane) stack.push({ node, exit: false, height, anchor: true });
+        for (const child of [...before].reverse()) stack.push({ node: child, exit: false, height: Math.max(height, size(child).height) });
       }
     }
   };

@@ -661,6 +661,7 @@ onMounted(() => {
         current: session.current,
         commands: session.commands,
         focusedNode: session.focusedNode,
+        windowAttempts: [...session.windowAttempts],
         layout: layout.layout,
         contentSection: layout.contentSection,
         contentTabs: layout.contentTabs,

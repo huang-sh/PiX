@@ -10,7 +10,9 @@ import type {
   ProjectGroup,
   ProjectInfo,
   PromptCustomization,
+  RawSessionEntry,
   SessionSnapshot,
+  SessionHistoryWindow,
   SessionSummary,
   SettingsBundle,
 } from "../shared/types.js";
@@ -21,7 +23,7 @@ import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js"
 import { canonicalPath, pixHome } from "./paths.js";
 import { ProviderBalanceService } from "./provider-balances.js";
 import { createHash } from "node:crypto";
-import { isSessionRunning, parseSessionJsonl, projectSession } from "../shared/session.js";
+import { isSessionRunning, parseSessionJsonl, projectSession, promptRecall, searchGraphNodeIds, validateHistoryWindow, windowEntries } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
@@ -95,6 +97,10 @@ export class MainController {
   private pendingAgentControls = new Map<string, number>();
   // Includes approval and remote forwarding before a shell process exists.
   private pendingShellRuns = new Set<symbol>();
+  private remoteImages?: {
+    client: WslHostClient; session: string; epoch?: string; source?: WeakRef<SessionSnapshot>; bytes: number;
+    entries: Map<string, { promise: Promise<RawSessionEntry | undefined>; bytes: number }>;
+  };
   private readonly promptConfiguration: { customization?: PromptCustomization };
   private readonly providerBalances: ProviderBalanceService;
   get hasPendingWork() { return this.pixie.busy || this.pendingAgentControls.size > 0 || this.pendingShellRuns.size > 0 || this.gitSwitches.size > 0; }
@@ -565,6 +571,17 @@ export class MainController {
       return decorate(files.list());
     }
   }
+  /** The snapshot a full-history read (paging, search, recall) falls back to
+   * when no runtime serves the session: the view's own snapshot or a session
+   * entry's read-only one. A live window whose runtime is gone cannot answer
+   * those reads — serving it would fabricate the end of history — so it counts
+   * as not open and the caller keeps its state and retries. */
+  private readableSnapshotOf(session: string, entry?: SessionEntry): SessionSnapshot {
+    const snapshot = this.current?.session.path === resolve(session) ? this.current
+      : entry ? this.registry.snapshotOf(entry) : undefined;
+    if (snapshot?.entriesComplete) return snapshot;
+    throw new Error("Session is not open");
+  }
   fallback(path: string, files = this.files, warn?: (message: string) => void): SessionSnapshot {
     const x = files.read(path),
       summary = files.list().find((s) => s.path === resolve(path)) ?? {
@@ -611,7 +628,62 @@ export class MainController {
       if (error) graph.recoveryMessages.push(`Branch ${record.id} unavailable: ${error}`);
     }
     if (graph.recoveryMessages.length) warn?.(`Read-only graph: ${graph.recoveryMessages.join("; ")}`);
-    return { ...snapshot, ...cache.view(snapshot, new Set()) };
+    // A read-only view has no runtime to serve subsequent history reads. Keep
+    // every canonical branch entry, not the live view's main-line wire window.
+    return { ...snapshot, ...cache.view(snapshot, new Set(), new Set()), entries: cache.fullHistory(), entriesComplete: true };
+  }
+  /** Older hosts expose image bytes through history pages. Share that read
+   * across thumbnails/full-size views and all images in the same message. */
+  private async remoteImageEntry(snapshot: SessionSnapshot, entryId: string) {
+    const client = this.wsl!;
+    const sameHistory = (other?: SessionSnapshot) => other?.session.path === snapshot.session.path
+      && (snapshot.graph?.epoch ? other.graph?.epoch === snapshot.graph.epoch : other === snapshot);
+    let cache = this.remoteImages;
+    const epoch = snapshot.graph?.epoch;
+    if (!cache || cache.client !== client || cache.session !== snapshot.session.path || cache.epoch !== epoch
+      || (!epoch && cache.source?.deref() !== snapshot))
+      this.remoteImages = cache = { client, session: snapshot.session.path, epoch,
+        source: epoch ? undefined : new WeakRef(snapshot), bytes: 0, entries: new Map() };
+    const valid = () => this.wsl === client && sameHistory(this.current);
+    let item = cache.entries.get(entryId);
+    if (item) { cache.entries.delete(entryId); cache.entries.set(entryId, item); }
+    else {
+      const target = cache;
+      const trim = () => {
+        while (target.bytes > 48 * 1024 * 1024 || target.entries.size > 128) {
+          const key = target.entries.keys().next().value!;
+          target.bytes -= target.entries.get(key)!.bytes;
+          target.entries.delete(key);
+        }
+      };
+      item = { bytes: 0, promise: Promise.resolve(undefined) };
+      const pending = item;
+      item.promise = this.pool.invokeWsl("session.branchWindow", {
+        session: snapshot.session.path, leafId: entryId, limit: 1, bytes: 4 << 20,
+      }).then(value => {
+        const page = value as SessionHistoryWindow;
+        validateHistoryWindow(page, snapshot.session.path, snapshot.graph?.epoch);
+        if (!valid())
+          throw new Error("Session changed; reopen the image");
+        const record = page.entries.find(entry => entry.id === entryId);
+        if (target.entries.get(entryId) === pending) {
+          pending.bytes = record ? JSON.stringify(record).length * 2 : 0;
+          target.bytes += pending.bytes;
+          // Evict settled data as well as bounding the number of pending reads.
+          trim();
+          if (!record) target.entries.delete(entryId);
+        }
+        return record;
+      }).catch(error => {
+        if (target.entries.get(entryId) === pending) target.entries.delete(entryId);
+        throw error;
+      });
+      cache.entries.set(entryId, item);
+      trim();
+    }
+    const record = await item.promise;
+    if (!valid()) throw new Error("Session changed; reopen the image");
+    return record;
   }
   invoke(route: DesktopRoute, raw?: unknown, sessionPath?: string): Promise<unknown> {
     if (route !== "shell.run") return this.invokeRoute(route, raw, sessionPath);
@@ -630,20 +702,50 @@ export class MainController {
       return this.dialogs.respond(String(v.id), v.value as string | undefined);
     }
     if (route === "ui.pending") return [...this.dialogs.list(), ...await this.pool.pendingDialogs()];
+    if (this.wsl && (route === "session.branchWindow" || route === "session.search" || route === "session.prompts"))
+      return this.pool.invokeWsl(route, v);
     if (route === "session.image") {
       // Read only already-opened snapshots, including cached remote images.
       // Look up the entry by ID so deletion cannot make an old index show a different image.
       const current = this.current?.session.path === v.session ? this.current : undefined;
-      const entry = current ? undefined : this.entryFor(String(v.session))?.entry;
+      const entry = current ? this.activeEntry() : this.entryFor(String(v.session))?.entry;
       const snapshot = current ?? (entry ? this.registry.snapshotOf(entry) : undefined);
       if (!snapshot) throw new Error("Image unavailable; reopen the session and try again");
       if (v.epoch && snapshot.graph?.epoch !== v.epoch) throw new Error("Session changed; reopen the image");
-      const message = snapshot.entries.find(entry => entry.id === v.entryId)?.message as { content?: unknown } | undefined;
+      // The snapshot's entries are a bounded window; the runtime holds the rest.
+      let record = entry?.runtime?.entryById(String(v.entryId))
+        ?? snapshot.entries.find(item => item.id === v.entryId);
+      if (!record && current && this.wsl) record = await this.remoteImageEntry(snapshot, String(v.entryId));
+      const message = record?.message as { content?: unknown } | undefined;
       const image = Array.isArray(message?.content) ? message.content[Number(v.index)] : undefined;
       if (!isPromptImage(image)) throw new Error("Image unavailable; reopen the session and try again");
       if (v.digest && v.digest !== createHash("sha256").update(image.mimeType).update("\0").update(image.data).digest("hex"))
         throw new Error("Image changed; reopen the image");
       return image;
+    }
+    if (route === "session.branchWindow") {
+      const leafId = typeof v.leafId === "string" ? v.leafId : null;
+      const entry = this.entryFor(String(v.session))?.entry
+        ?? (this.current?.session.path === resolve(String(v.session)) ? this.activeEntry() : undefined);
+      const byteLimit = typeof v.bytes === "number" ? v.bytes : undefined;
+      if (entry?.runtime) return entry.runtime.branchWindow(leafId, Number(v.limit), byteLimit);
+      // A read-only fallback keeps its full entries; window them the same way.
+      const snapshot = this.readableSnapshotOf(String(v.session), entry);
+      return { ...windowEntries(snapshot.entries, leafId, Number(v.limit), byteLimit),
+        session: snapshot.session.path, epoch: snapshot.graph?.epoch };
+    }
+    if (route === "session.search") {
+      const entry = this.entryFor(String(v.session))?.entry
+        ?? (this.current?.session.path === resolve(String(v.session)) ? this.activeEntry() : undefined);
+      if (entry?.runtime) return { nodeIds: entry.runtime.searchEntries(String(v.query)) };
+      const snapshot = this.readableSnapshotOf(String(v.session), entry);
+      return { nodeIds: searchGraphNodeIds(snapshot.projection, snapshot.entries, String(v.query)) };
+    }
+    if (route === "session.prompts") {
+      const entry = this.entryFor(String(v.session))?.entry
+        ?? (this.current?.session.path === resolve(String(v.session)) ? this.activeEntry() : undefined);
+      if (entry?.runtime) return { prompts: entry.runtime.promptRecall() };
+      return { prompts: promptRecall(this.readableSnapshotOf(String(v.session), entry).entries) };
     }
     const request = ["session.open", "remote.disconnect", "wsl.disconnect"].includes(route) || (route === "agent.control" && v.action === "newSession")
       ? ++this.viewRequest : this.viewRequest;
@@ -1151,7 +1253,7 @@ export class MainController {
         if (!runtime) throw new Error("No Pi session open");
         const snapshot = runtime.snapshot();
         if (snapshot.session.path !== v.session) throw new Error("Session changed; reopen the file change");
-        return readFileChange(snapshot.session.path, snapshot.entries, String(v.ref));
+        return readFileChange(snapshot.session.path, runtime.fullEntries(), String(v.ref));
       }
       case "shell.run": {
         const command = String(v.command);

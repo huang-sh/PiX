@@ -113,3 +113,85 @@ test("marks a failed assistant message with its error detail", () => {
   assert.equal(failed?.errorMessage, '401: {"message":"Authentication Fails"}');
   assert.equal(activity?.currentAssistantId, undefined);
 });
+
+test("user messages count as new passes only when steered in after the opening echo", () => {
+  // Pi 1.5.0 echoes the prompt right after agent_start: the pass's first
+  // user message, never a steer.
+  let activity = reduceAgentActivity(undefined, { type: "agent_start" });
+  activity = reduceAgentActivity(activity, { type: "message_start", message: { role: "system", content: [] } });
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "regular prompt" }] },
+  });
+  assert.equal(activity?.pass, 1);
+  assert.equal(activity?.promptEchoed, true);
+  // A steer in the gap before any output still begins a new visible turn.
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "gap steer" }] },
+  });
+  assert.equal(activity?.pass, 2);
+  assert.equal(activity?.items.length, 0);
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "assistant", content: [{ type: "text", text: "answer" }] },
+  });
+  assert.equal(activity?.items[0]!.pass, 2);
+  // The next run's agent_start resets the pass and the echo marker.
+  activity = reduceAgentActivity(activity, { type: "agent_settled" });
+  activity = reduceAgentActivity(activity, { type: "agent_start" });
+  assert.equal(activity?.pass, 1);
+  assert.equal(activity?.promptEchoed, undefined);
+  // An auto-retry's agent_start bumps the pass and keeps the visible output.
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "assistant", content: [{ type: "text", text: "partial answer" }] },
+  });
+  activity = reduceAgentActivity(activity, { type: "agent_start" });
+  assert.equal(activity?.pass, 2);
+  assert.equal(activity?.items.length, 1);
+});
+
+test("a view attached mid-run counts a following user message as steered", () => {
+  let activity = reduceAgentActivity(undefined, {
+    type: "message_start",
+    message: { role: "assistant", content: [{ type: "text", text: "already streaming" }] },
+  });
+  assert.equal(activity?.partial, true);
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "late steer" }] },
+  });
+  assert.equal(activity?.pass, 2);
+});
+
+test("a mid-run user message starts a fresh live view for the new turn", () => {
+  let activity = reduceAgentActivity(undefined, { type: "agent_start" });
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "opening prompt" }] },
+  });
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "assistant", content: [{ type: "toolCall", id: "a", name: "toolA" }] },
+  });
+  for (const [id, name] of [["a", "toolA"], ["b", "toolB"], ["c", "toolC"]] as const) {
+    activity = reduceAgentActivity(activity, { type: "tool_execution_start", toolCallId: id, toolName: name, args: {} });
+    activity = reduceAgentActivity(activity, { type: "tool_execution_end", toolCallId: id, result: { content: [] }, isError: false });
+  }
+  // The steered user message lands between tool c and tool d.
+  activity = reduceAgentActivity(activity, {
+    type: "message_start",
+    message: { role: "user", content: [{ type: "text", text: "urgent steer" }] },
+  });
+  assert.equal(activity?.active, true);
+  assert.equal(activity?.items.length, 0);
+  assert.equal(activity?.pass, 2);
+  activity = reduceAgentActivity(activity, {
+    type: "tool_execution_start", toolCallId: "d", toolName: "toolD", args: {},
+  });
+  assert.deepEqual(
+    activity?.items.map(item => (item as { title?: string }).title),
+    ["toolD"],
+  );
+});

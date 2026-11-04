@@ -1,20 +1,39 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { GraphRuntime } from "../src/main/graph-runtime.js";
+import type { RawSessionEntry } from "../src/shared/types.js";
+
+/** Snapshots carry the main line's window; branch history arrives via branchWindow. */
+function allRuntimeEntries(runtime: GraphRuntime): RawSessionEntry[] {
+  const snapshot = runtime.snapshot();
+  const merged = new Map(snapshot.entries.map(entry => [entry.id, entry]));
+  const branches = new Set(snapshot.projection.nodes.map(node => node.branchId).filter(id => id && id !== "main"));
+  for (const id of branches) {
+    // Walk from each branch's newest node so the window covers its whole line.
+    const leaf = snapshot.projection.nodes.filter(node => node.branchId === id).at(-1)!.leafEntryId;
+    for (const entry of runtime.branchWindow(leaf, 500).entries) merged.set(entry.id, entry);
+  }
+  return [...merged.values()];
+}
 import { GraphFiles, durableWrite, encodeSession, parseStrict, type BranchRecord } from "../src/main/graph-files.js";
+import { readFileChange } from "../src/main/file-changes.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
+import { projectSession, SNAPSHOT_TURN_LIMIT } from "../src/shared/session.js";
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(r => setTimeout(r, 20)); }
   throw new Error("Timed out waiting for graph state");
 }
 
-test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 30000 }, async t => {
+// The parent budget covers 21 sequential subtests that each open a runtime;
+// under the full suite's parallel load their cumulative duration passes 30s.
+test("admitted prompts stay pending and busy throughout startup and model configuration", { timeout: 60000 }, async t => {
   for (const stage of ["startup", "model", "model failure", "startup abort", "model abort", "open abort", "startup direct abort", "model direct abort"]) for (const target of ["main", "branch", "continuation"]) {
     if (stage === "open abort" && target === "main") continue;
     if (stage.includes("direct") && target !== "main") continue;
@@ -115,17 +134,17 @@ test("admitted prompts stay pending and busy throughout startup and model config
           const node = snapshot.projection.nodes.find(node => node.id === run.nodeId)!;
           assert.equal(node.title, "pending question");
           assert.equal(node.parentId, parentId);
-          assert.match(JSON.stringify(snapshot.entries), /new reply/);
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /new reply/);
         }
         if (cancelled) {
           assert.ok(!snapshot.projection.nodes.some(node => node.title === "pending question"));
-          assert.ok(!JSON.stringify(snapshot.entries).includes("new reply"), "no model call may start after stop");
+          assert.ok(!JSON.stringify(allRuntimeEntries(runtime)).includes("new reply"), "no model call may start after stop");
           block = false;
           faux.setResponses([fauxAssistantMessage("after cancellation")]);
           await runtime.control({ action: "promptAt", requestId: "after-stop", nodeId: parentId,
             text: "fresh question", provider: "faux", modelId: "test" });
           await until(() => !runtime.busy);
-          assert.match(JSON.stringify(runtime.snapshot().entries), /after cancellation/);
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /after cancellation/);
         }
       } finally {
         release();
@@ -252,6 +271,110 @@ test("manual compaction cannot change a completed turn's timing or block later p
     await prompt("after-reopen", "Continue after reopening");
     assert.equal(runtime.needsReopen, false);
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.preview.includes("Reply to after-reopen")));
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a closed session's parked manager serves its unchanged reopen", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-parked-manager-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: runtime.snapshot().projection.activeNodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("one", "first question");
+    const manager = runtime.runtime!.session.sessionManager;
+    const path = runtime.snapshot().session.path;
+    await runtime.close();
+    const reopened = await runtime.open(path);
+    assert.ok(reopened.entries.length > 0);
+    assert.equal(runtime.runtime!.session.sessionManager, manager,
+      "an unchanged file must reopen through its parked manager instead of re-parsing");
+    await prompt("two", "second question");
+    assert.ok(runtime.snapshot().projection.nodes.some(node => node.preview.includes("Reply to two")));
+  } finally {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a large graph streams branch transcripts after the open snapshot", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-lazy-branches-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  runtime["lazyBranchBytes"] = 0;
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  runtime["sessionServicesOptions"] = (pi, cwd) => ({ cwd, agentDir: home,
+    settingsManager: pi.SettingsManager.inMemory({}),
+    resourceLoaderOptions: { noExtensions: true },
+  });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  const prompt = async (requestId: string, text: string, nodeId?: string | null) => {
+    faux.setResponses([fauxAssistantMessage(`Reply to ${requestId}`)]);
+    await runtime.control({ action: "promptAt", requestId, nodeId: nodeId === undefined ? runtime.snapshot().projection.activeNodeId : nodeId,
+      text, provider: "faux", modelId: "test" });
+    await until(() => !runtime.busy);
+  };
+  try {
+    await runtime.create();
+    await prompt("first", "first question");
+    await prompt("branch-1", "branch question", null);
+    const path = runtime.snapshot().session.path;
+    const branchId = runtime.snapshot().graph!.runs.find(run => run.requestId === "branch-1")!.branchId;
+    const branchLeaf = runtime.snapshot().projection.nodes.find(node => node.branchId === branchId)!.leafEntryId;
+    assert.notEqual(branchId, "main");
+    await runtime.close();
+    const opened = await runtime.open(path);
+    assert.equal(opened.graph!.branchCount, 1, "unloaded branches still make the graph nonempty");
+    assert.equal(opened.graph!.runs.some(run => run.branchId === branchId), false,
+      "the open snapshot must carry only the main line");
+    const requested = runtime.branchWindow(branchLeaf, 40);
+    assert.ok(requested.entries.some(entry => entry.id === branchLeaf), "paging hydrates the requested source before background loading runs");
+    await until(() => runtime.snapshot().graph!.runs.some(run => run.branchId === branchId));
+    const branchNode = runtime.snapshot().projection.nodes.find(node => node.branchId === branchId);
+    assert.ok(branchNode, "the hydrated branch must join the graph");
+    await prompt("branch-2", "follow-up", branchNode.id);
+    assert.ok(runtime.snapshot().graph!.runs.some(run => run.requestId === "branch-2"),
+      "forking from a hydrated branch must work");
+    await prompt("nested-branch", "nested question", branchNode.id);
+    const childRun = runtime.snapshot().graph!.runs.find(run => run.requestId === "nested-branch")!;
+    assert.notEqual(childRun.branchId, branchId);
+    const childLeaf = runtime.snapshot().projection.nodes.find(node => node.id === childRun.nodeId)!.leafEntryId;
+    // Directory order can hydrate a child before its parent after a cold open.
+    runtime["workers"].get(branchId)!.snapshot = undefined;
+    runtime.snapshot();
+    assert.equal(runtime["snapshotCache"].entriesById.has(branchNode.userEntryId), false);
+    assert.ok(runtime.branchWindow(childLeaf, 40).entries.some(entry => entry.id === branchNode.userEntryId),
+      "a page must hydrate missing ancestor sources too");
   } finally {
     await runtime.close();
     if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
@@ -405,7 +528,7 @@ test("broker model preflight respects cancellation before a prompt starts", { ti
           faux.setResponses([fauxAssistantMessage("reply after stop")]);
           await runtime.control({ action: "promptAt", requestId: "after-broker-stop", nodeId: null, text: "fresh question" });
           await until(() => !runtime.busy);
-          assert.match(JSON.stringify(runtime.snapshot().entries), /reply after stop/);
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /reply after stop/);
         }
       }
     } finally {
@@ -519,14 +642,14 @@ test("restart can continue main and branch turns left without a reply or tool re
           assert.equal(node.running, false);
           assert.equal(node.forkable, true, "the restored turn must unlock the composer and pass promptAt admission");
           if (branch) assert.equal(restored.graph!.runs.find(run => run.branchId === "crashed")?.status, "interrupted");
-          const retained = structuredClone(restored.entries);
+          const retained = structuredClone(allRuntimeEntries(runtime));
           faux.setResponses([fauxAssistantMessage("continued after restart")]);
           await runtime.control({ action: "promptAt", requestId: "followup", nodeId, text: "continue", provider: "faux", modelId: "test" });
           await until(() => !runtime.busy);
-          const continued = runtime.snapshot();
-          assert.match(JSON.stringify(continued.entries), /continued after restart/);
-          for (const entry of retained) assert.deepEqual(continued.entries.find(value => value.id === entry.id), entry);
-          assert.ok(continued.projection.nodes.some(node => node.title === "continue" && node.parentId === nodeId));
+          assert.match(JSON.stringify(allRuntimeEntries(runtime)), /continued after restart/);
+          const all = allRuntimeEntries(runtime);
+          for (const entry of retained) assert.deepEqual(all.find(value => value.id === entry.id), entry);
+          assert.ok(runtime.snapshot().projection.nodes.some((node: { title?: string; parentId?: string | null }) => node.title === "continue" && node.parentId === nodeId));
           assert.ok(!JSON.stringify(events).includes('"tool_execution_start"'), "old tool calls must not be replayed");
           await runtime.close();
           assert.equal((await runtime.open(path)).projection.nodes.find(node => node.id === nodeId)?.forkable, true);
@@ -574,7 +697,7 @@ test("interrupted turns resume and retain native bookmarks across branches, rest
     await runtime.control({ action: "promptAt", requestId: "followup", nodeId: target, text: "second", provider: "faux", modelId: "test" });
     await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "second")
       && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
-    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after interrupt"));
+    assert.ok(JSON.stringify(allRuntimeEntries(runtime)).includes("after interrupt"));
 
     let branchStarted = false;
     faux.setResponses([
@@ -600,7 +723,7 @@ test("interrupted turns resume and retain native bookmarks across branches, rest
       text: "branch second", provider: "faux", modelId: "test" });
     await until(() => runtime.snapshot().projection.nodes.some(node => node.title === "branch second")
       && runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
-    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("branch after interrupt"));
+    assert.ok(JSON.stringify(allRuntimeEntries(runtime)).includes("branch after interrupt"));
     const tree = runtime.snapshot(), path = tree.session.path;
     const main = tree.projection.nodes.find(node => node.title === "first")!;
     const label = async (entryId: string, value?: string) => runtime.control({ action: "setLabel", entryId, label: value }) as Promise<SessionSnapshot>;
@@ -688,7 +811,7 @@ test("failed persistence after abort blocks writes until the graph is reopened",
     await runtime.control({ action: "promptAt", requestId: "recovered", nodeId: runtime.snapshot().projection.activeNodeId,
       text: "safe again", provider: "faux", modelId: "test" });
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
-    assert.ok(JSON.stringify(runtime.snapshot().entries).includes("after reopen"));
+    assert.ok(JSON.stringify(allRuntimeEntries(runtime)).includes("after reopen"));
     const failedCursor = t.mock.method(runtime.graph!, "saveLeaf", () => { throw new Error("simulated cursor EIO"); });
     await assert.rejects(runtime.close(), /simulated cursor EIO/);
     assert.equal(runtime.graph, undefined, "a failed close releases graph ownership");
@@ -754,6 +877,7 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
       return t.mock.method(worker.pi, "close", async () => { closing++; await closeGate; await close(); });
     });
     const remove = t.mock.method(runtime.graph!, "deleteNode");
+    const beforeDeletion = runtime.snapshot();
     const deletion = runtime.control({ action: "deleteNode", graphId, nodeId: a2 });
     try {
       await until(() => closing === workers.length);
@@ -764,6 +888,10 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
       closes.forEach(close => close.mock.restore());
       remove.mock.restore();
     }
+    assert.notEqual(runtime.snapshot().graph!.epoch, beforeDeletion.graph!.epoch, "deletion invalidates every client's history pool");
+    assert.equal(broadcast?.graph?.epoch, runtime.snapshot().graph!.epoch, "other clients receive the new epoch too");
+    const afterDeletionEpoch = runtime.snapshot().graph!.epoch;
+    assert.equal((await runtime.open(graphId)).graph!.epoch, afterDeletionEpoch, "an unchanged open keeps its epoch");
     assert.deepEqual(runtime.runtime.session.getActiveToolNames(), ["read"]);
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === a));
     assert.ok(runtime.snapshot().projection.nodes.some(node => node.id === b));
@@ -789,7 +917,9 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     const exported = await runtime.control({ action: "exportJsonl" }) as { path: string };
     assert.ok(!readFileSync(exported.path, "utf8").includes("DELETE_"));
     const ids = runtime.snapshot().projection.nodes.map(node => node.id).sort();
+    const beforeReopen = runtime.snapshot().graph!.epoch;
     await runtime.close(); await runtime.open(graphId);
+    assert.notEqual(runtime.snapshot().graph!.epoch, beforeReopen, "a reloaded history must not reuse the old pool");
     assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.id).sort(), ids);
     await retryOldRequests();
     const mainNode = runtime.snapshot().projection.nodes.find(node => node.title === "main")!;
@@ -840,6 +970,46 @@ test("permanent node deletion preserves tools and deduplication, and recovers fa
     assert.deepEqual(runtime.runtime.session.getActiveToolNames(), ["read"]);
   } finally {
     release?.(); await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+test("exports carry stored file-change diffs", { timeout: 20000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-export-diffs-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
+    faux.setResponses([fauxAssistantMessage("done")]);
+    await runtime.control({ action: "prompt", text: "change a file" });
+    await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+    // Drive the real write tool through the same agent hooks a live run uses,
+    // so the file-changes extension appends its entry and snapshot.
+    writeFileSync(join(cwd, "a.txt"), "before\n");
+    const toolCall = { id: randomUUID(), name: "write", arguments: { path: "a.txt", content: "after\n" } };
+    await runtime.runtime.session.agent.beforeToolCall({ toolCall, args: toolCall.arguments });
+    const result = await (await runtime.pi()).createWriteTool(cwd).execute(toolCall.id, toolCall.arguments);
+    await runtime.runtime.session.agent.afterToolCall({ toolCall, args: toolCall.arguments, result, isError: false });
+    const snapshot = runtime.snapshot();
+    const change = snapshot.projection.nodes.at(-1)!.fileChanges![0]!;
+    const exported = await runtime.control({ action: "exportJsonl" }) as { path: string };
+    const entries = parseStrict(readFileSync(exported.path, "utf8")).entries;
+    assert.equal(await readFileChange(exported.path, entries, change.ref),
+      await readFileChange(snapshot.session.path, snapshot.entries, change.ref));
+    assert.match(await readFileChange(exported.path, entries, change.ref), /\+after/);
+  } finally {
+    await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });
@@ -946,7 +1116,7 @@ test("independent branches persist without merging; export during a run preserve
     rmSync(home, { recursive: true, force: true });
   }
 });
-test("branch export copies a root-to-node path into a standalone session without touching the graph", { timeout: 30000 }, async () => {
+test("branch export copies a node and all descendants into a standalone graph without touching the source", { timeout: 60000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-export-branch-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
@@ -966,13 +1136,14 @@ test("branch export copies a root-to-node path into a standalone session without
     await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
     async function turn(requestId: string, nodeId: string | null, text: string, answer: string) {
       faux.setResponses([fauxAssistantMessage(answer)]);
-      await runtime.control({ action: "promptAt", requestId, nodeId, text, provider: "faux", modelId: "test" });
+      await runtime.control({ action: "promptAt", requestId, nodeId, text, provider: "faux", modelId: "test",
+        ...(requestId === "a" ? { promptOverride: { mode: "append" as const, name: "reviewer", text: "Review carefully" } } : {}) });
       await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
       return runtime.snapshot().projection.nodes.find(node => node.title === text)!.id;
     }
     const root = await turn("root", null, "root prompt", "root answer");
     // Advance main past the root so prompts at the historical root fork parallel branches.
-    await turn("main", root, "main question", "main answer");
+    const main = await turn("main", root, "main question", "main answer");
     const a = await turn("a", root, "A question", "A answer");
     const a2 = await turn("a-next", a, "A next question", "A next answer");
     const b = await turn("b", a, "B question", "B answer");
@@ -983,27 +1154,45 @@ test("branch export copies a root-to-node path into a standalone session without
 
     await assert.rejects(runtime.control({ action: "exportBranchSession", graphId: "other", nodeId: a2 }), /same graph/);
     await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: "turn:gone" }), /no longer exists/);
-    // Any node exports its root-to-node path; the turns after it stay behind.
+    // The selected node becomes the root; every following branch stays connected.
     const midExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a }) as { path: string };
     const midRaw = readFileSync(midExport.path, "utf8");
-    assert.ok(midRaw.includes("root prompt") && midRaw.includes("A answer"));
-    for (const text of ["A next question", "B question", "main question"]) assert.ok(!midRaw.includes(text), text);
+    for (const text of ["A question", "A answer", "A next question", "B question"]) assert.ok(midRaw.includes(text), text);
+    for (const text of ["root prompt", "root answer", "main question"]) assert.ok(!midRaw.includes(text), text);
+    const midData = parseStrict(midRaw);
+    const midProjection = projectSession(midData.entries, midData.entries.at(-1)!.id);
+    assert.equal(midProjection.nodes.find(node => node.title === "A question")!.parentId, null);
+    assert.equal(midProjection.nodes.find(node => node.title === "A question")!.promptOverride?.name, "reviewer");
+    for (const title of ["A next question", "B question"])
+      assert.equal(midProjection.nodes.find(node => node.title === title)!.parentId, a);
+    const beforeExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    const beforeData = parseStrict(readFileSync(beforeExport.path, "utf8"));
+    const beforeManager = SessionManager.inMemory(cwd, undefined, [beforeData.header, ...beforeData.entries] as any);
+    assert.deepEqual(projectSession(beforeData.entries, beforeManager.getLeafId()).nodes.map(n => n.title), ["root prompt", "A question"]);
+    const afterManager = SessionManager.inMemory(cwd, undefined, [midData.header, ...midData.entries] as any);
+    assert.equal(projectSession(beforeData.entries, beforeManager.getLeafId()).nodes.at(-1)!.promptOverride?.name, "reviewer");
+    assert.match(beforeManager.getSessionName()!, /^↑ [a-f0-9]{6} · A question$/);
+    assert.match(afterManager.getSessionName()!, /^↓ [a-f0-9]{6} · A question$/);
+    const repeatExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    assert.notEqual(SessionManager.open(repeatExport.path).getSessionName()!.slice(0, 8), beforeManager.getSessionName()!.slice(0, 8),
+      "repeated exports remain distinguishable when the session list truncates long titles");
+
     const rootExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: root }) as { path: string };
     const rootRaw = readFileSync(rootExport.path, "utf8");
     assert.ok(rootRaw.includes("root answer"));
-    assert.ok(!rootRaw.includes("A question") && !rootRaw.includes("main question"));
+    for (const text of ["A question", "A next question", "B question", "main question"]) assert.ok(rootRaw.includes(text), text);
 
     const exported = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a2 }) as { path: string };
     const raw = readFileSync(exported.path, "utf8");
     assert.ok(exported.path.startsWith(sessions), "the exported session lands in the session directory");
-    for (const text of ["root prompt", "root answer", "A question", "A answer", "A next question", "A next answer"])
+    for (const text of ["A next question", "A next answer"])
       assert.ok(raw.includes(text), text);
-    for (const text of ["main question", "B question", "B answer"]) assert.ok(!raw.includes(text), text);
+    for (const text of ["root prompt", "root answer", "A question", "A answer", "main question", "B question", "B answer"]) assert.ok(!raw.includes(text), text);
     const parsed = parseStrict(raw);
     assert.notEqual(parsed.header.id, parseStrict(graphBefore).header.id);
     assert.equal(parsed.header.parentSession, graphId);
     const manager = SessionManager.inMemory(cwd, undefined, [parsed.header, ...parsed.entries] as any);
-    assert.equal(manager.getTree().length, 1, "the exported path is one linear branch");
+    assert.equal(manager.getTree().length, 1, "the exported leaf is a standalone turn");
     assert.equal(readFileSync(graphId, "utf8"), graphBefore);
     assert.equal(runtime.graph!.records.size, recordsBefore);
     assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.id).sort(), nodesBefore);
@@ -1011,7 +1200,7 @@ test("branch export copies a root-to-node path into a standalone session without
     const exportedB = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
     const rawB = readFileSync(exportedB.path, "utf8");
     assert.ok(rawB.includes("B answer"));
-    assert.ok(!rawB.includes("A next question"));
+    for (const text of ["root prompt", "A question", "A next question"]) assert.ok(!rawB.includes(text), text);
 
     faux.setResponses([async () => { await new Promise<void>(r => { releaseHeld = r; }); return fauxAssistantMessage("held answer"); }]);
     await runtime.control({ action: "promptAt", requestId: "held", nodeId: a2, text: "held question", provider: "faux", modelId: "test" });
@@ -1020,25 +1209,315 @@ test("branch export copies a root-to-node path into a standalone session without
       return run?.status === "running" && Boolean(run.nodeId);
     });
     const held = runtime.snapshot().graph!.runs.find(r => r.requestId === "held")!;
-    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /Wait for this turn/);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId! }), /Wait for all turns/);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: a }), /Wait for all turns/);
+    const beforeWhileRunning = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    assert.ok(!readFileSync(beforeWhileRunning.path, "utf8").includes("held question"), "running descendants do not block exporting earlier history");
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: held.nodeId!, direction: "ancestors" }), /Wait for all turns/);
     releaseHeld();
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
 
+    // A process exit can leave an interrupted run with an intact transcript.
+    const aRecord = runtime.graph!.records.get(runtime.snapshot().projection.nodes.find(node => node.id === a)!.branchId!)!;
+    aRecord.status = "running";
+    runtime.graph!.save(aRecord);
+    await runtime.close(); await runtime.open(graphId);
+    assert.match(runtime.graph!.records.get(aRecord.id)!.error!, /Execution interrupted/);
+    const interruptedExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
+    assert.ok(readFileSync(interruptedExport.path, "utf8").includes("B answer"), "an interrupted ancestor with intact data remains exportable");
+
+    // An unrelated damaged branch must not block a healthy path. The damaged
+    // branch's recovered preview must never be mistaken for its full source.
+    const bRecord = runtime.graph!.records.get(runtime.snapshot().projection.nodes.find(node => node.id === b)!.branchId!)!;
+    const bPath = runtime.graph!.path(bRecord.id);
+    const bOriginal = readFileSync(bPath, "utf8");
+    await runtime.close();
+    durableWrite(bPath, bOriginal + '{"type":"message"');
+    await runtime.open(graphId);
+    assert.ok(runtime.graph!.recoveryMessages.length);
+    const healthyExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a2 }) as { path: string };
+    const healthyRaw = readFileSync(healthyExport.path, "utf8");
+    assert.ok(healthyRaw.includes("A next answer"));
+    assert.ok(!healthyRaw.includes("B question"));
+    const healthyBefore = await runtime.control({ action: "exportBranchSession", graphId, nodeId: a, direction: "ancestors" }) as { path: string };
+    const healthyBeforeData = parseStrict(readFileSync(healthyBefore.path, "utf8"));
+    assert.deepEqual(projectSession(healthyBeforeData.entries, healthyBeforeData.entries.at(-1)!.id).nodes.map(n => n.title), ["root prompt", "A question"]);
+    const healthyMain = await runtime.control({ action: "exportBranchSession", graphId, nodeId: main }) as { path: string };
+    assert.ok(readFileSync(healthyMain.path, "utf8").includes("main answer"));
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: root }), /Invalid session JSON/);
+    const filesBefore = readdirSync(sessions).sort();
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: b }), /Invalid session JSON/);
+    assert.deepEqual(readdirSync(sessions).sort(), filesBefore, "failed validation produces no export or temporary output");
+    assert.equal(readFileSync(bPath, "utf8"), bOriginal + '{"type":"message"');
+    await assert.rejects(runtime.control({ action: "exportJsonl" }), /source data needs recovery/);
+
+    // A descendant that cannot even be displayed is still a required source.
+    const bCheckpoint = runtime.graph!.checkpointPath(bRecord.id);
+    await runtime.close();
+    rmSync(bPath); rmSync(bCheckpoint);
+    await runtime.open(graphId);
+    assert.ok(!runtime.snapshot().projection.nodes.some(node => node.id === b));
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: a }), /Branch source unavailable/);
+
+    // Successfully recovered cursor metadata does not make conversation data invalid.
+    await runtime.close();
+    durableWrite(bPath, bOriginal);
+    durableWrite(bCheckpoint, bOriginal);
+    durableWrite(join(`${graphId}.pix-tree`, "cursor.json"), "broken");
+    await runtime.open(graphId);
+    assert.ok(runtime.graph!.recoveryMessages.some(message => message.includes("Recovered metadata")));
+    // Origin parentId is provenance; deletion may have reparented the path.
+    const selectedRecord = runtime.graph!.records.get(bRecord.id)!;
+    selectedRecord.parentId = "removed-original-parent";
+    const recoveredExport = await runtime.control({ action: "exportBranchSession", graphId, nodeId: b }) as { path: string };
+    assert.ok(readFileSync(recoveredExport.path, "utf8").includes("B answer"));
+    selectedRecord.parentId = bRecord.parentId;
+    // Unreadable origin metadata hides the entire descendant from records and
+    // projection. Export must not silently succeed with that branch omitted.
+    const bOrigin = `${bPath}.origin.json`;
+    await runtime.close();
+    const originBefore = readFileSync(bOrigin, "utf8");
+    durableWrite(bOrigin, "broken");
+    rmSync(`${bOrigin}.bak`, { force: true });
+    await runtime.open(graphId);
+    assert.equal(runtime.graph!.records.has(bRecord.id), false);
+    const beforeMissingMetadataExport = readdirSync(sessions).sort();
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: a }), /Branch metadata unavailable/);
+    assert.deepEqual(readdirSync(sessions).sort(), beforeMissingMetadataExport);
+    await runtime.close();
+    durableWrite(bOrigin, originBefore);
+    await runtime.open(graphId);
+    const aPath = runtime.graph!.path(aRecord.id);
+    await runtime.close();
+    durableWrite(aPath, readFileSync(aPath, "utf8") + '{"type":"message"');
+    await runtime.open(graphId);
+    await assert.rejects(runtime.control({ action: "exportBranchSession", graphId, nodeId: b }), /Invalid session JSON/,
+      "a damaged ancestor cannot be replaced with its recovered preview");
+
     // The export is a live, standalone session: it reopens and continues on its own.
     await runtime.close();
-    await runtime.open(exported.path);
-    assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.title),
-      ["root prompt", "A question", "A next question"]);
+    await runtime.open(midExport.path);
+    assert.deepEqual(runtime.snapshot().projection.nodes.map(node => node.title).sort(),
+      ["A next question", "A question", "B question"]);
+    assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === a)!.parentId, null);
+    for (const id of [a2, b]) assert.equal(runtime.snapshot().projection.nodes.find(node => node.id === id)!.parentId, a);
     await runtime.control({ action: "setModel", provider: "faux", modelId: "test" });
     faux.setResponses([fauxAssistantMessage("exported continuation")]);
     await runtime.control({ action: "prompt", text: "continue exported" });
     await until(() => runtime.snapshot().graph!.runs.every(run => run.status !== "running"));
     assert.equal(runtime.snapshot().projection.nodes.length, 4);
     assert.equal(runtime.snapshot().projection.nodes.at(-1)!.title, "continue exported");
+    assert.equal(runtime.snapshot().projection.nodes.at(-1)!.promptOverride?.name, "reviewer");
+    const fork = await turn("export-fork", a, "new fork after export", "new fork answer");
+    assert.equal(runtime.snapshot().projection.nodes.find(n => n.id === fork)!.parentId, a);
+    const reopenedGraph = runtime.graph!.main;
+    const sourceBeforeRepeat = readFileSync(reopenedGraph, "utf8");
+    for (const direction of ["ancestors", "descendants"] as const) {
+      const repeated = await runtime.control({ action: "exportBranchSession", graphId: reopenedGraph, nodeId: fork, direction }) as { path: string };
+      const data = parseStrict(readFileSync(repeated.path, "utf8"));
+      const manager = SessionManager.open(repeated.path);
+      assert.deepEqual(projectSession(data.entries, manager.getLeafId()).nodes.map(n => n.title),
+        direction === "ancestors" ? ["A question", "new fork after export"] : ["new fork after export"]);
+      const context = JSON.stringify(manager.buildSessionContext().messages);
+      assert.ok(context.includes("new fork answer"));
+      assert.equal(context.includes("A answer"), direction === "ancestors");
+      assert.ok(!context.includes("B answer") && !context.includes("root answer"));
+    }
+    assert.equal(readFileSync(reopenedGraph, "utf8"), sourceBeforeRepeat);
   } finally {
     releaseHeld?.(); await runtime.close();
     if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
     if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+
+test("explicit branches fork main and child tips while ordinary prompts keep continuing their branch", { timeout: 30000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pix-explicit-fork-"));
+  const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, "agent");
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  try {
+    await runtime.create();
+    async function turn(text: string, nodeId: string | null, forceFork = false) {
+      faux.setResponses([fauxAssistantMessage(`Answer ${text}`)]);
+      const input = { action: "promptAt" as const, requestId: text, text, nodeId, forceFork, provider: "faux", modelId: "test" };
+      await runtime.control(input);
+      await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+      const node = runtime.snapshot().projection.nodes.find(n => n.title === text)!;
+      await runtime.control(input);
+      assert.equal(runtime.snapshot().projection.nodes.filter(n => n.title === text).length, 1);
+      return node;
+    }
+    const root = await turn("root", null);
+    const mainBefore = readFileSync(runtime.graph!.main, "utf8");
+    const child = await turn("child", root.id, true);
+    assert.notEqual(child.branchId, "main");
+    assert.equal(child.parentId, root.id);
+    assert.equal(readFileSync(runtime.graph!.main, "utf8"), mainBefore);
+    const continuation = await turn("child-next", child.id);
+    assert.equal(continuation.branchId, child.branchId);
+    const childPath = runtime.graph!.path(child.branchId!);
+    const childBefore = readFileSync(childPath, "utf8");
+    const nested = await turn("nested", continuation.id, true);
+    assert.notEqual(nested.branchId, child.branchId);
+    assert.equal(nested.parentId, continuation.id);
+    assert.equal(runtime.graph!.records.get(nested.branchId!)!.parentId, child.branchId);
+    assert.equal(readFileSync(childPath, "utf8"), childBefore);
+    const childAfterFork = await turn("child-after-fork", continuation.id);
+    assert.equal(childAfterFork.branchId, child.branchId);
+    assert.equal(childAfterFork.parentId, continuation.id);
+    assert.equal(runtime.graph!.records.size, 2);
+    const mainNext = await turn("main-next", root.id);
+    assert.equal(mainNext.branchId, "main");
+    const graphId = runtime.graph!.main;
+    await runtime.close(); await runtime.open(graphId);
+    assert.equal(runtime.snapshot().projection.nodes.find(n => n.id === nested.id)!.branchId, nested.branchId);
+    const resumed = await turn("nested-next", nested.id);
+    assert.equal(resumed.branchId, nested.branchId);
+    assert.equal(resumed.parentId, nested.id);
+    const childResumed = await turn("child-after-restart", childAfterFork.id);
+    assert.equal(childResumed.branchId, child.branchId);
+    assert.equal(childResumed.parentId, childAfterFork.id);
+    assert.equal(runtime.graph!.records.size, 2);
+    const flag = (id: string) => runtime.snapshot().projection.nodes.find(node => node.id === id)?.continuable;
+    assert.equal(flag(root.id), false, "a passed-over main tip loses in-place continuation");
+    assert.notEqual(flag(mainNext.id), false, "the main tip keeps it");
+    assert.equal(flag(child.id), false);
+    assert.notEqual(flag(childResumed.id), false, "a branch tip keeps it");
+    assert.equal(flag(nested.id), false);
+  } finally {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a long session ships a bounded window while paging, search, lookups and forks see the whole history", { timeout: 30000 }, async t => {
+  const home = mkdtempSync(join(tmpdir(), "pix-window-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const runtime = new GraphRuntime(home, join(home, "sessions"), () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  t.after(async () => {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  });
+  const history: RawSessionEntry[] = [];
+  let parentId: string | null = null;
+  for (let i = 0; i < SNAPSHOT_TURN_LIMIT + 20; i++) {
+    history.push({ type: "message", id: `u${i}`, parentId, timestamp: String(i), message: { role: "user", content: [{ type: "text", text: `needle ${i}` }] } });
+    history.push({ type: "message", id: `a${i}`, parentId: `u${i}`, timestamp: String(i), message: { role: "assistant", content: [{ type: "text", text: `answer ${i}` }] } });
+    parentId = `a${i}`;
+  }
+  const path = join(home, "sessions", "long.jsonl");
+  writeFileSync(path, encodeSession({ header: { type: "session", version: 3, id: "long", timestamp: "2026-01-01T00:00:00.000Z", cwd: home }, entries: history }));
+  await runtime.open(path);
+  // A read-side route that arrives before the first snapshot still sees history.
+  assert.ok(runtime.branchWindow(null, SNAPSHOT_TURN_LIMIT).entries.length > 0, "an early window is not empty");
+  const snapshot = runtime.snapshot();
+  const turns = (list: RawSessionEntry[]) => list.filter(entry => entry.type === "message" && (entry.message as { role?: string }).role === "user").length;
+  assert.equal(turns(snapshot.entries), SNAPSHOT_TURN_LIMIT, "the wire carries only the newest turns");
+  assert.equal(snapshot.projection.messagesHasEarlier, true);
+  assert.equal(turns(runtime.fullEntries()), SNAPSHOT_TURN_LIMIT + 20, "the runtime keeps the whole history");
+  assert.equal(runtime.entryById("u0")?.id, "u0", "an entry outside the window still resolves");
+  const all = runtime.branchWindow(snapshot.projection.leafId, SNAPSHOT_TURN_LIMIT + 40);
+  assert.equal(all.hasEarlier, false);
+  assert.equal(turns(all.entries), SNAPSHOT_TURN_LIMIT + 20, "paging back reaches the true root");
+  const page = runtime.branchWindow(snapshot.projection.leafId, 10);
+  assert.equal(page.hasEarlier, true, "a short page reports the older history it left behind");
+  assert.equal(turns(page.entries), 10);
+  assert.ok(runtime.searchEntries("needle 0").length > 0, "search reads beyond the window");
+  // Forking from a node the window paged out must still find the branch point
+  // and copy the full prefix up to it, not the wire's bounded window.
+  const oldNode = snapshot.projection.nodes.find(n => n.leafEntryId === "a5")!;
+  assert.ok(oldNode, "the projection still exposes paged-out nodes");
+  faux.setResponses([fauxAssistantMessage("fork reply")]);
+  await runtime.control({ action: "promptAt", requestId: "old-fork", text: "old fork", nodeId: oldNode.id, forceFork: true, provider: "faux", modelId: "test" });
+  await until(() => runtime.snapshot().projection.nodes.some(n => n.title === "old fork"));
+  await until(() => runtime.snapshot().graph!.runs.every(r => r.status !== "running"));
+  const fork = runtime.snapshot().projection.nodes.find(n => n.title === "old fork")!;
+  assert.notEqual(fork.branchId, "main");
+  const baseline = runtime.graph!.records.get(fork.branchId!)!.baseline;
+  assert.ok(baseline.some(e => e.id === "u0"), "the fork copies history from before the window");
+  assert.ok(baseline.some(e => e.id === "a5"), "the fork copies its branch point");
+  assert.ok(!baseline.some(e => e.id === "u20"), "the fork stops at the branch point");
+});
+
+test("a failed branch run keeps the branch's full history paged and searchable", { timeout: 30000 }, async t => {
+  const home = mkdtempSync(join(tmpdir(), "pix-failed-branch-"));
+  const previous = { home: process.env.PIX_HOME, agent: process.env.PI_CODING_AGENT_DIR };
+  process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
+  const cwd = join(home, "workspace"); mkdirSync(cwd);
+  const runtime = new GraphRuntime(cwd, home, () => {}, async () => {});
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 128000 }] });
+  const factory = runtime.factory.bind(runtime);
+  runtime.factory = pi => async args => {
+    const result = await factory(pi)(args);
+    result.services.modelRuntime.registerNativeProvider(faux.provider);
+    return result;
+  };
+  t.after(async () => {
+    await runtime.close();
+    if (previous.home === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous.home;
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    rmSync(home, { recursive: true, force: true });
+  });
+  const history: RawSessionEntry[] = [];
+  let parentId: string | null = null;
+  for (let i = 0; i < SNAPSHOT_TURN_LIMIT + 20; i++) {
+    history.push({ type: "message", id: `u${i}`, parentId, timestamp: String(i), message: { role: "user", content: [{ type: "text", text: `needle ${i}` }] } });
+    history.push({ type: "message", id: `a${i}`, parentId: `u${i}`, timestamp: String(i), message: { role: "assistant", content: [{ type: "text", text: `answer ${i}` }] } });
+    parentId = `a${i}`;
+  }
+  const header = { type: "session", version: 3, id: "failed-branch", timestamp: "2026-01-01T00:00:00.000Z", cwd };
+  const baseline = history.slice(0, 2); // the fork point stays on main
+  const path = join(home, "failed-branch.jsonl");
+  const files = new GraphFiles(path);
+  files.acquire();
+  durableWrite(path, encodeSession({ header, entries: baseline }));
+  files.create({ id: "long", parentId: "main", forkEntryId: "", requestId: "seeded", request: { text: "needle 1" },
+    inherited: Object.fromEntries(baseline.map(entry => [entry.id, entry.id])), header, baseline,
+    status: "idle", runId: "seeded-run" } as BranchRecord, { header, entries: history });
+  files.release();
+
+  await runtime.open(path);
+  const tip = runtime.snapshot().projection.nodes.filter(node => node.branchId === "long").at(-1)!;
+  assert.ok(tip, "the seeded branch hydrates into the graph");
+  assert.ok(runtime.searchEntries("needle 1").length > 0, "search covers the branch's oldest turn before the failure");
+
+  // The prompt itself succeeds; sealing fails after it, which routes the run
+  // through executeBranch's failure path with the branch file already long.
+  const graph = runtime["graph"] as GraphFiles;
+  const seal = graph.seal.bind(graph);
+  graph.seal = ((record: BranchRecord, data: unknown) => { throw new Error("simulated seal failure"); }) as typeof graph.seal;
+  faux.setResponses([fauxAssistantMessage("sealed never")]);
+  await runtime.control({ action: "promptAt", requestId: "boom", nodeId: tip.id, text: "fail here", provider: "faux", modelId: "test" });
+  await until(() => runtime.snapshot().graph!.runs.find(run => run.branchId === "long")?.status === "interrupted");
+  graph.seal = seal;
+  // The failed run must retain the branch's full history, not its live window.
+  assert.ok(runtime.searchEntries("needle 1").length > 0, "search still covers the branch's oldest turn");
+  const all = runtime.branchWindow(tip.leafEntryId, SNAPSHOT_TURN_LIMIT + 40);
+  assert.equal(all.hasEarlier, false, "the walk reaches the true root, not a truncated one");
+  // Branch-owned entries carry their canonical branch prefix in the merged history.
+  assert.ok(all.entries.some(entry => entry.id === "long:u1"), "paging back reaches the branch's oldest own turn");
+  assert.ok(all.entries.some(entry => entry.id === "u0"), "paging back crosses into the inherited baseline");
 });

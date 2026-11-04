@@ -168,3 +168,32 @@ describe("retry failed turn", () => {
     expect(useSessionStore().focusedNode).toBe("turn:u1");
   });
 });
+
+describe("retrying a windowed-out turn", () => {
+  beforeEach(() => { vi.mocked(window.pix!.invoke).mockReset(); });
+
+  it("does not overwrite edits made while its history was loading", async () => {
+    const { setupState } = mountGraph(okBranch, "a2", true);
+    useSessionStore().current!.entries = okBranch.slice(0, 2);
+    let release!: (value: unknown) => void;
+    vi.mocked(window.pix!.invoke).mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const retry = setupState.retryTurn("turn:u2");
+    setupState.draftState.text = "new draft while loading";
+    release({ entries: okBranch, hasEarlier: false });
+    await retry;
+    expect(setupState.draftState.text).toBe("new draft while loading");
+  });
+
+  it("preserves the draft and reports failure instead of retrying a clipped title", async () => {
+    const entries = structuredClone(okBranch);
+    entries[2]!.message = { role: "user", content: "long original prompt ".repeat(30) };
+    const { setupState } = mountGraph(entries, "a2", true);
+    useSessionStore().current!.entries = entries.slice(0, 2);
+    setupState.draftState.text = "keep my draft";
+    vi.mocked(window.pix!.invoke).mockRejectedValue(new Error("network unavailable"));
+    const notice = vi.spyOn(useLayoutStore(), "showNotice");
+    await setupState.retryTurn("turn:u2");
+    expect(setupState.draftState.text).toBe("keep my draft");
+    expect(notice).toHaveBeenCalledWith(expect.stringContaining("complete prompt"), "error");
+  });
+});

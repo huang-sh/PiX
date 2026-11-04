@@ -364,7 +364,7 @@ export class SettingsService {
       preventSleepDuringTasks: true,
       keepScreenOnDuringTasks: false,
       canvasDotGrid: true,
-      nodeCardShowCommit: true,
+      nodeCardShowCommit: false,
       canvasDotGridSpacing: 24,
       canvasDotGridDotSize: 4,
       deployModelCredentialsToRemote: false,

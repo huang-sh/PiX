@@ -56,9 +56,9 @@ export function createRunCommand(deps: AppCommandDeps) {
     import: () => session.importSession(),
     share: exportSession,
     copy: async () => {
-      const text = [...(session.current?.projection.messages ?? [])]
-        .reverse()
-        .find((message) => message.role === "assistant")?.text;
+      const generation = session.poolGeneration;
+      const text = await session.lastAssistantText();
+      if (generation !== session.poolGeneration) return;
       if (!text) { layout.showNotice(t("notice.noAssistantMessage"), "warning"); return; }
       if (window.pix?.copy) await window.pix.copy(text);
       else await navigator.clipboard.writeText(text);

@@ -46,7 +46,7 @@ onMounted(refresh);
 </script>
 
 <template>
-  <div>
+  <div class="settings-stack">
     <section class="settings-card" :aria-label="t('settings.remote.deploy')">
       <SettingRow
         :row="{

@@ -20,8 +20,10 @@ const withHome = (run: (home: string) => void | Promise<void>) => async () => {
 
 const logPath = (home: string) => join(home, ".pix", "log", "main.log");
 
+// debugLog's appendFile is fire-and-forget, so under a loaded machine the line
+// can land well after the call; poll past any realistic flush delay.
 const waitForText = async (file: string, text: string) => {
-  for (let i = 0; i < 400; i++) {
+  for (let i = 0; i < 1200; i++) {
     if (existsSync(file) && readFileSync(file, "utf8").includes(text)) return readFileSync(file, "utf8");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }

@@ -191,6 +191,9 @@ export interface GraphNode {
   branchId?: string;
   running?: boolean;
   forkable?: boolean;
+  /** False when this node cannot continue its branch in place — composing
+   * there always forks. Plain sessions leave it unset: they continue anywhere. */
+  continuable?: boolean;
 }
 export type GraphFilter = "all" | "labeled" | "running" | "errors";
 export interface GraphEdge {
@@ -234,6 +237,10 @@ export interface AgentActivityItem {
 export interface AgentActivity {
   /** The view joined mid-run; persisted history still contains its earlier output. */
   partial?: boolean;
+  /** This pass has already consumed its opening user message (Pi echoes the
+   * prompt right after agent_start); a later user message in the same pass
+   * is a steered turn. */
+  promptEchoed?: boolean;
   startedAt: string;
   pass: number;
   active: boolean;
@@ -246,6 +253,8 @@ export interface SessionProjection {
   activeBranchNodeIds: string[];
   activeBranchEntryIds: string[];
   messages: BranchMessage[];
+  /** True when older turns than the snapshot window exist; they load on demand. */
+  messagesHasEarlier?: boolean;
   leafId: string | null;
   activeNodeId: string | null;
   /** Override in force at the active leaf, null once an `off` record is set, undefined before any record. */
@@ -297,15 +306,27 @@ export interface RuntimeState {
   pendingMessageCount: number;
   queuedMessages?: QueuedMessage[];
 }
+/** Identity is optional for compatibility with older remote hosts. */
+export interface SessionHistoryWindow {
+  entries: RawSessionEntry[];
+  hasEarlier: boolean;
+  session?: string;
+  epoch?: string;
+}
+
 export interface SessionSnapshot {
   session: SessionSummary;
   entries: RawSessionEntry[];
+  /** Set only by a full-history source; a wire window cannot certify completeness. */
+  entriesComplete?: true;
   projection: SessionProjection;
   runtime: RuntimeState;
   graph?: {
     id: string;
     revision: number;
     epoch?: string;
+    /** Persisted branches, including transcripts not hydrated yet. */
+    branchCount?: number;
     runs: Array<{
       branchId: string;
       runId: string;
@@ -477,7 +498,7 @@ export interface AppSettings {
   canvasDotGridDotSize: number;
   /** Optional footer fields in priority order; model and thinking always appear. */
   nodeCardFields?: NodeCardField[];
-  /** Show a short commit SHA beside the branch in node footers; defaults to true. */
+  /** Show a short commit SHA beside the branch in node footers; defaults to false. */
   nodeCardShowCommit?: boolean;
   /**
    * Deploys this desktop's model API keys and custom models to remote hosts,
@@ -565,8 +586,8 @@ export interface RuntimeExtension {
 }
 export type AgentControl =
   | { action: "deleteNode"; nodeId: string; graphId: string }
-  | { action: "exportBranchSession"; nodeId: string; graphId: string }
-  | { action: "promptAt"; requestId: string; nodeId: string | null; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
+  | { action: "exportBranchSession"; nodeId: string; graphId: string; direction?: "ancestors" | "descendants" }
+  | { action: "promptAt"; requestId: string; nodeId: string | null; forceFork?: boolean; text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string; promptOverride?: PromptOverrideInput }
   | { action: "branchAbort"; branchId: string; runId: string }
   | { action: "prompt"; text: string; images?: PromptImage[]; submittedAt?: string }
   | { action: "steer" | "followUp"; text: string; images?: PromptImage[]; graphId?: string; branchId?: string; runId?: string }
@@ -690,6 +711,9 @@ export type DesktopRoute =
   | "remote.revoke"
   | "session.list"
   | "session.image"
+  | "session.branchWindow"
+  | "session.search"
+  | "session.prompts"
   | "session.snapshot"
   | "session.open"
   | "session.stop"

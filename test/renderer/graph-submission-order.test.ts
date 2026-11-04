@@ -79,11 +79,9 @@ it.each((["up", "down"] as const).flatMap(direction =>
     await flushPromises();
     check("turn:new");
     expect(graph.nodes.some((node: any) => node.id === "draft:turn:b")).toBe(true);
-    if (direction === "up") {
-      const orders = Object.values(useLayoutStore().layout.branchOrders!).flat();
-      expect(orders).toContainEqual(["turn:new", -1]);
-      expect(orders.some(([id]) => id.startsWith("pending:"))).toBe(false);
-    }
+    const orders = Object.values(useLayoutStore().layout.branchOrders!).flat();
+    expect(orders).toContainEqual(["turn:new", direction === "up" ? -1 : 1]);
+    expect(orders.some(([id]) => id.startsWith("pending:"))).toBe(false);
   } finally { requests.forEach(request => request.finish(session.current!)); await send; }
 });
 
@@ -128,10 +126,11 @@ it("keeps concurrent upward submissions in their own lanes before either reply a
   } finally { requests.forEach(request => request.finish(session.current!)); await Promise.all([first, second]); }
 });
 
-it.each(["queued", "prepared", "main"])("removes a rejected submission's temporary order without changing the open draft (%s)", async stage => {
+it.each((["up", "down"] as const).flatMap(direction =>
+  ["queued", "prepared", "main"].map(stage => ({ direction, stage }))))("removes a rejected $direction submission's temporary order without changing the open draft ($stage)", async ({ direction, stage }) => {
   const { graph, session, requests } = setup();
   const target = stage === "main" ? "turn:c" : "turn:root";
-  await graph.compose(target, "up");
+  await graph.compose(target, direction);
   const send = graph.submitDraft("rejected question");
   await graph.compose("turn:b", "up");
   const draft = graph.draftState;
@@ -191,9 +190,10 @@ it.each([false, true])("keeps the submitted turn's order when generation fails (
   } finally { requests.forEach(request => request.finish(session.current!)); await send; }
 });
 
-it.each([false, true])("restores the submission's order after switching sessions (reply while away: %s)", async replyWhileAway => {
+it.each((["up", "down"] as const).flatMap(direction =>
+  [false, true].map(replyWhileAway => ({ direction, replyWhileAway }))))("restores the $direction submission's order after switching sessions (reply while away: $replyWhileAway)", async ({ direction, replyWhileAway }) => {
   const { graph, session, requests, y } = setup();
-  await graph.compose("turn:root", "up");
+  await graph.compose("turn:root", direction);
   const send = graph.submitDraft("new question");
   try {
     await flushPromises();
@@ -220,9 +220,10 @@ it.each([false, true])("restores the submission's order after switching sessions
     session.viewRequest++;
     session.applySnapshot(admitted);
     await flushPromises();
-    expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    if (direction === "up") expect(y("turn:new")).toBeLessThan(y("turn:a"));
+    else expect(y("turn:new")).toBeGreaterThan(y("turn:b"));
     requests[0]!.finish(admitted); await send;
     await flushPromises();
-    expect(Object.values(useLayoutStore().layout.branchOrders!).flat()).toEqual([["turn:new", -1]]);
+    expect(Object.values(useLayoutStore().layout.branchOrders!).flat()).toEqual([["turn:new", direction === "up" ? -1 : 1]]);
   } finally { requests.forEach(request => request.finish(session.current!)); await send; }
 });

@@ -20,7 +20,7 @@ export function useDraftSubmit() {
     model?: RuntimeModel | null,
     thinkingLevel?: string,
     images?: PromptImage[],
-    options?: { follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null },
+    options?: { forceFork?: boolean; follow?: boolean; columnId?: string; requestId?: string; promptOverride?: NodePromptOverride | null },
   ): Promise<{ nodeId?: string } | false> {
     submitError.value = "";
     submitted.value = session.current?.graph ? undefined : {

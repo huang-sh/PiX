@@ -136,6 +136,44 @@ describe("chat panel composer", () => {
     } finally { panel.unmount(); }
   });
 
+  it("recalls the newest prompt first even after a window fetch appends older entries to the pool", async () => {
+    // A windowed snapshot carries only the newest turns; a later "show
+    // earlier" fetch merges older entries into the entry pool, whose array
+    // order then no longer matches the session log. Recall order must come
+    // from the main-served history, not from that pool order.
+    const turn = (id: string, parent: string | null, role: string, content: string): RawSessionEntry =>
+      ({ type: "message", id, parentId: parent, timestamp: `2026-09-02T10:00:0${id.at(-1)}Z`,
+        message: { role, content } } as RawSessionEntry);
+    const windowed: RawSessionEntry[] = [
+      turn("u1", null, "user", "second"), turn("a1", "u1", "assistant", "answer"),
+      turn("u2", "a1", "user", "third"), turn("a2", "u2", "assistant", "answer two"),
+    ];
+    const fetched: RawSessionEntry[] = [turn("u0", null, "user", "early one"), turn("a0", "u0", "assistant", "answer zero")];
+    const invoke = vi.spyOn(desktop, "invoke").mockImplementation((async (route: string) => {
+      if (route === "session.prompts") return { prompts: ["third", "second", "early one"] };
+      if (route === "session.branchWindow") return { entries: fetched, hasEarlier: false };
+      return {} as never;
+    }) as never);
+    const session = useSessionStore();
+    const current = { ...snapshot(windowed, "a2"), projection: { ...snapshot(windowed, "a2").projection, messagesHasEarlier: true } };
+    hydrate(session, current);
+    session.focusedNode = "turn:u2";
+    const panel = mount(BranchContextPanel, { global: { plugins: [i18n], attachTo: document.body } });
+    try {
+      await panel.get(".composer-collapsed").trigger("click");
+      await flushPromises();
+      // The paging fetch appends the older page after the window entries.
+      await session.fetchWindow("a2", 80, 8 << 20);
+      const editor = panel.get<HTMLTextAreaElement>(".prompt-composer textarea");
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("third");
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("second");
+      await editor.trigger("keydown", { key: "ArrowUp" });
+      expect(editor.element.value).toBe("early one");
+    } finally { panel.unmount(); }
+  });
+
   it("keeps the editor usable while streaming and aborts from its separate stop control", async () => {
     // Pi's abort() waits for the agent to go idle before returning, so the
     // control response already carries isStreaming=false — the composer must

@@ -1007,7 +1007,7 @@ export class RemoteWorkspacePool {
     else if (
       result &&
       typeof result === "object" &&
-      "session" in result
+      "session" in result && "projection" in result && "runtime" in result
     ) {
       const snapshot = result as SessionSnapshot;
       // Selection replies and path-migrating actions move the slot's session; a

@@ -13,10 +13,12 @@ export interface SessionPatch {
   graph: NonNullable<SessionSnapshot["graph"]>;
   recoveredInputs?: { value: NonNullable<SessionSnapshot["graph"]>["recoveredInputs"] };
   entries?: ListPatch<SessionSnapshot["entries"][number]>;
+  entriesComplete?: SessionSnapshot["entriesComplete"];
   nodes?: ListPatch<SessionProjection["nodes"][number]>;
   edges?: ListPatch<SessionProjection["edges"][number]>;
   messages?: ListPatch<SessionProjection["messages"][number]>;
   projection: Partial<Omit<SessionProjection, "nodes" | "edges" | "messages">>;
+  projectionRemoved?: Array<keyof SessionPatch["projection"]>;
 }
 export interface SessionUpdate {
   current?: SessionSnapshot;
@@ -69,21 +71,29 @@ export function sessionPatch(before: SessionSnapshot, after: SessionSnapshot): S
   const messages = diffList(before.projection.messages, after.projection.messages, value => value.entryId);
   if (entries === null || nodes === null || edges === null || messages === null) return undefined;
   const projection: SessionPatch["projection"] = {};
-  for (const key of ["activeBranchNodeIds", "activeBranchEntryIds", "leafId", "activeNodeId"] as const)
-    if (!equal(before.projection[key], after.projection[key])) Object.assign(projection, { [key]: after.projection[key] });
+  const projectionRemoved: NonNullable<SessionPatch["projectionRemoved"]> = [];
+  for (const key of ["activeBranchNodeIds", "activeBranchEntryIds", "leafId", "activeNodeId", "activePromptOverride", "messagesHasEarlier"] as const) {
+    if (equal(before.projection[key], after.projection[key])) continue;
+    if (after.projection[key] === undefined) projectionRemoved.push(key);
+    else Object.assign(projection, { [key]: after.projection[key] });
+  }
   return { baseRevision: before.graph.revision, session: after.session, runtime: after.runtime,
     graph: { ...after.graph, recoveredInputs: undefined },
     ...(!equal(before.graph.recoveredInputs, after.graph.recoveredInputs) ? { recoveredInputs: { value: after.graph.recoveredInputs } } : {}),
-    entries, nodes, edges, messages, projection };
+    entries, entriesComplete: after.entriesComplete, nodes, edges, messages, projection,
+    ...(projectionRemoved.length ? { projectionRemoved } : {}) };
 }
 
 export function applySessionPatch(before: SessionSnapshot | undefined, patch: SessionPatch): SessionSnapshot | undefined {
   if (!before?.graph || before.graph.id !== patch.graph.id || before.graph.epoch !== patch.graph.epoch
     || before.graph.revision !== patch.baseRevision || patch.graph.revision <= patch.baseRevision) return undefined;
+  const projection = { ...before.projection, ...patch.projection };
+  for (const key of patch.projectionRemoved ?? []) delete projection[key];
   return { session: patch.session, runtime: patch.runtime,
     graph: { ...patch.graph, recoveredInputs: patch.recoveredInputs ? patch.recoveredInputs.value : before.graph.recoveredInputs },
     entries: applyList(before.entries, patch.entries, value => value.id),
-    projection: { ...before.projection, ...patch.projection,
+    entriesComplete: patch.entriesComplete,
+    projection: { ...projection,
       nodes: applyList(before.projection.nodes, patch.nodes, value => value.id),
       edges: applyList(before.projection.edges, patch.edges, value => value.id),
       messages: applyList(before.projection.messages, patch.messages, value => value.entryId) } };

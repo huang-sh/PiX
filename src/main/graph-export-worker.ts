@@ -4,14 +4,19 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { GraphFiles, durableWrite, encodeSession, parseStrict, samePersistedValue, type BranchRecord, type SessionData } from "./graph-files.js";
 import { PiRuntime } from "./pi-runtime.js";
+import { exportSubtree } from "./graph-export.js";
+import { copyFileChangeSnapshots } from "./file-changes.js";
+import { debugLog } from "./debug-log.js";
 
 async function run() {
-  const { main, data, branches, leafId, outputPath, html, targetLeafId } = workerData as {
+  const { main, data, branches, leafId, outputPath, html, rootEntryId, targetLeafId, exportTitle } = workerData as {
     main: string; data: SessionData; branches: Array<{ record: BranchRecord; data: SessionData }>;
-    leafId: string | null; outputPath: string; html: boolean; targetLeafId?: string | null;
+    leafId: string | null; outputPath: string; html: boolean; rootEntryId?: string; targetLeafId?: string; exportTitle?: string;
   };
   // All inputs are cloned by worker_threads at dispatch. Never read a changing
   // live source or mutate the graph's files, locks, cursors, or runtime.
+  // File-change snapshots are the exception: each is settled before the entry
+  // referencing it is appended, so reading them from the live graph cannot race.
   const graph = new GraphFiles(main);
   const sources = new Map<string, SessionData>();
   for (const branch of branches) {
@@ -23,9 +28,11 @@ async function run() {
   const pi = await adapter.pi();
   let exported = result;
   let outputLeaf = leafId;
-  if (targetLeafId != null) {
-    // Let Pi copy the path and its latest bookmarks together. Labels may have
-    // been edited from a different tip, so walking parents alone loses them.
+  if (rootEntryId != null) {
+    exported = exportSubtree(result, rootEntryId);
+    outputLeaf = exported.entries.at(-1)?.id ?? null;
+  } else if (targetLeafId != null) {
+    // The SDK also carries bookmarks edited from other tips of the graph.
     const manager = pi.SessionManager.inMemory(String(result.header.cwd), undefined, [result.header, ...result.entries]);
     manager.createBranchedSession(targetLeafId);
     exported = { header: manager.getHeader(), entries: manager.getEntries() };
@@ -45,6 +52,12 @@ async function run() {
       throw new Error("Export changed main context");
   }
   const output: SessionData = { ...exported, header: { ...exported.header, id: randomUUID(), parentSession: main } };
+  if (exportTitle) {
+    const id = randomUUID();
+    output.entries = [...output.entries, { type: "session_info", id, parentId: outputLeaf,
+      timestamp: new Date().toISOString(), name: `${rootEntryId != null ? "↓" : "↑"} ${String(output.header.id).slice(0, 6)} · ${exportTitle}` }];
+    outputLeaf = id;
+  }
   const temp = mkdtempSync(join(dirname(outputPath), ".pix-export-"));
   try {
     const jsonl = join(temp, "tree.jsonl");
@@ -56,6 +69,12 @@ async function run() {
     const source = html ? await adapter.exportSnapshotHtml(manager, join(temp, "tree.html")) : jsonl;
     // Exclusive installation also protects a destination created after dispatch.
     linkSync(source, outputPath);
+    if (!html) {
+      // Stored diffs are history enrichment for the installed copy: a failed
+      // copy costs "diff unavailable", never the already-installed export.
+      try { await copyFileChangeSnapshots(main, outputPath, output.entries); }
+      catch (error) { debugLog(`graph-export: file-change snapshots not copied to ${outputPath}`, error); }
+    }
     return { path: outputPath };
   } finally { rmSync(temp, { recursive: true, force: true }); }
 }
