@@ -5,6 +5,7 @@ import { exportSubtree } from "../src/main/graph-export.js";
 import { GraphFiles, encodeSession, parseStrict, type SessionData, type BranchRecord } from "../src/main/graph-files.js";
 import { projectSession } from "../src/shared/session.js";
 import { GIT_BRANCH_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE, type RawSessionEntry } from "../src/shared/types.js";
+import { FILE_CHANGE_CUSTOM_TYPE } from "../src/shared/file-changes.js";
 import { latestPromptOverride } from "../src/main/extensions/prompt-override.js";
 
 const entry = (type: string, id: string, parentId: string | null, extra = {}): RawSessionEntry =>
@@ -146,6 +147,28 @@ test("branch composition supports native persona records while rejecting unknown
     source.entries[1] = { ...source.entries[1]!, customType: "unknown.extension" };
     assert.throws(() => graph.candidate(main, new Map([[record.id, source]])), /Extension state needs a compatible export adapter/);
   }
+});
+
+
+test("branch composition carries file-change records into subtree exports", () => {
+  const main: SessionData = { header, entries: [user("old-user", null)] };
+  const record: BranchRecord = { id: "branch", parentId: "main", forkEntryId: "old-user", requestId: "request",
+    request: { text: "selected" }, inherited: { "old-user": "old-user" }, baseline: main.entries,
+    header: { ...header, id: "branch" }, status: "idle", runId: "run" };
+  const graph = new GraphFiles("/test/main.jsonl");
+  graph.records.set(record.id, record);
+  const source: SessionData = { header: record.header, entries: [...main.entries,
+    user("selected", "old-user"),
+    entry("custom", "change", "selected", { customType: FILE_CHANGE_CUSTOM_TYPE,
+      data: { path: "src/a.ts", ref: "d03fd343-7ac2-490d-8469-a399b7fab9bb", status: "modified", added: 4, removed: 2 } }),
+    user("child", "change"),
+  ] };
+  const before = encodeSession(source);
+  const exported = exportSubtree(graph.candidate(main, new Map([[record.id, source]])), "branch:selected");
+  assert.equal(encodeSession(source), before);
+  const nodes = projectSession(exported.entries, exported.entries.at(-1)!.id).nodes;
+  assert.deepEqual(nodes.find(node => node.userEntryId === "branch:selected")!.fileChanges,
+    [{ path: "src/a.ts", ref: "d03fd343-7ac2-490d-8469-a399b7fab9bb", status: "modified", added: 4, removed: 2 }]);
 });
 
 
