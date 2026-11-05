@@ -17,13 +17,21 @@ const { values: args } = parseArgs({ options: {
   prepare: { type: "boolean" }, finish: { type: "boolean" },
   target: { type: "string", multiple: true }, receipt: { type: "string" }, "owner-pid": { type: "string" },
   ui: { type: "string" }, language: { type: "string" },
+  "error-file": { type: "string" },
 } });
 const receipt = resolve(args.receipt ?? "");
 const helper = join(dirname(process.argv[1]!), "installer-helper.ps1");
 const zh = args.language === "zh-CN" || (args.language !== "en" && /^(zh|Chinese)/i.test(process.env.LANG ?? ""));
 async function windows(action: string, extra: string[] = []) {
-  const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-Action", action, ...extra], { windowsHide: true, timeout: action === "show" ? 0 : 15_000, maxBuffer: 4 * 1024 * 1024 });
-  return JSON.parse(stdout.replace(/^\uFEFF/, "").trim());
+  try {
+    const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-Action", action, ...extra], { encoding: "utf8", windowsHide: true, timeout: action === "show" ? 0 : 15_000, maxBuffer: 4 * 1024 * 1024 });
+    return JSON.parse(stdout.replace(/^\uFEFF/, "").trim());
+  } catch (error) {
+    const message = "Another PiX installation is running. Quit it completely before updating.";
+    if (String((error as { stderr?: string }).stderr).includes("PiXOtherInstallation"))
+      throw new Error(zh ? "另一个安装位置的 PiX 正在运行，或无法确认进程路径。请完整退出 PiX 后重试。" : message);
+    throw error;
+  }
 }
 async function discover(targets: string[]) {
   const homes = new Set([process.env.PIX_HOME ?? homedir()]);
@@ -172,4 +180,13 @@ async function main() {
     throw error;
   }
 }
-void main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+void main().catch(error => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  process.exitCode = 1;
+  // NSIS reads this explicitly as UTF-16LE, bypassing nsExec's ANSI pipe decoding.
+  if (args["error-file"]) {
+    try { writeFileSync(args["error-file"], `\uFEFF${message}`, "utf16le"); }
+    catch (reportError) { console.error(reportError instanceof Error ? reportError.message : String(reportError)); }
+  }
+});
