@@ -192,6 +192,13 @@ export function validateRouteInput(
         thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),
       };
     }
+    case "pixie.previewPrompt":
+      return {
+        identity: str(v.identity, "identity", true),
+        rules: str(v.rules, "rules", true),
+        docs: str(v.docs, "docs", true),
+        full: str(v.full, "full", true),
+      };
     case "ui.pending":
       return {};
     case "ui.respond":

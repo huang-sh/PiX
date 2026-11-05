@@ -46,7 +46,8 @@ import type { CreateAgentSessionServicesOptions, InlineExtension, SessionManager
 // Re-exported for graph-runtime so the SDK boundary stays in this adapter.
 export type { SessionManager };
 import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
-import type { PromptCustomization, SystemPromptPreview } from "../shared/types.js";
+import type { PixiePromptCustomization, PromptCustomization, SystemPromptPreview } from "../shared/types.js";
+import { PIXIE_CANVAS_GUIDANCE, PIXIE_IDENTITY } from "../shared/pixie-prompt.js";
 import { needsPromptDisplayBoundary, projectSession, promptRecall, summarizeSession, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES, searchGraphNodeIds, windowEntries } from "../shared/session.js";
 import type { RunTiming } from "../shared/run-timing.js";
 import {
@@ -167,8 +168,6 @@ export function piCliEntry(): string {
   return join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
 }
 
-const PI_OPENING = "You are an expert coding assistant operating inside pi, a coding agent harness.";
-
 let pixieBasePrompt: Promise<string> | undefined;
 
 /**
@@ -200,19 +199,42 @@ function piBaseSystemPrompt(cwd: string): Promise<string> {
   }));
 }
 
+/** Swaps the stock prompt's opening paragraph for the given identity. */
+function withIdentity(core: string, identity: string): string {
+  const paragraph = core.indexOf("\n\n");
+  return paragraph > 0 ? identity + core.slice(paragraph) : `${core}\n\n${identity}`;
+}
+
 /**
- * The base prompt with only the opening identity line replaced by the given
- * Pixie identity, passed to the Pixie subprocess through --system-prompt. The
- * identity is composed per call — never memoized — so a reload after a
- * settings change starts the new identity instead of the first one seen. If
- * the opening no longer matches, the identity is appended instead of silently
- * renaming nothing.
+ * Replaces the stock <rules>/<docs> section with the custom one — the same
+ * section semantics as the agent prompt customization — appending it only
+ * when the stock prompt carries no such section.
  */
-export async function piPixieSystemPrompt(cwd: string, identity: string): Promise<string> {
-  const core = await piBaseSystemPrompt(cwd);
-  return core.startsWith(PI_OPENING)
-    ? identity + core.slice(PI_OPENING.length)
-    : `${core}\n\n${identity}`;
+function withSection(core: string, tag: "rules" | "docs", content: string): string {
+  const open = `<${tag}>`, close = `</${tag}>`, wrapped = `${open}\n${content}\n${close}`;
+  const start = core.indexOf(open);
+  if (start < 0) return `${core}\n\n${wrapped}`;
+  const end = core.indexOf(close, start);
+  return end < 0 ? `${core}\n\n${wrapped}` : core.slice(0, start) + wrapped + core.slice(end + close.length);
+}
+
+/**
+ * Pixie's full system prompt, passed to the subprocess through --system-prompt.
+ * A set `full` is used verbatim — nothing else is added. Otherwise the base
+ * prompt's opening paragraph becomes the identity, custom rules/docs replace
+ * the stock sections like the agent prompt customization, and the canvas
+ * guidance closes. Composition is per call — never memoized — so a reload
+ * after a settings change starts the new prompt instead of the first one seen.
+ */
+export async function composePixieSystemPrompt(cwd: string, customization?: PixiePromptCustomization): Promise<string> {
+  const full = customization?.full?.trim();
+  if (full) return full;
+  const identity = customization?.identity?.trim() || PIXIE_IDENTITY;
+  let prompt = withIdentity(await piBaseSystemPrompt(cwd), identity);
+  const rules = customization?.rules?.trim(), docs = customization?.docs?.trim();
+  if (rules) prompt = withSection(prompt, "rules", rules);
+  if (docs) prompt = withSection(prompt, "docs", docs);
+  return `${prompt}\n\n${PIXIE_CANVAS_GUIDANCE}`;
 }
 
 const usageMessageText = (message: any): string => {

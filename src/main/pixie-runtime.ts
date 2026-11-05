@@ -2,12 +2,11 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CanvasCommand } from "../shared/canvas.js";
-import type { DesktopEvent, PixieSettings, PromptImage, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
+import type { DesktopEvent, PixiePromptCustomization, PixieSettings, PromptImage, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
-import { PIXIE_IDENTITY, PIXIE_CANVAS_GUIDANCE } from "../shared/pixie-prompt.js";
 import { debugLog } from "./debug-log.js";
 import { pixAgentDir } from "./paths.js";
-import { piPixieSystemPrompt } from "./pi-runtime.js";
+import { composePixieSystemPrompt } from "./pi-runtime.js";
 import { PixieRpc, type RpcLine } from "./pixie-rpc.js";
 
 export const pixieWorkspace = () => join(pixAgentDir(), "pixie");
@@ -176,20 +175,30 @@ export class PixieRuntime {
   }
 
   /**
-   * Boots the subprocess with the system prompt set directly: Pi's own
-   * generated default with the identity line swapped — the user's, or the
-   * built-in Pixie one — plus the canvas tool guidance. The subprocess appends skills, context
-   * files, and the working directory to whatever text this sets.
+   * Boots the subprocess with the system prompt set directly: the fully
+   * customized Pixie prompt — Pi's generated default with the identity line
+   * swapped, optional rules/docs sections, and the canvas tool guidance; or
+   * the user's verbatim text in full-replacement mode. The subprocess appends
+   * skills, context files, and the working directory to whatever text this
+   * sets.
    */
   private async startAgent(): Promise<void> {
-    const identity = this.settings().systemPrompt?.trim() || PIXIE_IDENTITY;
-    const prompt = await piPixieSystemPrompt(pixieWorkspace(), identity);
+    const prompt = await composePixieSystemPrompt(pixieWorkspace(), this.settings().prompt);
     const adjacent = new URL("./pixie-extension.js", import.meta.url);
     const extension = existsSync(adjacent) ? adjacent : new URL("../pixie-extension.js", import.meta.url);
     await this.rpc.start(pixieWorkspace(), { PI_CODING_AGENT_DIR: pixAgentDir() }, [
       "--extension", fileURLToPath(extension),
-      "--system-prompt", `${prompt}\n\n${PIXIE_CANVAS_GUIDANCE}`,
+      "--system-prompt", prompt,
     ]);
+  }
+
+  /**
+   * The exact system prompt a boot would use — with the caller's draft when
+   * given, otherwise the saved settings. Pure in-memory composition: no
+   * subprocess is started and nothing touches disk.
+   */
+  promptPreview(customization?: PixiePromptCustomization): Promise<string> {
+    return composePixieSystemPrompt(pixieWorkspace(), customization ?? this.settings().prompt);
   }
 
   private async boot(): Promise<SessionSnapshot> {

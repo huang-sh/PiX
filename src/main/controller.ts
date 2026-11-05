@@ -7,6 +7,7 @@ import type {
   DesktopEvent,
   DesktopRoute,
   LayoutState,
+  PixiePromptCustomization,
   ProjectGroup,
   ProjectInfo,
   PromptCustomization,
@@ -840,6 +841,8 @@ export class MainController {
       });
     if (route === "pixie.stop") return this.pixie.stop();
     if (route === "pixie.newSession") return this.pixie.newSession();
+    if (route === "pixie.previewPrompt")
+      return { text: await this.pixie.promptPreview(v as PixiePromptCustomization | undefined) };
     if (route === "pixie.reveal") {
       this.platform.showItemInFolder(pixieWorkspace());
       return;

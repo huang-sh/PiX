@@ -254,6 +254,30 @@ function normalizeAppSettings(raw: Record<string, unknown>): Record<string, unkn
     const { assistant, ...rest } = shortcuts;
     out.keyboardShortcuts = rest.pixie === undefined ? { ...rest, pixie: assistant } : rest;
   }
+  // The Pixie prompt became fully customizable; the old identity-only
+  // "systemPrompt" string becomes prompt.identity so the upgrade never
+  // resets a saved identity. Only non-blank string sections survive.
+  if (out.pixie !== null && typeof out.pixie === "object" && !Array.isArray(out.pixie)) {
+    const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown> : undefined;
+    const pixie = { ...(out.pixie as Record<string, unknown>) };
+    if (typeof pixie.systemPrompt === "string") {
+      const prompt: Record<string, unknown> = { ...asRecord(pixie.prompt) };
+      if (pixie.systemPrompt.trim() && typeof prompt.identity !== "string") prompt.identity = pixie.systemPrompt;
+      pixie.prompt = prompt;
+    }
+    delete pixie.systemPrompt;
+    const saved = asRecord(pixie.prompt);
+    if (saved) {
+      const prompt: Record<string, string> = {};
+      for (const key of ["identity", "rules", "docs", "full"])
+        if (typeof saved[key] === "string" && saved[key]!.trim()) prompt[key] = saved[key] as string;
+      if (Object.keys(prompt).length) pixie.prompt = prompt;
+      else delete pixie.prompt;
+    } else delete pixie.prompt;
+    out.pixie = pixie;
+  }
   if (out.nodeCardFields !== undefined) out.nodeCardFields = normalizeNodeCardFields(out.nodeCardFields);
   try {
     if (out.keyboardShortcuts !== undefined) out.keyboardShortcuts = migrateShortcutOverrides(out.keyboardShortcuts);

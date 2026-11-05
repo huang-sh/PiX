@@ -467,6 +467,17 @@ export interface PiSettings {
   warnings?: { anthropicExtraUsage?: boolean };
   [key: string]: unknown;
 }
+/** Pixie's system prompt customization; every part is optional and falls back to the built-in prompt. */
+export interface PixiePromptCustomization {
+  /** Replaces the built-in identity line. */
+  identity?: string;
+  /** Wrapped as a <rules> section after the core prompt. */
+  rules?: string;
+  /** Wrapped as a <docs> section after the core prompt. */
+  docs?: string;
+  /** When set, used verbatim as the entire system prompt — nothing else is added. */
+  full?: string;
+}
 /** Pixie (the app-level assistant) preferences, stored in app settings. */
 export interface PixieSettings {
   /** False hides the floating Pixie sprite from the window. */
@@ -475,8 +486,8 @@ export interface PixieSettings {
   restoreLastConversation?: boolean;
   /** "provider/modelId" applied to new conversations; unset follows the Pi profile default. */
   defaultModel?: string;
-  /** Appended to Pi's base prompt instead of the built-in Pixie prompt when set. */
-  systemPrompt?: string;
+  /** Fully customizable prompt, like the agent prompt customization. */
+  prompt?: PixiePromptCustomization;
 }
 export interface AppSettings {
   keyboardShortcuts?: ShortcutOverrides;
@@ -680,6 +691,7 @@ export type DesktopRoute =
   | "pixie.send"
   | "pixie.stop"
   | "pixie.newSession"
+  | "pixie.previewPrompt"
   | "pixie.clearHistory"
   | "pixie.reveal"
   | "pixie.reload"
