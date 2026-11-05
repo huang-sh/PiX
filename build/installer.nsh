@@ -7,6 +7,35 @@ Var pixGuardUi
 Var pixGuardLanguage
 Var pixGuardTargets
 
+LangString pixErrorUnavailable 1033 "Installer helper failed (exit code $0). No readable error report was produced."
+LangString pixErrorUnavailable 2052 "安装辅助程序执行失败（退出码 $0），未能生成可读取的错误报告。"
+LangString pixPathInstallError 1033 "PiX CLI PATH registration failed"
+LangString pixPathInstallError 2052 "PiX 命令行 PATH 注册失败"
+LangString pixPathUninstallError 1033 "PiX CLI PATH cleanup failed"
+LangString pixPathUninstallError 2052 "PiX 命令行 PATH 清理失败"
+LangString pixReleaseError 1033 "Could not release PiX installation locks"
+LangString pixReleaseError 2052 "无法释放 PiX 安装锁"
+
+; All installer helpers write errors as UTF-16LE. Never display nsExec's
+; ANSI-decoded output, including when a helper cannot start or write a report.
+!macro pixReadInstallError
+  StrCpy $1 ""
+  ClearErrors
+  FileOpen $2 "$PLUGINSDIR\pix-install-error.txt" r
+  ${IfNot} ${Errors}
+    ${Do}
+      FileReadUTF16LE $2 $3
+      ${IfThen} ${Errors} ${|} ${ExitDo} ${|}
+      StrCpy $1 "$1$3"
+    ${Loop}
+    FileClose $2
+  ${EndIf}
+  ${If} $1 == ""
+    StrCpy $1 "$(pixErrorUnavailable)"
+  ${EndIf}
+  ClearErrors
+!macroend
+
 !macro pixPrepareInstall
   StrCpy $pixGuardRuntime "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
   ${IfNot} ${FileExists} "$pixGuardRuntime"
@@ -40,7 +69,8 @@ Var pixGuardTargets
       StrCpy $pixGuardTargets '$pixGuardTargets --target "$perUserInstallationFolder\${APP_EXECUTABLE_FILENAME}"'
     ${EndIf}
     System::Call 'kernel32::SetEnvironmentVariable(t "ELECTRON_RUN_AS_NODE", t "1")'
-    nsExec::ExecToStack '"$pixGuardRuntime" "$PLUGINSDIR\install-guard.cjs" --prepare $pixGuardTargets --receipt "$PLUGINSDIR\pix-install.json" --owner-pid "$pixGuardOwner" --ui "$pixGuardUi" --language "$pixGuardLanguage"'
+    Delete "$PLUGINSDIR\pix-install-error.txt"
+    nsExec::ExecToStack '"$pixGuardRuntime" "$PLUGINSDIR\install-guard.cjs" --prepare $pixGuardTargets --error-file "$PLUGINSDIR\pix-install-error.txt" --receipt "$PLUGINSDIR\pix-install.json" --owner-pid "$pixGuardOwner" --ui "$pixGuardUi" --language "$pixGuardLanguage"'
     Pop $0
     Pop $1
     ${If} $pixGuardEnv == ""
@@ -49,8 +79,9 @@ Var pixGuardTargets
       System::Call 'kernel32::SetEnvironmentVariable(t "ELECTRON_RUN_AS_NODE", t "$pixGuardEnv")'
     ${EndIf}
     ${If} $0 != 0
-      DetailPrint "$1"
       ${If} $0 != 2
+        !insertmacro pixReadInstallError
+        DetailPrint "$1"
         MessageBox MB_OK|MB_ICONEXCLAMATION "$1" /SD IDOK
       ${EndIf}
       SetErrorLevel 2
@@ -61,8 +92,14 @@ Var pixGuardTargets
 
 !macro pixReleaseInstall
   ${If} ${FileExists} "$PLUGINSDIR\pix-install.json"
-    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action finish -Receipt "$PLUGINSDIR\pix-install.json"'
+    Delete "$PLUGINSDIR\pix-install-error.txt"
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action finish -Receipt "$PLUGINSDIR\pix-install.json" -ErrorFile "$PLUGINSDIR\pix-install-error.txt"'
     Pop $0
+    Pop $1
+    ${If} $0 != 0
+      !insertmacro pixReadInstallError
+      DetailPrint "$(pixReleaseError): $1"
+    ${EndIf}
   ${EndIf}
 !macroend
 
@@ -117,12 +154,15 @@ Var pixGuardTargets
   ${If} $installMode == "all"
     StrCpy $2 "Machine"
   ${EndIf}
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\cli\path.ps1" -Action install -Directory "$INSTDIR\resources\cli" -Scope $2'
+  InitPluginsDir
+  Delete "$PLUGINSDIR\pix-install-error.txt"
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\cli\path.ps1" -Action install -Directory "$INSTDIR\resources\cli" -Scope $2 -ErrorFile "$PLUGINSDIR\pix-install-error.txt"'
   Pop $0
   Pop $1
   ${If} $0 != 0
-    DetailPrint "PiX CLI PATH registration failed: $1"
-    MessageBox MB_OK|MB_ICONEXCLAMATION "PiX CLI PATH registration failed: $1"
+    !insertmacro pixReadInstallError
+    DetailPrint "$(pixPathInstallError): $1"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(pixPathInstallError): $1"
     Abort
   ${EndIf}
   !insertmacro pixReleaseInstall
@@ -157,12 +197,15 @@ Var pixGuardTargets
   ${If} $installMode == "all"
     StrCpy $2 "Machine"
   ${EndIf}
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\cli\path.ps1" -Action uninstall -Directory "$INSTDIR\resources\cli" -Scope $2'
+  InitPluginsDir
+  Delete "$PLUGINSDIR\pix-install-error.txt"
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\cli\path.ps1" -Action uninstall -Directory "$INSTDIR\resources\cli" -Scope $2 -ErrorFile "$PLUGINSDIR\pix-install-error.txt"'
   Pop $0
   Pop $1
   ${If} $0 != 0
-    DetailPrint "PiX CLI PATH cleanup failed: $1"
-    MessageBox MB_OK|MB_ICONEXCLAMATION "PiX CLI PATH cleanup failed: $1"
+    !insertmacro pixReadInstallError
+    DetailPrint "$(pixPathUninstallError): $1"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(pixPathUninstallError): $1"
     Abort
   ${EndIf}
   DeleteRegValue HKCU "Software\PiX" "installerLanguage"
