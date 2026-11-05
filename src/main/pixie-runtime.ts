@@ -232,6 +232,10 @@ export class PixieRuntime {
       this.rpc.request({ type: "get_state" }) as Promise<RpcState>,
       this.rpc.request({ type: "get_entries" }) as Promise<{ entries: RawSessionEntry[]; leafId: string | null }>,
     ]);
+    // A reply that lost its payload (a substrate or protocol mismatch) must
+    // fail loudly instead of crashing with an opaque TypeError.
+    if (!entries || typeof entries !== "object")
+      throw new Error("Pixie's session substrate returned no entries");
     const list = entries.entries ?? [];
     return {
       session: {

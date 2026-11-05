@@ -99,6 +99,11 @@ export const usePixieStore = defineStore("pixie", {
       this.models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
     },
     applySnapshot(snapshot: SessionSnapshot) {
+      // The reply crosses two process boundaries (host, then the Pixie
+      // subprocess); a stale or mismatched peer must report itself instead of
+      // crashing here with an opaque TypeError.
+      if (!snapshot || typeof snapshot !== "object" || !snapshot.projection)
+        throw new Error("Pixie returned an invalid session snapshot");
       snapshot.entries = markRaw(snapshot.entries);
       snapshot.projection = markRaw(snapshot.projection);
       this.snapshot = snapshot;

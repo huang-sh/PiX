@@ -195,4 +195,18 @@ describe("pixie store", () => {
 
     expect(invoke.mock.calls.some(([route]) => route === "pixie.newSession")).toBe(false);
   });
+
+  it("reports a snapshot-less reply as an invalid snapshot, not a TypeError", async () => {
+    const pixie = usePixieStore();
+    vi.spyOn(desktop, "invoke").mockImplementation(async route => {
+      if (route === "agent.control") return [model];
+      // A stale host or substrate mismatch can resolve without a payload.
+      return undefined;
+    });
+
+    await pixie.ensure();
+
+    expect(pixie.error).toBe("Pixie returned an invalid session snapshot");
+    expect(pixie.snapshot).toBeUndefined();
+  });
 });
