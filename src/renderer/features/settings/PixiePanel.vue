@@ -26,15 +26,19 @@ const clearing = ref(false);
 const draft = ref<PixiePromptCustomization>({});
 const promptSaving = ref(false);
 const customized = computed(() => Boolean(layout.settings?.app.pixie?.prompt));
-// Adopt externally-normalized writes — but only when the saved prompt really
-// changed, so toggling an unrelated row never discards unsaved edits.
+// The saved prompt as last adopted. Settings refreshes replace the whole
+// bundle on every unrelated write (toggling a row, another window), so the
+// draft resets only when the saved prompt itself changed — unsaved edits
+// survive anything else. A local save adopts the normalized result.
+let adopted: PixiePromptCustomization | undefined;
 watch(() => layout.settings?.app.pixie?.prompt, saved => {
-  const current = draft.value;
-  if (saved?.identity === current.identity && saved?.rules === current.rules
-    && saved?.docs === current.docs && saved?.full === current.full) return;
+  if (saved?.identity === adopted?.identity && saved?.rules === adopted?.rules
+    && saved?.docs === adopted?.docs && saved?.full === adopted?.full) return;
+  adopted = saved;
   draft.value = { ...saved };
 }, { immediate: true });
-// Full replacement ignores the sections; their drafts stay for toggling back.
+// Full replacement ignores the sections. Their drafts stay while toggling
+// back without saving; a save in full mode clears them from the settings.
 const fullMode = computed({
   get: () => draft.value.full !== undefined,
   set: (on: boolean) => {
@@ -90,19 +94,24 @@ function revealWorkspace() {
 }
 
 // The prompt patch is a complete snapshot with explicit null removals —
-// the settings merge would keep stale sections otherwise. A saved prompt
-// restarts the idle Pixie so it takes effect immediately.
+// the settings merge would keep stale sections otherwise. Saving persists
+// the visible configuration: full replacement drops the hidden sections,
+// the sections drop an unset full. A saved prompt restarts the idle Pixie
+// so it takes effect immediately.
 async function savePrompt() {
   if (promptSaving.value) return;
   promptSaving.value = true;
   try {
     const identity = draft.value.identity?.trim();
-    const prompt: Record<string, string | null> = {
-      identity: identity && identity !== PIXIE_IDENTITY.trim() ? identity : null,
-      rules: draft.value.rules?.trim() || null,
-      docs: draft.value.docs?.trim() || null,
-      full: draft.value.full?.trim() || null,
-    };
+    const full = draft.value.full?.trim();
+    const prompt: Record<string, string | null> = full
+      ? { full, identity: null, rules: null, docs: null }
+      : {
+          identity: identity && identity !== PIXIE_IDENTITY.trim() ? identity : null,
+          rules: draft.value.rules?.trim() || null,
+          docs: draft.value.docs?.trim() || null,
+          full: null,
+        };
     await layout.updateAppSettings({ pixie: { prompt } });
     await desktop.invoke("pixie.reload");
     layout.showNotice(t("settings.pixiePromptApplied"));
