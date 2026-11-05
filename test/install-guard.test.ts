@@ -142,7 +142,7 @@ async function realProfile(job: (home: string, guard: string) => Promise<void>) 
 test("standalone cleanup releases other profiles after an error and can retry the retained receipt", async () => {
   await realProfile(async (home, guard) => {
     const receipt = join(home, "receipt.json");
-    const reservations = ["blocked", "idle"].map(name => ({ home: join(home, name), ownerPid: process.pid, token: name }));
+    const reservations = ["中文用户-未释放", "idle"].map(name => ({ home: join(home, name), ownerPid: process.pid, token: name }));
     const locks = reservations.map(item => join(item.home, ".pix/run/starting"));
     for (const lock of locks) {
       mkdirSync(lock, { recursive: true });
@@ -151,8 +151,13 @@ test("standalone cleanup releases other profiles after an error and can retry th
     mkdirSync(join(locks[0]!, "installer"));
     writeFileSync(join(locks[1]!, "installer"), reservations[1]!.token);
     writeFileSync(receipt, JSON.stringify({ ownerPid: process.pid, reservations }));
-    const failed = await execute(process.execPath, [guard, "--finish", "--receipt", receipt]);
+    const errorFile = join(home, "install-error.txt");
+    const failed = await execute(process.execPath, [guard, "--finish", "--receipt", receipt, "--error-file", errorFile]);
     assert.notEqual(failed.status, 0);
+    const errorBytes = readFileSync(errorFile);
+    assert.deepEqual([...errorBytes.subarray(0, 2)], [0xff, 0xfe]);
+    assert.equal(errorBytes.toString("utf16le").slice(1), failed.output.trimEnd());
+    assert.match(errorBytes.toString("utf16le"), /中文用户-未释放/);
     assert.equal(existsSync(locks[1]!), false, "cleanup must continue after the malformed first marker");
     assert.equal(existsSync(receipt), true, "failed cleanup must retain the authenticated receipt");
     rmSync(join(locks[0]!, "installer"), { recursive: true });
@@ -240,6 +245,52 @@ test("actual interactive commands prompt for installation, cancellation preserve
     } finally {
       for (const reservation of reservations) releaseInstallReservation(reservation);
       await host.shutdown();
+    }
+  });
+});
+
+test("Windows installation does not mistake its own PiX runtime for another installation", { skip: process.platform !== "win32", timeout: 60000 }, async () => {
+  await realProfile(async (home, guard) => {
+    // NSIS runs the guard using the installed PiX.exe, even when the app is closed.
+    const runtime = join(home, "PiX.exe");
+    copyFileSync(process.execPath, runtime);
+    const receipt = join(home, "receipt.json");
+    try {
+      for (const targets of [[runtime], [runtime, runtime]]) {
+        const prepared = await execute(runtime, [guard, "--prepare", ...targets.flatMap(target => ["--target", target]),
+          "--receipt", receipt, "--owner-pid", String(process.pid), "--ui", "silent"]);
+        assert.equal(prepared.status, 0, prepared.output);
+        assert.equal(prepared.output, "");
+        assert.equal(existsSync(join(home, ".pix/run/starting/installer")), true);
+        const finished = await execute(runtime, [guard, "--finish", "--receipt", receipt]);
+        assert.equal(finished.status, 0, finished.output);
+        assert.equal(existsSync(receipt), false);
+        assert.equal(existsSync(join(home, ".pix/run/starting")), false);
+      }
+    } finally {
+      if (existsSync(receipt)) for (const item of JSON.parse(readFileSync(receipt, "utf8")).reservations) releaseInstallReservation(item);
+    }
+  });
+});
+
+test("Windows installation reports a conflicting installation in Chinese without a PowerShell stack dump", { skip: process.platform !== "win32", timeout: 30000 }, async () => {
+  await realProfile(async (home, guard) => {
+    const runtime = join(home, "PiX.exe");
+    copyFileSync(process.execPath, runtime);
+    const other = spawn(runtime, ["-e", "setInterval(() => {}, 1000); console.log('ready')"], { stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      await once(other.stdout, "data");
+      const errorFile = join(home, "error.txt");
+      const result = await execute(process.execPath, [guard, "--prepare", "--target", join(home, "other", "PiX.exe"),
+        "--receipt", join(home, "receipt.json"), "--owner-pid", String(process.pid), "--ui", "silent", "--language", "zh-CN", "--error-file", errorFile]);
+      assert.equal(result.status, 1);
+      assert.match(result.output, /另一个安装位置的 PiX/);
+      assert.doesNotMatch(result.output, /Command failed|CategoryInfo|powershell\.exe/);
+      assert.equal(readFileSync(errorFile, "utf16le").slice(1), result.output.trimEnd());
+    } finally {
+      const exited = once(other, "exit");
+      other.kill();
+      await exited;
     }
   });
 });
