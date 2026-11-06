@@ -35,6 +35,18 @@ function snapshot(leafId: string, streaming = false, withSentTurn = false): Sess
 const model: RuntimeModel = { provider: "test", id: "big", name: "Big" };
 
 describe("pixie store", () => {
+  it("publishes background completion history without a pending user send", () => {
+    const pixie = usePixieStore();
+    pixie.applySnapshot(snapshot("a1"));
+    pixie.onEvent({ type: "agent", payload: { type: "agent_start" } });
+    pixie.onEvent({ type: "agent", payload: { type: "agent_settled" } });
+    pixie.onEvent({ type: "snapshot", payload: snapshot("a2", false, true) });
+    expect(pixie.snapshot?.projection.messages.at(-1)?.text).toBe("answer");
+    expect(pixie.unread).toBe(true);
+    expect(pixie.running).toBe(false);
+    expect(pixie.pending).toBeUndefined();
+  });
+
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => vi.restoreAllMocks());
 

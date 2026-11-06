@@ -153,6 +153,13 @@ const layoutState = (value: unknown): LayoutState => {
       top: numberField(pixieSprite.top, "pixieSprite.top"),
     };
   }
+  if (v.pixieSize === null) layout.pixieSize = null;
+  else if (v.pixieSize !== undefined) {
+    const size = objectField(v.pixieSize, "pixieSize");
+    const width = numberField(size.width, "pixieSize.width"), height = numberField(size.height, "pixieSize.height");
+    if (width <= 0 || height <= 0) throw new Error("pixieSize dimensions must be positive");
+    layout.pixieSize = { width, height };
+  }
   if (v.branchOrders !== undefined) {
     const orders = objectField(v.branchOrders, "branchOrders");
     for (const [branch, entries] of Object.entries(orders)) {

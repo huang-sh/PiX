@@ -9,12 +9,15 @@ test("layout save validates the persisted workbench shape", () => {
     branchOrders: { "D:\\p\\s.jsonl": [["turn:a", 2], ["turn:b", 1]] },
     chatPinWidth: { from: 400, to: 640 },
     pixieSprite: { left: 240, top: 120 },
+    pixieSize: { width: 740, height: 500 },
     widths: { navigator: 240, chat: 480, content: 800.5, settings: 360 },
     collapsed: { navigator: false, chat: false, content: true },
     minimap: true,
     utility: { open: true, collapsed: false, height: 220, activeTab: "terminal" },
   };
   assert.deepEqual(validateRouteInput("layout.save", { layout }), { layout });
+  assert.deepEqual(validateRouteInput("layout.save", { layout: { ...layout, pixieSize: null } }), { layout: { ...layout, pixieSize: null } });
+  assert.throws(() => validateRouteInput("layout.save", { layout: { ...layout, pixieSize: { width: 0, height: 500 } } }), /pixieSize/);
   assert.throws(() =>
     validateRouteInput("layout.save", { layout: { ...layout, minimap: "yes" } }),
     /minimap/);

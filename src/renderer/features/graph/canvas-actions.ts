@@ -1,7 +1,7 @@
 import { nextTick } from "vue";
 import type { CanvasCommand } from "../../../shared/canvas";
 import { GRAPH_FILTERS } from "../../../shared/graph-filter";
-import type { GraphFilter, RuntimeModel } from "../../../shared/types";
+import type { GraphFilter, GraphNode, RuntimeModel } from "../../../shared/types";
 import type { ComposerDraft } from "../../components/PromptComposer.vue";
 import { useSessionStore } from "../../stores/session";
 import { useLayoutStore } from "../../stores/layout";
@@ -37,25 +37,40 @@ export interface CanvasView {
 /** Agent and pointer actions share the actual canvas/store operations. */
 export function createCanvasActions(view: CanvasView) {
   const session = useSessionStore(), layout = useLayoutStore(), workspace = useWorkspaceStore();
+  const nodeSummary = (node: GraphNode) => ({ id: node.id, parentId: node.parentId, title: node.title,
+    label: node.label, preview: node.preview.slice(0, 240), ...(node.preview.length > 240 ? { previewTruncated: true } : {}),
+    running: node.running, hasError: node.hasError,
+    forkable: node.forkable, continuable: node.continuable });
+  function scope() {
+    const current = session.current;
+    return { context: view.context(), project: workspace.project,
+      session: current ? { id: current.session.id, path: current.session.path } : null,
+      available: current?.runtime.available ?? false };
+  }
+  function draftSummary() {
+    const draft = view.draft();
+    return { visible: draft.visible, parentId: draft.parentId, text: draft.state.text,
+      imageCount: draft.state.images.length, busy: draft.state.busy, error: draft.state.error,
+      model: draft.model ? { provider: draft.model.provider, id: draft.model.id } : draft.model,
+      thinkingLevel: draft.thinkingLevel, promptOverride: draft.state.promptOverride };
+  }
   function inspect(command: CanvasCommand) {
     const current = session.current, nodes = current?.projection.nodes ?? [];
-    const offset = command.offset ?? 0, limit = command.limit ?? 100;
-    const draft = view.draft();
+    const offset = command.offset ?? 0, limit = command.limit ?? 40;
+    const include = new Set(command.include);
     return {
-      context: view.context(), project: workspace.project, session: current?.session ?? null,
-      graphId: current?.graph?.id, available: current?.runtime.available ?? false,
-      selectedNodeId: session.highlightedNode || session.focusedNode,
-      focusedNodeId: session.focusedNode, activeNodeId: current?.projection.activeNodeId,
-      nodes: nodes.slice(offset, offset + limit).map(node => ({ ...node, preview: node.preview.slice(0, 1000), rawEntryIds: undefined })),
+      ...scope(), selectedNodeId: session.highlightedNode || session.focusedNode,
+      nodes: nodes.slice(offset, offset + limit).map(nodeSummary),
       totalNodes: nodes.length, offset, nextOffset: offset + limit < nodes.length ? offset + limit : null,
-      runs: current?.graph?.runs.map(run => ({ branchId: run.branchId, runId: run.runId, nodeId: run.nodeId, status: run.status,
-        targetNodeId: run.nodeId ?? `pending:${run.runId}`,
-        pending: run.pending, error: run.error, queuedMessages: run.runtime?.queuedMessages })),
-      draft: { visible: draft.visible, parentId: draft.parentId, text: draft.state.text, imageCount: draft.state.images.length,
-        busy: draft.state.busy, error: draft.state.error, model: draft.model, thinkingLevel: draft.thinkingLevel, promptOverride: draft.state.promptOverride },
-      models: session.models, personas: layout.settings?.app.personas ?? [],
-      chatColumns: layout.chatColumns, viewport: view.viewport(), positions: view.positions().slice(offset, offset + limit),
-      filter: view.filter(), filters: GRAPH_FILTERS, search: view.search(), minimap: layout.layout.minimap,
+      runs: current?.graph?.runs.map(run => ({ nodeId: run.nodeId ?? `pending:${run.runId}`, status: run.status,
+        error: run.error, ...(include.has("queue") ? { queuedMessages: run.runtime?.queuedMessages } : {}) })),
+      ...(include.has("draft") ? { draft: draftSummary() } : {}),
+      ...(include.has("models") ? { models: session.models.map(({ provider, id, name, input, thinkingLevels, reasoning, contextWindow }) =>
+        ({ provider, id, name, input, thinkingLevels, reasoning, contextWindow })) } : {}),
+      ...(include.has("personas") ? { personas: (layout.settings?.app.personas ?? []).map(({ name }) => ({ name })) } : {}),
+      ...(include.has("layout") ? { focusedNodeId: session.focusedNode, chatColumns: layout.chatColumns,
+        viewport: view.viewport(), positions: view.positions().slice(offset, offset + limit),
+        filter: view.filter(), filters: GRAPH_FILTERS, search: view.search(), minimap: layout.layout.minimap } : {}),
     };
   }
   function node(id: string | null | undefined) {
@@ -63,8 +78,7 @@ export function createCanvasActions(view: CanvasView) {
     if (!found) throw new Error(`Canvas node not found: ${id ?? "(missing nodeId)"}. Inspect the canvas for current IDs.`);
     return found;
   }
-  function target(id: string | null | undefined) {
-    if (id === undefined) throw new Error("Specify nodeId; use null explicitly for a root");
+  function target(id: string | null = null) {
     if (id !== null && node(id).forkable === false) throw new Error("This node cannot start a new branch");
     if (!session.current?.runtime.available) throw new Error("The current session is read-only or unavailable");
     if (!session.current.graph && (session.current.runtime.isStreaming || session.pendingPrompt)) throw new Error("The current session is still running");
@@ -110,7 +124,15 @@ export function createCanvasActions(view: CanvasView) {
     switch (command.action) {
       case "read": {
         const value = node(command.nodeId);
-        return { context: view.context(), node: value, ...session.messageWindowFor(value.id, command.limit ?? 40), activity: session.activityFor(value.id) };
+        const limit = command.limit ?? 40;
+        const plan = session.windowPlanFor(value.id, limit);
+        if (plan?.request) {
+          await session.fetchWindow(plan.leaf, limit, 64 * 1024, true);
+          checkContext(command);
+        }
+        const history = session.messageWindowFor(value.id, limit);
+        return { context: view.context(), node: nodeSummary(value), messages: history.messages.slice(-limit),
+          hasEarlier: history.hasEarlier || history.messages.length > limit, activity: session.activityFor(value.id) };
       }
       case "newSession":
         if (!workspace.project) throw new Error("Open a project before creating a session");
@@ -201,6 +223,21 @@ export function createCanvasActions(view: CanvasView) {
         if (layout.layout.minimap !== command.enabled) await layout.toggleMinimap(); break;
     }
     await nextTick();
-    return { result, ...inspect({ action: "inspect" }) };
+    const reply = { ok: true, context: view.context(), action: command.action, nodeId: command.nodeId ?? undefined };
+    switch (command.action) {
+      case "newSession": case "recover": return { ...reply, ...scope() };
+      case "compose": case "draft": case "retry": case "cancelDraft": return { ...reply, draft: draftSummary() };
+      case "send": case "submit": case "export": return { ...reply, result };
+      case "select": case "highlight": return { ...reply, selectedNodeId: session.highlightedNode || session.focusedNode };
+      case "openPanel": case "closePanel": return { ...reply, chatColumns: layout.chatColumns };
+      case "search": return { ...reply, search: view.search() };
+      case "filter": return { ...reply, filter: view.filter() };
+      case "viewport": case "center": case "tidy": return { ...reply, viewport: view.viewport() };
+      case "move": return { ...reply, position: view.positions().find(item => item.id === command.nodeId), branch: command.branch ?? false };
+      case "minimap": return { ...reply, enabled: layout.layout.minimap };
+      case "label": return { ...reply, label: node(command.nodeId).label ?? "" };
+      case "editQueued": case "removeQueued": case "steerQueued": return { ...reply, queueId: command.queueId };
+      default: return reply;
+    }
   };
 }

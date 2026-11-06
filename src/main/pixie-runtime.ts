@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { PixieTasks, taskCompletionPrompt, taskSummary, taskDetails, type PixieTaskHost, type PixieTaskSource, type PixieTaskTarget } from "./pixie-tasks.js";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CanvasCommand } from "../shared/canvas.js";
-import type { DesktopEvent, PixiePromptCustomization, PixieSettings, PromptImage, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
+import type { DesktopEvent, PixiePromptCustomization, PixieSettings, PromptImage, ProjectInfo, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 import { debugLog } from "./debug-log.js";
 import { pixAgentDir } from "./paths.js";
@@ -80,10 +82,118 @@ interface RpcState {
 export class PixieRuntime {
   private canvas?: (command: CanvasCommand) => Promise<unknown>;
   private sending = false;
-  private readonly rpc = new PixieRpc(command => {
-    if (!this.canvas) throw new Error("Ask Pixie from a connected desktop window to use its canvas");
+  private lifecycle = false;
+  private reloadPending = false;
+  private readonly rpc = new PixieRpc(command => this.canvasCommand(command));
+  private taskJournal?: PixieTasks;
+  private readonly taskFile: string;
+  private source?: PixieTaskSource;
+  private monitor?: ReturnType<typeof setInterval>;
+  private checkingTasks = false;
+  private closed = false;
+  private followUpsPaused = false;
+  private retryTasksAt = 0;
+  private review?: { id: string; revision: number };
+
+  get tasks(): PixieTasks {
+    return this.taskJournal ??= new PixieTasks(this.taskFile);
+  }
+  registerTaskHost(host: PixieTaskHost) { return this.tasks.addHost(host); }
+
+  private async canvasCommand(command: CanvasCommand): Promise<unknown> {
+    if (command.action === "tasks") {
+      if (command.taskId) return taskDetails(this.tasks.get(command.taskId));
+      const tasks = this.tasks.list().reverse(), offset = command.offset ?? 0, limit = command.limit ?? 30;
+      return { tasks: tasks.slice(offset, offset + limit).map(({ id, purpose, state, revision, parentTaskId, target, notification }) =>
+        ({ id, purpose, state, revision, parentTaskId, target, notification })), total: tasks.length,
+        nextOffset: offset + limit < tasks.length ? offset + limit : null };
+    }
+    if (command.action === "read" && command.taskId) {
+      const { task, ancestors, output } = await this.tasks.read(command.taskId, command.limit);
+      return { task: taskDetails(task), ancestors: ancestors.map(({ id, purpose, acceptance, state, revision }) =>
+        ({ id, purpose, acceptance, state, revision })), output };
+    }
+    if (this.review) {
+      const task = this.tasks.get(this.review.id);
+      if ((task.state === "cancelled" && command.action !== "stop") || task.revision !== this.review.revision)
+        throw new Error("The delegation changed while you were reviewing it; read its latest state before taking further action");
+    }
+    if (command.action === "updateTask") {
+      const task = this.tasks.update(command);
+      if (this.review?.id === task.id) this.review.revision = task.revision;
+      return { ...taskSummary(task), purpose: task.purpose, acceptance: task.acceptance };
+    }
+    if (command.action === "delegate") {
+      if (!this.source) throw new Error("No Pixie request is active");
+      let target: PixieTaskTarget;
+      if (command.taskId) {
+        const parent = this.tasks.get(command.taskId);
+        if (parent.state === "cancelled") throw new Error("This delegation was cancelled");
+        target = parent.target;
+        command = { ...command, nodeId: command.nodeId === undefined ? parent.nodeId : command.nodeId };
+      } else {
+        if (!this.canvas) throw new Error("Inspect a connected desktop canvas to start a new delegation");
+        const view = await this.canvas({ action: "inspect" }) as { context: string; project?: ProjectInfo; session?: { path: string } };
+        if (!view.project || !view.session?.path || view.context !== command.context)
+          throw new Error("The canvas session changed; inspect again before delegating");
+        target = { project: view.project, session: view.session.path };
+      }
+      const result = await this.tasks.delegate(command, this.source, target, command.taskId);
+      return { ...result, task: taskSummary(result.task) };
+    }
+    if (command.taskId && ["steer", "followUp", "stop"].includes(command.action)) {
+      if (!this.source) throw new Error("No Pixie request is active");
+      const result = await this.tasks.control(command, this.source);
+      return { ...result, task: taskSummary(result.task) };
+    }
+    if (!this.canvas) throw new Error("This background turn has no live canvas; use taskId to address the original delegation");
     return this.canvas(command);
-  });
+  }
+
+  private startMonitoring() {
+    if (this.monitor || this.closed) return;
+    this.monitor = setInterval(() => { void this.checkTasks(); }, 2_000);
+    this.monitor.unref();
+  }
+
+  /** Host polling uses no model tokens. Completion reviews run only between Pixie turns. */
+  private async checkTasks() {
+    if (this.closed || this.checkingTasks) return;
+    this.checkingTasks = true;
+    try {
+      await this.flushReload();
+      await this.tasks.reconcile();
+      if (this.closed || this.busy || this.followUpsPaused || Date.now() < this.retryTasksAt) return;
+      const task = this.tasks.pending();
+      if (!task) return;
+      this.sending = true;
+      this.review = { id: task.id, revision: task.revision };
+      try {
+        if (this.closed || this.followUpsPaused) return;
+        const latest = this.tasks.get(task.id);
+        if (latest.state === "cancelled" || latest.revision !== task.revision) return;
+        this.tasks.delivery(task.id, task.revision, "delivering");
+        const snapshot = await this.sendTurn({ text: taskCompletionPrompt(latest) }, {
+          ...task.source, id: `task:${task.id}:${task.revision}`,
+        });
+        const assistant = [...snapshot.entries].reverse().find(entry => (entry.message as { role?: string } | undefined)?.role === "assistant")?.message as { stopReason?: string; errorMessage?: string } | undefined;
+        if (assistant?.stopReason === "error" || assistant?.stopReason === "aborted")
+          throw new Error(assistant.errorMessage || "Pixie's task review was interrupted");
+        this.tasks.delivery(task.id, this.review.revision, this.closed || this.followUpsPaused ? "pending" : "delivered");
+        this.emit({ type: "pixie", payload: { type: "snapshot", payload: snapshot } });
+      } catch (error) {
+        this.tasks.delivery(task.id, this.review.revision, "pending");
+        this.retryTasksAt = Date.now() + 60_000;
+        this.emit({ type: "pixie", payload: { type: "notice", payload: { level: "error", message: `Pixie task follow-up pending: ${String(error)}` } } });
+      } finally {
+        this.review = undefined;
+        this.source = undefined;
+        this.sending = false;
+        await this.flushReload();
+      }
+    } catch (error) { debugLog("pixie: task reconciliation", error); }
+    finally { this.checkingTasks = false; }
+  }
   private starting?: Promise<SessionSnapshot>;
   /** Cumulative assistant content by part index, rebuilt from wire deltas. */
   private parts = new Map<number, { kind: "text" | "thinking"; body: string }>();
@@ -91,7 +201,7 @@ export class PixieRuntime {
   /** The in-flight turn's timing: prompt dispatch → first delta → settle. */
   private turnTiming?: { promptAt: number; firstDeltaAt?: number };
 
-  get busy(): boolean { return Boolean(this.starting || this.sending || this.turnTiming); }
+  get busy(): boolean { return Boolean(this.starting || this.sending || this.turnTiming || this.lifecycle); }
 
   constructor(
     private readonly emit: (event: DesktopEvent) => void,
@@ -100,6 +210,7 @@ export class PixieRuntime {
     // Before any clear-or-boot can touch the session dirs: clearing first
     // and migrating afterwards would resurrect the wiped conversations.
     migrateLegacyWorkspace();
+    this.taskFile = join(pixieWorkspace(), "delegations.json");
     this.rpc.onEvent(event => this.onWireEvent(event));
     // A dead subprocess must fail the in-flight turn, not hang its waiters.
     this.rpc.onExit(error => {
@@ -110,13 +221,19 @@ export class PixieRuntime {
   }
 
   private onWireEvent(event: RpcLine) {
+    if (event.type === "extension_error" && event.event === "send_message") {
+      for (const waiter of this.idleWaiters) waiter.reject(new Error(String(event.error)));
+      this.idleWaiters.clear();
+    }
     if (event.type === "message_update") {
       if (this.turnTiming && !this.turnTiming.firstDeltaAt) this.turnTiming.firstDeltaAt = Date.now();
       this.emitAgent(this.cumulativeUpdate(event));
       return;
     }
     if (event.type === "message_start" || event.type === "message_end") {
-      const role = (event.message as { role?: string } | undefined)?.role;
+      const message = event.message as { role?: string; display?: boolean } | undefined;
+      if (message?.role === "custom" && message.display === false) return;
+      const role = message?.role;
       if (role === "assistant") this.parts.clear();
     } else if (event.type === "agent_settled" || event.type === "agent_start") {
       this.parts.clear();
@@ -168,6 +285,8 @@ export class PixieRuntime {
 
   /** Single-flight boot: repeated toggles, sends, and retries share one start. */
   ensure(): Promise<SessionSnapshot> {
+    this.startMonitoring();
+    if (this.starting) return this.starting;
     if (this.rpc.running) return this.snapshot();
     return (this.starting ??= this.boot().finally(() => {
       this.starting = undefined;
@@ -176,8 +295,8 @@ export class PixieRuntime {
 
   /**
    * Boots the subprocess with the system prompt set directly: the fully
-   * customized Pixie prompt — Pi's generated default with the identity line
-   * swapped, optional rules/docs sections, and the canvas tool guidance; or
+   * customized Pixie prompt — Pi's section structure with Pixie's coordination
+   * identity, tools, rules/docs, and canvas guidance; or
    * the user's verbatim text in full-replacement mode. The subprocess appends
    * skills, context files, and the working directory to whatever text this
    * sets.
@@ -237,6 +356,20 @@ export class PixieRuntime {
     if (!entries || typeof entries !== "object")
       throw new Error("Pixie's session substrate returned no entries");
     const list = entries.entries ?? [];
+    const projection = projectSession(list, entries.leafId ?? null);
+    const byId = new Map(list.map(entry => [entry.id, entry]));
+    // Hidden events start their own reply, rather than merging it into the
+    // user's most recent (possibly unrelated) question.
+    let eventTurn: string | undefined;
+    projection.messages = projection.messages.flatMap(message => {
+      const entry = byId.get(message.entryId);
+      if (entry?.type === "custom_message" && entry.display === false) {
+        eventTurn = `turn:${entry.id}`;
+        return [];
+      }
+      if (message.role === "user") eventTurn = undefined;
+      return [{ ...message, ...(eventTurn ? { turnId: eventTurn } : {}) }];
+    });
     return {
       session: {
         ...summarizeSession(state.sessionFile ?? "", null, list, new Date().toISOString()),
@@ -245,7 +378,7 @@ export class PixieRuntime {
         cwd: pixieWorkspace(),
       },
       entries: list,
-      projection: projectSession(list, entries.leafId ?? null),
+      projection,
       runtime: this.runtimeState(state),
     };
   }
@@ -282,23 +415,27 @@ export class PixieRuntime {
     modelId?: string;
     thinkingLevel?: string;
   }, canvas?: (command: CanvasCommand) => Promise<unknown>): Promise<SessionSnapshot> {
-    if (this.sending) throw new Error("Pixie is already answering another message");
+    if (this.sending || this.lifecycle) throw new Error("Pixie is already answering another message or changing conversations");
     this.sending = true;
+    this.followUpsPaused = false;
     this.canvas = canvas;
     try {
       return await this.sendTurn(input);
     } finally {
       this.canvas = undefined;
+      this.source = undefined;
       this.sending = false;
+      await this.flushReload();
     }
   }
 
-  private async sendTurn(input: { text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }): Promise<SessionSnapshot> {
+  private async sendTurn(input: { text: string; images?: PromptImage[]; provider?: string; modelId?: string; thinkingLevel?: string }, source?: PixieTaskSource): Promise<SessionSnapshot> {
     await this.ensure();
     // Session-scoped switches, like the plain chat's promptAt: the profile
     // default stays put, so changing the Pixie model never leaks into new
     // graph sessions.
     const state = await this.rpc.request({ type: "get_state" }) as RpcState;
+    this.source = source ?? { id: randomUUID(), text: input.text, sessionId: state.sessionId, sessionFile: state.sessionFile };
     if (input.provider && input.modelId &&
       (state.model?.provider !== input.provider || state.model?.id !== input.modelId))
       await this.rpc.request({ type: "set_model", provider: input.provider, modelId: input.modelId });
@@ -308,14 +445,15 @@ export class PixieRuntime {
     this.turnTiming = timing;
     const idle = this.whenIdle();
     try {
-      await this.rpc.request({ type: "prompt", message: input.text, ...(input.images?.length ? { images: input.images } : {}) });
+      await Promise.all([this.rpc.request(source
+        ? { type: "pixie.task.event", content: input.text }
+        : { type: "prompt", message: input.text, ...(input.images?.length ? { images: input.images } : {}) }), idle]);
     } catch (error) {
-      // The turn never started; its idle waiter must not outlive the send.
+      // Neither failed admission nor a failed event turn may retain a busy waiter.
       this.idleWaiters.clear();
       this.turnTiming = undefined;
       throw error;
     }
-    await idle;
     this.turnTiming = undefined;
     const first = timing.firstDeltaAt ? `, first delta ${timing.firstDeltaAt - timing.promptAt}ms` : "";
     debugLog(`pixie: turn ${Date.now() - timing.promptAt}ms${first}`);
@@ -323,45 +461,72 @@ export class PixieRuntime {
   }
 
   async stop(): Promise<void> {
+    this.followUpsPaused = true;
     await this.ensure();
     await this.rpc.request({ type: "abort" });
   }
 
   async newSession(): Promise<SessionSnapshot> {
-    await this.ensure();
-    await this.rpc.request({ type: "new_session" });
-    await this.applyDefaultModel();
-    return this.snapshot();
+    if (this.busy) throw new Error("Stop Pixie before starting a new conversation");
+    this.lifecycle = true;
+    try {
+      await this.ensure();
+      await this.rpc.request({ type: "new_session" });
+      await this.applyDefaultModel();
+      return await this.snapshot();
+    } finally { this.lifecycle = false; }
   }
 
-  /** Deletes every Pixie conversation and boots a fresh one. */
+  /** Deletes Pixie conversations and pending follow-ups, leaving graph agents alone. */
   async clearHistory(): Promise<SessionSnapshot> {
-    if (this.rpc.running) {
-      const state = await this.rpc.request({ type: "get_state" }).catch(() => undefined) as RpcState | undefined;
-      if (state?.isStreaming || state?.isCompacting)
-        throw new Error("Stop Pixie before clearing its conversations");
-      await this.rpc.stop();
-    }
-    for (const dir of sessionDirs()) rmSync(dir, { recursive: true, force: true });
-    return this.ensure();
+    if (this.busy) throw new Error("Stop Pixie before clearing its conversations");
+    this.lifecycle = true;
+    this.followUpsPaused = true;
+    try {
+      if (this.rpc.running) {
+        const state = await this.rpc.request({ type: "get_state" }).catch(() => undefined) as RpcState | undefined;
+        if (state?.isStreaming || state?.isCompacting)
+          throw new Error("Stop Pixie before clearing its conversations");
+        await this.rpc.stop();
+      }
+      this.tasks.clear();
+      for (const dir of sessionDirs()) rmSync(dir, { recursive: true, force: true });
+      return await this.ensure();
+    } finally { this.lifecycle = false; }
   }
 
-  /**
-   * Neither prompt nor catalog changes can be pushed into the subprocess (the
-   * RPC protocol has no reload), so an idle Pixie restarts into the same
-   * session file; a busy one picks the change up on its next lifecycle.
-   */
+  private async flushReload() {
+    if (!this.reloadPending || this.busy || this.closed) return;
+    try { await this.reload(); }
+    catch (error) {
+      this.emit({ type: "pixie", payload: { type: "notice", payload: { level: "error", message: `Pixie reload failed: ${String(error)}` } } });
+    }
+  }
+
+  /** Defer prompt/catalog changes until idle, preserving the conversation. */
   async reload(): Promise<void> {
-    if (!this.rpc.running || this.starting) return;
-    const state = await this.rpc.request({ type: "get_state" }).catch(() => undefined) as RpcState | undefined;
-    if (state?.isStreaming || state?.isCompacting) return;
-    const resume = state?.sessionFile;
-    await this.rpc.stop();
-    await this.startAgent();
-    if (resume) await this.rpc.request({ type: "switch_session", sessionPath: resume });
+    if (this.closed) return;
+    this.reloadPending = true;
+    if (this.busy) return;
+    this.reloadPending = false;
+    if (!this.rpc.running) return; // The next boot already reads the latest settings.
+    this.lifecycle = true;
+    try {
+      const state = await this.rpc.request({ type: "get_state" }) as RpcState;
+      if (state.isStreaming || state.isCompacting) { this.reloadPending = true; return; }
+      const resume = state.sessionFile;
+      await this.rpc.stop();
+      if (this.closed) return;
+      await this.startAgent();
+      if (this.closed) { await this.rpc.stop(); return; }
+      if (resume) await this.rpc.request({ type: "switch_session", sessionPath: resume });
+    } finally { this.lifecycle = false; }
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    clearInterval(this.monitor);
+    this.monitor = undefined;
     await this.starting?.catch(() => {});
     this.rpc.write({ type: "abort" });
     await this.rpc.stop();

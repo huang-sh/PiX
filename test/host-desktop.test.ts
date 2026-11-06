@@ -66,6 +66,17 @@ async function desktopView(t: TestContext) {
   return { cwd, desktop, controller };
 }
 
+test("same-version hosts without Pixie support fail explicitly before dispatching its routes", async t => {
+  const { host, cwd } = await fixture(t);
+  const client = await HostClient.connect({ ...host.address, pixieRpc: undefined }, cwd);
+  t.after(() => client.close());
+  const ensure = t.mock.method(host.owner.pixie, "ensure", async () => null as unknown as SessionSnapshot);
+  await assert.rejects(client.invoke("pixie.ensure"), /host does not support Pixie/);
+  await assert.rejects(client.invoke("pixie.send", { text: "hello" }), /host does not support Pixie/);
+  assert.equal(ensure.mock.callCount(), 0);
+  assert.ok(await client.invoke("app.bootstrap"), "older host's existing features remain usable");
+});
+
 test("desktop clients share Pixie, receive its events, and protect its active work on quit", async t => {
   const { host, connectDesktop } = await fixture(t);
   const a = await connectDesktop({ ...headlessPlatform }, "pixie-a");

@@ -17,7 +17,15 @@ export const en = {
     menuOpen: "Open conversation",
     menuSettings: "Pixie settings",
     menuHide: "Hide floating companion",
-    resize: "Resize",
+    resize: "Drag or use arrow keys to resize; double-click to reset",
+    resize_n: "Resize top edge",
+    resize_s: "Resize bottom edge",
+    resize_w: "Resize left edge",
+    resize_e: "Resize right edge",
+    resize_nw: "Resize top-left corner",
+    resize_ne: "Resize top-right corner",
+    resize_sw: "Resize bottom-left corner",
+    resize_se: "Resize bottom-right corner",
   },
 };
 
@@ -38,7 +46,15 @@ export const zhCN: typeof en = {
     menuOpen: "打开对话",
     menuSettings: "精灵设置",
     menuHide: "隐藏悬浮精灵",
-    resize: "调整大小",
+    resize: "拖动或使用方向键调整大小；双击恢复默认",
+    resize_n: "调整上边缘",
+    resize_s: "调整下边缘",
+    resize_w: "调整左边缘",
+    resize_e: "调整右边缘",
+    resize_nw: "调整左上角",
+    resize_ne: "调整右上角",
+    resize_sw: "调整左下角",
+    resize_se: "调整右下角",
   },
 };
 

@@ -471,9 +471,9 @@ export interface PiSettings {
 export interface PixiePromptCustomization {
   /** Replaces the built-in identity line. */
   identity?: string;
-  /** Wrapped as a <rules> section after the core prompt. */
+  /** Replaces the built-in coordination rules section. */
   rules?: string;
-  /** Wrapped as a <docs> section after the core prompt. */
+  /** Replaces the built-in delegation documentation section. */
   docs?: string;
   /** When set, used verbatim as the entire system prompt — nothing else is added. */
   full?: string;
@@ -549,6 +549,7 @@ export interface LayoutState {
   chatPinWidth?: { from: number; to: number };
   /** The floating Pixie sprite's pinned window position; unset = default corner. */
   pixieSprite?: { left: number; top: number };
+  pixieSize?: { width: number; height: number } | null;
   collapsed: Record<PanelId, boolean>;
   minimap: boolean;
   utility: {

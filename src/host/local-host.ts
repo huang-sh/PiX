@@ -299,7 +299,7 @@ export async function serveLocalHost() {
   });
   await new Promise<void>((resolve, reject) => { wss.once("listening", resolve); wss.once("error", reject); });
   const address: HostAddress = { protocol: LOCAL_HOST_PROTOCOL, version: PIX_HOST_VERSION,
-    pid: process.pid, port: (wss.address() as { port: number }).port, token, desktopViewMigration: true };
+    pid: process.pid, port: (wss.address() as { port: number }).port, token, desktopViewMigration: true, pixieRpc: true };
   mkdirSync(hostRunDir(), { recursive: true, mode: 0o700 });
   writeFileSync(hostAddressFile(), JSON.stringify(address), { mode: 0o600 });
   let maintaining = false;

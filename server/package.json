@@ -28,6 +28,7 @@
     "dist",
     "bin",
     "skills",
+    "pixie-skills",
     "LICENSE"
   ],
   "license": "MPL-2.0"

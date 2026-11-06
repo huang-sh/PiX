@@ -128,6 +128,9 @@ export const useLayoutStore = defineStore("layout", {
       const sprite = this.layout.pixieSprite;
       if (!sprite || !Number.isFinite(sprite.left) || !Number.isFinite(sprite.top))
         this.layout.pixieSprite = undefined;
+      const pixieSize = this.layout.pixieSize;
+      if (!pixieSize || !Number.isFinite(pixieSize.width) || !Number.isFinite(pixieSize.height)
+        || pixieSize.width <= 0 || pixieSize.height <= 0) this.layout.pixieSize = undefined;
       if (!this.layout.navigatorPinned) this.layout.collapsed.navigator = true;
       if ((this.layout.version ?? 0) < 4) {
         this.layout.version = 4;
@@ -172,6 +175,10 @@ export const useLayoutStore = defineStore("layout", {
     },
     async setPixieSprite(position: { left: number; top: number }) {
       this.layout.pixieSprite = { left: Math.round(position.left), top: Math.round(position.top) };
+      await this.save();
+    },
+    async setPixieSize(size?: { width: number; height: number }) {
+      this.layout.pixieSize = size ? { width: Math.round(size.width), height: Math.round(size.height) } : null;
       await this.save();
     },
     async openTool(section: ContentSection) {

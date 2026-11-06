@@ -227,7 +227,8 @@ async function serve() {
         if (
           request.type !== "request" ||
           typeof request.id !== "string" ||
-          !isProjectRoute(request.route)
+          !isProjectRoute(request.route) ||
+          (request.sessionPath !== undefined && (typeof request.sessionPath !== "string" || !request.sessionPath))
         )
           throw new Error("Invalid remote request");
         if (
@@ -260,7 +261,7 @@ async function serve() {
           }
           return;
         }
-        const result = request.route === "host.activity" ? await activity() : await controller.invoke(request.route, request.input);
+        const result = request.route === "host.activity" ? await activity() : await controller.invoke(request.route, request.input, request.sessionPath);
         send(socket, {
           type: "response",
           id: request.id,

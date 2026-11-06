@@ -172,10 +172,13 @@ export const usePixieStore = defineStore("pixie", {
       }
     },
     // Pi events arrive re-tagged as desktop "pixie" events; the payload is
-    // the runtime's own {type: "agent" | "notice", payload} event.
+    // the runtime's agent, snapshot or notice event.
     onEvent(event: { type?: string; payload?: unknown } | undefined) {
       if (!event) return;
-      if (event.type === "agent") {
+      if (event.type === "snapshot") {
+        this.applySnapshot(event.payload as SessionSnapshot);
+        if (!this.visible) this.unread = true;
+      } else if (event.type === "agent") {
         const wasActive = this.activity?.active;
         const activity = reduceAgentActivity(this.activity, event.payload);
         this.activity = activity;

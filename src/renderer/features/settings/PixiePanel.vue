@@ -1,20 +1,18 @@
 <script setup lang="ts">
-import { FolderOpen, RotateCcw, Save, Trash2 } from "@lucide/vue";
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { ChevronRight, FolderOpen, Pencil, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { PIXIE_IDENTITY } from "../../../shared/pixie-prompt";
+import { PIXIE_DOCS, PIXIE_IDENTITY, PIXIE_RULES } from "../../../shared/pixie-prompt";
 import type { PixiePromptCustomization, SessionSnapshot } from "../../../shared/types";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
 import { usePixieStore } from "../../stores/pixie";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
-import { useSettingsDraftContext } from "./settings-context";
 import type { Row } from "./use-settings-draft";
 import SettingRow from "./SettingRow.vue";
 
 const { t } = useI18n();
-const { value, setValue, rowHint, optionLabel } = useSettingsDraftContext();
 const pixie = usePixieStore();
 const session = useSessionStore();
 const layout = useLayoutStore();
@@ -25,7 +23,25 @@ const clearing = ref(false);
 // default mode.
 const draft = ref<PixiePromptCustomization>({});
 const promptSaving = ref(false);
-const customized = computed(() => Boolean(layout.settings?.app.pixie?.prompt));
+type PromptSection = keyof PixiePromptCustomization;
+const defaults = { identity: PIXIE_IDENTITY, rules: PIXIE_RULES, docs: PIXIE_DOCS, full: "" };
+const labels = { identity: "pixiePromptIdentity", rules: "pixiePromptRules", docs: "pixiePromptDocs", full: "pixiePromptFull" };
+const editing = ref<PromptSection | null>(null);
+const root = ref<HTMLElement>();
+let editBackup: PixiePromptCustomization = {};
+const sections = computed<PromptSection[]>(() => fullMode.value ? ["full"] : ["identity", "rules", "docs"]);
+const contentOf = (name: PromptSection) => draft.value[name]?.trim() || defaults[name];
+async function startEdit(name: PromptSection, backup = { ...draft.value }) {
+  editBackup = backup;
+  editing.value = name;
+  draft.value[name] = contentOf(name);
+  await nextTick();
+  root.value?.querySelector<HTMLTextAreaElement>("textarea")?.focus({ preventScroll: true });
+}
+function cancelEdit() {
+  draft.value = { ...editBackup };
+  editing.value = null;
+}
 // The saved prompt as last adopted. Settings refreshes replace the whole
 // bundle on every unrelated write (toggling a row, another window), so the
 // draft resets only when the saved prompt itself changed — unsaved edits
@@ -36,14 +52,17 @@ watch(() => layout.settings?.app.pixie?.prompt, saved => {
     && saved?.docs === adopted?.docs && saved?.full === adopted?.full) return;
   adopted = saved;
   draft.value = { ...saved };
+  editing.value = null;
 }, { immediate: true });
-// Full replacement ignores the sections. Their drafts stay while toggling
-// back without saving; a save in full mode clears them from the settings.
+// Switching modes starts an edit; cancelling restores the previous mode and
+// sections. Saving a full replacement removes the section overrides.
 const fullMode = computed({
   get: () => draft.value.full !== undefined,
   set: (on: boolean) => {
-    if (on) { if (draft.value.full === undefined) draft.value.full = ""; }
+    const backup = { ...draft.value };
+    if (on) draft.value.full = "";
     else delete draft.value.full;
+    void startEdit(on ? "full" : "identity", backup);
   },
 });
 const personas = computed(() => layout.settings?.app.personas ?? []);
@@ -51,7 +70,10 @@ const personas = computed(() => layout.settings?.app.personas ?? []);
 function seedIdentity(event: Event) {
   const select = event.target as HTMLSelectElement;
   const persona = personas.value.find(item => item.name === select.value);
-  if (persona) draft.value.identity = persona.text;
+  if (persona) {
+    if (editing.value !== "identity") void startEdit("identity");
+    draft.value.identity = persona.text;
+  }
   select.value = "";
 }
 
@@ -108,12 +130,14 @@ async function savePrompt() {
       ? { full, identity: null, rules: null, docs: null }
       : {
           identity: identity && identity !== PIXIE_IDENTITY.trim() ? identity : null,
-          rules: draft.value.rules?.trim() || null,
-          docs: draft.value.docs?.trim() || null,
+          rules: draft.value.rules?.trim() && draft.value.rules.trim() !== PIXIE_RULES.trim() ? draft.value.rules.trim() : null,
+          docs: draft.value.docs?.trim() && draft.value.docs.trim() !== PIXIE_DOCS.trim() ? draft.value.docs.trim() : null,
           full: null,
         };
     await layout.updateAppSettings({ pixie: { prompt } });
     await desktop.invoke("pixie.reload");
+    draft.value = { ...layout.settings?.app.pixie?.prompt };
+    editing.value = null;
     layout.showNotice(t("settings.pixiePromptApplied"));
   } catch (error) {
     layout.showNotice(error instanceof Error ? error.message : String(error), "error");
@@ -122,8 +146,10 @@ async function savePrompt() {
   }
 }
 
-function resetPrompt() {
-  draft.value = {};
+function resetPrompt(name?: PromptSection) {
+  if (promptSaving.value) return;
+  if (name) delete draft.value[name];
+  else draft.value = {};
   void savePrompt();
 }
 
@@ -180,169 +206,118 @@ async function clearHistory() {
 </script>
 
 <template>
-  <section class="settings-card" data-pixie-settings>
-    <SettingRow
-      v-for="row in rows"
-      :key="row.path"
-      :row="row"
-      :disabled="row === modelRow && !modelOptionsReady"
-    />
-    <div class="setting-row pixie-prompt-row">
-      <span>
-        <strong>
-          {{ t("settings.rows.pixieSystemPrompt") }}
-          <em v-if="customized" class="pixie-prompt-tag">{{ t("settings.pixiePromptCustomized") }}</em>
-        </strong>
-        <small>{{ t("settings.rows.pixieSystemPromptDesc") }}</small>
-      </span>
-      <div class="pixie-prompt-editor">
-        <label class="pixie-prompt-mode">
-          <input type="checkbox" data-pixie-prompt-full-mode v-model="fullMode" />
-          {{ t("settings.pixiePromptFullMode") }}
-        </label>
-        <template v-if="!fullMode">
-          <select v-if="personas.length" data-pixie-prompt-persona @change="seedIdentity">
-            <option value="">{{ t("settings.pixiePromptSeedPersona") }}</option>
-            <option v-for="persona in personas" :key="persona.name" :value="persona.name">{{ persona.name }}</option>
-          </select>
-          <textarea
-            v-model="draft.identity"
-            rows="2"
-            :placeholder="PIXIE_IDENTITY"
-            :aria-label="t('settings.pixiePromptIdentity')"
-            data-pixie-prompt-identity
-          ></textarea>
-          <textarea
-            v-model="draft.rules"
-            rows="3"
-            :placeholder="t('settings.pixiePromptRulesPlaceholder')"
-            :aria-label="t('settings.pixiePromptRules')"
-            data-pixie-prompt-rules
-          ></textarea>
-          <textarea
-            v-model="draft.docs"
-            rows="3"
-            :placeholder="t('settings.pixiePromptDocsPlaceholder')"
-            :aria-label="t('settings.pixiePromptDocs')"
-            data-pixie-prompt-docs
-          ></textarea>
-        </template>
-        <template v-else>
-          <small class="pixie-prompt-warning">{{ t("settings.pixiePromptFullWarning") }}</small>
-          <textarea
-            v-model="draft.full"
-            rows="10"
-            :placeholder="t('settings.pixiePromptFullPlaceholder')"
-            :aria-label="t('settings.pixiePromptFull')"
-            data-pixie-prompt-full
-          ></textarea>
-        </template>
-        <div class="pixie-prompt-actions">
-          <Button variant="ghost" size="sm" data-action="pixie-prompt-reset" @click="resetPrompt">
-            <RotateCcw :size="14" /> {{ t("settings.pixiePromptReset") }}
+  <section class="pixie-settings" data-pixie-settings>
+    <div class="settings-card pixie-basics">
+      <SettingRow
+        v-for="row in rows"
+        :key="row.path"
+        :row="row"
+        :disabled="row === modelRow && !modelOptionsReady"
+      />
+    </div>
+    <section class="settings-card">
+      <div ref="root" class="prompt-section" data-pixie-prompt-section>
+        <header class="persona-card-head">
+          <div>
+            <h2>{{ t("settings.rows.pixieSystemPrompt") }}</h2>
+            <p>{{ t("settings.rows.pixieSystemPromptDesc") }}</p>
+          </div>
+          <Button variant="outline" size="icon" :title="t('settings.promptRefresh')" :disabled="previewBusy || promptSaving" @click="loadPreview">
+            <RefreshCw :size="15" :class="{ spin: previewBusy }" />
           </Button>
-          <Button variant="outline" size="sm" :disabled="promptSaving" data-action="pixie-prompt-save" @click="savePrompt">
-            <Save :size="14" /> {{ promptSaving ? t("settings.saving") : t("settings.pixiePromptSave") }}
+        </header>
+        <label class="pixie-prompt-mode">
+          <span>{{ t("settings.pixiePromptFullMode") }}</span>
+          <input class="switch" type="checkbox" data-pixie-prompt-full-mode v-model="fullMode" :disabled="promptSaving || !!editing" />
+        </label>
+        <p v-if="fullMode" class="prompt-note">{{ t("settings.pixiePromptFullWarning") }}</p>
+        <article v-for="name in sections" :key="name" class="prompt-block" :data-pixie-prompt-block="name">
+          <header>
+            <strong>{{ t(`settings.${labels[name]}`) }}</strong>
+            <span class="prompt-badge" :class="{ 'is-dynamic': !layout.settings?.app.pixie?.prompt?.[name] }">
+              {{ t(layout.settings?.app.pixie?.prompt?.[name] ? "settings.promptCustomized" : "settings.pixiePromptBuiltin") }}
+            </span>
+            <span class="prompt-block-actions">
+              <Button v-if="!editing" variant="ghost" size="icon" :title="t('settings.promptCustomize')" :disabled="promptSaving" :data-pixie-edit="name" @click="startEdit(name)"><Pencil :size="13" /></Button>
+              <Button v-if="layout.settings?.app.pixie?.prompt?.[name]" variant="ghost" size="icon" :title="t('settings.promptReset')" :disabled="promptSaving || !!editing" :data-pixie-reset="name" @click="resetPrompt(name)"><RotateCcw :size="13" /></Button>
+            </span>
+          </header>
+          <label v-if="name === 'identity' && personas.length" class="prompt-persona-picker">
+            <span>{{ t("settings.promptChoosePersona") }}</span>
+            <select data-pixie-prompt-persona :disabled="promptSaving || !!(editing && editing !== 'identity')" @change="seedIdentity">
+              <option value="">{{ t("settings.pixiePromptSeedPersona") }}</option>
+              <option v-for="persona in personas" :key="persona.name" :value="persona.name">{{ persona.name }}</option>
+            </select>
+          </label>
+          <form v-if="editing === name" class="persona-form" :aria-busy="promptSaving" @submit.prevent="savePrompt">
+            <label>
+              <span>{{ t("settings.promptEditing", { section: t(`settings.${labels[name]}`) }) }}</span>
+              <textarea v-model="draft[name]" rows="10" :disabled="promptSaving"
+                :data-pixie-prompt-identity="name === 'identity' ? '' : undefined"
+                :data-pixie-prompt-rules="name === 'rules' ? '' : undefined"
+                :data-pixie-prompt-docs="name === 'docs' ? '' : undefined"
+                :data-pixie-prompt-full="name === 'full' ? '' : undefined"
+              />
+            </label>
+            <footer>
+              <Button variant="outline" size="sm" type="button" :disabled="promptSaving" data-action="pixie-prompt-cancel" @click="cancelEdit">{{ t("common.cancel") }}</Button>
+              <Button size="sm" type="submit" :disabled="promptSaving" data-action="pixie-prompt-save">{{ t(promptSaving ? "settings.saving" : "common.save") }}</Button>
+            </footer>
+          </form>
+          <pre v-else :class="{ 'is-empty': !contentOf(name) }">{{ contentOf(name) || t("settings.promptNotSet") }}</pre>
+        </article>
+        <details class="pixie-preview-section">
+          <summary><ChevronRight :size="15" />{{ t("settings.pixiePromptPreview") }}</summary>
+          <article class="prompt-block is-readonly" data-pixie-prompt-preview>
+            <small>{{ t("settings.pixiePromptPreviewHint") }}</small>
+            <p v-if="previewError" class="persona-error" role="alert">{{ previewError }}</p>
+            <pre v-else>{{ previewBusy && !preview ? t("settings.promptLoading") : preview }}</pre>
+          </article>
+        </details>
+        <div class="pixie-prompt-actions">
+          <Button variant="ghost" size="sm" :disabled="promptSaving || !!editing" data-action="pixie-prompt-reset" @click="resetPrompt()">
+            <RotateCcw :size="14" /> {{ t("settings.pixiePromptReset") }}
           </Button>
         </div>
       </div>
+    </section>
+    <div class="settings-card pixie-storage">
+      <label class="setting-row">
+        <span>
+          <strong>{{ t("settings.rows.pixieWorkspace") }}</strong>
+          <small>{{ t("settings.rows.pixieWorkspaceDesc") }}</small>
+        </span>
+        <Button variant="outline" size="sm" data-action="pixie-reveal" @click="revealWorkspace">
+          <FolderOpen :size="14" /> {{ t("settings.pixieOpen") }}
+        </Button>
+      </label>
+      <label class="setting-row">
+        <span>
+          <strong>{{ t("settings.rows.pixieClear") }}</strong>
+          <small>{{ t("settings.rows.pixieClearDesc") }}</small>
+        </span>
+        <Button variant="danger" size="sm" :disabled="clearing" data-action="pixie-clear" @click="clearHistory">
+          <Trash2 :size="14" /> {{ t(clearing ? "settings.pixieClearing" : "settings.pixieClear") }}
+        </Button>
+      </label>
     </div>
-    <div class="setting-row pixie-preview-row">
-      <span>
-        <strong>{{ t("settings.pixiePromptPreview") }}</strong>
-        <small>{{ t("settings.pixiePromptPreviewHint") }}</small>
-      </span>
-      <div class="pixie-prompt-preview" data-pixie-prompt-preview>
-        <p v-if="previewError" class="pixie-preview-error">{{ previewError }}</p>
-        <pre v-else>{{ previewBusy && !preview ? t("settings.promptLoading") : preview }}</pre>
-      </div>
-    </div>
-    <label class="setting-row">
-      <span>
-        <strong>{{ t("settings.rows.pixieWorkspace") }}</strong>
-        <small>{{ t("settings.rows.pixieWorkspaceDesc") }}</small>
-      </span>
-      <Button variant="outline" size="sm" data-action="pixie-reveal" @click="revealWorkspace">
-        <FolderOpen :size="14" /> {{ t("settings.pixieOpen") }}
-      </Button>
-    </label>
-    <label class="setting-row">
-      <span>
-        <strong>{{ t("settings.rows.pixieClear") }}</strong>
-        <small>{{ t("settings.rows.pixieClearDesc") }}</small>
-      </span>
-      <Button variant="danger" size="sm" :disabled="clearing" data-action="pixie-clear" @click="clearHistory">
-        <Trash2 :size="14" /> {{ t(clearing ? "settings.pixieClearing" : "settings.pixieClear") }}
-      </Button>
-    </label>
   </section>
 </template>
 
 <style scoped>
-.pixie-prompt-row { align-items: start; }
-.pixie-prompt-editor { display: grid; gap: 7px; justify-items: end; }
-.pixie-prompt-mode {
-  justify-self: start;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-size-caption);
-  color: var(--text-muted);
-  cursor: pointer;
-}
-.pixie-prompt-editor select {
-  width: 100%;
-  padding: 6px 9px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--font-size-caption);
-}
-.pixie-prompt-editor textarea {
-  width: 100%;
-  min-height: 64px;
-  padding: 9px 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font: 12px/1.6 var(--font-mono, monospace);
-  resize: vertical;
-}
-.pixie-prompt-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.pixie-prompt-actions { display: flex; gap: 8px; }
-.pixie-prompt-warning {
-  justify-self: start;
-  max-width: 100%;
-  color: var(--warning, #b45309);
-  font-size: var(--font-size-caption);
-}
-.pixie-preview-row { align-items: start; }
-.pixie-prompt-preview {
-  width: 100%;
-  max-height: 240px;
-  overflow: auto;
-  padding: 9px 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-}
-.pixie-prompt-preview pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font: 11px/1.6 var(--font-mono, monospace);
-  color: var(--text);
-}
-.pixie-preview-error { margin: 0; font-size: var(--font-size-caption); color: var(--danger, #b91c1c); }
-.pixie-prompt-tag {
-  margin-left: 7px;
-  padding: 1px 7px;
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-  color: var(--accent-strong);
-  font-size: var(--font-size-caption);
-  font-style: normal;
+.pixie-settings { display: grid; gap: 16px; }
+.pixie-settings :deep(.setting-row:last-child) { border-bottom: 0; }
+.pixie-storage button { justify-self: end; }
+.pixie-prompt-mode { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 12px; cursor: pointer; }
+.pixie-prompt-mode .switch { flex: none; }
+.pixie-preview-section summary { display: flex; align-items: center; gap: 7px; width: fit-content; cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
+.pixie-preview-section summary::-webkit-details-marker { display: none; }
+.pixie-preview-section summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+.pixie-preview-section[open] summary { margin-bottom: 10px; }
+.pixie-preview-section[open] summary svg { transform: rotate(90deg); }
+.pixie-prompt-actions { display: flex; justify-content: flex-end; }
+@media (max-width: 900px) {
+  .pixie-settings :deep(.setting-row) { grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
+  .pixie-settings :deep(.setting-row select) { grid-column: 1 / -1; }
 }
 </style>

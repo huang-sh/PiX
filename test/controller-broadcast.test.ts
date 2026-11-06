@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
@@ -351,4 +351,51 @@ test("a page attached mid-run receives the settled node footer via broadcast", a
     controller.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("Pixie delegations keep their original session when another local or remote project is viewed", async t => {
+  const controller = new MainController(root, platform);
+  t.after(async () => controller.closeAll());
+  const project = controller.project!;
+  const file = join(home, "delegated.jsonl");
+  writeFileSync(file, "");
+  const path = realpathSync(file);
+  let current = { session: { path }, entries: [], projection: projectSession([], null), runtime: { available: true },
+    graph: { id: path, revision: 1, runs: [] } } as unknown as SessionSnapshot;
+  const calls: any[] = [];
+  controller.createSessionRuntime = () => ({ open: async () => {}, close: async () => {}, state: () => current.runtime,
+    branchWindow: () => ({ entries: current.entries, hasEarlier: false }),
+    snapshot: () => current, control: async (input: any) => {
+      calls.push(input);
+      current = { ...current, graph: { ...current.graph!, runs: [{ requestId: input.requestId, runId: "delegated-run",
+        branchId: "main", nodeId: null, status: "running" }] } };
+      return current;
+    },
+  }) as never;
+  await controller.registry.open(project, home, path);
+  controller.project = { name: "elsewhere", path: "/remote", remote: { kind: "ssh", host: "different-host" } };
+  controller.registry.viewProject("ssh:different-host:/remote");
+  const visible = { ...current, session: { ...current.session, path: "/remote/visible.jsonl" } };
+  controller.current = visible;
+  const { task } = await controller.pixie.tasks.delegate({ action: "delegate", nodeId: null,
+    text: "Fix the original project", purpose: "Original user goal", acceptance: "Run original checks" },
+    { id: "source", text: "Original user goal", sessionId: "pixie" }, { project, session: path });
+  assert.equal(task.state, "running", task.error);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].text, /Run original checks/);
+  assert.equal(controller.current, visible, "delegation must not steal the current view");
+  const entries = [
+    { type: "message", id: "task-user", parentId: null, timestamp: "2026-01-01", message: { role: "user", content: "requirements" } },
+    { type: "message", id: "task-result", parentId: "task-user", timestamp: "2026-01-01", message: { role: "assistant", content: "checked result" } },
+  ];
+  current = { ...current, entries, projection: projectSession(entries, "task-result"), graph: { ...current.graph!,
+    runs: current.graph!.runs.map(run => ({ ...run, nodeId: "turn:task-user", status: "idle" })) } };
+  const runtime = controller.registry.entry(path)!.runtime as unknown as { emit(event: unknown): void };
+  runtime.emit({ type: "sessions", payload: { current } });
+  assert.equal(controller.pixie.tasks.pending()?.id, task.id, "background completion reaches the durable queue before view filtering");
+  assert.equal(controller.current, visible);
+  const { output } = await controller.pixie.tasks.read(task.id, 1) as { output: { messages: Array<{ text: string }>; hasEarlier: boolean } };
+  assert.deepEqual(output.messages.map(message => message.text), ["checked result"]);
+  assert.equal(output.hasEarlier, true);
 });

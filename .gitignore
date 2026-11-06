@@ -6,6 +6,7 @@ out/
 out-test/
 server/dist/
 server/skills/
+server/pixie-skills/
 server/LICENSE
 release/
 /.pix-installed-*/

@@ -12,8 +12,10 @@ import { useRunCommand } from "../commands/runCommand";
 import BranchHistory, { type HistoryTurn as Turn } from "../branch-context/BranchHistory.vue";
 import { registerPixieOverlay } from "../../stores/pixie";
 import { usePixieStore } from "../../stores/pixie";
+import { useLayoutStore } from "../../stores/layout";
 
 const pixie = usePixieStore();
+const layout = useLayoutStore();
 const runCommand = useRunCommand();
 const { t } = useI18n();
 const card = ref<HTMLElement>();
@@ -21,17 +23,21 @@ const scroll = ref<HTMLElement>();
 const composer = ref<InstanceType<typeof PromptComposer>>();
 // null rides the CSS default (centered); the first drag pins concrete pixels.
 const position = ref<{ left: number; top: number } | null>(null);
-// null rides the CSS default width (and content-driven height); the first
-// corner resize pins both. The stored height only applies to the expanded
-// card — the compact bar stays content-sized.
+// Keep the preferred size separate from viewport constraints.
 const size = ref<{ width: number; height: number } | null>(null);
+const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
+const fittedSize = computed(() => size.value ? {
+  width: Math.min(size.value.width, Math.max(1, viewport.value.width - 16)),
+  height: Math.min(size.value.height, Math.max(1, viewport.value.height - 52)),
+} : null);
 const cardStyle = computed(() => ({
   ...(position.value ? { left: `${position.value.left}px`, top: `${position.value.top}px` } : {}),
-  ...(size.value
+  ...(fittedSize.value
     ? {
-        width: `${size.value.width}px`,
-        maxHeight: "calc(100vh - 24px)",
-        ...(expanded.value ? { height: `${size.value.height}px` } : {}),
+        width: `${fittedSize.value.width}px`,
+        height: `${fittedSize.value.height}px`,
+        maxHeight: "calc(100vh - 52px)",
+        ...(!position.value ? { top: `${Math.max(44, Math.min(viewport.value.height * 0.28, viewport.value.height - fittedSize.value.height - 8))}px` } : {}),
       }
     : {}),
 }));
@@ -42,6 +48,7 @@ const expandedLiveTools = ref(new Set<string>());
 let drag: { id: number; grabX: number; grabY: number; width: number; height: number } | undefined;
 let previousFocus: HTMLElement | null = null;
 let scrollFrame: number | undefined;
+let lastScrollTop = 0;
 
 // The compact bar stays until a first message exists; the expanded card keeps
 // the composer in place and grows the transcript above it.
@@ -63,8 +70,11 @@ const turns = computed<Turn[]>(() => {
   for (const message of messages.value.slice(-visibleTurnCount.value * 2)) {
     if (message.role === "user") grouped.push({ id: message.turnId, user: message, body: [] });
     else {
-      const turn = grouped.at(-1) ?? { id: message.turnId, body: [] };
-      if (!grouped.length) grouped.push(turn);
+      let turn = grouped.at(-1);
+      if (!turn || turn.id !== message.turnId) {
+        turn = { id: message.turnId, body: [] };
+        grouped.push(turn);
+      }
       turn.body.push(message);
     }
   }
@@ -132,7 +142,8 @@ function toggleLiveTool(id: string, event: Event) {
 // --- Scrolling ---------------------------------------------------------------
 function updateFollow() {
   const root = scroll.value;
-  if (!root) return;
+  if (!root || scrollFrame !== undefined || root.scrollTop === lastScrollTop) return;
+  lastScrollTop = root.scrollTop;
   following.value = root.scrollHeight - root.scrollTop - root.clientHeight < 48;
 }
 function scrollLatest() {
@@ -142,6 +153,8 @@ function scrollLatest() {
     const root = scroll.value;
     if (!root || !following.value) return;
     root.scrollTop = root.scrollHeight;
+    // A delayed programmatic scroll event must not unpin newly grown output.
+    lastScrollTop = root.scrollTop;
   });
 }
 watch(() => [
@@ -178,8 +191,8 @@ async function submitComposer(text: string, images?: PromptImage[]) {
 // --- Dragging ----------------------------------------------------------------
 function clamp(left: number, top: number, width: number, height: number) {
   return {
-    left: Math.min(window.innerWidth - width - 8, Math.max(8, left)),
-    top: Math.min(window.innerHeight - Math.min(height, 160), Math.max(44, top)),
+    left: Math.max(8, Math.min(window.innerWidth - width - 8, left)),
+    top: Math.max(44, Math.min(window.innerHeight - height - 8, top)),
   };
 }
 function startDrag(event: PointerEvent) {
@@ -207,48 +220,74 @@ function endDrag(event: PointerEvent) {
 
 // --- Resizing -----------------------------------------------------------------
 const MIN_WIDTH = 380, MIN_HEIGHT = 240;
-let resize: { id: number; startX: number; startY: number; width: number; height: number } | undefined;
-function startResize(event: PointerEvent) {
+const resizeDirections = ["se", "s", "sw", "w", "nw", "n", "ne", "e"] as const;
+type ResizeDirection = typeof resizeDirections[number];
+type ResizeBounds = { width: number; height: number; left: number; top: number };
+let resize: (ResizeBounds & { id: number; startX: number; startY: number; direction: ResizeDirection }) | undefined;
+function startResize(event: PointerEvent, direction: ResizeDirection) {
   if (event.button !== 0) return;
   const rect = card.value?.getBoundingClientRect();
   if (!rect) return;
+  position.value = clamp(rect.left, rect.top, rect.width, rect.height);
   resize = {
     id: event.pointerId,
+    direction,
     startX: event.clientX,
     startY: event.clientY,
     width: rect.width,
     height: rect.height,
+    ...position.value,
   };
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
 }
+function resizeBy(bounds: ResizeBounds, direction: ResizeDirection, dx: number, dy: number) {
+  let { left, top } = bounds;
+  let right = left + bounds.width, bottom = top + bounds.height;
+  if (direction.includes("w")) left = Math.max(8, Math.min(right - MIN_WIDTH, left + dx));
+  if (direction.includes("e")) right = Math.min(window.innerWidth - 8, Math.max(left + MIN_WIDTH, right + dx));
+  if (direction.includes("n")) top = Math.max(44, Math.min(bottom - MIN_HEIGHT, top + dy));
+  if (direction.includes("s")) bottom = Math.min(window.innerHeight - 8, Math.max(top + MIN_HEIGHT, bottom + dy));
+  position.value = { left, top };
+  size.value = { width: Math.max(1, Math.round(right - left)), height: Math.max(1, Math.round(bottom - top)) };
+  scrollLatest();
+}
 function resizeMove(event: PointerEvent) {
   if (!resize || event.pointerId !== resize.id) return;
-  const width = Math.min(window.innerWidth - 24, Math.max(MIN_WIDTH, resize.width + event.clientX - resize.startX));
-  const height = Math.min(window.innerHeight - 24, Math.max(MIN_HEIGHT, resize.height + event.clientY - resize.startY));
-  size.value = { width: Math.round(width), height: Math.round(height) };
-  // A height change moves the bottom; keep following views anchored to it.
-  scrollLatest();
+  resizeBy(resize, resize.direction, event.clientX - resize.startX, event.clientY - resize.startY);
 }
 function endResize(event: PointerEvent) {
   if (!resize || event.pointerId !== resize.id) return;
   resize = undefined;
+  if (size.value) void layout.setPixieSize(size.value);
 }
 function constrainOnResize() {
-  if (size.value) {
-    const width = Math.min(size.value.width, window.innerWidth - 24);
-    const height = Math.min(size.value.height, window.innerHeight - 24);
-    if (width !== size.value.width || height !== size.value.height)
-      size.value = { width, height };
-  }
+  viewport.value = { width: window.innerWidth, height: window.innerHeight };
   if (!position.value || !card.value) return;
   // The clamped size lands in the DOM after this pass; clamp the position with
   // the intended size, not the still-stale rendered one.
-  const width = size.value?.width ?? card.value.offsetWidth;
-  const height = size.value?.height ?? card.value.offsetHeight;
+  const width = fittedSize.value?.width ?? card.value.offsetWidth;
+  const height = fittedSize.value?.height ?? card.value.offsetHeight;
   const { left, top } = position.value;
   const next = clamp(left, top, width, height);
   if (next.left !== left || next.top !== top) position.value = next;
 }
+function resetSize() {
+  size.value = null;
+  position.value = null;
+  void layout.setPixieSize();
+}
+function resizeWithKeys(event: KeyboardEvent, direction: ResizeDirection) {
+  const steps: Record<string, [number, number]> = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] };
+  const step = steps[event.key], rect = card.value?.getBoundingClientRect();
+  if (!step || !rect || (step[0] && !/[ew]/.test(direction)) || (step[1] && !/[ns]/.test(direction))) return;
+  event.preventDefault();
+  resizeBy(rect, direction, step[0], step[1]);
+  if (size.value) void layout.setPixieSize(size.value);
+}
+watch(() => layout.layout.pixieSize, saved => {
+  if (!size.value && saved) size.value = { ...saved };
+}, { immediate: true });
+watch([expanded, () => pixie.visible], () => { void nextTick(constrainOnResize); });
 
 // --- Focus and keyboard ------------------------------------------------------
 async function focusComposer() {
@@ -314,7 +353,7 @@ watch(() => pixie.snapshot?.session.path, () => {
         v-show="pixie.visible"
         ref="card"
         class="pixie-card"
-        :class="{ expanded }"
+        :class="{ expanded, sized: size }"
         :style="cardStyle"
         role="complementary"
         :aria-label="t('pixie.title')"
@@ -434,14 +473,18 @@ watch(() => pixie.snapshot?.session.path, () => {
           :on-submit="submitComposer"
           :on-stop="() => pixie.stop()"
         />
-        <div
-          v-if="expanded"
+        <button
+          v-for="direction in resizeDirections"
+          :key="direction"
+          type="button"
           class="pixie-resize"
-          role="separator"
-          :aria-label="t('pixie.resize')"
+          :data-resize="direction"
+          :aria-label="t(`pixie.resize_${direction}`)"
           :title="t('pixie.resize')"
-          @pointerdown.stop.prevent="startResize"
+          @pointerdown.stop.prevent="startResize($event, direction)"
           @lostpointercapture="endResize"
+          @keydown="resizeWithKeys($event, direction)"
+          @dblclick="resetSize"
         />
       </section>
     </Transition>
@@ -457,6 +500,7 @@ watch(() => pixie.snapshot?.session.path, () => {
   display: flex;
   flex-direction: column;
   width: min(640px, calc(100vw - 48px));
+  max-width: calc(100vw - 16px);
   max-height: min(66vh, 720px);
   transform: translateX(-50%);
   border: 1px solid var(--border-strong);
@@ -467,6 +511,7 @@ watch(() => pixie.snapshot?.session.path, () => {
 }
 .pixie-card[style*="left:"] { transform: none; }
 .pixie-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -496,18 +541,22 @@ watch(() => pixie.snapshot?.session.path, () => {
 .pixie-hint { margin: 0; padding: 10px 12px 0; color: var(--muted); font-size: var(--font-size-caption); }
 .pixie-messages {
   flex: 1 1 auto;
-  min-height: 120px;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 0 12px;
+  margin: 0 6px;
+  padding: 0 6px;
 }
 .pixie-messages :deep(.branch-history) { display: block; }
 .pixie-error {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  min-height: 0;
+  max-height: 120px;
+  overflow-y: auto;
   gap: 8px;
-  margin: 0;
-  padding: 6px 12px;
+  margin: 0 6px;
+  padding: 6px;
   color: var(--danger);
   font-size: var(--font-size-ui);
 }
@@ -522,28 +571,31 @@ watch(() => pixie.snapshot?.session.path, () => {
   cursor: pointer;
   white-space: nowrap;
 }
-/* Padding clears the corner resize handle; without it the composer's footer
-   (and its send button) would reach the card corner underneath the handle. */
-.pixie-composer { border-top: 1px solid var(--border); padding: 0 10px 9px; }
+/* Keep scrollbars and controls inside the six-pixel resize targets. */
+.pixie-composer { flex-shrink: 0; border-top: 1px solid var(--border); margin: 0 6px; padding: 0 6px 10px; }
+.pixie-card.sized .pixie-composer { max-height: calc(100% - 44px); overflow-y: auto; }
+.pixie-card.sized .pixie-hint { flex: 1; }
 .pixie-resize {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  z-index: 1;
   touch-action: none;
 }
-.pixie-resize::before {
-  content: "";
-  position: absolute;
-  inset: 5px 5px 3px 3px;
-  border-right: 2px solid var(--border-strong);
-  border-bottom: 2px solid var(--border-strong);
-  border-radius: 0 0 3px 0;
-  opacity: 0.7;
-}
-.pixie-resize:hover::before { border-color: var(--accent); opacity: 1; }
+.pixie-resize[data-resize="n"], .pixie-resize[data-resize="s"] { left: 16px; right: 16px; height: 6px; cursor: ns-resize; }
+.pixie-resize[data-resize="n"] { top: 0; }
+.pixie-resize[data-resize="s"] { bottom: 0; }
+.pixie-resize[data-resize="e"], .pixie-resize[data-resize="w"] { top: 16px; bottom: 16px; width: 6px; cursor: ew-resize; }
+.pixie-resize[data-resize="e"] { right: 0; }
+.pixie-resize[data-resize="w"] { left: 0; }
+.pixie-resize[data-resize="nw"], .pixie-resize[data-resize="ne"],
+.pixie-resize[data-resize="sw"], .pixie-resize[data-resize="se"] { width: 16px; height: 16px; }
+.pixie-resize[data-resize="nw"] { top: 0; left: 0; cursor: nwse-resize; }
+.pixie-resize[data-resize="ne"] { top: 0; right: 0; cursor: nesw-resize; }
+.pixie-resize[data-resize="sw"] { bottom: 0; left: 0; cursor: nesw-resize; }
+.pixie-resize[data-resize="se"] { bottom: 0; right: 0; cursor: nwse-resize; }
+.pixie-resize:hover, .pixie-resize:focus-visible { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .pixie-card:not(.expanded) { max-height: none; }
 .pixie-card:not(.expanded) .pixie-composer :deep(textarea) { min-height: 72px; }
 

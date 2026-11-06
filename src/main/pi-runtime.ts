@@ -47,7 +47,8 @@ import type { CreateAgentSessionServicesOptions, InlineExtension, SessionManager
 export type { SessionManager };
 import { NODE_FOOTER_CUSTOM_TYPE, PROMPT_DISPLAY_CUSTOM_TYPE, PROMPT_OVERRIDE_CUSTOM_TYPE } from "../shared/types.js";
 import type { PixiePromptCustomization, PromptCustomization, SystemPromptPreview } from "../shared/types.js";
-import { PIXIE_CANVAS_GUIDANCE, PIXIE_IDENTITY } from "../shared/pixie-prompt.js";
+import { PIXIE_CANVAS_GUIDANCE, PIXIE_DOCS, PIXIE_IDENTITY, PIXIE_RULES } from "../shared/pixie-prompt.js";
+import { PIXIE_DEFAULT_TOOLS } from "../shared/canvas.js";
 import { needsPromptDisplayBoundary, projectSession, promptRecall, summarizeSession, SNAPSHOT_TURN_LIMIT, SNAPSHOT_WINDOW_BYTES, searchGraphNodeIds, windowEntries } from "../shared/session.js";
 import type { RunTiming } from "../shared/run-timing.js";
 import {
@@ -168,73 +169,29 @@ export function piCliEntry(): string {
   return join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
 }
 
-let pixieBasePrompt: Promise<string> | undefined;
-
 /**
- * Pi's default system prompt, generated through a throwaway in-memory session
- * so it always reflects the installed SDK and extensions. The identity-free
- * core is what is expensive to build, so it is memoized per process; the
- * skills/context/cwd sections the subprocess appends to a custom prompt itself
- * are stripped here so they are assembled once, by the real session.
- */
-function piBaseSystemPrompt(cwd: string): Promise<string> {
-  return (pixieBasePrompt ??= (async () => {
-    const pi: any = await import("@earendil-works/pi-coding-agent");
-    const { session } = await pi.createAgentSession({
-      cwd,
-      agentDir: pixAgentDir(),
-      sessionManager: pi.SessionManager.inMemory(cwd, undefined, []),
-    });
-    try {
-      const prompt = session.systemPrompt;
-      const markers = ["The following skills provide specialized instructions", "<available_skills>", "<project_context>", "<cwd>"]
-        .map(marker => prompt.indexOf(marker)).filter(at => at > 0);
-      return markers.length ? prompt.slice(0, Math.min(...markers)) : prompt;
-    } finally {
-      await session.dispose?.();
-    }
-  })().catch(error => {
-    pixieBasePrompt = undefined;
-    throw error;
-  }));
-}
-
-/** Swaps the stock prompt's opening paragraph for the given identity. */
-function withIdentity(core: string, identity: string): string {
-  const paragraph = core.indexOf("\n\n");
-  return paragraph > 0 ? identity + core.slice(paragraph) : `${core}\n\n${identity}`;
-}
-
-/**
- * Replaces the stock <rules>/<docs> section with the custom one — the same
- * section semantics as the agent prompt customization — appending it only
- * when the stock prompt carries no such section.
- */
-function withSection(core: string, tag: "rules" | "docs", content: string): string {
-  const open = `<${tag}>`, close = `</${tag}>`, wrapped = `${open}\n${content}\n${close}`;
-  const start = core.indexOf(open);
-  if (start < 0) return `${core}\n\n${wrapped}`;
-  const end = core.indexOf(close, start);
-  return end < 0 ? `${core}\n\n${wrapped}` : core.slice(0, start) + wrapped + core.slice(end + close.length);
-}
-
-/**
- * Pixie's full system prompt, passed to the subprocess through --system-prompt.
- * A set `full` is used verbatim — nothing else is added. Otherwise the base
- * prompt's opening paragraph becomes the identity, custom rules/docs replace
- * the stock sections like the agent prompt customization, and the canvas
- * guidance closes. Composition is per call — never memoized — so a reload
- * after a settings change starts the new prompt instead of the first one seen.
+ * Use Pi's section builder with Pixie's coordination defaults, without booting
+ * an executor session or inheriting its tool instructions. The real subprocess
+ * adds skills, project context and cwd once. Full replacement remains opaque.
  */
 export async function composePixieSystemPrompt(cwd: string, customization?: PixiePromptCustomization): Promise<string> {
   const full = customization?.full?.trim();
   if (full) return full;
-  const identity = customization?.identity?.trim() || PIXIE_IDENTITY;
-  let prompt = withIdentity(await piBaseSystemPrompt(cwd), identity);
-  const rules = customization?.rules?.trim(), docs = customization?.docs?.trim();
-  if (rules) prompt = withSection(prompt, "rules", rules);
-  if (docs) prompt = withSection(prompt, "docs", docs);
-  return `${prompt}\n\n${PIXIE_CANVAS_GUIDANCE}`;
+  const prompt = await composeSystemPrompt({
+    cwd,
+    selectedTools: PIXIE_DEFAULT_TOOLS.map(tool => tool.name),
+    toolSnippets: Object.fromEntries(PIXIE_DEFAULT_TOOLS.map(tool => [tool.name, tool.description])),
+  }, {
+    preamble: customization?.identity?.trim() || PIXIE_IDENTITY,
+    rules: customization?.rules?.trim() || PIXIE_RULES,
+    docs: customization?.docs?.trim() || PIXIE_DOCS,
+  }, null);
+  return [
+    prompt.preamble,
+    ...prompt.sections.filter(section => section.name !== "cwd")
+      .map(section => `<${section.name}>\n${section.content}\n</${section.name}>`),
+    PIXIE_CANVAS_GUIDANCE,
+  ].join("\n\n");
 }
 
 const usageMessageText = (message: any): string => {

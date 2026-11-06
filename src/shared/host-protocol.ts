@@ -4,6 +4,8 @@ export const LOCAL_HOST_PROTOCOL = 2;
 export interface HostAddress {
   protocol: number; version: string; pid: number; port: number; token: string;
   desktopViewMigration?: boolean;
+  /** App-level Pixie RPC and canvas callbacks; older same-version builds lack these routes. */
+  pixieRpc?: boolean;
 }
 export interface HostConnectionState {
   connected: boolean;

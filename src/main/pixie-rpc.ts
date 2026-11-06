@@ -55,6 +55,10 @@ export class PixieRpc {
     this.child = child;
     child.on("message", (value: unknown) => {
       const message = value as { type?: string; id?: string; command?: unknown } | null;
+      if (message?.type === "pixie.task.reply") {
+        this.dispatch(JSON.stringify({ ...message, type: "response" }));
+        return;
+      }
       if (message?.type !== "pixie.canvas.request" || typeof message.id !== "string") return;
       void (async () => {
         let reply: { result?: unknown; error?: string };
@@ -143,7 +147,13 @@ export class PixieRpc {
         resolve: data => { clearTimeout(timer); resolve(data); },
         reject: error => { clearTimeout(timer); reject(error); },
       });
-      stdin.write(`${JSON.stringify({ id, ...command })}\n`);
+      if (command.type === "pixie.task.event") {
+        this.child!.send({ id, ...command }, error => {
+          if (!error) return;
+          this.pending.get(id)?.reject(error);
+          this.pending.delete(id);
+        });
+      } else stdin.write(`${JSON.stringify({ id, ...command })}\n`);
     });
   }
 

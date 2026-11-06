@@ -595,7 +595,7 @@ export class WslHostClient {
     else pending.reject(new Error(message.error.message));
   }
 
-  request<T = unknown>(route: ProjectRoute, input?: unknown, timeoutMs?: number): Promise<T> {
+  request<T = unknown>(route: ProjectRoute, input?: unknown, timeoutMs?: number, sessionPath?: string): Promise<T> {
     if (!this.connected)
       return Promise.reject(new Error("Remote host is not connected"));
     // Work and its cancellation are monitored by the transport heartbeat; timing them out
@@ -619,7 +619,7 @@ export class WslHostClient {
         reject: (error) => finish(error),
       });
       try {
-        this.socket.send(JSON.stringify({ type: "request", id, route, input }), (error) => {
+        this.socket.send(JSON.stringify({ type: "request", id, route, input, ...(sessionPath ? { sessionPath } : {}) }), (error) => {
           if (error) this.disconnected(error);
         });
       } catch (error) {

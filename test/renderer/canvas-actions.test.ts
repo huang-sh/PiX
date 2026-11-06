@@ -7,7 +7,7 @@ import { useSessionStore } from "../../src/renderer/stores/session";
 import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { useWorkspaceStore } from "../../src/renderer/stores/workspace";
 import { i18n } from "../../src/renderer/i18n";
-import { projectSession, searchGraphNodeIds } from "../../src/shared/session";
+import { projectSession, searchGraphNodeIds, windowEntries } from "../../src/shared/session";
 import type { SessionSnapshot } from "../../src/shared/types";
 import type { CanvasCommand } from "../../src/shared/canvas";
 
@@ -30,7 +30,7 @@ async function setup() {
     graph: { id: "graph", epoch: "epoch", revision: 1, runs: [] } } as unknown as SessionSnapshot);
   const wrapper = mount(GraphPanel, { global: { plugins: [pinia, i18n], stubs: { VueFlow: true, MiniMap: true } } });
   await flushPromises();
-  const inspect = () => canvas.execute({ action: "inspect" }) as Promise<any>;
+  const inspect = () => canvas.execute({ action: "inspect", include: ["draft", "layout"] }) as Promise<any>;
   const initial = await inspect();
   const execute = (command: Omit<CanvasCommand, "context">) => canvas.execute({ ...command, context: initial.context }) as Promise<any>;
   return { session, layout, canvas, wrapper, inspect, execute, initial };
@@ -153,4 +153,59 @@ it("rejects overlapping tool operations and unregisters a destroyed canvas", asy
   finish({}); await pending;
   wrapper.unmount();
   await expect(canvas.execute({ action: "inspect" })).rejects.toThrow("not available");
+});
+
+
+it("keeps mutation receipts small and loads catalogs only on request", async () => {
+  const { canvas, execute, session, layout } = await setup();
+  session.models = Array.from({ length: 54 }, (_, i) => ({ provider: "fixture", id: `model-${i}`, name: `Model ${i}` }));
+  layout.settings = { app: { personas: [{ name: "review", text: "private persona text" }] } } as any;
+  const summary = await canvas.execute({ action: "inspect" }) as any;
+  expect(summary.models).toBeUndefined();
+  expect(summary.draft).toBeUndefined();
+  expect(summary.positions).toBeUndefined();
+  expect(summary.nodes[0].rawEntryIds).toBeUndefined();
+  const details = await canvas.execute({ action: "inspect", include: ["models", "personas", "draft", "layout"] }) as any;
+  expect(details.models).toHaveLength(54);
+  expect(details.personas).toEqual([{ name: "review" }]);
+  expect(details.draft.visible).toBe(false);
+  const reply = await execute({ action: "highlight", nodeId: "turn:root" });
+  expect(reply).toMatchObject({ ok: true, selectedNodeId: "turn:root" });
+  expect(reply.nodes).toBeUndefined();
+  expect(reply.models).toBeUndefined();
+  expect(JSON.stringify(reply).length).toBeLessThan(250);
+});
+
+it.each([false, true])("awaits uncached node history without crossing session changes (switch=%s)", async switchSession => {
+  const { session, canvas } = await setup();
+  const entries = [
+    { type: "message", id: "old", parentId: null, timestamp: "2026-01-01", message: { role: "user", content: "original requirement" } },
+    { type: "message", id: "proof", parentId: "old", timestamp: "2026-01-01", message: { role: "assistant", content: "verified evidence" } },
+    { type: "message", id: "recent", parentId: "proof", timestamp: "2026-01-01", message: { role: "user", content: "next task" } },
+  ];
+  session.applySnapshot({ ...session.current!, session: { ...session.current!.session, path: "/project/paged.jsonl" },
+    entries: [entries[2]!], projection: projectSession(entries, "recent") });
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  vi.mocked(window.pix!.invoke).mockImplementation(async (route, input: any) => {
+    if (route !== "session.branchWindow") return [];
+    await gate;
+    return windowEntries(entries, input.leafId, input.limit);
+  });
+  const { context } = await canvas.execute({ action: "inspect" }) as any;
+  let settled = false;
+  const reading = (canvas.execute({ action: "read", context, nodeId: "turn:old", limit: 1 }) as Promise<any>)
+    .then(result => { settled = true; return result; });
+  await flushPromises();
+  expect(settled).toBe(false);
+  if (switchSession) {
+    session.current!.session.path = "/project/another.jsonl";
+    finish();
+    await expect(reading).rejects.toThrow("session changed");
+    return;
+  }
+  finish();
+  const reply = await reading;
+  expect(reply.messages.map((message: any) => message.text)).toEqual(["verified evidence"]);
+  expect(reply.hasEarlier).toBe(true);
 });

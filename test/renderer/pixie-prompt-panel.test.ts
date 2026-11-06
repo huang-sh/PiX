@@ -55,13 +55,17 @@ it("saves the customized prompt as a complete snapshot and reloads the idle agen
   await wrapper.get("[data-pixie-prompt-persona]").setValue("reviewer");
   expect(wrapper.get("[data-pixie-prompt-identity]").element.value).toBe("Review carefully.");
   await wrapper.get("[data-pixie-prompt-identity]").setValue("My Pixie.");
+  await wrapper.get("form.persona-form").trigger("submit");
+  await flushPromises();
+  await wrapper.get('[data-pixie-edit="rules"]').trigger("click");
   await wrapper.get("[data-pixie-prompt-rules]").setValue("Always cite files.");
-  await wrapper.get('[data-action="pixie-prompt-save"]').trigger("click");
+  await wrapper.get("form.persona-form").trigger("submit");
   await flushPromises();
 
   expect(stored.app.pixie).toEqual({ prompt: { identity: "My Pixie.", rules: "Always cite files." } });
   expect(invoke).toHaveBeenCalledWith("pixie.reload");
   // The preview composes from the live draft and renders main-side.
+  await wrapper.get('[data-pixie-edit="docs"]').trigger("click");
   await wrapper.get("[data-pixie-prompt-docs]").setValue("Notes.");
   await settle();
   expect(invoke).toHaveBeenCalledWith("pixie.previewPrompt",
@@ -76,6 +80,7 @@ it("keeps unsaved prompt edits when an unrelated settings row saves", async () =
     piGlobal: {}, piProject: {}, effective: {}, paths: {},
   } as unknown as SettingsBundle;
   const { wrapper } = await openPixieSettings(stored);
+  await wrapper.get('[data-pixie-edit="identity"]').trigger("click");
   const identity = wrapper.get("[data-pixie-prompt-identity]");
   expect(identity.element.value).toBe("Saved.");
 
@@ -96,7 +101,8 @@ it("adopts a prompt changed by another writer", async () => {
     piGlobal: {}, piProject: {}, effective: {}, paths: {},
   } as unknown as SettingsBundle;
   const { wrapper, layout } = await openPixieSettings(stored);
-  expect(wrapper.get("[data-pixie-prompt-identity]").element.value).toBe("");
+  expect(wrapper.find("textarea").exists()).toBe(false);
+  expect(wrapper.get('[data-pixie-prompt-block="identity"] pre').text()).toContain("You are Pixie");
 
   stored.app.pixie = { prompt: { full: "External full prompt." } };
   layout.applySettings(structuredClone(stored));
@@ -105,7 +111,7 @@ it("adopts a prompt changed by another writer", async () => {
   // Full mode takes over: the checkbox reflects it and the sections are gone.
   expect((wrapper.get("[data-pixie-prompt-full-mode]").element as HTMLInputElement).checked).toBe(true);
   expect(wrapper.find("[data-pixie-prompt-identity]").exists()).toBe(false);
-  expect(wrapper.get("[data-pixie-prompt-full]").element.value).toBe("External full prompt.");
+  expect(wrapper.get('[data-pixie-prompt-block="full"] pre').text()).toBe("External full prompt.");
 });
 
 it("full replacement saves only the verbatim text and resets everything together", async () => {
@@ -118,12 +124,12 @@ it("full replacement saves only the verbatim text and resets everything together
     piGlobal: {}, piProject: {}, effective: {}, paths: {},
   } as unknown as SettingsBundle;
   const { wrapper } = await openPixieSettings(stored);
-  expect(wrapper.get("[data-pixie-prompt-identity]").element.value).toBe("Old identity.");
+  expect(wrapper.get('[data-pixie-prompt-block="identity"] pre').text()).toBe("Old identity.");
 
   await wrapper.get("[data-pixie-prompt-full-mode]").setValue(true);
   expect(wrapper.find("[data-pixie-prompt-full]").exists()).toBe(true);
   await wrapper.get("[data-pixie-prompt-full]").setValue("Verbatim prompt.");
-  await wrapper.get('[data-action="pixie-prompt-save"]').trigger("click");
+  await wrapper.get("form.persona-form").trigger("submit");
   await flushPromises();
   // The section keys were explicitly removed, not left stale by the merge.
   expect(stored.app.pixie).toEqual({ prompt: { full: "Verbatim prompt." } });
@@ -132,4 +138,23 @@ it("full replacement saves only the verbatim text and resets everything together
   await flushPromises();
   expect(stored.app.pixie).toEqual({});
   expect((wrapper.get("[data-pixie-prompt-full-mode]").element as HTMLInputElement).checked).toBe(false);
+});
+
+
+it("edits one section at a time and cancels without changing saved settings", async () => {
+  const stored = {
+    app: { language: "en", pixie: { prompt: { rules: "Saved rules." } } },
+    piGlobal: {}, piProject: {}, effective: {}, paths: {},
+  } as unknown as SettingsBundle;
+  const { wrapper } = await openPixieSettings(stored);
+  expect(wrapper.find("textarea").exists()).toBe(false);
+  await wrapper.get('[data-pixie-edit="rules"]').trigger("click");
+  await wrapper.get("[data-pixie-prompt-rules]").setValue("Unsaved rules.");
+  expect(wrapper.findAll("textarea")).toHaveLength(1);
+  await wrapper.get('[data-action="pixie-prompt-cancel"]').trigger("click");
+  expect(wrapper.get('[data-pixie-prompt-block="rules"] pre').text()).toBe("Saved rules.");
+  expect(stored.app.pixie?.prompt?.rules).toBe("Saved rules.");
+  await wrapper.get("[data-pixie-prompt-full-mode]").setValue(true);
+  await wrapper.get('[data-action="pixie-prompt-cancel"]').trigger("click");
+  expect(wrapper.find('[data-pixie-prompt-block="identity"]').exists()).toBe(true);
 });

@@ -58,6 +58,15 @@ function transport(t: TestContext) {
   return { client, child, socket };
 }
 
+test("remote task requests carry a stable session target on the wire", async t => {
+  const { client, socket } = transport(t);
+  const result = client.request("session.snapshot", undefined, undefined, "/sessions/background.jsonl");
+  const request = socket.sent.at(-1)!;
+  assert.equal(request.sessionPath, "/sessions/background.jsonl");
+  socket.emit("message", JSON.stringify({ type: "response", id: request.id, ok: true, result: { original: true } }));
+  assert.deepEqual(await result, { original: true });
+});
+
 test("remote activity requires an advertised capability and validates its response", async t => {
   const { client, socket } = transport(t);
   assert.equal(await client.activity(), undefined);

@@ -205,6 +205,8 @@ export class HostClient {
     });
   }
   invoke<T = unknown>(route: DesktopRoute, input?: unknown, sessionPath?: string) {
+    if (route.startsWith("pixie.") && this.address.pixieRpc !== true)
+      return Promise.reject(new Error("The running PiX host does not support Pixie. Close older PiX clients and restart the host with this build, or use a separate PIX_HOME for this instance."));
     return this.request<T>({ method: "invoke", route, input, sessionPath });
   }
   onEvent(listener: (event: DesktopEvent) => void) {

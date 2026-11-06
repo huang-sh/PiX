@@ -71,6 +71,8 @@ const preparingSession = computed(() => session.creating || session.creation?.st
 const sessionKey = computed(() => JSON.stringify([session.activeProjectId,
   preparingSession.value ? "creating" : session.current?.session.path,
   preparingSession.value ? undefined : session.current?.session.id]));
+// Keep tool scope opaque and short: copying serialized paths is error-prone.
+const canvasContext = computed(() => { void sessionKey.value; return crypto.randomUUID(); });
 let creatingDraft: string | undefined;
 let orderSequence = 0;
 let draftOrder = 0;
@@ -1089,7 +1091,7 @@ watch(
 );
 
 const unregisterCanvas = useCanvasStore().register(createCanvasActions({
-  context: () => sessionKey.value,
+  context: () => canvasContext.value,
   draft: () => ({ visible: nodes.value.some(node => node.type === "draft"), parentId: draftParent.value ?? null,
     state: draftState.value, model: draftModel.value ?? session.current?.runtime.model,
     thinkingLevel: draftThinking.value ?? inheritThinking(draftParent.value) }),

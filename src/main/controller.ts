@@ -28,6 +28,7 @@ import { isSessionRunning, parseSessionJsonl, projectSession, promptRecall, sear
 import { sessionEventEncoder } from "../shared/session-updates.js";
 import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
+import type { PixieTaskTarget } from "./pixie-tasks.js";
 import { PixieRuntime, pixieWorkspace } from "./pixie-runtime.js";
 import type { CanvasCommand } from "../shared/canvas.js";
 import { ExtensionDialogs } from "./extension-dialogs.js";
@@ -93,6 +94,7 @@ export class MainController {
   localProjectPath: string | null;
   /** Pooled remote workspaces: slots, connections, recycling, and routing. */
   pool: RemoteWorkspacePool;
+  private detachTaskHost?: () => void;
   private viewRequest = 0;
   private gitSwitches = new Set<string>();
   private pendingAgentControls = new Map<string, number>();
@@ -178,6 +180,59 @@ export class MainController {
         },
       },
     });
+    this.detachTaskHost = this.pixie.registerTaskHost({
+      available: target => target.project.remote
+        ? Boolean(this.pool.slot(projectId(target.project))?.client.connected)
+        : Boolean(this.registry.entry(target.session)?.runtime
+          && projectId(this.registry.entry(target.session)!.project) === projectId(target.project)),
+      snapshot: async target => target.project.remote
+        ? this.pool.slot(projectId(target.project))!.client.request<SessionSnapshot>("session.snapshot", undefined, undefined, target.session)
+        : this.registry.entry(target.session)?.runtime?.snapshot(),
+      control: (target, input) => this.controlPixieTask(target, input),
+      read: async (target, leafId, limit = 40) => {
+        const page = target.project.remote
+          ? await this.pool.slot(projectId(target.project))!.client.request<SessionHistoryWindow>("session.branchWindow", {
+            session: target.session, leafId, limit, bytes: 64 * 1024,
+          }, undefined, target.session)
+          : this.registry.entry(target.session)!.runtime!.branchWindow(leafId, limit, 64 * 1024);
+        let remaining = 24_000;
+        const history = projectSession(page.entries, leafId).messages;
+        const messages = history.slice(-limit).reverse().map(message => {
+          const text = message.text.slice(-Math.max(0, remaining));
+          const bounded = remaining > 0 ? text : "";
+          remaining -= bounded.length;
+          return { entryId: message.entryId, role: message.role, text: bounded, toolName: message.toolName,
+            isError: message.isError, truncated: bounded.length !== message.text.length };
+        });
+        return { session: target.session, leafId, messages: messages.reverse(), hasEarlier: page.hasEarlier || history.length > limit };
+      },
+    });
+  }
+
+  private async controlPixieTask(target: PixieTaskTarget, input: AgentControl): Promise<SessionSnapshot> {
+    if (target.project.remote) {
+      const slot = this.pool.slot(projectId(target.project));
+      if (!slot?.client.connected) throw new Error("Remote task host is disconnected");
+      slot.lastActivity = Date.now();
+      const result = await slot.client.request<SessionSnapshot>("agent.control", input, undefined, target.session);
+      this.pixie.tasks.observe(target.project, result);
+      return result;
+    }
+    const entry = this.registry.entry(target.session);
+    if (!entry?.runtime || projectId(entry.project) !== projectId(target.project)) throw new Error("The task session is not open");
+    const owner = projectId(target.project);
+    if (this.gitSwitches.has(owner)) throw new Error("Wait for the Git branch switch to finish");
+    this.pendingAgentControls.set(owner, (this.pendingAgentControls.get(owner) ?? 0) + 1);
+    try {
+      const { result } = await this.controlAgent(input, target.session);
+      const snapshot = result as SessionSnapshot;
+      this.pixie.tasks.observe(target.project, snapshot);
+      if (this.registry.isActive(entry)) { this.current = snapshot; this.emit({ type: "sessions", payload: { current: snapshot } }); }
+      return snapshot;
+    } finally {
+      const remaining = this.pendingAgentControls.get(owner)! - 1;
+      if (remaining) this.pendingAgentControls.set(owner, remaining); else this.pendingAgentControls.delete(owner);
+    }
   }
   /**
    * Registry entries build their own runtime with the entry's frozen project.
@@ -201,6 +256,7 @@ export class MainController {
     if (pushed.type !== "agent") {
       if (pushed.type === "sessions") {
         const current = (pushed.payload as { current?: SessionSnapshot })?.current;
+        if (current) this.pixie.tasks.observe(entry.project, current);
         if (current && !this.registry.isActive(entry)) {
           // A background session settled: refresh history and the list, never the view.
           this.progress.noteEpoch(current);
@@ -509,6 +565,7 @@ export class MainController {
     return this.projectGroups();
   }
   rememberSnapshot(project: ProjectInfo | null, snapshot: SessionSnapshot) {
+    if (project) this.pixie.tasks.observe(project, snapshot);
     if (!project) return;
     const old = this.settings.projectHistory().find(
       (record) => record.id === projectId(project),
@@ -850,7 +907,7 @@ export class MainController {
     if (route === "pixie.clearHistory") {
       if (
         this.settings.bundle().app.confirmDestructiveActions &&
-        !(await this.platform.confirm("Delete every Pixie conversation?", pixieWorkspace()))
+        !(await this.platform.confirm("Delete every Pixie conversation and cancel its pending follow-ups?", pixieWorkspace()))
       )
         return { cancelled: true };
       return this.pixie.clearHistory();
@@ -1350,6 +1407,7 @@ export class MainController {
   }
   /** Permanently removes a client view from the shared registry. */
   detach() {
+    this.detachTaskHost?.();
     this.suspend();
     this.registry.detach();
     this.progress.clear();

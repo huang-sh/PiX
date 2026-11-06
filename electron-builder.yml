@@ -40,6 +40,8 @@ extraResources:
   # tree to remote hosts as a sibling of the server bundle.
   - from: skills
     to: skills
+  - from: pixie-skills
+    to: pixie-skills
 
 win:
   icon: build/icon.png
