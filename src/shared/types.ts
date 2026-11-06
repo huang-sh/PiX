@@ -6,6 +6,7 @@ import type { NodeCardField } from "./node-card.js";
 import type { UsageAmount } from "./usage.js";
 import type { BalanceQuery } from "./provider-balances.js";
 import type { CompactionRecord, RunTiming } from "./run-timing.js";
+import type { DesktopInvoke, DesktopRouteMap } from "./desktop-routes.js";
 
 export type PromptImage = ImageContent;
 export interface ImageReference {
@@ -684,18 +685,11 @@ export type AgentControl =
   | { action: "systemPromptPreview" }
   | { action: "navigateTree" | "fork"; entryId: string };
 export type DesktopRoute =
+  | keyof DesktopRouteMap
   | "canvas.respond"
   | "ui.respond"
   | "ui.pending"
   | "app.bootstrap"
-  | "pixie.ensure"
-  | "pixie.send"
-  | "pixie.stop"
-  | "pixie.newSession"
-  | "pixie.previewPrompt"
-  | "pixie.clearHistory"
-  | "pixie.reveal"
-  | "pixie.reload"
   | "app.hostStatus"
   | "app.hostRestart"
   | "app.pickProject"
@@ -722,17 +716,6 @@ export type DesktopRoute =
   | "remote.openProject"
   | "remote.deployed"
   | "remote.revoke"
-  | "session.list"
-  | "session.image"
-  | "session.branchWindow"
-  | "session.search"
-  | "session.prompts"
-  | "session.snapshot"
-  | "session.open"
-  | "session.stop"
-  | "session.import"
-  | "session.rename"
-  | "session.delete"
   | "usage.overview"
   | "usage.balances"
   | "library.pin"
@@ -779,7 +762,7 @@ export interface ExtensionDialog {
 export type RemoteConnectStage = "checking" | "runtime" | "upload" | "install" | "starting" | "handshake" | "loading";
 export interface DesktopApi {
   initialTheme?: ThemePreference;
-  invoke<T = unknown>(route: DesktopRoute, input?: unknown): Promise<T>;
+  invoke: DesktopInvoke;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
   filePath(file: File): string;
 }

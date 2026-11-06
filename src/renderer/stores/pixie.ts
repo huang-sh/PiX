@@ -93,7 +93,7 @@ export const usePixieStore = defineStore("pixie", {
       // Models don't gate input: the picker fills in behind the snapshot, and
       // a catalog failure must not block the first send.
       void this.loadModels().catch(() => {});
-      this.applySnapshot(await desktop.invoke<SessionSnapshot>("pixie.ensure"));
+      this.applySnapshot(await desktop.invoke("pixie.ensure"));
     },
     async loadModels() {
       this.models = await desktop.invoke<RuntimeModel[]>("agent.control", { action: "getModels" });
@@ -131,7 +131,7 @@ export const usePixieStore = defineStore("pixie", {
         knownEntryIds: new Set(this.snapshot.entries.map(entry => entry.id)),
       };
       try {
-        const snapshot = await desktop.invoke<SessionSnapshot>("pixie.send", {
+        const snapshot = await desktop.invoke("pixie.send", {
           text,
           ...(images?.length ? { images } : {}),
           ...(this.model ? { provider: this.model.provider, modelId: this.model.id } : {}),
@@ -164,7 +164,7 @@ export const usePixieStore = defineStore("pixie", {
     async newSession() {
       if (this.running) return;
       try {
-        this.applySnapshot(await desktop.invoke<SessionSnapshot>("pixie.newSession"));
+        this.applySnapshot(await desktop.invoke("pixie.newSession"));
         this.model = undefined;
         this.thinking = undefined;
       } catch (error) {

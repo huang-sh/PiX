@@ -13,7 +13,6 @@ import type {
   RuntimeModel,
   PromptImage,
   SessionSnapshot,
-  SessionHistoryWindow,
   SessionSummary,
   SettingsBundle,
 } from "../../shared/types";
@@ -378,7 +377,7 @@ export const useSessionStore = defineStore("session", {
     },
     async refresh() {
       const project = this.activeProjectId, request = this.viewRequest;
-      const sessions = await desktop.invoke<SessionSummary[]>("session.list");
+      const sessions = await desktop.invoke("session.list");
       if (project !== this.activeProjectId || request !== this.viewRequest) return;
       this.sessions = sessions;
       this.syncProject();
@@ -451,7 +450,7 @@ export const useSessionStore = defineStore("session", {
       this.creation = undefined;
       this.loading = true;
       try {
-        const snapshot = await desktop.invoke<SessionSnapshot>("session.open", { path });
+        const snapshot = await desktop.invoke("session.open", { path });
         if (request !== this.viewRequest) return;
         this.applySnapshot(snapshot);
         this.focusedNode = snapshot.projection.activeNodeId;
@@ -620,7 +619,7 @@ export const useSessionStore = defineStore("session", {
           while (history.missingParentId) {
             const cursor = history.missingParentId;
             const turns = history.messages.filter(message => message.role === "user").length;
-            const result = await desktop.invoke<SessionHistoryWindow>("session.branchWindow",
+            const result = await desktop.invoke("session.branchWindow",
               { session: current.session.path, leafId: cursor,
                 limit: Math.min(500, Math.max(1, limit - turns)), bytes: byteLimit });
             const now = this.current;
@@ -669,7 +668,7 @@ export const useSessionStore = defineStore("session", {
       const current = this.current;
       if (!current || !query.trim()) { this.searchResults = []; return; }
       try {
-        const result = await desktop.invoke<{ nodeIds?: string[] }>("session.search", { session: current.session.path, query });
+        const result = await desktop.invoke("session.search", { session: current.session.path, query });
         if (token === this.searchToken) this.searchResults = Array.isArray(result?.nodeIds) ? result.nodeIds : [];
       } catch {
         if (token === this.searchToken) this.searchResults = [];
@@ -688,7 +687,7 @@ export const useSessionStore = defineStore("session", {
         this.promptRecall = [];
       }
       try {
-        const result = await desktop.invoke<{ prompts?: string[] }>("session.prompts", { session: current.session.path });
+        const result = await desktop.invoke("session.prompts", { session: current.session.path });
         if (request === this.promptRecallRequest && generation === this.poolGeneration
           && this.current?.session.path === current.session.path && this.current?.graph?.epoch === current.graph?.epoch
           && this.promptRecallKey === key)
@@ -881,7 +880,7 @@ export const useSessionStore = defineStore("session", {
         undo: async () => {
           // pristineOnly makes the backend refuse when the file grew message
           // entries the journal never sealed behind a lock.
-          const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean; skipped?: boolean }>(
+          const result = await desktop.invoke(
             "session.delete", { path: createdPath, confirmed: true, pristineOnly: true });
           if (result.cancelled || result.skipped) return false;
           this.applyDeletion(createdPath, result.sessions);
@@ -931,10 +930,7 @@ export const useSessionStore = defineStore("session", {
       }
     },
     async importSession() {
-      const result = await desktop.invoke<{ imported?: string; sessions: SessionSummary[] } | null>(
-        "session.import",
-        {},
-      );
+      const result = await desktop.invoke("session.import");
       if (!result) return;
       this.sessions = result.sessions;
       this.syncProject();
@@ -959,7 +955,7 @@ export const useSessionStore = defineStore("session", {
       });
     },
     async applyRename(path: string, name: string) {
-      const result = await desktop.invoke<{ sessions: SessionSummary[]; current?: SessionSnapshot }>(
+      const result = await desktop.invoke(
         "session.rename",
         { path, name },
       );
@@ -985,7 +981,7 @@ export const useSessionStore = defineStore("session", {
     async remove(path: string, confirmed = false) {
       const target = this.sessions.find((session) => session.path === path);
       const labelName = target ? displayName(target) : path;
-      const result = await desktop.invoke<{ sessions: SessionSummary[]; cancelled?: boolean }>("session.delete", confirmed ? { path, confirmed } : { path });
+      const result = await desktop.invoke("session.delete", confirmed ? { path, confirmed } : { path });
       if (!result.cancelled) {
         this.applyDeletion(path, result.sessions);
         trackEvent({ kind: "deleteSession", label: i18n.global.t("history.deleteSession", { name: labelName }) });

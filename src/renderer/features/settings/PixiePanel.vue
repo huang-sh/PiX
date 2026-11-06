@@ -3,7 +3,7 @@ import { ChevronRight, FolderOpen, Pencil, RefreshCw, RotateCcw, Trash2 } from "
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { PIXIE_DOCS, PIXIE_IDENTITY, PIXIE_RULES } from "../../../shared/pixie-prompt";
-import type { PixiePromptCustomization, SessionSnapshot } from "../../../shared/types";
+import type { PixiePromptCustomization } from "../../../shared/types";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
 import { usePixieStore } from "../../stores/pixie";
@@ -167,7 +167,7 @@ async function loadPreview() {
   previewBusy.value = true;
   previewError.value = "";
   try {
-    const result = await desktop.invoke<{ text?: string }>("pixie.previewPrompt", {
+    const result = await desktop.invoke("pixie.previewPrompt", {
       identity: draft.value.identity?.trim() || undefined,
       rules: draft.value.rules?.trim() || undefined,
       docs: draft.value.docs?.trim() || undefined,
@@ -193,7 +193,7 @@ async function clearHistory() {
   if (clearing.value) return;
   clearing.value = true;
   try {
-    const result = await desktop.invoke<SessionSnapshot | { cancelled: true }>("pixie.clearHistory");
+    const result = await desktop.invoke("pixie.clearHistory");
     if (result && "projection" in result) pixie.applySnapshot(result);
     else if (result?.cancelled) return;
     layout.showNotice(t("settings.pixieCleared"));

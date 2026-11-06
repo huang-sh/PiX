@@ -16,7 +16,7 @@ export function sessionImageUrl(image: SessionImage, thumbnail = false): Promise
     return existing.promise;
   }
   const item = { bytes: 0, promise: Promise.resolve("") };
-  item.promise = desktop.invoke<PromptImage>("session.image", { ...image.reference, thumbnail }).then(result => {
+  item.promise = desktop.invoke("session.image", { ...image.reference, thumbnail }).then(result => {
     const url = imageDataUrl(result);
     if (cache.get(key) === item) {
       item.bytes = url.length * 2;

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PixieRuntime, pixieWorkspace } from "../src/main/pixie-runtime.js";
@@ -51,4 +51,49 @@ test("an existing pixie workspace leaves the legacy dir untouched", () => {
     assert.ok(existsSync(join(agentDir, "assistant", "sessions")));
     assert.ok(existsSync(join(pixieWorkspace(), "occupied")));
   });
+});
+
+test("a symlinked profile restores and clears sessions written under the real cwd", async t => {
+  const previous = process.env.PIX_HOME;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pix-workspace-link-")));
+  const home = join(root, "home");
+  const alias = join(root, "alias");
+  mkdirSync(home);
+  symlinkSync(home, alias, process.platform === "win32" ? "junction" : "dir");
+  process.env.PIX_HOME = alias;
+  const runtime = new PixieRuntime(() => {}, () => ({ restoreLastConversation: true }));
+  t.after(async () => {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME;
+    else process.env.PIX_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  });
+  mkdirSync(pixieWorkspace(), { recursive: true });
+  const sessions = join(pixAgentDir(), "sessions");
+  const realDir = join(sessions, slug(realpathSync(pixieWorkspace())));
+  mkdirSync(realDir, { recursive: true });
+  const saved = join(realDir, "saved.jsonl");
+  writeFileSync(saved, "{}");
+  const requests: unknown[] = [];
+  t.mock.method(runtime as any, "startMonitoring", () => {});
+  t.mock.method(runtime as any, "startAgent", async () => {});
+  t.mock.method(runtime as any, "snapshot", async () => ({}));
+  t.mock.method(runtime["rpc"], "request", async (input: unknown) => { requests.push(input); return {}; });
+
+  await runtime.ensure();
+  assert.deepEqual(requests, [{ type: "switch_session", sessionPath: saved }]);
+
+  const aliasDir = join(sessions, slug(pixieWorkspace()));
+  const embeddedDir = join(pixieWorkspace(), "sessions");
+  const unrelated = join(sessions, "other-workspace", "keep.jsonl");
+  for (const dir of [aliasDir, embeddedDir, join(sessions, "other-workspace")])
+    mkdirSync(dir, { recursive: true });
+  writeFileSync(join(aliasDir, "old.jsonl"), "{}");
+  writeFileSync(join(embeddedDir, "old.jsonl"), "{}");
+  writeFileSync(unrelated, "{}");
+  await runtime.clearHistory();
+  assert.equal(existsSync(saved), false);
+  assert.equal(existsSync(join(aliasDir, "old.jsonl")), false);
+  assert.equal(existsSync(join(embeddedDir, "old.jsonl")), false);
+  assert.equal(existsSync(unrelated), true);
 });

@@ -7,7 +7,7 @@ import type { CanvasCommand } from "../shared/canvas.js";
 import type { DesktopEvent, PixiePromptCustomization, PixieSettings, PromptImage, ProjectInfo, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
 import { projectSession, summarizeSession } from "../shared/session.js";
 import { debugLog } from "./debug-log.js";
-import { pixAgentDir } from "./paths.js";
+import { canonicalPath, pixAgentDir } from "./paths.js";
 import { composePixieSystemPrompt } from "./pi-runtime.js";
 import { PixieRpc, type RpcLine } from "./pixie-rpc.js";
 
@@ -36,9 +36,14 @@ function migrateLegacyWorkspace(): void {
   }
 }
 
-/** Pixie's sessions can predate the RPC substrate, so both dirs are scanned. */
+/** Include pre-RPC sessions and both cwd spellings: the child resolves symlinks. */
 function sessionDirs(): string[] {
-  return [join(pixieWorkspace(), "sessions"), cliSessionDir(pixieWorkspace())];
+  const workspace = pixieWorkspace();
+  return [...new Set([
+    join(workspace, "sessions"),
+    cliSessionDir(workspace),
+    cliSessionDir(canonicalPath(workspace)),
+  ])];
 }
 
 /** The newest session file, preferring ones that already hold a conversation. */
@@ -92,7 +97,6 @@ export class PixieRuntime {
   private checkingTasks = false;
   private closed = false;
   private followUpsPaused = false;
-  private retryTasksAt = 0;
   private review?: { id: string; revision: number };
 
   get tasks(): PixieTasks {
@@ -163,7 +167,7 @@ export class PixieRuntime {
     try {
       await this.flushReload();
       await this.tasks.reconcile();
-      if (this.closed || this.busy || this.followUpsPaused || Date.now() < this.retryTasksAt) return;
+      if (this.closed || this.busy || this.followUpsPaused) return;
       const task = this.tasks.pending();
       if (!task) return;
       this.sending = true;
@@ -182,8 +186,7 @@ export class PixieRuntime {
         this.tasks.delivery(task.id, this.review.revision, this.closed || this.followUpsPaused ? "pending" : "delivered");
         this.emit({ type: "pixie", payload: { type: "snapshot", payload: snapshot } });
       } catch (error) {
-        this.tasks.delivery(task.id, this.review.revision, "pending");
-        this.retryTasksAt = Date.now() + 60_000;
+        this.tasks.delivery(task.id, this.review.revision, "pending", Date.now() + 60_000);
         this.emit({ type: "pixie", payload: { type: "notice", payload: { level: "error", message: `Pixie task follow-up pending: ${String(error)}` } } });
       } finally {
         this.review = undefined;

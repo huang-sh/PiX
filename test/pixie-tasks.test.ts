@@ -97,6 +97,60 @@ test("interrupted review resumes with stable identity and cannot duplicate child
   assert.equal(f.calls.length, 3); // original, child, one follow-up
 });
 
+test("a failing task review backs off independently without blocking other completions", async t => {
+  const f = setup(t);
+  const first = (await f.journal.delegate(command, source, target)).task;
+  f.journal.observe(project, snapshot(first.requestId, "idle"));
+  const second = (await f.journal.delegate(command, { ...source, id: "second-request" }, target)).task;
+  f.journal.observe(project, snapshot(second.requestId, "idle"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = join(f.file, "..", "home");
+  const runtime = new PixieRuntime(() => {}, () => ({}));
+  runtime["taskJournal"] = f.journal;
+  t.after(async () => {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+  });
+  let now = Date.now(), fail = true;
+  t.mock.method(Date, "now", () => now);
+  const attempts: string[] = [];
+  t.mock.method(runtime as any, "sendTurn", async (_input: unknown, event: PixieTaskSource) => {
+    attempts.push(event.id);
+    if (event.id === `task:${first.id}:1` && fail) throw new Error("First task review failed");
+    return snapshot();
+  });
+  await runtime["checkTasks"]();
+  for (const guard of ["sending", "lifecycle", "followUpsPaused"] as const) {
+    runtime[guard] = true;
+    await runtime["checkTasks"]();
+    assert.equal(attempts.length, 1, `${guard} must still prevent background reviews`);
+    runtime[guard] = false;
+  }
+  await Promise.all([runtime["checkTasks"](), runtime["checkTasks"]()]);
+  assert.equal(f.journal.get(first.id).notification, "pending");
+  assert.equal(f.journal.get(second.id).notification, "delivered");
+  assert.deepEqual(attempts, [`task:${first.id}:1`, `task:${second.id}:1`]);
+  now += 59_999;
+  await runtime["checkTasks"]();
+  assert.equal(attempts.length, 2, "the failed task must respect its retry delay");
+  now++;
+  await runtime["checkTasks"]();
+  assert.equal(attempts.length, 3, "the failed task becomes eligible again at its deadline");
+  const third = (await f.journal.delegate(command, { ...source, id: "third-request" }, target)).task;
+  f.journal.observe(project, snapshot(third.requestId, "idle"));
+  await runtime["checkTasks"]();
+  assert.equal(f.journal.get(third.id).notification, "delivered", "repeated failures cannot block new completions");
+  fail = false;
+  now += 60_000;
+  await runtime["checkTasks"]();
+  assert.equal(f.journal.get(first.id).notification, "delivered");
+  assert.equal(f.journal.get(first.id).retryAt, undefined);
+  assert.equal(new PixieTasks(f.file).pending(), undefined, "successful retries must not replay after restart");
+  assert.equal(f.journal.pending(), undefined);
+  assert.deepEqual(attempts, [`task:${first.id}:1`, `task:${second.id}:1`, `task:${first.id}:1`,
+    `task:${third.id}:1`, `task:${first.id}:1`], "retries preserve the event identity for deduplication");
+});
+
 test("task updates version pending context and cancellation suppresses stale follow-up", async t => {
   const f = setup(t);
   const { task } = await f.journal.delegate(command, source, target);
@@ -110,16 +164,44 @@ test("task updates version pending context and cancellation suppresses stale fol
   await assert.rejects(f.journal.control({ action: "followUp", taskId: task.id, text: "obsolete" }, source), /cancelled/);
 });
 
+test("review backoff survives restart and cannot delay an updated or cancelled task", async t => {
+  const f = setup(t);
+  const { task } = await f.journal.delegate(command, source, target);
+  f.journal.observe(project, snapshot(task.requestId, "idle"));
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  f.journal.delivery(task.id, task.revision, "pending", now + 60_000);
+  const restarted = new PixieTasks(f.file);
+  assert.equal(restarted.pending(), undefined);
+  now += 60_000;
+  assert.equal(restarted.pending()?.id, task.id);
+  restarted.delivery(task.id, task.revision, "delivering");
+  assert.equal(new PixieTasks(f.file).pending()?.id, task.id, "an interrupted retry remains recoverable");
+  restarted.delivery(task.id, task.revision, "pending", now + 60_000);
+  const revised = restarted.update({ action: "updateTask", taskId: task.id, purpose: "Review the corrected requirements" });
+  restarted.delivery(task.id, task.revision, "pending", now + 60_000);
+  assert.equal(restarted.pending()?.revision, revised.revision, "an old review cannot defer a new revision");
+  assert.equal(restarted.get(task.id).retryAt, undefined);
+  restarted.delivery(task.id, revised.revision, "pending", now + 60_000);
+  restarted.update({ action: "updateTask", taskId: task.id, taskState: "cancelled" });
+  restarted.delivery(task.id, revised.revision, "pending", now + 60_000);
+  now += 60_000;
+  assert.equal(new PixieTasks(f.file).pending(), undefined, "a cancelled task never resumes after its retry deadline");
+});
+
 test("cancelling a parent cancels pending child follow-ups and preserves updated ancestor context", async t => {
   const f = setup(t);
   const parent = (await f.journal.delegate(command, source, target)).task;
   const child = (await f.journal.delegate({ ...command, text: "Check a separate concern" },
     { ...source, id: "child-source" }, target, parent.id)).task;
+  f.journal.observe(project, snapshot(child.requestId, "idle"));
+  f.journal.delivery(child.id, child.revision, "pending", Date.now() + 60_000);
   f.journal.update({ action: "updateTask", taskId: parent.id, purpose: "Requirements changed" });
   assert.equal((await f.journal.read(child.id)).ancestors[0]!.purpose, "Requirements changed");
   f.journal.update({ action: "updateTask", taskId: parent.id, taskState: "cancelled" });
   f.journal.observe(project, snapshot(child.requestId, "idle"));
   assert.equal(f.journal.get(child.id).state, "cancelled");
+  assert.equal(f.journal.get(child.id).retryAt, undefined);
   assert.equal(f.journal.pending(), undefined);
   await f.journal.control({ action: "stop", taskId: child.id }, source);
   assert.equal((f.calls.at(-1) as { action: string }).action, "branchAbort");
