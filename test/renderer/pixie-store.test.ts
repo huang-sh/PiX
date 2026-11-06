@@ -42,7 +42,6 @@ describe("pixie store", () => {
     pixie.onEvent({ type: "agent", payload: { type: "agent_settled" } });
     pixie.onEvent({ type: "snapshot", payload: snapshot("a2", false, true) });
     expect(pixie.snapshot?.projection.messages.at(-1)?.text).toBe("answer");
-    expect(pixie.unread).toBe(true);
     expect(pixie.running).toBe(false);
     expect(pixie.pending).toBeUndefined();
   });
@@ -117,7 +116,7 @@ describe("pixie store", () => {
     expect(pixie.error).toBe("401");
   });
 
-  it("marks a reply unread when it settles while the card is hidden, and show clears it", () => {
+  it("tracks activity until a background reply settles while the card is hidden", () => {
     const pixie = usePixieStore();
     pixie.onEvent({ type: "agent", payload: { type: "agent_start" } });
     pixie.onEvent({
@@ -127,15 +126,10 @@ describe("pixie store", () => {
       },
     });
     expect(pixie.activity?.active).toBe(true);
-    expect(pixie.unread).toBe(false);
 
     pixie.onEvent({ type: "agent", payload: { type: "agent_settled" } });
 
     expect(pixie.activity?.active).toBe(false);
-    expect(pixie.unread).toBe(true);
-
-    pixie.show();
-    expect(pixie.unread).toBe(false);
   });
 
   it("refuses a second send while the first is still in flight", async () => {

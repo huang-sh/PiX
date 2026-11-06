@@ -216,7 +216,7 @@ try {
   result.checks.basicCanvasControls=true;
   result.checks.zeroCanvasErrors=true;
   result.canvasCalls=canvasCalls(controls.snapshot).map(call=>({name:call.name,arguments:call.arguments}));
-  await cdp.click('[data-action="ask-pix"]'); await delay(300); result.graphScreenshot=await cdp.shot('03-graph');
+  await cdp.click('[data-action="pixie-collapse"]'); await delay(300); result.graphScreenshot=await cdp.shot('03-graph');
   result.finalReply=completed.snapshot.projection.messages.findLast(m=>m.role==='assistant')?.text;
   result.tasks=tasks; result.rendererExceptions=cdp.errors; assert.deepEqual(cdp.errors,[]);
   result.checks.noExternalTmpFilesObserved = !toolCalls.some(call => call.name === 'bash' && /\/(?:private\/)?tmp\//.test(call.arguments.command ?? ''));

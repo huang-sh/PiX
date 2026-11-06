@@ -200,7 +200,7 @@ try {
   result.completedScreenshot = await cdp.shot('03-completed');
   await cdp.evaluate(`window.__pixTest.openSession(${JSON.stringify(original.target.session)})`);
   await until(async () => (await state()).nodes?.length === 2);
-  await cdp.click('[data-action="ask-pix"]');
+  await cdp.click('[data-action="pixie-collapse"]');
   await delay(300);
   result.graphScreenshot = await cdp.shot('04-original-session');
   result.checks.actualFileWriteAndReadTools = true;

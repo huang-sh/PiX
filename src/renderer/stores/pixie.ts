@@ -45,8 +45,6 @@ export const usePixieStore = defineStore("pixie", {
     model: undefined as RuntimeModel | null | undefined,
     thinking: undefined as string | undefined,
     error: "",
-    /** A reply settled while the card was hidden; cleared by the next show. */
-    unread: false,
     /** Single-flight init promise: a fresh store instance starts a fresh flight. */
     initFlight: undefined as Promise<void> | undefined,
   }),
@@ -63,7 +61,6 @@ export const usePixieStore = defineStore("pixie", {
   actions: {
     show() {
       this.visible = true;
-      this.unread = false;
       overlay?.focus();
       void this.ensure();
     },
@@ -150,8 +147,6 @@ export const usePixieStore = defineStore("pixie", {
         // turn must go with it or the card would show a message never sent.
         this.pending = undefined;
         return false;
-      } finally {
-        if (!this.visible) this.unread = true;
       }
     },
     async stop() {
@@ -177,12 +172,8 @@ export const usePixieStore = defineStore("pixie", {
       if (!event) return;
       if (event.type === "snapshot") {
         this.applySnapshot(event.payload as SessionSnapshot);
-        if (!this.visible) this.unread = true;
       } else if (event.type === "agent") {
-        const wasActive = this.activity?.active;
-        const activity = reduceAgentActivity(this.activity, event.payload);
-        this.activity = activity;
-        if (wasActive && !activity?.active && !this.visible) this.unread = true;
+        this.activity = reduceAgentActivity(this.activity, event.payload);
         // The turn's reply snapshot usually wins the race against this event
         // (the forwarder defers it a tick), so the settle itself must retire
         // the live section too — or the working indicator sticks forever.

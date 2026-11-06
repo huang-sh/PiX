@@ -3,7 +3,6 @@ import { ChevronDown, Folder, MessageSquare, MonitorUp, PanelLeft, PanelRight, P
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import Button from "../../components/ui/Button.vue";
-import { usePixieStore } from "../../stores/pixie";
 import GitBranchPicker from "../../components/GitBranchPicker.vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -14,7 +13,6 @@ const emit = defineEmits<{ pickProject: []; connectRemote: []; disconnectRemote:
 
 const layout = useLayoutStore();
 const workspace = useWorkspaceStore();
-const pixie = usePixieStore();
 const { t } = useI18n();
 const workspaceMenuOpen = ref(false);
 // Runtime binding (not a static src, which transformAssetUrls would compile):
@@ -24,9 +22,6 @@ const logoSrc = "icon.png";
 function shortcutTitle(label: string, id: ShortcutId) {
   const keys = shortcutBindings(id, layout.settings?.app.keyboardShortcuts).map((binding) => formatShortcut(binding, isMac())).join(" / ");
   return keys ? `${t(label)} (${keys})` : t(label);
-}
-function togglePixie() {
-  pixie.visible ? pixie.hide() : pixie.show();
 }
 
 function chooseLocal() {
@@ -65,23 +60,6 @@ function disconnectRemote() {
         <Pin v-if="layout.layout.navigatorPinned" class="navigator-pin-badge" :size="10" aria-hidden="true" />
       </Button>
       <span class="app-titlebar-brand"><img :src="logoSrc" alt="" /></span>
-      <Button
-        data-action="ask-pix"
-        :class="`ask-pix-toggle${pixie.visible ? ' active' : ''}`"
-        variant="ghost"
-        size="sm"
-        :title="shortcutTitle('pixie.title', 'pixie')"
-        :aria-expanded="pixie.visible"
-        @click="togglePixie"
-      >
-        {{ t("pixie.title") }}
-        <span
-          v-if="!pixie.visible && (pixie.running || pixie.unread)"
-          class="ask-pix-dot"
-          :class="{ running: pixie.running }"
-          aria-hidden="true"
-        />
-      </Button>
     </div>
 
     <div class="app-titlebar-workspace">

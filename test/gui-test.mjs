@@ -1771,9 +1771,9 @@ try {
       throw new Error(`Empty tool panel did not close: ${JSON.stringify(value)}`);
   });
   result.emptyToolPanelClosed = true;
-  // Pixie: the app-level assistant overlay opens from the titlebar, prepares
+  // Pixie: the app-level assistant overlay opens from the sprite, prepares
   // its own Pi session in the background, and Cmd/Ctrl+E and Escape collapse it.
-  await cdp.evaluate("document.querySelector('[data-action=ask-pix]').click()");
+  await cdp.evaluate("document.querySelector('[data-pixie-sprite]').click()");
   await retry(async () => {
     const value = await cdp.evaluate(`(() => {
       const card = document.querySelector('[data-pixie-card]');
@@ -1781,11 +1781,10 @@ try {
         visible: card?.checkVisibility() === true,
         composer: Boolean(card?.querySelector('textarea')),
         compact: Boolean(card) && !card.querySelector('.pixie-messages'),
-        active: document.querySelector('[data-action=ask-pix]')?.classList.contains('active') === true,
       };
     })()`);
-    if (!value.visible || !value.composer || !value.compact || !value.active)
-      throw new Error(`Ask PiX card did not open: ${JSON.stringify(value)}`);
+    if (!value.visible || !value.composer || !value.compact)
+      throw new Error(`Pixie card did not open: ${JSON.stringify(value)}`);
   });
   await retry(async () => {
     if (await cdp.evaluate(`Boolean(document.querySelector('[data-pixie-card] textarea')?.disabled)`))
