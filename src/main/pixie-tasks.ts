@@ -139,6 +139,9 @@ export class PixieTasks {
     let parentId = this.get(id).parentTaskId;
     while (parentId && !seen.has(parentId)) {
       seen.add(parentId);
+      // A missing ancestor (a hand-edited journal) ends the chain instead of
+      // stalling every pending notification through a thrown walk.
+      if (!this.tasks.has(parentId)) break;
       const parent = this.get(parentId);
       ancestors.push(parent);
       parentId = parent.parentTaskId;

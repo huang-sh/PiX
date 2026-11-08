@@ -312,6 +312,19 @@ test("cancelling a delegation frees its admission key for a fresh identical disp
   assert.equal(third.task.id, second.task.id);
 });
 
+test("a dangling parent reference ends the ancestor walk instead of stalling notifications", async t => {
+  const f = setup(t);
+  const { task } = await f.journal.delegate(command, source, target);
+  f.journal.observe(project, snapshot(task.requestId, "idle"));
+  const saved = JSON.parse(readFileSync(f.file, "utf8"));
+  saved.tasks.at(-1).parentTaskId = "no-such-task";
+  writeFileSync(f.file, JSON.stringify(saved));
+  const reloaded = new PixieTasks(f.file);
+  reloaded.addHost(f.host);
+  assert.equal(reloaded.pending()?.id, task.id, "the completion is still delivered");
+  assert.deepEqual(reloaded.ancestors(task.id), []);
+});
+
 test("load prunes terminal delegations past retention and caps receipts", async t => {
   const f = setup(t);
   const parent = (await f.journal.delegate(command, { ...source, id: "parent" }, target)).task;
