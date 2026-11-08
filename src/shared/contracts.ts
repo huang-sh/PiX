@@ -185,18 +185,22 @@ export function validateRouteInput(
     case "pixie.ensure":
     case "pixie.stop":
     case "pixie.newSession":
+    case "pixie.tasks":
     case "pixie.clearHistory":
     case "pixie.reveal":
     case "pixie.reload":
       return {};
     case "pixie.send": {
       const images = v.images === undefined ? undefined : validatePromptImages(v.images);
+      if (v.canvas !== undefined && v.canvas !== "headless" && v.canvas !== "live")
+        throw new Error("canvas must be headless or live");
       return {
         text: str(v.text, "text", !!images?.length) ?? "",
         ...(images?.length ? { images } : {}),
         provider: str(v.provider, "provider", true),
         modelId: str(v.modelId, "modelId", true),
         thinkingLevel: str(v.thinkingLevel, "thinkingLevel", true),
+        ...(v.canvas !== undefined ? { canvas: v.canvas } : {}),
       };
     }
     case "pixie.previewPrompt":

@@ -9,11 +9,18 @@ export interface DesktopRouteMap {
   "pixie.send": {
     input: ({ text: string; images?: PromptImage[] } | { text?: string; images: PromptImage[] }) & {
       provider?: string; modelId?: string; thinkingLevel?: string;
+      /** live drives the desktop's visible canvas; headless addresses the host's sessions directly. */
+      canvas?: "headless" | "live";
     };
     output: SessionSnapshot;
   };
   "pixie.stop": { input: undefined; output: void };
   "pixie.newSession": { input: undefined; output: SessionSnapshot };
+  "pixie.tasks": {
+    input: undefined;
+    output: { tasks: Array<{ id: string; state: string; revision: number; parentTaskId?: string; nodeId?: string;
+      error?: string; notification?: string; purpose: string; createdAt: string; updatedAt: string }> };
+  };
   "pixie.previewPrompt": { input: PixiePromptCustomization | undefined; output: { text: string } };
   "pixie.clearHistory": { input: undefined; output: SessionSnapshot | { cancelled: true } };
   "pixie.reveal": { input: undefined; output: void };

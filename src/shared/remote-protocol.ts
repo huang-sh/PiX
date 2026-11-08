@@ -41,6 +41,13 @@ export const PROJECT_ROUTES = [
   "settings.reset",
   "host.activity",
   "host.shutdown",
+  // The conversation-level Pixie surface. Destructive and settings-linked
+  // routes (clearHistory, reload, previewPrompt, reveal) stay desktop-only.
+  "pixie.ensure",
+  "pixie.send",
+  "pixie.stop",
+  "pixie.newSession",
+  "pixie.tasks",
 ] as const satisfies readonly (DesktopRoute | "host.activity" | "host.shutdown")[];
 
 export type ProjectRoute = (typeof PROJECT_ROUTES)[number];

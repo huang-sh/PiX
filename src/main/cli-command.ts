@@ -21,7 +21,11 @@ export interface CommandOptions {
 function context(options: CommandOptions) {
   const home = resolve(options.home ?? pixHome());
   const platform = options.platform ?? process.platform;
-  return { home, platform, launcher: join(home, ".pix", "bin", platform === "win32" ? "pix.cmd" : "pix"), state: join(home, ".pix", "command.json") };
+  return { home, platform,
+    launcher: join(home, ".pix", "bin", platform === "win32" ? "pix.cmd" : "pix"),
+    // The Pixie companion launcher runs the same entry with "pixie" defaulted in.
+    pixieLauncher: join(home, ".pix", "bin", platform === "win32" ? "pixie.cmd" : "pixie"),
+    state: join(home, ".pix", "command.json") };
 }
 function readState(file: string): Installation | undefined {
   try {
@@ -94,6 +98,7 @@ export function installCommand(options: CommandOptions = {}) {
     if (!read(c.launcher).startsWith(`#!/bin/sh\n${MARKER}\n`)) throw new Error(`Another command already exists at ${c.launcher}; it was left unchanged`);
   }
   const command = target ? `exec ${quote(target)} "$@"` : `exec ${quote(options.executable ?? process.execPath)} ${quote(options.entry ?? resolve(process.argv[1]!))} "$@"`;
+  const pixieCommand = target ? `exec ${quote(target)} pixie "$@"` : `exec ${quote(options.executable ?? process.execPath)} ${quote(options.entry ?? resolve(process.argv[1]!))} pixie "$@"`;
   const previous = readState(c.state);
   const files = configs(c.home, c.platform, options.shell ?? process.env.SHELL ?? "");
   const next: Installation = { launcher: c.launcher, configs: [] };
@@ -106,6 +111,7 @@ export function installCommand(options: CommandOptions = {}) {
   // Write the executable only once its PATH entries are ready. Reinstalling
   // updates our own wrapper when the app has moved, without duplicating blocks.
   atomic(c.launcher, `#!/bin/sh\n${MARKER}\n${command}\n`, 0o755);
+  atomic(c.pixieLauncher, `#!/bin/sh\n${MARKER}\n${pixieCommand}\n`, 0o755);
   atomic(c.state, JSON.stringify(next) + "\n");
   return { installed: true, launcher: c.launcher, restartTerminal: true };
 }
@@ -125,6 +131,7 @@ export function uninstallCommand(options: CommandOptions = {}) {
   }
   const text = read(c.launcher);
   if (text.startsWith(`#!/bin/sh\n${MARKER}\n`)) rmSync(c.launcher);
+  if (read(c.pixieLauncher).startsWith(`#!/bin/sh\n${MARKER}\n`)) rmSync(c.pixieLauncher);
   atomic(c.state, JSON.stringify({ disabled: true, launcher: c.launcher, configs: [] }) + "\n");
   return { installed: false, launcher: c.launcher, restartTerminal: true };
 }

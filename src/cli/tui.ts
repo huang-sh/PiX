@@ -17,6 +17,10 @@ import { promptDisplayTextMap, validateHistoryWindow } from "../shared/session.j
 import { GRAPH_FILTERS, graphFilterIds, matchesGraphFilter } from "../shared/graph-filter.js";
 import { runTask, type Run, type RunOptions } from "./run.js";
 
+// This module is the terminal's sanctioned home for Pi's presentation
+// components; sibling CLI entry points import them from here.
+export { getMarkdownTheme, getSelectListTheme, initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+
 interface InteractiveOptions extends RunOptions { cwd?: string; node?: string; root?: boolean; }
 const commands = [
   { name: "tree", description: "Navigate the session tree and choose a branch" },

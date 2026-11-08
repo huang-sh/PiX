@@ -12,6 +12,7 @@ Usage: pix [command] [arguments] [options]
 
   chat                         Interactive conversation (default)
   run [prompt]                 Run a task; read prompt from stdin when piped
+  pixie [prompt|tasks]         Talk to Pixie (shared with the desktop); --live-canvas drives the GUI
   resume <session> [prompt]    Resume interactively, or run the supplied prompt
   fork <node> [prompt]         Continue from a node in --session
   new                          Create a session
@@ -51,6 +52,7 @@ const parsed = parseArgs({ allowPositionals: true, options: {
   branch: { type: "string" }, "run-id": { type: "string" }, root: { type: "boolean" },
   filter: { type: "string" },
   force: { type: "boolean" },
+  "live-canvas": { type: "boolean" },
   help: { type: "boolean", short: "h" },
 } });
 const options = parsed.values;
@@ -103,7 +105,7 @@ async function main() {
     else throw new Error("Use pix command install, uninstall or status");
     return;
   }
-  const known = ["chat", "run", "resume", "fork", "new", "sessions", "tree", "label", "stop", "models", "dialogs", "respond", "host"];
+  const known = ["chat", "run", "resume", "fork", "new", "sessions", "tree", "label", "stop", "models", "dialogs", "respond", "host", "pixie"];
   if (!known.includes(command)) throw new Error(`Unknown command: ${command}. See pix --help.`);
   if (options.force && (command !== "host" || !["stop", "restart"].includes(args[0] ?? "")))
     throw new Error("Use --force only with pix host stop or pix host restart; it interrupts tasks and other clients");
@@ -137,6 +139,16 @@ async function main() {
   const cwd = resolve(options.cwd ?? process.cwd());
   const client = await connectLocalHost(cwd);
   try {
+    if (command === "pixie") {
+      const { pixieOnce, pixieInteractive, pixieTasks } = await import("./pixie.js");
+      const pixieOptions = { json: options.json, liveCanvas: options["live-canvas"] === true, cwd };
+      if (args[0] === "tasks") await pixieTasks(client, options.json);
+      else if (args.length) await pixieOnce(client, args.join(" "), pixieOptions);
+      else if (!process.stdin.isTTY || !process.stdout.isTTY)
+        throw new Error('Interactive Pixie needs a terminal. Pass a prompt: pixie "text"');
+      else await pixieInteractive(client, pixieOptions);
+      return;
+    }
     if (command === "sessions") {
       const sessions = await client.invoke<SessionSummary[]>("session.list");
       if (options.json) print({ type: "sessions", sessions });

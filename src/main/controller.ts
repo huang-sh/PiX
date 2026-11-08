@@ -26,6 +26,7 @@ import { ProviderBalanceService } from "./provider-balances.js";
 import { createHash } from "node:crypto";
 import { isSessionRunning, parseSessionJsonl, projectSession, promptRecall, searchGraphNodeIds, validateHistoryWindow, windowEntries } from "../shared/session.js";
 import { sessionEventEncoder } from "../shared/session-updates.js";
+import { headlessCanvas } from "./pixie-headless-canvas.js";
 import type { UsageRange } from "../shared/usage.js";
 import { PiRuntime, MODEL_ACTIONS } from "./pi-runtime.js";
 import type { PixieTaskTarget } from "./pixie-tasks.js";
@@ -190,23 +191,57 @@ export class MainController {
         : this.registry.entry(target.session)?.runtime?.snapshot(),
       control: (target, input) => this.controlPixieTask(target, input),
       read: async (target, leafId, limit = 40) => {
-        const page = target.project.remote
-          ? await this.pool.slot(projectId(target.project))!.client.request<SessionHistoryWindow>("session.branchWindow", {
+        if (target.project.remote) {
+          const page = await this.pool.slot(projectId(target.project))!.client.request<SessionHistoryWindow>("session.branchWindow", {
             session: target.session, leafId, limit, bytes: 64 * 1024,
-          }, undefined, target.session)
-          : this.registry.entry(target.session)!.runtime!.branchWindow(leafId, limit, 64 * 1024);
-        let remaining = 24_000;
-        const history = projectSession(page.entries, leafId).messages;
-        const messages = history.slice(-limit).reverse().map(message => {
-          const text = message.text.slice(-Math.max(0, remaining));
-          const bounded = remaining > 0 ? text : "";
-          remaining -= bounded.length;
-          return { entryId: message.entryId, role: message.role, text: bounded, toolName: message.toolName,
-            isError: message.isError, truncated: bounded.length !== message.text.length };
-        });
-        return { session: target.session, leafId, messages: messages.reverse(), hasEarlier: page.hasEarlier || history.length > limit };
+          }, undefined, target.session);
+          let remaining = 24_000;
+          const history = projectSession(page.entries, leafId).messages;
+          const messages = history.slice(-limit).reverse().map(message => {
+            const text = message.text.slice(-Math.max(0, remaining));
+            const bounded = remaining > 0 ? text : "";
+            remaining -= bounded.length;
+            return { entryId: message.entryId, role: message.role, text: bounded, toolName: message.toolName,
+              isError: message.isError, truncated: bounded.length !== message.text.length };
+          });
+          return { session: target.session, leafId, messages: messages.reverse(), hasEarlier: page.hasEarlier || history.length > limit };
+        }
+        return this.localHistoryWindow(target.session, leafId, limit);
       },
     });
+  }
+
+  /** A headless canvas for terminal-driven Pixie turns: this project's session tree, no view. */
+  private headlessCanvas() {
+    return headlessCanvas({
+      project: () => this.project,
+      listSessions: () => this.projectRuntime.list(),
+      openSession: async path => {
+        if (!this.project) throw new Error("Open a project first");
+        return this.registry.open(this.project, this.files.dir, path, error => { throw error; });
+      },
+      createSession: async () => {
+        if (!this.project) throw new Error("Open a project first");
+        return (await this.controlAgent({ action: "newSession" })).result as SessionSnapshot;
+      },
+      control: async (path, input) => (await this.controlAgent(input, path)).result as SessionSnapshot,
+      read: (path, leafId, limit = 40) => this.localHistoryWindow(path, leafId, limit),
+    });
+  }
+
+  /** The bounded message window a canvas read serves, shared by task reads and the headless canvas. */
+  private async localHistoryWindow(session: string, leafId: string, limit = 40): Promise<unknown> {
+    const page = this.registry.entry(session)!.runtime!.branchWindow(leafId, limit, 64 * 1024);
+    let remaining = 24_000;
+    const history = projectSession(page.entries, leafId).messages;
+    const messages = history.slice(-limit).reverse().map(message => {
+      const text = message.text.slice(-Math.max(0, remaining));
+      const bounded = remaining > 0 ? text : "";
+      remaining -= bounded.length;
+      return { entryId: message.entryId, role: message.role, text: bounded, toolName: message.toolName,
+        isError: message.isError, truncated: bounded.length !== message.text.length };
+    });
+    return { session, leafId, messages: messages.reverse(), hasEarlier: page.hasEarlier || history.length > limit };
   }
 
   private async controlPixieTask(target: PixieTaskTarget, input: AgentControl): Promise<SessionSnapshot> {
@@ -891,13 +926,21 @@ export class MainController {
     // Pixie routes resolve before the project-view dispatch: Pixie is
     // app-level and stays on the local host even in a remote workspace.
     if (route === "pixie.ensure") return this.pixie.ensure();
-    if (route === "pixie.send")
-      return this.pixie.send(v as Parameters<PixieRuntime["send"]>[0], command => {
+    if (route === "pixie.send") {
+      // Live turns drive the desktop's visible canvas; headless turns (the
+      // terminal) address the host's session tree without one.
+      const { canvas: mode, ...input } = v as Parameters<PixieRuntime["send"]>[0] & { canvas?: "headless" | "live" };
+      if (mode !== undefined && mode !== "headless" && mode !== "live") throw new Error("canvas must be headless or live");
+      return this.pixie.send(input, mode === "headless" ? this.headlessCanvas() : command => {
         if (!this.platform.canvas) throw new Error("This client has no canvas");
         return this.platform.canvas(command);
       });
+    }
     if (route === "pixie.stop") return this.pixie.stop();
     if (route === "pixie.newSession") return this.pixie.newSession();
+    if (route === "pixie.tasks")
+      return { tasks: this.pixie.tasks.list().reverse().map(({ id, state, revision, parentTaskId, nodeId, error, notification, purpose, createdAt, updatedAt }) =>
+        ({ id, state, revision, parentTaskId, nodeId, error, notification, purpose, createdAt, updatedAt })) };
     if (route === "pixie.previewPrompt")
       return { text: await this.pixie.promptPreview(v as PixiePromptCustomization | undefined) };
     if (route === "pixie.reveal") {

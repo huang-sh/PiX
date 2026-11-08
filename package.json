@@ -50,6 +50,7 @@
     "build:cli": "npm run build:server",
     "cli": "node bin/pix.mjs",
     "test:cli": "npm run build && node test/cli-host-test.mjs",
+    "test:cli:pixie": "npm run build:cli && node test/cli-pixie-test.mjs",
     "test:cli:real": "npm run build:cli && node test/cli-real-agent-test.mjs",
     "test:cli:tui:real": "npm run build:cli && node test/cli-tui-real-test.mjs",
     "test:cli:package": "npm run build:cli && node test/cli-package-test.mjs",
