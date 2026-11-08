@@ -93,8 +93,8 @@ test("a connected remote project serves delegation, control and reads over the p
 
   await journal.read(task.id, 5);
   const window = requests.find(request => request.route === "session.branchWindow")!;
-  assert.deepEqual(window.input, { session: target.session, leafId: "a", limit: 5, bytes: 64 * 1024 },
-    "reads page the remote session's transcript window");
+  assert.deepEqual(window.input, { session: target.session, leafId: "a", limit: 5, bytes: 4 << 20 },
+    "reads page the remote session's transcript window inside the wire contract");
 
   await journal.control({ action: "steer", taskId: task.id, text: "hurry" } as never, source);
   const steer = requests.at(-1)!;

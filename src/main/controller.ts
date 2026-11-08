@@ -192,8 +192,10 @@ export class MainController {
       control: (target, input) => this.controlPixieTask(target, input),
       read: async (target, leafId, limit = 40) => {
         if (target.project.remote) {
+          // The remote wire contract floors window fetches at 4 MiB; the local
+          // 24k-character budget below still bounds what the model receives.
           const page = await this.pool.slot(projectId(target.project))!.client.request<SessionHistoryWindow>("session.branchWindow", {
-            session: target.session, leafId, limit, bytes: 64 * 1024,
+            session: target.session, leafId, limit, bytes: 4 << 20,
           }, undefined, target.session);
           let remaining = 24_000;
           const history = projectSession(page.entries, leafId).messages;
