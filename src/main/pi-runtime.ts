@@ -920,17 +920,15 @@ export class PiRuntime {
   async open(path: string) {
     if (this.closing) throw new Error("Session is closing");
     const pi = await this.pi();
-    if (this.runtime) {
-      await this.extensionStartup;
-      await this.runtime.switchSession(path, { cwdOverride: this.cwd });
-    } else {
-      const manager = pi.SessionManager.open(path, this.dir, this.cwd);
-      this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
-        cwd: this.cwd,
-        agentDir: this.agentDir(),
-        sessionManager: manager,
-      });
-    }
+    // Callers only ever open into a fresh runtime: settled branch workers are
+    // closed (their runtime cleared) before any continuation, so every open
+    // builds the session manager directly.
+    const manager = pi.SessionManager.open(path, this.dir, this.cwd);
+    this.runtime = await pi.createAgentSessionRuntime(this.factory(pi), {
+      cwd: this.cwd,
+      agentDir: this.agentDir(),
+      sessionManager: manager,
+    });
     this.bind();
     return this.snapshot();
   }
