@@ -14,6 +14,7 @@ import SessionNavigator from "../navigator/SessionNavigator.vue";
 import ToolPanel from "../tools/ToolPanel.vue";
 import WelcomeScreen from "./WelcomeScreen.vue";
 import { whenMeasured, whenPanelsSettle, whenVisible, type PanelSettleTarget } from "../../lib/frame";
+import { equalSplitWidth } from "../../lib/split";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -76,6 +77,9 @@ function resized(panel: PanelId, size: number) {
   if (size <= 0) return;
   const width = Math.round(size);
   if (width <= 0) return;
+  // Programmatic resizes echo back through here; a no-op write would only
+  // reschedule the debounced save with an identical payload.
+  if (width === layout.layout.widths[panel]) return;
   layout.layout.widths[panel] = width;
   if (panel === "chat") syncedChatWidth = width;
   if (saveTimer.value) clearTimeout(saveTimer.value);
@@ -151,6 +155,63 @@ function resizeNavigatorWithKeyboard(event: KeyboardEvent) {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   event.preventDefault();
   void layout.setWidth("navigator", Math.min(420, Math.max(210, navigatorWidth.value + (event.key === "ArrowLeft" ? -10 : 10))));
+}
+
+// Shared by the chat panel's :min-size and the equal-split clamp below.
+const CHAT_MIN_WIDTH = 310;
+
+// The handle fires click after every drag release, and the OS folds two quick
+// releases into a dblclick even when both were small drags. Track each press's
+// own travel and judge only the two presses that make up the double click:
+// micro-adjust drags cannot masquerade as a reset, while a completed drag
+// right before a genuine double click does not poison it.
+const SPLIT_GESTURE_TRAVEL_LIMIT = 4; // px within either press of a double click
+let splitSegmentTravel = 0;
+let splitPrevSegmentTravel = 0;
+let splitGestureX = 0;
+let splitGestureY = 0;
+let splitGesturePressed = false;
+
+function splitGestureDown(event: PointerEvent) {
+  splitPrevSegmentTravel = splitSegmentTravel;
+  splitSegmentTravel = 0;
+  splitGestureX = event.clientX;
+  splitGestureY = event.clientY;
+  splitGesturePressed = true;
+}
+
+function splitGestureMove(event: PointerEvent) {
+  if (!splitGesturePressed) return;
+  splitSegmentTravel += Math.hypot(event.clientX - splitGestureX, event.clientY - splitGestureY);
+  splitGestureX = event.clientX;
+  splitGestureY = event.clientY;
+}
+
+function splitGestureUp() {
+  splitGesturePressed = false;
+}
+
+// Double-click on the canvas/chat handle equalizes the two columns. The chat
+// panel is pixel-sized and the graph panel flexes to the remainder, so chat
+// takes half of the measured group (minus the handle). The store write reaches
+// the splitter through the widths watcher, like pin-driven changes do. Double
+// click instead of click: the handle still fires click after a drag release.
+function resetChatSplit(event: MouseEvent) {
+  if (restoringLayout) return;
+  // The double click is made of the last two presses: if either was itself a
+  // drag, this is a pair of micro-adjust drags, not a reset gesture.
+  const dragLike = Math.max(splitPrevSegmentTravel, splitSegmentTravel) > SPLIT_GESTURE_TRAVEL_LIMIT;
+  splitSegmentTravel = 0;
+  splitPrevSegmentTravel = 0;
+  if (dragLike) return;
+  const handle = event.currentTarget;
+  if (!(handle instanceof HTMLElement)) return;
+  // reka renders the group id as data-panel-group-id, never as an id attribute.
+  const group = document.querySelector<HTMLElement>('[data-panel-group-id="pix-primary"]');
+  if (!group) return;
+  const width = equalSplitWidth(group.clientWidth, handle.offsetWidth, CHAT_MIN_WIDTH);
+  if (width === layout.layout.widths.chat) return;
+  void layout.setWidth("chat", width);
 }
 
 function openProjectSession(record: ProjectGroup, path: string) {
@@ -292,7 +353,17 @@ watch(() => layout.hydrated, async (hydrated) => {
             <WelcomeScreen v-if="!workspace.project" @open-project="$emit('pickProject')" />
             <GraphPanel v-show="workspace.project" class="graph" @new-session="$emit('newSession')" />
           </SplitterPanel>
-          <SplitterResizeHandle class="resize-handle" :class="{ hidden: layout.layout.collapsed.chat }" />
+          <SplitterResizeHandle
+            class="resize-handle"
+            :class="{ hidden: layout.layout.collapsed.chat }"
+            :aria-label="t('titlebar.resizeChatSplit')"
+            :title="t('titlebar.resetChatSplit')"
+            @pointerdown="splitGestureDown"
+            @pointermove="splitGestureMove"
+            @pointerup="splitGestureUp"
+            @pointercancel="splitGestureUp"
+            @dblclick="resetChatSplit"
+          />
 
           <SplitterPanel
             id="chat-panel"
@@ -304,7 +375,7 @@ watch(() => layout.hydrated, async (hydrated) => {
             :collapsed-size="0"
             size-unit="px"
             :default-size="layout.layout.widths.chat"
-            :min-size="310"
+            :min-size="CHAT_MIN_WIDTH"
             @resize="resized('chat', $event)"
             @collapse="panelState('chat', true)"
             @expand="panelState('chat', false)"
