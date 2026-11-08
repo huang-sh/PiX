@@ -74,13 +74,22 @@ describe("theme lifecycle", () => {
     layout.layout.collapsed.content = false;
     const panels = layout.layout, settings = layout.settings;
     let finish!: (value: SettingsBundle) => void;
-    vi.mocked(desktop.invoke).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    let themeWrites = 0;
+    // applyTheme also fires theme.syncOverlay; keep it off the settings.write
+    // choreography so only the first dark save hangs on the release.
+    vi.mocked(desktop.invoke).mockImplementation((route) => {
+      if (route === "theme.syncOverlay") return Promise.resolve(null);
+      if (route === "settings.update" && themeWrites++ === 0)
+        return new Promise(resolve => { finish = resolve; });
+      return Promise.resolve(structuredClone(bundle()));
+    });
     const saving = layout.setTheme("dark");
     expect(colorScheme.value).toBe("dark");
     expect(layout.themeSaving).toBe(true);
     await layout.setTheme("light");
-    expect(desktop.invoke).toHaveBeenCalledTimes(1);
-    expect(desktop.invoke).toHaveBeenCalledWith("settings.update", { scope: "app", patch: { theme: "dark" } });
+    const updates = vi.mocked(desktop.invoke).mock.calls.filter(([route]) => route === "settings.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toEqual(["settings.update", { scope: "app", patch: { theme: "dark" } }]);
     const saved = bundle(); saved.app.theme = "dark";
     finish(saved); await saving;
     expect(layout.settings).toBe(settings);
@@ -97,13 +106,20 @@ describe("theme lifecycle", () => {
     const layout = useLayoutStore(), initial = bundle();
     initial.app.theme = "system";
     layout.hydrate(initial);
-    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("Disk full"));
+    vi.mocked(desktop.invoke).mockImplementation((route) =>
+      route === "theme.syncOverlay" ? Promise.resolve(null) : Promise.reject(new Error("Disk full")));
     const saving = layout.setTheme("light");
     expect(colorScheme.value).toBe("light");
     await expect(saving).rejects.toThrow("Disk full");
     expect(layout.settings?.app.theme).toBe("system");
     expect(colorScheme.value).toBe("dark");
     expect(layout.themeSaving).toBe(false);
+  });
+
+  it("asks the main process to resync the caption overlay after every theme application", () => {
+    vi.mocked(desktop.invoke).mockClear();
+    applyTheme("dark");
+    expect(desktop.invoke).toHaveBeenCalledWith("theme.syncOverlay", { theme: "dark" });
   });
 
   it.each(["dark", "teal"] as const)("auto-saves %s without discarding other concurrent edits or overwriting the theme", async (theme) => {
