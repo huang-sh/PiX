@@ -1,10 +1,10 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PixieTasks, taskCompletionPrompt, taskSummary, taskDetails, type PixieTaskHost, type PixieTaskSource } from "../src/main/pixie-tasks.js";
+import { PixieTasks, taskCompletionPrompt, taskSummary, taskDetails, type PixieTask, type PixieTaskHost, type PixieTaskSource } from "../src/main/pixie-tasks.js";
 import { PixieRuntime, pixieWorkspace } from "../src/main/pixie-runtime.js";
 import { canvasCommand } from "../src/shared/canvas.js";
 import type { SessionSnapshot } from "../src/shared/types.js";
@@ -141,7 +141,8 @@ test("a failing task review backs off independently without blocking other compl
   await runtime["checkTasks"]();
   assert.equal(f.journal.get(third.id).notification, "delivered", "repeated failures cannot block new completions");
   fail = false;
-  now += 60_000;
+  // The second consecutive failure doubled the retry delay to 120s.
+  now += 120_000;
   await runtime["checkTasks"]();
   assert.equal(f.journal.get(first.id).notification, "delivered");
   assert.equal(f.journal.get(first.id).retryAt, undefined);
@@ -149,6 +150,43 @@ test("a failing task review backs off independently without blocking other compl
   assert.equal(f.journal.pending(), undefined);
   assert.deepEqual(attempts, [`task:${first.id}:1`, `task:${second.id}:1`, `task:${first.id}:1`,
     `task:${third.id}:1`, `task:${first.id}:1`], "retries preserve the event identity for deduplication");
+});
+
+test("a repeatedly failing review backs off and reports each cause once", async t => {
+  const f = setup(t);
+  const { task } = await f.journal.delegate(command, source, target);
+  f.journal.observe(project, snapshot(task.requestId, "idle"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = join(f.file, "..", "home");
+  const notices: string[] = [];
+  const runtime = new PixieRuntime(event => {
+    if (event.type === "pixie" && (event.payload as { type?: string }).type === "notice")
+      notices.push(String((event.payload as { payload: { message?: string } }).payload.message));
+  }, () => ({}));
+  runtime["taskJournal"] = f.journal;
+  t.after(async () => {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+  });
+  let now = Date.now(), message = "provider offline";
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(runtime as any, "sendTurn", async () => { throw new Error(message); });
+  await runtime["checkTasks"]();
+  assert.deepEqual(notices.map(text => text.includes("provider offline")), [true], "the first failure is reported");
+  now += 60_000;
+  await runtime["checkTasks"]();
+  now += 60_000;
+  await runtime["checkTasks"]();
+  assert.equal(notices.length, 1, "repeats of the same failure stay silent and the delay doubled");
+  now += 60_000;
+  await runtime["checkTasks"]();
+  assert.equal(notices.length, 1, "later repeats of the same failure stay silent");
+  message = "quota exceeded";
+  now += 240_000;
+  await runtime["checkTasks"]();
+  assert.equal(notices.length, 2, "a changed cause is a new error");
+  assert.match(notices[1]!, /quota exceeded/);
+  assert.equal(f.journal.get(task.id).retryAt, now + 60_000, "the new cause restarts from the base delay");
 });
 
 test("task updates version pending context and cancellation suppresses stale follow-up", async t => {
@@ -162,6 +200,59 @@ test("task updates version pending context and cancellation suppresses stale fol
   f.journal.observe(project, snapshot(task.requestId, "idle"));
   assert.equal(f.journal.pending(), undefined);
   await assert.rejects(f.journal.control({ action: "followUp", taskId: task.id, text: "obsolete" }, source), /cancelled/);
+});
+
+test("a failed steer or follow-up frees its receipt so an identical retry executes", async t => {
+  const f = setup(t);
+  const { task } = await f.journal.delegate(command, source, target);
+  const original = f.host.control;
+  let failNext = true;
+  f.host.control = async (destination, input) => {
+    if (input.action !== "promptAt" && failNext) { failNext = false; throw new Error("connection lost"); }
+    return original(destination, input);
+  };
+  await assert.rejects(
+    f.journal.control({ action: "followUp", taskId: task.id, text: "Queue the repair" }, source),
+    /connection lost/);
+  const retry = await f.journal.control({ action: "followUp", taskId: task.id, text: "Queue the repair" }, source);
+  assert.equal(retry.duplicate, undefined, "the identical retry must reach the host again");
+  assert.equal(f.calls.filter(call => (call as { action: string }).action === "followUp").length, 1,
+    "only the retry reached the host; without the fix the duplicate reply would have swallowed it");
+});
+
+test("an unreadable journal is quarantined and loads empty instead of failing its host", async t => {
+  const f = setup(t);
+  await f.journal.delegate(command, source, target);
+  const corrupt = "{ truncated garbage";
+  writeFileSync(f.file, corrupt);
+  const reloaded = new PixieTasks(f.file);
+  assert.equal(reloaded.list().length, 0);
+  assert.ok(reloaded.loadError);
+  assert.ok(existsSync(`${f.file}.corrupt`), "the unreadable file is kept beside its replacement");
+  assert.equal(readFileSync(`${f.file}.corrupt`, "utf8"), corrupt, "the unreadable bytes are kept for inspection");
+  assert.equal(new PixieTasks(f.file).loadError, undefined, "the replacement journal loads cleanly");
+});
+
+test("a quarantined journal is reported once and never blocks follow-ups", async t => {
+  const f = setup(t);
+  writeFileSync(f.file, "{ truncated garbage");
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = join(f.file, "..", "home");
+  const notices: Array<{ level?: string; message?: string }> = [];
+  const runtime = new PixieRuntime(event => {
+    if (event.type === "pixie" && (event.payload as { type?: string }).type === "notice")
+      notices.push((event.payload as { payload: { level?: string; message?: string } }).payload);
+  }, () => ({}));
+  runtime["taskJournal"] = new PixieTasks(f.file);
+  t.after(async () => {
+    await runtime.close();
+    if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+  });
+  await runtime["checkTasks"]();
+  await runtime["checkTasks"]();
+  assert.equal(notices.length, 1, "the quarantine notice is emitted exactly once");
+  assert.equal(notices[0]!.level, "error");
+  assert.match(String(notices[0]!.message), /delegations\.json\.corrupt/);
 });
 
 test("review backoff survives restart and cannot delay an updated or cancelled task", async t => {
@@ -206,6 +297,49 @@ test("cancelling a parent cancels pending child follow-ups and preserves updated
   await f.journal.control({ action: "stop", taskId: child.id }, source);
   assert.equal((f.calls.at(-1) as { action: string }).action, "branchAbort");
   await assert.rejects(f.journal.delegate(command, source, target, child.id), /cancelled/);
+});
+
+test("cancelling a delegation frees its admission key for a fresh identical dispatch", async t => {
+  const f = setup(t);
+  const first = (await f.journal.delegate(command, source, target)).task;
+  f.journal.update({ action: "updateTask", taskId: first.id, taskState: "cancelled" });
+  const second = await f.journal.delegate(command, source, target);
+  assert.equal(second.duplicate, undefined, "dead intent must not swallow the same command");
+  assert.notEqual(second.task.id, first.id);
+  assert.equal(f.journal.get(first.id).state, "cancelled");
+  const third = await f.journal.delegate(command, source, target);
+  assert.equal(third.duplicate, true, "live work with the same key still dedups");
+  assert.equal(third.task.id, second.task.id);
+});
+
+test("load prunes terminal delegations past retention and caps receipts", async t => {
+  const f = setup(t);
+  const parent = (await f.journal.delegate(command, { ...source, id: "parent" }, target)).task;
+  const child = (await f.journal.delegate({ ...command, text: "Child work" }, { ...source, id: "child" }, target, parent.id)).task;
+  const runner = (await f.journal.delegate({ ...command, text: "Still running" }, { ...source, id: "runner" }, target)).task;
+  const dropped = (await f.journal.delegate({ ...command, text: "Dropped work" }, { ...source, id: "dropped" }, target)).task;
+  const waiting = (await f.journal.delegate({ ...command, text: "Awaiting review" }, { ...source, id: "waiting" }, target)).task;
+  // Distinct run ids keep each observation scoped to its own task; the shared
+  // harness default would settle every live run in one shot.
+  for (const task of [child, parent]) f.journal.observe(project, snapshot(task.requestId, "idle", `run-${task.id}`));
+  f.journal.delivery(child.id, child.revision, "delivered");
+  f.journal.delivery(parent.id, parent.revision, "delivered");
+  // A delivery can race a run restart; running work must never be pruned.
+  f.journal.observe(project, snapshot(runner.requestId, "running", `run-${runner.id}`));
+  f.journal.delivery(runner.id, runner.revision, "delivered");
+  f.journal.update({ action: "updateTask", taskId: dropped.id, taskState: "cancelled" });
+  f.journal.observe(project, snapshot(waiting.requestId, "idle", `run-${waiting.id}`));
+
+  const saved = JSON.parse(readFileSync(f.file, "utf8"));
+  saved.tasks = saved.tasks.map((task: PixieTask) => ({ ...task, updatedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString() }));
+  saved.receipts = Array.from({ length: 505 }, (_, index) => [`receipt-${index}`, "done"]);
+  writeFileSync(f.file, JSON.stringify(saved));
+
+  const reloaded = new PixieTasks(f.file);
+  assert.deepEqual(reloaded.list().map(task => task.source.id).sort(), ["runner", "waiting"],
+    "running and undelivered work survives; terminal trees and cancellations go");
+  assert.equal(JSON.parse(readFileSync(f.file, "utf8")).receipts.length, 500, "receipts are capped");
+  assert.equal(new PixieTasks(f.file).loadError, undefined, "the pruned journal reloads cleanly");
 });
 
 test("run replacement and lost admission are uncertain, never replayed as new work", async t => {
@@ -376,6 +510,64 @@ test("ensure waits for boot even after the subprocess starts running", async t =
   const second = runtime.ensure();
   finish(ready);
   assert.deepEqual(await Promise.all([first, second]), [ready, ready]);
+});
+
+test("an unresolved model after session replacement is resolved to the default before dispatch", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "pixie-model-guard-"));
+  const previous = process.env.PIX_HOME;
+  process.env.PIX_HOME = dir;
+  const runtime = new PixieRuntime(() => {}, () => ({ defaultModel: "faux/lifecycle-test" }));
+  let finish: (value: SessionSnapshot) => void;
+  t.mock.method(runtime as any, "boot", () => new Promise<SessionSnapshot>(resolve => { finish = resolve; }));
+  t.mock.method(runtime as any, "snapshot", async () => snapshot());
+  const booted = runtime.ensure();
+  Object.defineProperty(runtime["rpc"], "running", { value: true });
+  finish!(snapshot());
+  await booted;
+  const calls: Array<Record<string, unknown>> = [];
+  let model: { provider: string; id: string } | undefined;
+  t.mock.method(runtime["rpc"], "request", async (command: Record<string, unknown>) => {
+    calls.push(command);
+    if (command.type === "get_state") return { sessionId: "pixie-1", sessionFile: "/pixie/s.jsonl", model, thinkingLevel: "off" };
+    if (command.type === "set_model") model = { provider: String(command.provider), id: String(command.modelId) };
+    return {};
+  });
+  const send = async (input: { text: string; provider?: string; modelId?: string }) => {
+    calls.length = 0;
+    const turn = runtime.send(input);
+    for (let i = 0; i < 200 && (runtime["idleWaiters"] as Set<unknown>).size === 0; i++)
+      await new Promise(resolve => setTimeout(resolve, 5));
+    runtime["onWireEvent"]({ type: "agent_settled" });
+    await turn;
+  };
+
+  // A replacement that has not resolved its model yet: the configured default
+  // is applied before the prompt, or the turn would run on pi's placeholder.
+  model = undefined;
+  await send({ text: "after a switch" });
+  let setModel = calls.findIndex(call => call.type === "set_model");
+  let prompt = calls.findIndex(call => call.type === "prompt");
+  assert.ok(setModel >= 0 && prompt > setModel, "the default model is set before dispatching");
+  assert.deepEqual({ provider: calls[setModel]!.provider, modelId: calls[setModel]!.modelId },
+    { provider: "faux", modelId: "lifecycle-test" });
+
+  // A session whose model restored: nothing is overridden.
+  model = { provider: "faux", id: "lifecycle-test" };
+  await send({ text: "restored session" });
+  assert.ok(!calls.some(call => call.type === "set_model"), "a resolved model is left alone");
+
+  // An explicit caller model wins without the default hop.
+  model = undefined;
+  await send({ text: "explicit model", provider: "other", modelId: "model" });
+  setModel = calls.findIndex(call => call.type === "set_model");
+  prompt = calls.findIndex(call => call.type === "prompt");
+  assert.deepEqual(calls.filter(call => call.type === "set_model"),
+    [{ type: "set_model", provider: "other", modelId: "model" }], "exactly the caller's model is set");
+  assert.ok(prompt > setModel);
+
+  await runtime.close();
+  if (previous === undefined) delete process.env.PIX_HOME; else process.env.PIX_HOME = previous;
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("task follow-ups use only the live extension after new, switch, reload and restore", { timeout: 30_000 }, async t => {

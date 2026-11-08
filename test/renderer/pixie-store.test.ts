@@ -46,6 +46,12 @@ describe("pixie store", () => {
     expect(pixie.pending).toBeUndefined();
   });
 
+  it("routes an invalid snapshot event to the error strip instead of throwing out of the event pipeline", () => {
+    const pixie = usePixieStore();
+    expect(() => pixie.onEvent({ type: "snapshot", payload: { nope: true } as unknown as SessionSnapshot })).not.toThrow();
+    expect(pixie.error).toMatch(/invalid session snapshot/i);
+  });
+
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => vi.restoreAllMocks());
 

@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentControl, ProjectInfo, SessionSnapshot } from "../shared/types.js";
 import { projectId } from "../shared/types.js";
 import type { CanvasCommand } from "../shared/canvas.js";
 import { durableWrite } from "./graph-files.js";
+import { debugLog } from "./debug-log.js";
 
 export interface PixieTaskTarget { project: ProjectInfo; session: string }
 export interface PixieTaskSource { id: string; text: string; sessionId: string; sessionFile?: string }
@@ -48,18 +49,66 @@ export class PixieTasks {
   private polling?: Promise<void>;
   private persistenceError?: Error;
 
+  /** Set when the saved journal could not be read and was quarantined instead. */
+  readonly loadError?: Error;
+
   constructor(private readonly file: string) {
     if (!existsSync(file)) return;
-    const saved = JSON.parse(readFileSync(file, "utf8"));
-    if (saved.version !== 1 || !Array.isArray(saved.tasks) || !Array.isArray(saved.receipts))
-      throw new Error("Invalid Pixie delegation journal");
-    for (const task of saved.tasks as PixieTask[]) {
-      if (!task.id || !task.target?.session || !task.source?.id) throw new Error("Invalid Pixie delegation record");
-      // Delivery is at least once; the stable event identity deduplicates its mutations.
-      if (task.notification === "delivering") task.notification = "pending";
-      this.tasks.set(task.id, task);
+    try {
+      const saved = JSON.parse(readFileSync(file, "utf8"));
+      if (saved.version !== 1 || !Array.isArray(saved.tasks) || !Array.isArray(saved.receipts))
+        throw new Error("Invalid Pixie delegation journal");
+      for (const task of saved.tasks as PixieTask[]) {
+        if (!task.id || !task.target?.session || !task.source?.id) throw new Error("Invalid Pixie delegation record");
+        // Delivery is at least once; the stable event identity deduplicates its mutations.
+        if (task.notification === "delivering") task.notification = "pending";
+        this.tasks.set(task.id, task);
+      }
+      this.receipts = new Map(saved.receipts);
+    } catch (error) {
+      // An unreadable journal must not take its host down: delegation intent is
+      // auxiliary and the session tree survives without it. Quarantine the file
+      // beside its replacement and start empty.
+      this.loadError = error instanceof Error ? error : new Error(String(error));
+      try {
+        rmSync(`${file}.corrupt`, { force: true });
+        renameSync(file, `${file}.corrupt`);
+      } catch (move) { debugLog("pixie: journal quarantine", move); }
+      debugLog("pixie: delegation journal quarantined", this.loadError);
     }
-    this.receipts = new Map(saved.receipts);
+    this.prune();
+  }
+
+  /**
+   * Retention at load: terminal delegations past the window and excess
+   * receipts are dropped so the journal cannot grow without bound. Execution
+   * transcripts stay in the session tree; only intent and delivery state go.
+   */
+  private prune() {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    let changed = false;
+    // Leaf-first: ancestors() walks parent links, so a parent must never leave
+    // living children behind. Each pass removes the newly exposed leaves.
+    for (;;) {
+      const parents = new Set([...this.tasks.values()].map(task => task.parentTaskId).filter(Boolean));
+      const expired = [...this.tasks.values()].filter(task => !parents.has(task.id)
+        && task.state !== "submitting" && task.state !== "running"
+        && (task.state === "cancelled" || task.notification === "delivered")
+        && Date.parse(task.updatedAt) < cutoff);
+      if (!expired.length) break;
+      for (const task of expired) this.tasks.delete(task.id);
+      changed = true;
+    }
+    // Receipts only guard event redelivery; the oldest are the least relevant.
+    while (this.receipts.size > 500) {
+      const oldest = this.receipts.keys().next().value;
+      if (oldest === undefined) break;
+      this.receipts.delete(oldest);
+      changed = true;
+    }
+    if (changed) {
+      try { this.save(); } catch (error) { debugLog("pixie: delegation journal prune", error); }
+    }
   }
 
   addHost(host: PixieTaskHost) { this.hosts.add(host); return () => this.hosts.delete(host); }
@@ -114,14 +163,16 @@ export class PixieTasks {
     const key = createHash("sha256").update(JSON.stringify([parentTaskId ?? source.id, projectId(target.project), target.session,
       command.nodeId, command.text, command.purpose, command.acceptance, command.images?.map(image => [image.mimeType, image.data]) ?? [],
       command.provider, command.modelId, command.thinkingLevel, command.branch ?? false])).digest("hex");
-    const previous = [...this.tasks.values()].find(task => task.key === key);
+    // A cancelled delegation is dead intent: the same command must be able to
+    // start fresh work. Live and uncertain keys still dedup retries.
+    const previous = [...this.tasks.values()].find(task => task.key === key && task.state !== "cancelled");
     if (previous) return { task: this.get(previous.id), duplicate: true };
     const host = this.host(target);
     const snapshot = await host.snapshot(target);
     // Recheck mutable journal state after host I/O, immediately before admission.
     if (parentTaskId && [this.get(parentTaskId), ...this.ancestors(parentTaskId)].some(task => task.state === "cancelled"))
       throw new Error("This delegation or its parent was cancelled");
-    const admitted = [...this.tasks.values()].find(task => task.key === key);
+    const admitted = [...this.tasks.values()].find(task => task.key === key && task.state !== "cancelled");
     if (admitted) return { task: this.get(admitted.id), duplicate: true };
     if (!snapshot?.runtime.available || !snapshot.graph) throw new Error("Open a writable PiX graph session first");
     if (command.nodeId !== null) {
@@ -260,14 +311,22 @@ export class PixieTasks {
       ? { action: "branchAbort", branchId: run.branchId, runId: run.runId }
       : { action: command.action as "steer" | "followUp", graphId: snapshot!.graph!.id,
         branchId: run.branchId, runId: run.runId, text: command.text ?? "", images: command.images };
-    const next = await host.control(task.target, input);
+    let next: SessionSnapshot;
+    try {
+      next = await host.control(task.target, input);
+    } catch (error) {
+      // The attempt failed visibly: free the receipt so an identical retry can
+      // reach the host again instead of reporting itself as an applied duplicate.
+      this.receipts.delete(key); this.save();
+      throw error;
+    }
     this.receipts.set(key, "done"); this.save();
     this.observe(task.target.project, next);
     return { task: this.get(task.id) };
   }
 }
 
-/** Public tool results exclude journal keys, delivery receipts and internal paths. */
+/** Tool-facing results drop journal internals: the admission key and the source's session identity. */
 export function taskSummary(task: PixieTask) {
   return { id: task.id, state: task.state, revision: task.revision, parentTaskId: task.parentTaskId,
     nodeId: task.nodeId, error: task.error, notification: task.notification };

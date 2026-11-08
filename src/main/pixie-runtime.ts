@@ -46,7 +46,7 @@ function sessionDirs(): string[] {
   ])];
 }
 
-/** The newest session file, preferring ones that already hold a conversation. */
+/** The most recently modified session file across every spelling of the workspace. */
 function latestSession(): string | undefined {
   const candidates: Array<{ path: string; modified: number }> = [];
   for (const dir of sessionDirs()) {
@@ -97,7 +97,10 @@ export class PixieRuntime {
   private checkingTasks = false;
   private closed = false;
   private followUpsPaused = false;
+  private journalNoticeShown = false;
   private review?: { id: string; revision: number };
+  /** The last failed review's identity and consecutive-failure count. */
+  private reviewFailure?: { key: string; count: number };
 
   get tasks(): PixieTasks {
     return this.taskJournal ??= new PixieTasks(this.taskFile);
@@ -160,11 +163,22 @@ export class PixieRuntime {
     this.monitor.unref();
   }
 
+  /** One notice when the saved journal was quarantined: its follow-ups were lost with it. */
+  private reportJournalProblem() {
+    if (this.journalNoticeShown) return;
+    const error = this.tasks.loadError;
+    if (!error) return;
+    this.journalNoticeShown = true;
+    this.emit({ type: "pixie", payload: { type: "notice", payload: { level: "error",
+      message: `Pixie delegations were reset after a journal read failure (${error.message}); tracked follow-ups will not resume. The previous file was kept as delegations.json.corrupt` } } });
+  }
+
   /** Host polling uses no model tokens. Completion reviews run only between Pixie turns. */
   private async checkTasks() {
     if (this.closed || this.checkingTasks) return;
     this.checkingTasks = true;
     try {
+      this.reportJournalProblem();
       await this.flushReload();
       await this.tasks.reconcile();
       if (this.closed || this.busy || this.followUpsPaused) return;
@@ -184,10 +198,18 @@ export class PixieRuntime {
         if (assistant?.stopReason === "error" || assistant?.stopReason === "aborted")
           throw new Error(assistant.errorMessage || "Pixie's task review was interrupted");
         this.tasks.delivery(task.id, this.review.revision, this.closed || this.followUpsPaused ? "pending" : "delivered");
+        this.reviewFailure = undefined;
         this.emit({ type: "pixie", payload: { type: "snapshot", payload: snapshot } });
       } catch (error) {
-        this.tasks.delivery(task.id, this.review.revision, "pending", Date.now() + 60_000);
-        this.emit({ type: "pixie", payload: { type: "notice", payload: { level: "error", message: `Pixie task follow-up pending: ${String(error)}` } } });
+        // A persistent failure retries with backoff and reports each cause
+        // once; a changed failure or task is a new error for the person.
+        const key = `${task.id}:${this.review!.revision}:${String(error)}`;
+        const count = this.reviewFailure?.key === key ? this.reviewFailure.count + 1 : 1;
+        this.reviewFailure = { key, count };
+        this.tasks.delivery(task.id, this.review!.revision, "pending",
+          Date.now() + Math.min(60_000 * 2 ** (count - 1), 30 * 60_000));
+        if (count > 1) debugLog("pixie: task follow-up retry deferred", error);
+        else this.emit({ type: "pixie", payload: { type: "notice", payload: { level: "error", message: `Pixie task follow-up pending: ${String(error)}` } } });
       } finally {
         this.review = undefined;
         this.source = undefined;
@@ -439,6 +461,12 @@ export class PixieRuntime {
     // graph sessions.
     const state = await this.rpc.request({ type: "get_state" }) as RpcState;
     this.source = source ?? { id: randomUUID(), text: input.text, sessionId: state.sessionId, sessionFile: state.sessionFile };
+    // A session replacement can briefly leave the restored model unresolved;
+    // a turn dispatched in that window substitutes pi's "unknown" placeholder
+    // and fails. Resolve the configured default first — a restored session
+    // with its own model is never touched, and an explicit model below wins.
+    if (!input.provider && (!state.model || state.model.provider === "unknown"))
+      await this.applyDefaultModel();
     if (input.provider && input.modelId &&
       (state.model?.provider !== input.provider || state.model?.id !== input.modelId))
       await this.rpc.request({ type: "set_model", provider: input.provider, modelId: input.modelId });
@@ -465,8 +493,9 @@ export class PixieRuntime {
 
   async stop(): Promise<void> {
     this.followUpsPaused = true;
-    await this.ensure();
-    await this.rpc.request({ type: "abort" });
+    // A process that is not running has nothing to abort; booting one just to
+    // cancel it would waste a cold start.
+    if (this.rpc.running) await this.rpc.request({ type: "abort" });
   }
 
   async newSession(): Promise<SessionSnapshot> {

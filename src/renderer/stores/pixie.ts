@@ -171,7 +171,10 @@ export const usePixieStore = defineStore("pixie", {
     onEvent(event: { type?: string; payload?: unknown } | undefined) {
       if (!event) return;
       if (event.type === "snapshot") {
-        this.applySnapshot(event.payload as SessionSnapshot);
+        // A dead or mismatched peer is reported like any other Pixie error; it
+        // must not throw out of the shared desktop event pipeline.
+        try { this.applySnapshot(event.payload as SessionSnapshot); }
+        catch (error) { this.error = error instanceof Error ? error.message : String(error); }
       } else if (event.type === "agent") {
         this.activity = reduceAgentActivity(this.activity, event.payload);
         // The turn's reply snapshot usually wins the race against this event
