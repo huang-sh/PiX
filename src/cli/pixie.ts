@@ -30,7 +30,7 @@ interface PixieTaskRow {
 
 export async function pixieTasks(client: HostClient, json?: boolean) {
   const { tasks } = await client.invoke<{ tasks: PixieTaskRow[] }>("pixie.tasks");
-  if (json) return tasks;
+  if (json) { process.stdout.write(JSON.stringify(tasks) + "\n"); return tasks; }
   if (!tasks.length) { process.stdout.write("No delegations.\n"); return tasks; }
   const rows = tasks.map(task => ({
     id: task.id.slice(0, 8),
