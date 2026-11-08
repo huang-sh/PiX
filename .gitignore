@@ -15,6 +15,9 @@ release/
 # Test artifacts (screenshots, logs, reports)
 artifacts/
 
+# Local scratch output (dumps, recordings, installers)
+/output/
+
 # Pi agent session data (test/workspace/.pi/settings.json is a tracked fixture)
 /.pi/
 test/workspace/.pi/sessions/
