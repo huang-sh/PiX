@@ -723,6 +723,7 @@ export type DesktopRoute =
   | "settings.get"
   | "settings.update"
   | "settings.reset"
+  | "theme.syncOverlay"
   | "layout.save";
 export interface DesktopEvent {
   type: "agent" | "shell" | "terminal" | "sessions" | "notice" | "host.connection" | "host.shutdown" | "remote.progress" | "remote.connection" | "update.available" | "ui.request" | "ui.dismiss";

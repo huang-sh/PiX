@@ -278,7 +278,12 @@ describe("SettingsPage auto-save", () => {
     expect(layout.settings?.app.enterToSend).toBe(false);
 
     // A failed write puts the control back to what is on disk and says why.
-    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("disk full"));
+    // applyTheme's overlay sync must not soak up the rejection meant for the
+    // settings.write.
+    vi.mocked(desktop.invoke).mockImplementation(async (route) => {
+      if (route === "theme.syncOverlay") return null;
+      throw new Error("disk full");
+    });
     await wrapper.get('[data-setting-path="closeToTray"] input').setValue(false);
     await flushPromises();
     expect((wrapper.get('[data-setting-path="closeToTray"] input').element as HTMLInputElement).checked).toBe(true);
@@ -368,11 +373,18 @@ describe("SettingsPage auto-save", () => {
 
   it("keeps the edit queued behind a failed write and persists it on the next round", async () => {
     const persisted = structuredClone(settings);
-    vi.mocked(desktop.invoke).mockImplementation(async (_route, payload) => {
+    // The first settings.write rejects; hydrate's overlay sync (and any later
+    // write) must not soak up that rejection.
+    let failedWrite = false;
+    vi.mocked(desktop.invoke).mockImplementation(async (route, payload) => {
+      if (route === "theme.syncOverlay") return null;
+      if (route === "settings.update" && !failedWrite) {
+        failedWrite = true;
+        throw new Error("disk full");
+      }
       Object.assign(persisted.app, (payload as UpdatePayload).patch);
       return structuredClone(persisted);
     });
-    vi.mocked(desktop.invoke).mockRejectedValueOnce(new Error("disk full"));
     const pinia = createPinia();
     setActivePinia(pinia);
     const layout = useLayoutStore();

@@ -11,6 +11,7 @@ import { CUSTOM_MODEL_APIS, PANEL_IDS, UTILITY_TABS } from "./types.js";
 import { INSTALLABLE_PACKAGE_SOURCES } from "./extensions.js";
 import { validatePromptImages } from "./images.js";
 import { MAX_SKILL_BYTES } from "./skills.js";
+import type { ThemePreference } from "./theme.js";
 const obj = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected object payload");
@@ -325,6 +326,10 @@ export function validateRouteInput(
               ? "global"
               : "app",
       };
+    case "theme.syncOverlay":
+      if (v.theme !== "light" && v.theme !== "dark" && v.theme !== "system" && v.theme !== "teal" && v.theme !== "peach" && v.theme !== "paper" && v.theme !== "graphite")
+        throw new Error("theme must be light, dark, teal, peach, paper, graphite or system");
+      return { theme: v.theme as ThemePreference };
     case "layout.save":
       return { layout: layoutState(v.layout) };
     case "agent.control": {
