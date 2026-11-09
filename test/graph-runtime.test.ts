@@ -1116,7 +1116,9 @@ test("independent branches persist without merging; export during a run preserve
     rmSync(home, { recursive: true, force: true });
   }
 });
-test("branch export copies a node and all descendants into a standalone graph without touching the source", { timeout: 60000 }, async () => {
+// The export round-trips several real session trees; the slowest CI runner
+// (macos-15-intel) exceeds 60s for it under full-suite load.
+test("branch export copies a node and all descendants into a standalone graph without touching the source", { timeout: 120000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pix-export-branch-"));
   const previous = process.env.PIX_HOME, previousAgent = process.env.PI_CODING_AGENT_DIR;
   process.env.PIX_HOME = home; process.env.PI_CODING_AGENT_DIR = join(home, ".pix", "agent");
