@@ -34,6 +34,7 @@ import type { HostConnectionState } from "../shared/host-protocol.js";
 import { installHttpProxy } from "./http-proxy.js";
 import type { DesktopRoute } from "../shared/types.js";
 import { normalizeTheme, resolveTheme, themeColors, type ThemePreference } from "../shared/theme.js";
+import { validateRouteInput } from "../shared/contracts.js";
 
 applyLinuxImeWorkaround({
   platform: process.platform,
@@ -121,12 +122,22 @@ function windowColors() {
   currentTheme = normalizeTheme(controller.settings.bundle().app.theme);
   return themeColors[resolveTheme(currentTheme, nativeTheme.shouldUseDarkColors)];
 }
-function syncWindowTheme() {
-  const colors = windowColors();
+function syncWindowTheme(themeOverride?: ThemePreference) {
+  // The renderer's optimistic sync passes the applied theme: the overlay then
+  // flips with the page's CSS instead of waiting for the settings write to
+  // land on disk and come back.
+  const colors = themeOverride
+    ? themeColors[resolveTheme(normalizeTheme(themeOverride), nativeTheme.shouldUseDarkColors)]
+    : windowColors();
   if (!win || win.isDestroyed()) return;
-  win.setBackgroundColor(colors.surface);
+  // Flip the overlay first: it is the slowest layer to settle against the
+  // page's own theme paint. Restyling an unchanged window background
+  // recomposites the window and can flash; only pay that on a real change.
   if (process.platform !== "darwin")
     win.setTitleBarOverlay({ color: colors.background, symbolColor: colors.text });
+  if (typeof win.getBackgroundColor() !== "string" ||
+    win.getBackgroundColor().toLowerCase() !== colors.surface.toLowerCase())
+    win.setBackgroundColor(colors.surface);
 }
 async function create() {
   const darwin = process.platform === "darwin";
@@ -157,9 +168,12 @@ async function create() {
     // Expose native control bounds through env(titlebar-area-*) on every
     // platform, including when macOS hides its traffic lights in fullscreen.
     titleBarOverlay: {
+      // Theme background, but 1px shorter than the 40px titlebar: the bottom
+      // strip is web territory, so the divider stays visible under the caption
+      // buttons. (A transparent overlay is not honored by the WCO compositor.)
       color: colors.background,
       symbolColor: colors.text,
-      height: 40,
+      height: 39,
     },
     ...(darwin ? { trafficLightPosition: { x: 4, y: 14 } } : {}),
     webPreferences: {
@@ -408,6 +422,12 @@ app.whenReady().then(async () => {
     async (_e: unknown, route: DesktopRoute, input: unknown) => {
       let result: unknown;
       try {
+        if (route === "theme.syncOverlay") {
+          // Renderer-driven: the overlay must flip right after the page paints
+          // the new theme (see theme.ts), not a settings round trip earlier.
+          syncWindowTheme((validateRouteInput("theme.syncOverlay", input) as { theme: ThemePreference }).theme);
+          return { ok: true as const, result: null };
+        }
         result = await controller.invoke(route, input);
         if (route === "session.image" && (input as { thumbnail?: unknown })?.thumbnail === true)
           result = imageThumbnail(result as PromptImage);
@@ -422,10 +442,8 @@ app.whenReady().then(async () => {
           message: error instanceof Error ? error.message : String(error),
         };
       }
-      // Theme sync is aftermath of a successful update, not part of the
-      // invoke: a failure here must not turn the reply into a rejected one.
-      if (route === "settings.update" || route === "settings.reset")
-        try { syncWindowTheme(); } catch (error) { console.error("[pix:invoke] theme sync:", error); }
+      // Theme sync is renderer-driven through theme.syncOverlay: flipping the
+      // overlay on settings writes raced the page's own theme paint.
       return { ok: true as const, result };
     },
   );

@@ -1,11 +1,21 @@
 import { computed, readonly, ref } from "vue";
 import { normalizeTheme, resolveTheme, themeColors, themeSchemes, type ColorScheme, type ThemeId, type ThemePreference } from "../shared/theme";
+import { desktop } from "./api";
 
 const resolved = ref<ThemeId>("light");
 export const activeTheme = readonly(resolved);
 export const colorScheme = computed<ColorScheme>(() => themeSchemes[resolved.value]);
 let preference: ThemePreference = "light";
 let systemTheme: MediaQueryList | undefined;
+
+// The caption overlay is painted by the main process's own compositor, so its
+// flip can only race the page's theme flip, never join it. Fire the sync in
+// the same tick as the CSS change, carrying the applied theme: main then
+// flips the overlay from the payload instead of re-reading the on-disk
+// settings, which still hold the previous theme until the write lands.
+function syncOverlay() {
+  void desktop.invoke("theme.syncOverlay", { theme: preference }).catch(() => {});
+}
 
 export function applyTheme(value: ThemePreference) {
   preference = normalizeTheme(value);
@@ -18,6 +28,7 @@ export function applyTheme(value: ThemePreference) {
   for (const [name, color] of Object.entries(themeColors[theme]))
     root.style.setProperty(`--${name}`, color);
   resolved.value = theme;
+  syncOverlay();
 }
 
 export function startTheme(initial: ThemePreference) {

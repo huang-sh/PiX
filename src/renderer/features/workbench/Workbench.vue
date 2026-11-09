@@ -14,6 +14,7 @@ import SessionNavigator from "../navigator/SessionNavigator.vue";
 import ToolPanel from "../tools/ToolPanel.vue";
 import WelcomeScreen from "./WelcomeScreen.vue";
 import { whenMeasured, whenPanelsSettle, whenVisible, type PanelSettleTarget } from "../../lib/frame";
+import { equalSplitWidth } from "../../lib/split";
 import { useLayoutStore } from "../../stores/layout";
 import { useSessionStore } from "../../stores/session";
 import { useWorkspaceStore } from "../../stores/workspace";
@@ -76,6 +77,9 @@ function resized(panel: PanelId, size: number) {
   if (size <= 0) return;
   const width = Math.round(size);
   if (width <= 0) return;
+  // Programmatic resizes echo back through here; a no-op write would only
+  // reschedule the debounced save with an identical payload.
+  if (width === layout.layout.widths[panel]) return;
   layout.layout.widths[panel] = width;
   if (panel === "chat") syncedChatWidth = width;
   if (saveTimer.value) clearTimeout(saveTimer.value);
@@ -88,6 +92,55 @@ function panelState(panel: PanelId, collapsed: boolean) {
   layout.layout.collapsed[panel] = collapsed;
   void layout.save();
 }
+
+// A drag that crosses reka's collapse threshold lands while the stylesheet
+// disables panel transitions for 1:1 pointer tracking. An inline transition
+// for that one change out-ranks the drag rule, so the panel glides shut on
+// the navigator's curve instead of snapping. Expands keep tracking the
+// pointer: animating them would lag every drag frame behind it.
+const GLIDE_TRANSITION = "flex-basis 260ms cubic-bezier(.22,1,.36,1), opacity 180ms ease";
+
+function panelGlide(panel: PanelId) {
+  const animating = ref(false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  function arm() {
+    if (!document.querySelector("[data-resize-handle-active]")) return;
+    animating.value = true;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      animating.value = false;
+      timer = undefined;
+    }, 300);
+  }
+  onBeforeUnmount(() => {
+    if (timer) clearTimeout(timer);
+  });
+  return {
+    collapsed() {
+      arm();
+      panelState(panel, true);
+    },
+    expanded() {
+      // A reverse drag that crosses the expand threshold must not inherit the
+      // armed transition: it would lag the pointer and snap at the deadline.
+      animating.value = false;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      panelState(panel, false);
+    },
+    style: computed(() => ({
+      flexGrow: 0,
+      flexBasis: `${layout.layout.collapsed[panel] ? 0 : layout.layout.widths[panel]}px`,
+      ...(animating.value ? { transition: GLIDE_TRANSITION } : {}),
+    })),
+  };
+}
+
+const chatGlide = panelGlide("chat");
+const contentGlide = panelGlide("content");
+// Top-level bindings so the template auto-unwraps the style refs.
+const chatPanelStyle = chatGlide.style;
+const contentPanelStyle = contentGlide.style;
 
 function cancelNavigatorHide() {
   if (navigatorHideTimer) clearTimeout(navigatorHideTimer);
@@ -151,6 +204,63 @@ function resizeNavigatorWithKeyboard(event: KeyboardEvent) {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   event.preventDefault();
   void layout.setWidth("navigator", Math.min(420, Math.max(210, navigatorWidth.value + (event.key === "ArrowLeft" ? -10 : 10))));
+}
+
+// Shared by the chat panel's :min-size and the equal-split clamp below.
+const CHAT_MIN_WIDTH = 310;
+
+// The handle fires click after every drag release, and the OS folds two quick
+// releases into a dblclick even when both were small drags. Track each press's
+// own travel and judge only the two presses that make up the double click:
+// micro-adjust drags cannot masquerade as a reset, while a completed drag
+// right before a genuine double click does not poison it.
+const SPLIT_GESTURE_TRAVEL_LIMIT = 4; // px within either press of a double click
+let splitSegmentTravel = 0;
+let splitPrevSegmentTravel = 0;
+let splitGestureX = 0;
+let splitGestureY = 0;
+let splitGesturePressed = false;
+
+function splitGestureDown(event: PointerEvent) {
+  splitPrevSegmentTravel = splitSegmentTravel;
+  splitSegmentTravel = 0;
+  splitGestureX = event.clientX;
+  splitGestureY = event.clientY;
+  splitGesturePressed = true;
+}
+
+function splitGestureMove(event: PointerEvent) {
+  if (!splitGesturePressed) return;
+  splitSegmentTravel += Math.hypot(event.clientX - splitGestureX, event.clientY - splitGestureY);
+  splitGestureX = event.clientX;
+  splitGestureY = event.clientY;
+}
+
+function splitGestureUp() {
+  splitGesturePressed = false;
+}
+
+// Double-click on the canvas/chat handle equalizes the two columns. The chat
+// panel is pixel-sized and the graph panel flexes to the remainder, so chat
+// takes half of the measured group (minus the handle). The store write reaches
+// the splitter through the widths watcher, like pin-driven changes do. Double
+// click instead of click: the handle still fires click after a drag release.
+function resetChatSplit(event: MouseEvent) {
+  if (restoringLayout) return;
+  // The double click is made of the last two presses: if either was itself a
+  // drag, this is a pair of micro-adjust drags, not a reset gesture.
+  const dragLike = Math.max(splitPrevSegmentTravel, splitSegmentTravel) > SPLIT_GESTURE_TRAVEL_LIMIT;
+  splitSegmentTravel = 0;
+  splitPrevSegmentTravel = 0;
+  if (dragLike) return;
+  const handle = event.currentTarget;
+  if (!(handle instanceof HTMLElement)) return;
+  // reka renders the group id as data-panel-group-id, never as an id attribute.
+  const group = document.querySelector<HTMLElement>('[data-panel-group-id="pix-primary"]');
+  if (!group) return;
+  const width = equalSplitWidth(group.clientWidth, handle.offsetWidth, CHAT_MIN_WIDTH);
+  if (width === layout.layout.widths.chat) return;
+  void layout.setWidth("chat", width);
 }
 
 function openProjectSession(record: ProjectGroup, path: string) {
@@ -292,22 +402,32 @@ watch(() => layout.hydrated, async (hydrated) => {
             <WelcomeScreen v-if="!workspace.project" @open-project="$emit('pickProject')" />
             <GraphPanel v-show="workspace.project" class="graph" @new-session="$emit('newSession')" />
           </SplitterPanel>
-          <SplitterResizeHandle class="resize-handle" :class="{ hidden: layout.layout.collapsed.chat }" />
+          <SplitterResizeHandle
+            class="resize-handle"
+            :class="{ hidden: layout.layout.collapsed.chat }"
+            :aria-label="t('titlebar.resizeChatSplit')"
+            :title="t('titlebar.resetChatSplit')"
+            @pointerdown="splitGestureDown"
+            @pointermove="splitGestureMove"
+            @pointerup="splitGestureUp"
+            @pointercancel="splitGestureUp"
+            @dblclick="resetChatSplit"
+          />
 
           <SplitterPanel
             id="chat-panel"
             ref="chatPanel"
-            :style="{ flexGrow: 0, flexBasis: `${layout.layout.collapsed.chat ? 0 : layout.layout.widths.chat}px` }"
+            :style="chatPanelStyle"
             :inert="layout.layout.collapsed.chat"
             :order="3"
             collapsible
             :collapsed-size="0"
             size-unit="px"
             :default-size="layout.layout.widths.chat"
-            :min-size="310"
+            :min-size="CHAT_MIN_WIDTH"
             @resize="resized('chat', $event)"
-            @collapse="panelState('chat', true)"
-            @expand="panelState('chat', false)"
+            @collapse="chatGlide.collapsed"
+            @expand="chatGlide.expanded"
           >
             <div class="chat-columns">
               <BranchContextPanel class="chat" />
@@ -326,7 +446,7 @@ watch(() => layout.hydrated, async (hydrated) => {
       <SplitterPanel
         id="content-panel"
         ref="contentPanel"
-        :style="{ flexGrow: 0, flexBasis: `${layout.layout.collapsed.content ? 0 : layout.layout.widths.content}px` }"
+        :style="contentPanelStyle"
         :inert="layout.layout.collapsed.content"
         :order="2"
         collapsible
@@ -335,8 +455,8 @@ watch(() => layout.hydrated, async (hydrated) => {
         :default-size="layout.layout.widths.content"
         :min-size="300"
         @resize="resized('content', $event)"
-        @collapse="panelState('content', true)"
-        @expand="panelState('content', false)"
+        @collapse="contentGlide.collapsed"
+        @expand="contentGlide.expanded"
       >
         <ToolPanel class="content" />
       </SplitterPanel>
