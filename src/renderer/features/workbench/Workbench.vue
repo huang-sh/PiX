@@ -93,6 +93,55 @@ function panelState(panel: PanelId, collapsed: boolean) {
   void layout.save();
 }
 
+// A drag that crosses reka's collapse threshold lands while the stylesheet
+// disables panel transitions for 1:1 pointer tracking. An inline transition
+// for that one change out-ranks the drag rule, so the panel glides shut on
+// the navigator's curve instead of snapping. Expands keep tracking the
+// pointer: animating them would lag every drag frame behind it.
+const GLIDE_TRANSITION = "flex-basis 260ms cubic-bezier(.22,1,.36,1), opacity 180ms ease";
+
+function panelGlide(panel: PanelId) {
+  const animating = ref(false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  function arm() {
+    if (!document.querySelector("[data-resize-handle-active]")) return;
+    animating.value = true;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      animating.value = false;
+      timer = undefined;
+    }, 300);
+  }
+  onBeforeUnmount(() => {
+    if (timer) clearTimeout(timer);
+  });
+  return {
+    collapsed() {
+      arm();
+      panelState(panel, true);
+    },
+    expanded() {
+      // A reverse drag that crosses the expand threshold must not inherit the
+      // armed transition: it would lag the pointer and snap at the deadline.
+      animating.value = false;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      panelState(panel, false);
+    },
+    style: computed(() => ({
+      flexGrow: 0,
+      flexBasis: `${layout.layout.collapsed[panel] ? 0 : layout.layout.widths[panel]}px`,
+      ...(animating.value ? { transition: GLIDE_TRANSITION } : {}),
+    })),
+  };
+}
+
+const chatGlide = panelGlide("chat");
+const contentGlide = panelGlide("content");
+// Top-level bindings so the template auto-unwraps the style refs.
+const chatPanelStyle = chatGlide.style;
+const contentPanelStyle = contentGlide.style;
+
 function cancelNavigatorHide() {
   if (navigatorHideTimer) clearTimeout(navigatorHideTimer);
   navigatorHideTimer = undefined;
@@ -368,7 +417,7 @@ watch(() => layout.hydrated, async (hydrated) => {
           <SplitterPanel
             id="chat-panel"
             ref="chatPanel"
-            :style="{ flexGrow: 0, flexBasis: `${layout.layout.collapsed.chat ? 0 : layout.layout.widths.chat}px` }"
+            :style="chatPanelStyle"
             :inert="layout.layout.collapsed.chat"
             :order="3"
             collapsible
@@ -377,8 +426,8 @@ watch(() => layout.hydrated, async (hydrated) => {
             :default-size="layout.layout.widths.chat"
             :min-size="CHAT_MIN_WIDTH"
             @resize="resized('chat', $event)"
-            @collapse="panelState('chat', true)"
-            @expand="panelState('chat', false)"
+            @collapse="chatGlide.collapsed"
+            @expand="chatGlide.expanded"
           >
             <div class="chat-columns">
               <BranchContextPanel class="chat" />
@@ -397,7 +446,7 @@ watch(() => layout.hydrated, async (hydrated) => {
       <SplitterPanel
         id="content-panel"
         ref="contentPanel"
-        :style="{ flexGrow: 0, flexBasis: `${layout.layout.collapsed.content ? 0 : layout.layout.widths.content}px` }"
+        :style="contentPanelStyle"
         :inert="layout.layout.collapsed.content"
         :order="2"
         collapsible
@@ -406,8 +455,8 @@ watch(() => layout.hydrated, async (hydrated) => {
         :default-size="layout.layout.widths.content"
         :min-size="300"
         @resize="resized('content', $event)"
-        @collapse="panelState('content', true)"
-        @expand="panelState('content', false)"
+        @collapse="contentGlide.collapsed"
+        @expand="contentGlide.expanded"
       >
         <ToolPanel class="content" />
       </SplitterPanel>
