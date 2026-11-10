@@ -17,11 +17,14 @@ async function checkDesktopRoutes(api: DesktopApi, image: PromptImage) {
   const cleared = await api.invoke("pixie.clearHistory");
   if ("cancelled" in cleared) cleared.cancelled satisfies true;
   else cleared satisfies SessionSnapshot;
+  const pixieSessions = await api.invoke("pixie.sessions");
+  pixieSessions.sessions satisfies SessionSummary[];
+  const switched: SessionSnapshot = await api.invoke("pixie.switchSession", { path: "session.jsonl" });
   const imported = await api.invoke("session.import");
   if (imported) imported.imported satisfies string;
   // Other routes keep working during the incremental migration.
   const legacy: { ok: boolean } = await api.invoke<{ ok: boolean }>("app.quit");
-  void [opened, sessions, current, page, sent, imageOnly, stopped, preview, customized, legacy];
+  void [opened, sessions, current, page, sent, imageOnly, stopped, preview, customized, legacy, switched];
 
   // @ts-expect-error session.open requires a path payload
   api.invoke("session.open");

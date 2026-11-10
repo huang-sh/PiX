@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Brain, LoaderCircle, MessageSquarePlus, Minimize, Sparkles, Terminal } from "@lucide/vue";
+import { Brain, History, LoaderCircle, MessageSquarePlus, Minimize, Sparkles, Terminal } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { withoutToolLabels } from "../../../shared/session";
-import type { BranchMessage, PromptImage, RuntimeModel } from "../../../shared/types";
+import { relativeTimeUnit } from "../../lib/relative-time";
+import type { BranchMessage, PromptImage, RuntimeModel, SessionSummary } from "../../../shared/types";
 import CopyButton from "../../components/CopyButton.vue";
 import MarkdownRenderer from "../../components/MarkdownRenderer.vue";
 import MessageImages from "../../components/MessageImages.vue";
@@ -167,6 +168,21 @@ watch(() => pixie.pending, pending => {
   scrollLatest();
 });
 
+// --- Session history -----------------------------------------------------------
+const historyOpen = ref(false);
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value;
+  if (historyOpen.value) void pixie.loadSessions();
+}
+async function pickSession(session: SessionSummary) {
+  historyOpen.value = false;
+  if (!session.active) await pixie.switchSession(session.path);
+}
+function relative(value: string) {
+  const { unit, n } = relativeTimeUnit(Date.now() - new Date(value).getTime());
+  return t(`time.${unit}`, { n });
+}
+
 // --- Composer ----------------------------------------------------------------
 function selectModel(model: RuntimeModel) {
   pixie.model = model;
@@ -304,6 +320,7 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
   if (document.querySelector('[data-state="open"]')) return;
   event.preventDefault();
+  if (historyOpen.value) { historyOpen.value = false; return; }
   collapse();
 }
 
@@ -344,6 +361,12 @@ watch(() => pixie.visible, visible => {
 watch(() => pixie.snapshot?.session.path, () => {
   if (pixie.visible && !card.value?.contains(document.activeElement)) void focusComposer();
 }, { flush: "post" });
+// Every applied snapshot — a settled turn, a new conversation, a switch from
+// another surface — refreshes an open picker: saved files appear as they are
+// written and the live row moves with the conversation.
+watch(() => pixie.snapshot, () => {
+  if (historyOpen.value) void pixie.loadSessions();
+});
 </script>
 
 <template>
@@ -362,7 +385,16 @@ watch(() => pixie.snapshot?.session.path, () => {
       >
         <header class="pixie-header" :title="t('pixie.dragHint')" @pointerdown="startDrag" @lostpointercapture="endDrag">
           <span class="pixie-title"><Sparkles :size="14" /> {{ t("pixie.title") }}</span>
-          <span class="pixie-scope">{{ t("pixie.scope") }}</span>
+          <button
+            type="button"
+            class="pixie-action"
+            :class="{ on: historyOpen }"
+            data-action="pixie-history"
+            :title="t('pixie.history')"
+            :aria-label="t('pixie.history')"
+            :aria-expanded="historyOpen"
+            @click="toggleHistory"
+          ><History :size="15" /></button>
           <button
             type="button"
             class="pixie-action"
@@ -381,6 +413,28 @@ watch(() => pixie.snapshot?.session.path, () => {
             @click="collapse"
           ><Minimize :size="15" /></button>
         </header>
+
+        <div v-if="historyOpen" class="pixie-sessions" data-pixie-sessions>
+          <p v-if="pixie.sessionsError" class="pixie-session-empty pixie-session-error">
+            <span>{{ pixie.sessionsError }}</span>
+            <button type="button" data-action="pixie-history-retry" @click="pixie.loadSessions()">{{ t("pixie.retry") }}</button>
+          </p>
+          <p v-else-if="!pixie.sessions.length" class="pixie-session-empty">{{ t("pixie.historyEmpty") }}</p>
+          <template v-else>
+            <button
+              v-for="session in pixie.sessions"
+              :key="session.path"
+              type="button"
+              class="pixie-session"
+              :class="{ active: session.active }"
+              :disabled="pixie.running"
+              @click="pickSession(session)"
+            >
+              <span class="pixie-session-title">{{ session.active ? "● " : "" }}{{ session.name ?? session.firstMessage }}</span>
+              <small>{{ relative(session.modified) }}</small>
+            </button>
+          </template>
+        </div>
 
         <div v-if="expanded" ref="scroll" class="pixie-messages" @scroll="updateFollow">
           <button v-if="messages.length >= visibleTurnCount * 2" type="button" class="load-earlier-turns" @click="showEarlierTurns">
@@ -523,8 +577,7 @@ watch(() => pixie.snapshot?.session.path, () => {
   touch-action: none;
 }
 .pixie-header:active { cursor: grabbing; }
-.pixie-title { display: flex; align-items: center; gap: 7px; font-size: var(--font-size-ui); font-weight: 600; }
-.pixie-scope { flex: 1; color: var(--muted); font-size: var(--font-size-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pixie-title { flex: 1; display: flex; align-items: center; gap: 7px; font-size: var(--font-size-ui); font-weight: 600; }
 .pixie-action {
   display: grid;
   place-items: center;
@@ -538,6 +591,53 @@ watch(() => pixie.snapshot?.session.path, () => {
 }
 .pixie-action:hover:not(:disabled) { background: var(--surface-subtle); color: var(--text); }
 .pixie-action:disabled { opacity: 0.45; cursor: default; }
+.pixie-action.on { color: var(--text); background: var(--surface-subtle); }
+.pixie-sessions {
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 6px 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.pixie-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.pixie-session:last-child { border-bottom: 0; }
+.pixie-session:hover:not(:disabled) { background: var(--surface-subtle); }
+.pixie-session:disabled { opacity: 0.55; cursor: default; }
+.pixie-session-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-ui);
+}
+.pixie-session.active .pixie-session-title { font-weight: 600; color: var(--accent); }
+.pixie-session small { flex-shrink: 0; color: var(--muted); font-size: var(--font-size-caption); }
+.pixie-session-empty { margin: 0; padding: 10px 12px; color: var(--muted); font-size: var(--font-size-caption); }
+.pixie-session-error { display: flex; align-items: center; gap: 8px; color: var(--danger); }
+.pixie-session-error span { flex: 1; overflow-wrap: anywhere; }
+.pixie-session-error button {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--font-size-caption);
+  cursor: pointer;
+}
 .pixie-hint { margin: 0; padding: 10px 12px 0; color: var(--muted); font-size: var(--font-size-caption); }
 .pixie-messages {
   flex: 1 1 auto;

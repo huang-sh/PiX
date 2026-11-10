@@ -1,17 +1,18 @@
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { PixieTasks, taskCompletionPrompt, taskSummary, taskDetails, type PixieTaskHost, type PixieTaskSource, type PixieTaskTarget } from "./pixie-tasks.js";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CanvasCommand } from "../shared/canvas.js";
-import type { DesktopEvent, PixiePromptCustomization, PixieSettings, PromptImage, ProjectInfo, RawSessionEntry, RuntimeState, SessionSnapshot } from "../shared/types.js";
-import { projectSession, summarizeSession } from "../shared/session.js";
+import type { DesktopEvent, PixiePromptCustomization, PixieSettings, PromptImage, ProjectInfo, RawSessionEntry, RuntimeState, SessionSnapshot, SessionSummary } from "../shared/types.js";
+import { parseSessionJsonl, projectSession, summarizeSession } from "../shared/session.js";
 import { debugLog } from "./debug-log.js";
-import { canonicalPath, pixAgentDir } from "./paths.js";
+import { pixAgentDir, pixieSessionDirs, pixieWorkspace } from "./paths.js";
 import { composePixieSystemPrompt } from "./pi-runtime.js";
 import { PixieRpc, type RpcLine } from "./pixie-rpc.js";
 
-export const pixieWorkspace = () => join(pixAgentDir(), "pixie");
+// Re-exported for callers that still reach the workspace through its runtime.
+export { pixieWorkspace };
 
 /** Where pi's CLI files new sessions for a given cwd (getDefaultSessionDirPath). */
 const cliSessionDir = (cwd: string) =>
@@ -37,14 +38,7 @@ function migrateLegacyWorkspace(): void {
 }
 
 /** Include pre-RPC sessions and both cwd spellings: the child resolves symlinks. */
-function sessionDirs(): string[] {
-  const workspace = pixieWorkspace();
-  return [...new Set([
-    join(workspace, "sessions"),
-    cliSessionDir(workspace),
-    cliSessionDir(canonicalPath(workspace)),
-  ])];
-}
+const sessionDirs = () => pixieSessionDirs();
 
 /** The most recently modified session file across every spelling of the workspace. */
 function latestSession(): string | undefined {
@@ -505,7 +499,70 @@ export class PixieRuntime {
       await this.ensure();
       await this.rpc.request({ type: "new_session" });
       await this.applyDefaultModel();
-      return await this.snapshot();
+      const snapshot = await this.snapshot();
+      // Every attached surface (desktop card, terminal) follows the switch.
+      this.emit({ type: "pixie", payload: { type: "snapshot", payload: snapshot } });
+      return snapshot;
+    } finally { this.lifecycle = false; }
+  }
+
+  /** Pixie's saved conversations, newest first, with the live one marked. */
+  async sessions(): Promise<SessionSummary[]> {
+    const rows = this.listSessionFiles();
+    if (!rows.length || !this.rpc.running) return rows;
+    // A wedged subprocess must degrade to unmarked rows in seconds, not hold
+    // the listing for the protocol's full timeout.
+    const state = await this.rpc.request({ type: "get_state" }, 2_000).catch(() => undefined) as RpcState | undefined;
+    const active = state?.sessionFile ? resolve(state.sessionFile) : undefined;
+    return active
+      ? rows.map(row => ({ ...row, active: resolve(row.path) === active || undefined }))
+      : rows;
+  }
+
+  /** Parsed summaries keyed by path; a file with an unchanged mtime is not re-read. */
+  private summaryCache = new Map<string, { mtimeMs: number; summary: SessionSummary }>();
+
+  /** Every session file across the workspace's dir spellings, newest first. */
+  private listSessionFiles(): SessionSummary[] {
+    const rows: SessionSummary[] = [];
+    const listed = new Set<string>();
+    for (const dir of sessionDirs()) {
+      if (!existsSync(dir)) continue;
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".jsonl")) continue;
+        const path = join(dir, name);
+        try {
+          const mtimeMs = statSync(path).mtimeMs;
+          listed.add(path);
+          const cached = this.summaryCache.get(path);
+          if (cached && cached.mtimeMs === mtimeMs) { rows.push(cached.summary); continue; }
+          const x = parseSessionJsonl(readFileSync(path, "utf8"));
+          const summary = summarizeSession(path, x.header, x.entries, new Date(mtimeMs).toISOString());
+          this.summaryCache.set(path, { mtimeMs, summary });
+          rows.push(summary);
+        } catch { /* raced deletion or unreadable file */ }
+      }
+    }
+    for (const path of this.summaryCache.keys())
+      if (!listed.has(path)) this.summaryCache.delete(path);
+    return rows.sort((a, b) => b.modified.localeCompare(a.modified));
+  }
+
+  /** Re-points the live conversation at one of Pixie's saved session files. */
+  async switchSession(path: string): Promise<SessionSnapshot> {
+    if (this.busy) throw new Error("Stop Pixie before switching conversations");
+    // Membership in the listing keeps the runtime pointed at its own files.
+    const target = resolve(path);
+    if (!this.listSessionFiles().some(row => resolve(row.path) === target))
+      throw new Error("Not a saved Pixie conversation; pixie sessions lists them");
+    this.lifecycle = true;
+    try {
+      await this.ensure();
+      await this.rpc.request({ type: "switch_session", sessionPath: target });
+      const snapshot = await this.snapshot();
+      // Every attached surface (desktop card, terminal) follows the switch.
+      this.emit({ type: "pixie", payload: { type: "snapshot", payload: snapshot } });
+      return snapshot;
     } finally { this.lifecycle = false; }
   }
 

@@ -85,7 +85,20 @@ try {
   if (shared.code !== 0 || !/ok\./.test(shared.stdout))
     throw new Error(`pix pixie failed: ${JSON.stringify(shared)}`);
 
-  console.log("cli pixie e2e passed: headless dispatch, automatic review, tasks listing, shared entry");
+  // 5. Saved conversations list from the terminal, and switching repoints Pixie.
+  const sessions = await cli("bin/pixie.mjs", ["sessions"]);
+  if (sessions.code !== 0 || !/● .{8}  .*(PIXIE-E2E-DELEGATE please|hello there)/.test(sessions.stdout))
+    throw new Error(`pixie sessions failed: ${JSON.stringify(sessions)}`);
+  const id = sessions.stdout.match(/● (.{8})/)?.[1];
+  if (!id) throw new Error(`no live conversation listed: ${JSON.stringify(sessions.stdout)}`);
+  const switched = await cli("bin/pixie.mjs", ["switch", id]);
+  if (switched.code !== 0 || !/Switched to/.test(switched.stdout))
+    throw new Error(`pixie switch failed: ${JSON.stringify(switched)}`);
+  const refused = await cli("bin/pixie.mjs", ["switch", "no-such-conversation"]);
+  if (refused.code === 0 || !/No such conversation/.test(refused.stderr))
+    throw new Error(`pixie switch accepted an unknown id: ${JSON.stringify(refused)}`);
+
+  console.log("cli pixie e2e passed: headless dispatch, automatic review, tasks listing, shared entry, session switch");
 } finally {
   await cli("bin/pix.mjs", ["host", "stop"]).catch(() => {});
   await new Promise(r => setTimeout(r, 500));

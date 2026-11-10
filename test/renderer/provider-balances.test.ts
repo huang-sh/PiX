@@ -161,9 +161,9 @@ it("separates statistics and balances, retains edits and filters, and pauses pol
   expect(wrapper.get<HTMLInputElement>('[data-balance-url]').element.value).toBe("https://relay.example/unsaved");
 });
 
-const overview = (cost: number): UsageOverview => ({ generatedAt: "", range: "today", sessionCount: 1,
+const overview = (cost: number, agents: UsageOverview["agents"] = []): UsageOverview => ({ generatedAt: "", range: "today", sessionCount: 1,
   totals: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost }, today: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost },
-  estimatedCost: 0, days: [], models: [], projects: [], sessions: [] });
+  estimatedCost: 0, days: [], models: [], projects: [], agents, sessions: [] });
 
 it("keeps the newest usage period when earlier reads finish late", async () => {
   const pending: Array<(value: UsageOverview) => void> = [];
@@ -173,4 +173,32 @@ it("keeps the newest usage period when earlier reads finish late", async () => {
   pending[1]!(overview(2)); await flushPromises();
   pending[0]!(overview(99)); await flushPromises();
   expect(wrapper.get('.usage-card-cost strong').text()).toBe("$2.00");
+});
+
+it("splits Pixie's own usage from canvas agent usage once Pixie has sessions", async () => {
+  vi.mocked(desktop.invoke).mockImplementation(async route => route === "usage.overview" ? overview(1.25, [
+    { agent: "pixie", sessions: 2, usage: { input: 30, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0.25 }, estimatedCost: 0 },
+    { agent: "canvas", sessions: 1, usage: { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: 1 }, estimatedCost: 0 },
+  ]) : []);
+  const wrapper = mount(UsagePanel, { global: { plugins: [i18n] } });
+  await flushPromises();
+  const rows = wrapper.findAll("[data-usage-agent]");
+  expect(rows).toHaveLength(2);
+  expect(rows[0]!.attributes("data-usage-agent")).toBe("pixie");
+  expect(rows[0]!.text()).toContain("Pixie (coordinator)");
+  expect(rows[0]!.text()).toContain("$0.2500");
+  expect(rows[1]!.text()).toContain("Canvas agents");
+  expect(rows[1]!.text()).toContain("$1.00");
+  // Totals stay the sum of both agents.
+  expect(wrapper.get('.usage-card-cost strong').text()).toBe("$1.25");
+});
+
+it("keeps the previous single-agent appearance when Pixie has no usage", async () => {
+  vi.mocked(desktop.invoke).mockImplementation(async route => route === "usage.overview" ? overview(1, [
+    { agent: "pixie", sessions: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, estimatedCost: 0 },
+    { agent: "canvas", sessions: 1, usage: { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: 1 }, estimatedCost: 0 },
+  ]) : []);
+  const wrapper = mount(UsagePanel, { global: { plugins: [i18n] } });
+  await flushPromises();
+  expect(wrapper.find("[data-usage-agent]").exists()).toBe(false);
 });

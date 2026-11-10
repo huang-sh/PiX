@@ -78,7 +78,11 @@ renderer actions and existing SSH/WSL dispatch; Pixie itself stays local.
 ## Provider balances
 
 Settings → Usage separates session token/cost statistics and provider balances
-into tabs, sharing the Agent settings page's tab style. Switching tabs retains
+into tabs, sharing the Agent settings page's tab style. The statistics tab
+splits Pixie's own sessions (found through the coordinator workspace's session
+directories, even when a shared custom sessionDir sweeps them into a project's
+scan) from canvas execution usage; both rows always sum to the totals, and a
+Pixie session never attributes to the project whose scan found it. Switching tabs retains
 filters and unsaved balance-query edits; automatic balance polling pauses while
 its tab is hidden. `usage.balances` follows the desktop's provider catalog and logins,
 including while an SSH/WSL project is selected; it is not a remote project

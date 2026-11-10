@@ -16,6 +16,8 @@ export interface DesktopRouteMap {
   };
   "pixie.stop": { input: undefined; output: void };
   "pixie.newSession": { input: undefined; output: SessionSnapshot };
+  "pixie.sessions": { input: undefined; output: { sessions: SessionSummary[] } };
+  "pixie.switchSession": { input: { path: string }; output: SessionSnapshot };
   "pixie.tasks": {
     input: undefined;
     output: { tasks: Array<{ id: string; state: string; revision: number; parentTaskId?: string; nodeId?: string;

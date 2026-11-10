@@ -39,6 +39,20 @@ writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: Object.fro
 writeFileSync(join(agent, "auth.json"), JSON.stringify(Object.fromEntries(["one", "two"].map(id => [id, { type: "api_key", key: `fixture-${id}` }]))));
 writeFileSync(join(home, ".pix", "gui.settings.json"), JSON.stringify({ language: "zh-CN", closeToTray: false, usage: { balanceQueries: queries } }));
 const port = 11000 + Math.floor(Math.random() * 1000);
+// One Pixie session (in the coordinator's slotted CLI dir) and one canvas
+// session in the project, each with a billed reply, so the statistics tab
+// must show the agent split instead of mixing the two into one total.
+const nowIso = new Date().toISOString();
+const sessionJsonl = (id, cwd, usage) => [
+  JSON.stringify({ type: "session", version: 3, id, timestamp: nowIso, cwd }),
+  JSON.stringify({ type: "message", id: `${id}-u`, parentId: null, timestamp: nowIso, message: { role: "user", content: "hello" } }),
+  JSON.stringify({ type: "message", id: `${id}-a`, parentId: `${id}-u`, timestamp: nowIso, message: { role: "assistant", content: "ok", provider: "zai", model: "glm-5.3", responseModel: "glm-5.3", usage } }),
+].join("\n") + "\n";
+const pixieDir = join(agent, "sessions", "--" + join(agent, "pixie").replace(/^[/\\]/, "").replace(/[/\\:]/g, "-") + "--");
+mkdirSync(join(workspace, ".pi", "sessions"), { recursive: true });
+mkdirSync(pixieDir, { recursive: true });
+writeFileSync(join(workspace, ".pi", "sessions", "canvas.jsonl"), sessionJsonl("11111111-1111-4111-8111-111111111111", workspace, { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 1 } }));
+writeFileSync(join(pixieDir, "pixie.jsonl"), sessionJsonl("22222222-2222-4222-8222-222222222222", join(agent, "pixie"), { input: 40, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.25 } }));
 const child = spawn(electronBinary(root), ["--no-sandbox", "--disable-gpu", `--user-data-dir=${join(home, "electron")}`, `--remote-debugging-port=${port}`, root], {
   cwd: root, env: { ...process.env, PIX_HOME: home, PIX_PROJECT: workspace, PI_OFFLINE: "1", ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
 });
@@ -88,6 +102,23 @@ try {
   await evaluate("document.querySelector('[data-settings-category=usage]').click()");
   await retry(async () => assert.equal(await evaluate("document.querySelector('[data-usage-tab=statistics]')?.getAttribute('aria-selected')"), "true"));
   assert.deepEqual(calls, { one: 0, two: 0 }, "statistics does not query provider balances");
+  // The agent split: Pixie's own session lands in its own row; the canvas
+  // session keeps the project's usage; totals keep summing both.
+  const split = await retry(async () => {
+    const overview = await evaluate("window.pix.invoke('usage.overview', { range: '30d', scope: 'project' })");
+    assert.equal(overview.sessionCount, 2);
+    return overview;
+  });
+  const agentRow = (agent) => split.agents.find((row) => row.agent === agent);
+  assert.equal(agentRow("pixie").sessions, 1);
+  assert.equal(agentRow("pixie").usage.cost, 0.25);
+  assert.equal(agentRow("canvas").sessions, 1);
+  assert.equal(agentRow("canvas").usage.cost, 1);
+  assert.equal(split.totals.cost, 1.25);
+  await retry(async () => assert.equal(await evaluate("Boolean(document.querySelector('[data-usage-agent=pixie]'))"), true));
+  assert.equal(await evaluate("document.querySelector('[data-usage-agent=pixie]').textContent.includes('0.2500')"), true);
+  assert.equal(await evaluate("document.querySelector('[data-usage-agent=canvas]').textContent.includes('$1.00')"), true);
+  assert.equal(await evaluate("document.querySelector('.usage-card-cost strong').textContent"), "$1.25");
   await evaluate("document.querySelector('[data-usage-tab=balances]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))");
   await retry(async () => assert.equal(await evaluate("document.querySelectorAll('[data-balance-provider] .balance-amount').length"), 2));
   assert.deepEqual(calls, { one: 1, two: 1 });

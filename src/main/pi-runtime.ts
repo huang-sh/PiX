@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, basename, join, resolve } from "node:path";
+import { dirname, basename, join, resolve, sep } from "node:path";
 import { readFileSync } from "node:fs";
 import { agentEventForwarder } from "./agent-event-forwarder.js";
 import type { ExtensionDialogs } from "./extension-dialogs.js";
@@ -23,7 +23,7 @@ import {
 import { isBundledExtension, resolveBuiltinPackages } from "./builtin-packages.js";
 import { applyBuiltinSkillOverrides, resolveBuiltinSkills } from "./builtin-skills.js";
 import { SkillControls } from "./skill-controls.js";
-import { canonicalPath, pixAgentDir } from "./paths.js";
+import { canonicalPath, pixAgentDir, pixieSessionDirs } from "./paths.js";
 import { addCustomModel, addCustomModels, getCustomModels } from "./custom-models.js";
 import { discoverModels } from "./model-discovery.js";
 import { durableWrite, encodeSession, sessionModifiedAt } from "./graph-files.js";
@@ -260,9 +260,26 @@ function sessionFilesUnder(root: string): string[] {
 }
 
 /**
+ * Whether a session file belongs to Pixie's own workspace. Pixie sessions
+ * share the profile's sessions root with project sessions, so a custom
+ * sessionDir can sweep them into a project's scan; the tag routes their
+ * usage into the Pixie agent row instead of the project's.
+ */
+function isPixieSessionPath(path: string): boolean {
+  const file = canonicalPath(path);
+  const lower = process.platform === "win32";
+  return pixieSessionDirs().some(dir => {
+    const root = canonicalPath(dir);
+    const name = (p: string) => (lower ? p.toLowerCase() : p);
+    return name(file) === name(root) || name(file).startsWith(name(root) + sep);
+  });
+}
+
+/**
  * One session file's parsed usage, served from the persistent scan cache
  * (mtime + size validation, clones on every hand-out) and reduced through the
- * SDK on a miss.
+ * SDK on a miss. The pixie agent tag is path metadata, applied per hand-out
+ * like the project tag so the cached shape never changes.
  */
 function cachedSessionUsage(
   pi: any,
@@ -272,14 +289,16 @@ function cachedSessionUsage(
   project: UsageProjectRef | undefined,
 ): UsageSessionInput {
   const stat = statSync(path);
+  const withAgent = (session: UsageSessionInput): UsageSessionInput =>
+    isPixieSessionPath(path) ? { ...session, agent: "pixie" } : session;
   const cached = usageScanCache.get(path, stat, project);
-  if (cached) return cached;
+  if (cached) return withAgent(cached);
   usageScanCache.set(
     path,
     stat,
     sessionUsage(pi.SessionManager.open(path, dir, cwd), path, stat.mtime.toISOString(), project),
   );
-  return usageScanCache.get(path, stat, project)!;
+  return withAgent(usageScanCache.get(path, stat, project)!);
 }
 
 export class PiRuntime {

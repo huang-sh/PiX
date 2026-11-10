@@ -79,6 +79,9 @@ export interface UsageSessionInput {
   firstMessage: string;
   records: UsageRecord[];
   project?: UsageProjectRef;
+  /** "pixie" marks the coordinator agent's own sessions; everything else —
+   *  graph sessions, branches, workers — is canvas execution usage. */
+  agent?: "pixie";
 }
 
 export interface UsageSessionRow {
@@ -92,6 +95,7 @@ export interface UsageSessionRow {
   /** Portion of usage.cost estimated from price tables. */
   estimatedCost: number;
   project?: UsageProjectRef;
+  agent?: "pixie";
 }
 
 export interface UsageModelRow {
@@ -104,6 +108,16 @@ export interface UsageProjectRow {
   id: string;
   name: string;
   path: string;
+  sessions: number;
+  usage: UsageAmount;
+  estimatedCost: number;
+}
+
+/** Which agent ran the session: Pixie itself, or an agent on the canvas. */
+export type UsageAgent = "pixie" | "canvas";
+
+export interface UsageAgentRow {
+  agent: UsageAgent;
   sessions: number;
   usage: UsageAmount;
   estimatedCost: number;
@@ -129,6 +143,9 @@ export interface UsageOverview {
   days: UsageDayRow[];
   models: UsageModelRow[];
   projects: UsageProjectRow[];
+  /** Pixie's own usage split from canvas execution usage; rows always cover
+   *  both agents and sum to totals. */
+  agents: UsageAgentRow[];
   sessions: UsageSessionRow[];
 }
 
@@ -266,6 +283,9 @@ export function aggregateUsage(
   const byModel = new Map<string, UsageBucket>();
   const byDay = new Map<string, UsageBucket>();
   const byProject = new Map<string, { project: UsageProjectRef; bucket: UsageBucket; sessions: number }>();
+  const byAgent = new Map<UsageAgent, { bucket: UsageBucket; sessions: number }>(
+    (["pixie", "canvas"] as const).map(agent => [agent, { bucket: { amount: emptyAmount(), estimated: 0 }, sessions: 0 }]),
+  );
   const rows: UsageSessionRow[] = [];
 
   for (const session of sessions) {
@@ -282,7 +302,15 @@ export function aggregateUsage(
       addRecord(bucketFor(byDay, dayKey), record);
     }
     if (usageTokens(inRange.amount) === 0 && inRange.amount.cost === 0) continue;
-    if (session.project) {
+    // Pixie's own sessions count toward their agent row, never toward the
+    // project whose scan root swept them in: a shared custom sessionDir can
+    // place them under a project's tree, but they are not project work.
+    const agent: UsageAgent = session.agent === "pixie" ? "pixie" : "canvas";
+    const agentEntry = byAgent.get(agent)!;
+    sumAmount(agentEntry.bucket.amount, inRange.amount);
+    agentEntry.bucket.estimated += inRange.estimated;
+    agentEntry.sessions++;
+    if (session.project && agent === "canvas") {
       const entry =
         byProject.get(session.project.id) ??
         (byProject.set(session.project.id, {
@@ -304,7 +332,8 @@ export function aggregateUsage(
       messageCount: session.messageCount,
       usage: inRange.amount,
       estimatedCost: inRange.estimated,
-      ...(session.project ? { project: session.project } : {}),
+      ...(session.project && agent === "canvas" ? { project: session.project } : {}),
+      ...(session.agent ? { agent: session.agent } : {}),
     });
   }
 
@@ -367,6 +396,10 @@ export function aggregateUsage(
           b.usage.cost - a.usage.cost ||
           usageTokens(b.usage) - usageTokens(a.usage),
       ),
+    agents: (["pixie", "canvas"] as const).map(agent => {
+      const { bucket, sessions } = byAgent.get(agent)!;
+      return { agent, sessions, usage: bucket.amount, estimatedCost: bucket.estimated };
+    }),
     sessions: rows
       .sort((a, b) => b.modified.localeCompare(a.modified))
       .slice(0, MAX_SESSION_ROWS),

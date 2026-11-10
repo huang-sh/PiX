@@ -186,6 +186,7 @@ export function validateRouteInput(
     case "pixie.ensure":
     case "pixie.stop":
     case "pixie.newSession":
+    case "pixie.sessions":
     case "pixie.tasks":
     case "pixie.clearHistory":
     case "pixie.reveal":
@@ -204,6 +205,8 @@ export function validateRouteInput(
         ...(v.canvas !== undefined ? { canvas: v.canvas } : {}),
       };
     }
+    case "pixie.switchSession":
+      return { path: str(v.path, "path") };
     case "pixie.previewPrompt":
       return {
         identity: str(v.identity, "identity", true),

@@ -2,7 +2,7 @@
 import { RefreshCw } from "@lucide/vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { UsageDayRow, UsageOverview, UsageRange } from "../../../shared/usage";
+import type { UsageAgentRow, UsageDayRow, UsageOverview, UsageRange } from "../../../shared/usage";
 import { USAGE_RANGES } from "../../../shared/usage";
 import { desktop } from "../../api";
 import Button from "../../components/ui/Button.vue";
@@ -108,6 +108,13 @@ const barTitle = (day: UsageDayRow) =>
 const heatLevel = (day: UsageDayRow) =>
   day.tokens <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((4 * day.tokens) / maxDayTokens.value)));
 
+// The agent split appears once Pixie itself has usage in range; without any
+// Pixie sessions the panel keeps its previous single-agent appearance.
+const agentSplit = computed(() =>
+  overview.value?.agents.some((row) => row.agent === "pixie" && row.sessions > 0) ?? false);
+const agentLabel = (row: UsageAgentRow) =>
+  t(row.agent === "pixie" ? "settings.usage.agentPixie" : "settings.usage.agentCanvas");
+
 async function load() {
   const sequence = ++loadSequence;
   loading.value = true;
@@ -201,6 +208,36 @@ watch([range, scope], load);
           <small>{{ t("settings.usage.cacheWrite") }}</small>
           <strong>{{ fmtTokens(overview.totals.cacheWrite) }}</strong>
         </div>
+      </div>
+
+      <div v-if="agentSplit" class="usage-block">
+        <h3>{{ t("settings.usage.agentsTitle") }}</h3>
+        <table class="usage-table">
+          <thead>
+            <tr>
+              <th>{{ t("settings.usage.agentCol") }}</th>
+              <th>{{ t("settings.usage.sessions") }}</th>
+              <th>{{ t("settings.usage.colTokensIn") }}</th>
+              <th>{{ t("settings.usage.colTokensOut") }}</th>
+              <th>{{ t("settings.usage.colCost") }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in overview.agents" :key="row.agent" :data-usage-agent="row.agent">
+              <td>{{ agentLabel(row) }}</td>
+              <td>{{ row.sessions }}</td>
+              <td>{{ fmtTokens(row.usage.input) }}</td>
+              <td>{{ fmtTokens(row.usage.output) }}</td>
+              <td>
+                {{ fmtCost(row.usage.cost) }}<em
+                  v-if="row.estimatedCost > 0"
+                  class="usage-est-mark"
+                  :title="t('settings.usage.estimatedTip', { v: fmtCost(row.estimatedCost) })"
+                >≈</em>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <div v-if="overview.days.length" class="usage-block">

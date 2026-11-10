@@ -221,4 +221,30 @@ describe("pixie store", () => {
     expect(pixie.error).toBe("Pixie returned an invalid session snapshot");
     expect(pixie.snapshot).toBeUndefined();
   });
+
+  it("keeps a listing failure inside the picker and clears it on the next load", async () => {
+    const pixie = usePixieStore();
+    vi.spyOn(desktop, "invoke").mockImplementation(async route => {
+      if (route === "pixie.sessions") throw new Error("listing down");
+      return route === "agent.control" ? [model] : snapshot("a1");
+    });
+
+    await pixie.loadSessions();
+
+    // The conversation itself stays usable: the card's error strip is untouched.
+    expect(pixie.sessionsError).toBe("listing down");
+    expect(pixie.error).toBe("");
+
+    vi.spyOn(desktop, "invoke").mockImplementation(async route =>
+      route === "agent.control"
+        ? [model]
+        : route === "pixie.sessions"
+          ? { sessions: [{ ...snapshot("a1").session, active: true }] }
+          : snapshot("a1"));
+    await pixie.loadSessions();
+
+    expect(pixie.sessionsError).toBe("");
+    expect(pixie.sessions).toHaveLength(1);
+    expect(pixie.sessions[0]!.active).toBe(true);
+  });
 });

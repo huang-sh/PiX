@@ -4,9 +4,22 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PixieRuntime, pixieWorkspace } from "../src/main/pixie-runtime.js";
-import { pixAgentDir } from "../src/main/paths.js";
+import { canonicalPath, pixAgentDir, pixieSessionDirs } from "../src/main/paths.js";
 
 const slug = (cwd: string) => `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+
+test("pixieSessionDirs covers the workspace dir and both CLI slotted spellings", () => {
+  withTempHome(() => {
+    // The workspace exists once Pixie has run; realpath then resolves the
+    // platform's symlinked spellings (/var vs /private/var) into two slugs.
+    mkdirSync(pixieWorkspace(), { recursive: true });
+    assert.deepEqual(pixieSessionDirs(), [
+      join(pixieWorkspace(), "sessions"),
+      join(pixAgentDir(), "sessions", slug(pixieWorkspace())),
+      join(pixAgentDir(), "sessions", slug(canonicalPath(pixieWorkspace()))),
+    ]);
+  });
+});
 
 function withTempHome(run: (agentDir: string) => void): void {
   const previous = process.env.PIX_HOME;

@@ -21,7 +21,7 @@ import { projectId } from "../shared/types.js";
 import { isPromptImage } from "../shared/images.js";
 import { validateRouteInput } from "../shared/contracts.js";
 import { isProjectRoute, type ProjectRoute } from "../shared/remote-protocol.js";
-import { canonicalPath, pixHome } from "./paths.js";
+import { canonicalPath, pixHome, pixieSessionDirs } from "./paths.js";
 import { ProviderBalanceService } from "./provider-balances.js";
 import { createHash } from "node:crypto";
 import { isSessionRunning, parseSessionJsonl, projectSession, promptRecall, searchGraphNodeIds, validateHistoryWindow, windowEntries } from "../shared/session.js";
@@ -613,11 +613,23 @@ export class MainController {
     ]);
   }
   /**
-   * Session directories behind the usage panel's all-projects scope: every
-   * local project in the history, the project in view first. Remote projects
-   * stay on their hosts, which answer the same route with their own scans.
+   * Pixie's own session directories, appended to every usage scan: the
+   * coordinator's usage is counted as its own agent category in both scopes,
+   * separate from the canvas execution sessions of any project.
    */
-  private usageScans(bundle: SettingsBundle): Array<{ project: { id: string; name: string; path: string }; dir: string }> {
+  private pixieUsageScans(): Array<{ dir: string }> {
+    return pixieSessionDirs()
+      .map(dir => canonicalPath(dir))
+      .filter(dir => existsSync(dir))
+      .map(dir => ({ dir }));
+  }
+  /**
+   * Session directories behind the usage panel's all-projects scope: every
+   * local project in the history, the project in view first, plus Pixie's own
+   * workspace. Remote projects stay on their hosts, which answer the same
+   * route with their own scans.
+   */
+  private usageScans(bundle: SettingsBundle): Array<{ project?: { id: string; name: string; path: string }; dir: string }> {
     const current = this.project && !this.project.remote ? this.project : null;
     const projects = [
       ...(current ? [current] : []),
@@ -633,7 +645,7 @@ export class MainController {
     const seenDirs = new Set<string>();
     const dirKey = (dir: string) =>
       process.platform === "win32" ? canonicalPath(dir).toLowerCase() : canonicalPath(dir);
-    return projects
+    const projectScans = projects
       .map((project) => ({
         project: { id: projectId(project), name: project.name, path: project.path },
         dir: historySessionDir(project, bundle),
@@ -644,6 +656,7 @@ export class MainController {
         seenDirs.add(key);
         return true;
       });
+    return [...projectScans, ...this.pixieUsageScans()];
   }
   async sessions() {
     const files = this.files;
@@ -940,6 +953,8 @@ export class MainController {
     }
     if (route === "pixie.stop") return this.pixie.stop();
     if (route === "pixie.newSession") return this.pixie.newSession();
+    if (route === "pixie.sessions") return { sessions: await this.pixie.sessions() };
+    if (route === "pixie.switchSession") return this.pixie.switchSession(String(v.path));
     if (route === "pixie.tasks")
       return { tasks: this.pixie.tasks.list().reverse().map(({ id, state, revision, parentTaskId, nodeId, error, notification, purpose, createdAt, updatedAt }) =>
         ({ id, state, revision, parentTaskId, nodeId, error, notification, purpose, createdAt, updatedAt })) };
@@ -1272,7 +1287,7 @@ export class MainController {
                     path: this.project.path,
                   },
                   dir: this.files.dir,
-                }]
+                }, ...this.pixieUsageScans()]
               : undefined;
         return this.projectRuntime.usageOverview(
           v.range as UsageRange,

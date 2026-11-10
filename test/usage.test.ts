@@ -248,3 +248,42 @@ test("the all-projects scope attributes usage to projects", () => {
   assert.equal(overview.sessions.find((r) => r.id === "a")!.project!.name, "One");
   assert.equal(overview.sessions.find((r) => r.id === "c")!.project, undefined);
 });
+
+test("pixie sessions split into their own agent row and out of project attribution", () => {
+  // A shared custom sessionDir can sweep Pixie's sessions into a project's
+  // scan: the file carries the project tag, but its usage belongs to the
+  // coordinator agent, not the project.
+  const pixie = {
+    ...session("px", [record(day(0), "zai/glm-5.3", { input: 40, cost: 0.4 })], day(0)),
+    project: { id: "p1", name: "One", path: "D:\\one" },
+    agent: "pixie" as const,
+  };
+  const canvas = {
+    ...session("cv", [record(day(0), "zai/glm-5.3", { input: 10, cost: 0.1 })], day(0)),
+    project: { id: "p1", name: "One", path: "D:\\one" },
+  };
+  const overview = aggregateUsage([pixie, canvas], "today", now);
+  assert.deepEqual(
+    overview.agents.map((row) => [row.agent, row.sessions]),
+    [["pixie", 1], ["canvas", 1]],
+  );
+  assert.ok(near(overview.agents[0]!.usage.cost, 0.4));
+  assert.ok(near(overview.agents[1]!.usage.cost, 0.1));
+  // Totals keep counting both agents; the project row keeps only its canvas work.
+  assert.ok(near(overview.totals.cost, 0.5));
+  assert.deepEqual(overview.projects, [{
+    id: "p1", name: "One", path: "D:\\one", sessions: 1,
+    usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0.1 }, estimatedCost: 0,
+  }]);
+  assert.equal(overview.sessions.find((r) => r.id === "px")!.agent, "pixie");
+  assert.equal(overview.sessions.find((r) => r.id === "px")!.project, undefined);
+  assert.equal(overview.sessions.find((r) => r.id === "cv")!.agent, undefined);
+  // Without pixie sessions the pixie row is present but empty, so the UI can
+  // keep the block hidden for installs that never used the coordinator.
+  const none = aggregateUsage([canvas], "today", now);
+  assert.deepEqual(
+    none.agents.map((row) => [row.agent, row.sessions]),
+    [["pixie", 0], ["canvas", 1]],
+  );
+  assert.ok(near(none.totals.cost, 0.1));
+});

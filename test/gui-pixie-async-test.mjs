@@ -200,9 +200,25 @@ try {
   result.completedScreenshot = await cdp.shot('03-completed');
   await cdp.evaluate(`window.__pixTest.openSession(${JSON.stringify(original.target.session)})`);
   await until(async () => (await state()).nodes?.length === 2);
+  // Session history: the picker lists Pixie's conversations, follows a new
+  // one, and switches back to a saved one with its transcript intact.
+  await cdp.click('[data-action="pixie-history"]');
+  await until(() => cdp.evaluate(`(() => { const rows=document.querySelectorAll('[data-pixie-sessions] .pixie-session'); return rows.length===1 && rows[0].classList.contains('active'); })()`));
+  await cdp.click('[data-action="pixie-new-session"]');
+  await until(async () => { const x = await state(); return !x.running && (x.messages?.length ?? 0) === 0; });
+  // A conversation only becomes a listed file once it holds a message.
+  await cdp.type('GUI_HISTORY: a second saved conversation');
+  await until(async () => { const x = await state(); if (x.error) throw new Error(x.error); return !x.running && x.messages?.some(m => m.includes('GUI_HISTORY')); });
+  await until(() => cdp.evaluate(`(() => { const rows=document.querySelectorAll('[data-pixie-sessions] .pixie-session'); return rows.length===2 && rows[0].classList.contains('active') && !rows[1].classList.contains('active'); })()`));
+  result.checks.historyListsAndMarksConversations = true;
+  result.historyScreenshot = await cdp.shot('04-history');
+  await cdp.evaluate(`document.querySelectorAll('[data-pixie-sessions] .pixie-session')[1].click()`);
+  await until(() => cdp.evaluate(`!document.querySelector('[data-pixie-sessions]')`));
+  await until(async () => { const x = await state(); return !x.running && x.messages?.some(m => m.includes('GUI_ASYNC')); });
+  result.checks.historySwitchRestoresConversation = true;
   await cdp.click('[data-action="pixie-collapse"]');
   await delay(300);
-  result.graphScreenshot = await cdp.shot('04-original-session');
+  result.graphScreenshot = await cdp.shot('05-original-session');
   result.checks.actualFileWriteAndReadTools = true;
   result.tasks = tasks; result.rendererExceptions = cdp.errors;
   assert.deepEqual(cdp.errors, []);

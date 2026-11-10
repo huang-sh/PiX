@@ -94,6 +94,8 @@ export interface SessionSummary {
   firstMessage: string;
   /** A run is in flight in this session's live runtime. */
   running?: boolean;
+  /** This conversation is the live Pixie session (Pixie listings only). */
+  active?: boolean;
   pinned?: boolean;
   archived?: boolean;
 }

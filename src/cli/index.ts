@@ -12,7 +12,7 @@ Usage: pix [command] [arguments] [options]
 
   chat                         Interactive conversation (default)
   run [prompt]                 Run a task; read prompt from stdin when piped
-  pixie [prompt|tasks]         Talk to Pixie (shared with the desktop); --live-canvas drives the GUI
+  pixie [prompt|sessions|switch|tasks]  Talk to Pixie (shared with the desktop); --live-canvas drives the GUI
   resume <session> [prompt]    Resume interactively, or run the supplied prompt
   fork <node> [prompt]         Continue from a node in --session
   new                          Create a session
@@ -140,9 +140,14 @@ async function main() {
   const client = await connectLocalHost(cwd);
   try {
     if (command === "pixie") {
-      const { pixieOnce, pixieInteractive, pixieTasks } = await import("./pixie.js");
+      const { pixieOnce, pixieInteractive, pixieSessions, pixieSwitch, pixieTasks } = await import("./pixie.js");
       const pixieOptions = { json: options.json, liveCanvas: options["live-canvas"] === true, cwd };
       if (args[0] === "tasks") await pixieTasks(client, options.json);
+      else if (args[0] === "sessions") await pixieSessions(client, options.json);
+      else if (args[0] === "switch") {
+        if (!args[1]) throw new Error("Use pixie switch <id-or-path>; pixie sessions lists them");
+        await pixieSwitch(client, args.slice(1).join(" "), pixieOptions);
+      }
       else if (args.length) await pixieOnce(client, args.join(" "), pixieOptions);
       else if (!process.stdin.isTTY || !process.stdout.isTTY)
         throw new Error('Interactive Pixie needs a terminal. Pass a prompt: pixie "text"');

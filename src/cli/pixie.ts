@@ -7,7 +7,7 @@ import {
   KeybindingsManager, TUI_KEYBINDINGS, matchesKey,
 } from "@earendil-works/pi-tui";
 import type { HostClient } from "../host/client.js";
-import type { SessionSnapshot } from "../shared/types.js";
+import type { SessionSnapshot, SessionSummary } from "../shared/types.js";
 import { Conversation, getMarkdownTheme, getSelectListTheme, initTheme, UserMessageComponent } from "./tui.js";
 
 export interface PixieOptions { json?: boolean; liveCanvas?: boolean; cwd?: string }
@@ -45,6 +45,48 @@ export async function pixieTasks(client: HostClient, json?: boolean) {
   return tasks;
 }
 
+/** The shortest id prefix that names exactly one conversation in the list —
+ * pi's UUIDv7 ids share their leading timestamp digits, so a fixed 8-char
+ * prefix is ambiguous for conversations created close together. */
+function sessionPrefixes(sessions: SessionSummary[]): string[] {
+  return sessions.map(session => {
+    for (let length = 8; length < session.id.length; length++) {
+      const prefix = session.id.slice(0, length);
+      if (sessions.filter(other => other.id.startsWith(prefix)).length === 1) return prefix;
+    }
+    return session.id;
+  });
+}
+
+/** Lists Pixie's saved conversations, newest first, marking the live one. */
+export async function pixieSessions(client: HostClient, json?: boolean) {
+  const { sessions } = await client.invoke<{ sessions: SessionSummary[] }>("pixie.sessions");
+  if (json) { process.stdout.write(JSON.stringify(sessions) + "\n"); return sessions; }
+  if (!sessions.length) { process.stdout.write("No conversations.\n"); return sessions; }
+  const prefixes = sessionPrefixes(sessions);
+  sessions.forEach((session, index) =>
+    process.stdout.write(`${session.active ? "●" : "○"} ${prefixes[index]}  ${session.name ?? session.firstMessage}\n  ${session.path}\n`));
+  process.stdout.write(`(${sessions.length} conversation${sessions.length === 1 ? "" : "s"}; pixie switch <id> resumes one)\n`);
+  return sessions;
+}
+
+/** Resolves a conversation selector: its path, its id, or a unique id prefix. */
+async function pixieSessionPath(client: HostClient, selector: string): Promise<string> {
+  const { sessions } = await client.invoke<{ sessions: SessionSummary[] }>("pixie.sessions");
+  const matches = sessions.filter(session => session.path === selector || session.id.startsWith(selector));
+  if (matches.length !== 1)
+    throw new Error(matches.length ? "Conversation id is ambiguous; use its full id or path" : "No such conversation; pixie sessions lists them");
+  return matches[0]!.path;
+}
+
+/** One-shot switch: repoint the shared Pixie conversation at a saved one. */
+export async function pixieSwitch(client: HostClient, selector: string, options: PixieOptions) {
+  const snapshot = await client.invoke<SessionSnapshot>("pixie.switchSession", { path: await pixieSessionPath(client, selector) });
+  if (options.json) process.stdout.write(JSON.stringify(snapshot) + "\n");
+  else process.stdout.write(`Switched to ${snapshot.session.name ?? snapshot.session.firstMessage ?? snapshot.session.id}\n  ${snapshot.session.path}\n`);
+  return snapshot;
+}
+
 /** One-shot: send a prompt, stream the reply, exit when the turn settles. */
 export async function pixieOnce(client: HostClient, text: string, options: PixieOptions) {
   if (options.json) {
@@ -80,6 +122,8 @@ export async function pixieOnce(client: HostClient, text: string, options: Pixie
 
 const commands = [
   { name: "new", description: "Start a new Pixie conversation" },
+  { name: "sessions", description: "List saved conversations" },
+  { name: "switch <id>", description: "Resume a saved conversation" },
   { name: "stop", description: "Stop the running reply" },
   { name: "tasks", description: "List tracked delegations" },
   { name: "exit", description: "Leave Pixie" },
@@ -178,12 +222,34 @@ export async function pixieInteractive(client: HostClient, options: PixieOptions
       catch (error) { notice(error instanceof Error ? error.message : String(error)); }
       return;
     }
+    if (text === "/sessions") {
+      try {
+        const { sessions } = await client.invoke<{ sessions: SessionSummary[] }>("pixie.sessions");
+        const prefixes = sessionPrefixes(sessions);
+        notice(sessions.length
+          ? sessions.slice(0, 6).map((session, index) => `${session.active ? "●" : "○"} ${prefixes[index]} ${(session.name ?? session.firstMessage).replace(/\s+/g, " ").slice(0, 60)}`).join("\n")
+          : "No conversations.");
+      } catch (error) { notice(`Could not list conversations: ${error instanceof Error ? error.message : String(error)}`); }
+      return;
+    }
+    if (text.startsWith("/switch")) {
+      const selector = text.slice("/switch".length).trim();
+      if (!selector) { notice("Use /switch <id-or-path>; /sessions lists them"); return; }
+      try {
+        const path = await pixieSessionPath(client, selector);
+        load(await client.invoke<SessionSnapshot>("pixie.switchSession", { path }));
+        notice("Conversation switched");
+      } catch (error) { notice(error instanceof Error ? error.message : String(error)); }
+      return;
+    }
     if (text === "/stop") { stop(); return; }
     if (text === "/tasks") {
-      const tasks = await client.invoke<{ tasks: PixieTaskRow[] }>("pixie.tasks").then(result => result.tasks).catch(() => []);
-      notice(tasks.length
-        ? tasks.slice(0, 6).map(task => `${task.id.slice(0, 8)} ${task.state} ${task.purpose.replace(/\s+/g, " ").slice(0, 60)}`).join("\n")
-        : "No delegations.");
+      try {
+        const { tasks } = await client.invoke<{ tasks: PixieTaskRow[] }>("pixie.tasks");
+        notice(tasks.length
+          ? tasks.slice(0, 6).map(task => `${task.id.slice(0, 8)} ${task.state} ${task.purpose.replace(/\s+/g, " ").slice(0, 60)}`).join("\n")
+          : "No delegations.");
+      } catch (error) { notice(`Could not list delegations: ${error instanceof Error ? error.message : String(error)}`); }
       return;
     }
     if (text.startsWith("/")) { notice(`Unknown command: ${commands.map(item => `/${item.name}`).join(" ")}`); return; }

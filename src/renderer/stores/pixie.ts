@@ -5,6 +5,7 @@ import type {
   PromptImage,
   RuntimeModel,
   SessionSnapshot,
+  SessionSummary,
 } from "../../shared/types";
 import { reduceAgentActivity } from "../../shared/agent-stream";
 import { deliversPendingTurn } from "../../shared/session";
@@ -36,6 +37,10 @@ export const usePixieStore = defineStore("pixie", {
   state: () => ({
     visible: false,
     snapshot: undefined as SessionSnapshot | undefined,
+    /** Saved Pixie conversations for the history picker. */
+    sessions: [] as SessionSummary[],
+    /** Listing failure, kept in the picker: the conversation itself stays usable. */
+    sessionsError: "",
     activity: undefined as AgentActivity | undefined,
     /** Optimistic user turn, shown until the send reply carries the real entry. */
     pending: undefined as { text: string; images?: PromptImage[]; timestamp: string; knownEntryIds: Set<string> } | undefined,
@@ -160,6 +165,24 @@ export const usePixieStore = defineStore("pixie", {
       if (this.running) return;
       try {
         this.applySnapshot(await desktop.invoke("pixie.newSession"));
+        this.model = undefined;
+        this.thinking = undefined;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadSessions() {
+      try {
+        this.sessions = (await desktop.invoke("pixie.sessions")).sessions;
+        this.sessionsError = "";
+      } catch (error) {
+        this.sessionsError = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async switchSession(path: string) {
+      if (this.running) return;
+      try {
+        this.applySnapshot(await desktop.invoke("pixie.switchSession", { path }));
         this.model = undefined;
         this.thinking = undefined;
       } catch (error) {
