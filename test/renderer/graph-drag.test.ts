@@ -109,3 +109,39 @@ it("removes a hidden sending draft's edge and restores it when the draft reappea
   await flushPromises();
   expect(wrapper.find(edge).exists()).toBe(true);
 });
+
+it.each(["header", "textarea", "header button"])("drags a draft only from its header, preserving its editor (%s)", async target => {
+  const { wrapper, flow, graph } = await setup();
+  flow.autoPanOnNodeDrag.value = false;
+  await graph.compose("turn:root");
+  await flushPromises();
+  const draft = wrapper.get('[data-id="draft:turn:root"]');
+  const editor = draft.get("textarea");
+  await editor.setValue("keep typing here");
+  graph.draftState.images.push({ mimeType: "image/png", data: "aGVsbG8=" });
+  graph.draftState.files = [{ name: "notes.txt", path: "/project/notes.txt" }];
+  await flushPromises();
+  const node = flow.findNode("draft:turn:root"), before = { ...node.position };
+  const mouse = (type: string, x: number, y: number) => {
+    const event = new MouseEvent(type, { bubbles: true, buttons: type === "mouseup" ? 0 : 1, clientX: x, clientY: y });
+    // Vitest proxies Window, which jsdom's MouseEvent constructor rejects.
+    Object.defineProperty(event, "view", { value: window });
+    return event;
+  };
+  draft.get(target).element.dispatchEvent(mouse("mousedown", 100, 100));
+  window.dispatchEvent(mouse("mousemove", 110, 110));
+  window.dispatchEvent(mouse("mousemove", 180, 190));
+  window.dispatchEvent(mouse("mouseup", 180, 190));
+  await flushPromises();
+  if (target === "header") expect(node.position).not.toEqual(before);
+  else expect(node.position).toEqual(before);
+  const position = { ...node.position };
+  graph.rebuild();
+  graph.syncNodeDimensions([{ id: node.id, type: "dimensions", dimensions: { width: 440, height: 500 } }]);
+  await flushPromises();
+  expect(flow.findNode(node.id).position).toEqual(position);
+  expect(draft.get("textarea").element).toBe(editor.element);
+  expect((editor.element as HTMLTextAreaElement).value).toBe("keep typing here");
+  expect(graph.draftState.images).toEqual([{ mimeType: "image/png", data: "aGVsbG8=" }]);
+  expect(graph.draftState.files).toEqual([{ name: "notes.txt", path: "/project/notes.txt" }]);
+});

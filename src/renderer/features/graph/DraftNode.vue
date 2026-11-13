@@ -30,15 +30,16 @@ const { t } = useI18n();
 </script>
 
 <template>
-  <article class="draft-node nodrag nowheel" @click.stop>
+  <article class="draft-node nowheel" @click.stop>
     <Handle v-if="data.parentId" type="target" :position="Position.Left" />
-    <header>
+    <header class="draft-drag-handle">
       <span><i />{{ t("draft.title") }}</span>
-      <button v-if="data.onCancel" type="button" :title="t('draft.close')" @click="data.onCancel">
+      <button v-if="data.onCancel" class="nodrag" type="button" :title="t('draft.close')" @click="data.onCancel">
         <X :size="14" />
       </button>
     </header>
     <PromptComposer
+      class="nodrag"
       :draft-state="data.draftState"
       :runnable="data.runnable"
       :editable="data.initializing || Boolean(data.creationError)"
