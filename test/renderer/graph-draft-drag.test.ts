@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, expect, it, vi } from "vitest";
 import GraphPanel from "../../src/renderer/features/graph/GraphPanel.vue";
 import { useSessionStore } from "../../src/renderer/stores/session";
+import { useLayoutStore } from "../../src/renderer/stores/layout";
 import { i18n } from "../../src/renderer/i18n";
 import { projectSession } from "../../src/shared/session";
 import type { SessionSnapshot } from "../../src/shared/types";
@@ -205,4 +206,43 @@ it("does not move the source when preflight fails while another session is open"
   await flushPromises();
   expect(at("turn:root")).toEqual(source);
   expect(at("pending:run")).toBeUndefined();
+});
+
+it("restores an empty session's moved root draft on return", async () => {
+  const { session, at, move } = setup();
+  const empty = { ...snapshot(), entries: [], projection: projectSession([], null) };
+  session.applySnapshot(empty); await flushPromises(); move("draft:root");
+  session.applySnapshot(snapshot("B")); await flushPromises();
+  session.applySnapshot(empty); await flushPromises();
+  expect(at("draft:root")).toEqual({ x: 1300, y: 700 });
+});
+
+it.each(["observed", "away", "late reply"])("hands position and order to the submitted turn when queued input advances its run (%s)", async stage => {
+  const { session, graph, at, move } = setup();
+  await graph.compose("turn:root", "up"); move("draft:turn:root");
+  let requestId = "", finish!: (id: string) => void;
+  vi.spyOn(session, "promptAt").mockImplementation(async (_parent, _text, _model, _thinking, _images, options) => {
+    requestId = options!.requestId!;
+    session.current!.graph!.runs = [run(requestId)];
+    return stage === "late reply" ? new Promise<string>(resolve => { finish = resolve; }) : "pending:run";
+  });
+  const send = graph.submitDraft("sent"); await flushPromises();
+  if (stage !== "late reply") await send;
+  move("pending:run", { x: 1450, y: 820 });
+  const original = session.current!;
+  if (stage === "observed") {
+    session.applySnapshot({ ...append(original), graph: { ...original.graph!, runs: [run(requestId, "turn:sent")] } });
+    await flushPromises();
+  } else { session.applySnapshot(snapshot("B")); await flushPromises(); }
+  const entries = [...append(original).entries, { type: "message", id: "queued", parentId: "sent", timestamp: "10",
+    message: { role: "user", content: "queued follow-up" } }];
+  session.applySnapshot({ ...original, entries, projection: projectSession(entries, "queued"),
+    graph: { ...original.graph!, runs: [run(requestId, "turn:queued")] } });
+  await flushPromises();
+  if (stage === "late reply") { finish("turn:queued"); await send; await flushPromises(); }
+  expect(at("turn:sent")).toEqual({ x: 1450, y: 820 });
+  expect(at("turn:queued")).not.toEqual({ x: 1450, y: 820 });
+  const orders = Object.values(useLayoutStore().layout.branchOrders!).flat();
+  expect(orders).toContainEqual(["turn:sent", -1]);
+  expect(orders.some(([id]) => id === "turn:queued")).toBe(false);
 });

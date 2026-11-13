@@ -52,9 +52,10 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
-// A submission may be broadcast before its IPC reply supplies the node id.
-let submittedPositions = new Map<string, ManualPosition>();
-const rememberedSubmissions = new Map<string, Map<string, ManualPosition>>();
+// Keep the original parent until a submission receives its own turn id.
+type SubmittedDraft = { parentId: string | null; position?: ManualPosition };
+let submissions = new Map<string, SubmittedDraft>();
+const rememberedSubmissions = new Map<string, Map<string, SubmittedDraft>>();
 // Sessions remember where they were left: manual card positions, measured card
 // sizes, and the pane viewport come back unchanged on return instead of
 // re-centering. Sizes matter because only visible cards ever measure — without
@@ -277,6 +278,12 @@ async function loadNodeContent(node: GraphNode) {
   await contentWindowRequest(node);
 }
 
+function submittedNodeId(id: string, parentId: string | null) {
+  const byId = new Map(projection.value?.nodes.map(node => [node.id, node]));
+  for (let node = byId.get(id); node; node = node.parentId ? byId.get(node.parentId) : undefined)
+    if ((node.parentId ?? null) === parentId) return node.id;
+}
+
 function rebuild() {
   const value = projection.value;
   if (!value) {
@@ -295,8 +302,8 @@ function rebuild() {
     const adoptedPosition = adoptDraft ? dragged.get("draft:root") : undefined;
     dragged.clear();
     if (adoptedPosition) dragged.set("draft:root", adoptedPosition);
-    submittedPositions = rememberedSubmissions.get(sessionKey.value) ?? new Map();
-    rememberedSubmissions.set(sessionKey.value, submittedPositions);
+    submissions = rememberedSubmissions.get(sessionKey.value) ?? new Map();
+    rememberedSubmissions.set(sessionKey.value, submissions);
     restoredLayout = rememberedLayouts.get(sessionKey.value);
     restoredSizes = rememberedDimensions.get(sessionKey.value);
     branchOrder.clear();
@@ -322,8 +329,14 @@ function rebuild() {
   }
   if (draftParent.value && !value.nodes.some(node => node.id === draftParent.value)) resetDraft();
   const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
+  // Queued follow-ups advance a run's tip; hand off to its first submitted turn.
+  const submittedRuns = (session.current?.graph?.runs ?? []).map(run => {
+    const submitted = run.requestId ? submissions.get(run.requestId) : undefined;
+    return run.nodeId && submitted
+      ? { ...run, nodeId: submittedNodeId(run.nodeId, submitted.parentId) ?? null } : run;
+  });
   // The same submission changes ids as admission and the real turn arrive.
-  for (const run of session.current?.graph?.runs ?? []) {
+  for (const run of submittedRuns) {
     const pendingId = `pending:${run.runId}`;
     const submittedId = run.requestId ? `pending:${run.requestId}` : pendingId;
     const from = branchOrder.has(pendingId) ? pendingId : submittedId;
@@ -357,28 +370,28 @@ function rebuild() {
   // Restore pending slots before translating their ids to admitted turns.
   if (restoredLayout) {
     const ids = new Set([...positions.keys(), ...session.currentPendingPrompts.map(pending => pending.message.entryId)]);
+    if (!value.nodes.length) ids.add("draft:root");
     for (const run of session.current?.graph?.runs ?? []) {
       ids.add(`pending:${run.runId}`);
       if (run.requestId) ids.add(`pending:${run.requestId}`);
     }
     for (const [id, position] of restoredLayout) if (ids.has(id)) dragged.set(id, position);
   }
-  for (const run of session.current?.graph?.runs ?? []) {
+  for (const run of submittedRuns) {
     const pendingId = `pending:${run.runId}`;
     const submittedId = run.requestId ? `pending:${run.requestId}` : pendingId;
-    const position = dragged.get(pendingId) ?? dragged.get(submittedId) ?? (run.requestId ? submittedPositions.get(run.requestId) : undefined);
-    if (!position) continue;
+    const position = dragged.get(pendingId) ?? dragged.get(submittedId) ?? (run.requestId ? submissions.get(run.requestId)?.position : undefined);
     const failedBeforeTurn = run.error && run.nodeId && (restoredSizes ?? previousNodes).has(run.nodeId);
-    if (!failedBeforeTurn && (run.nodeId || run.status === "running")) {
+    if (position && !failedBeforeTurn && (run.nodeId || run.status === "running")) {
       const id = run.nodeId ?? pendingId;
       if (!dragged.has(id)) dragged.set(id, position);
     }
     if (run.nodeId || run.status !== "running") dragged.delete(pendingId);
     if (submittedId !== pendingId) dragged.delete(submittedId);
-    if (run.requestId) submittedPositions.delete(run.requestId);
+    if (run.requestId && (run.nodeId || run.status !== "running")) submissions.delete(run.requestId);
   }
   for (const pending of session.currentPendingPrompts) {
-    const position = pending.requestId ? submittedPositions.get(pending.requestId)
+    const position = pending.requestId ? submissions.get(pending.requestId)?.position
       : pending.targetNodeId === draftParent.value ? dragged.get(draftParent.value ? `draft:${draftParent.value}` : "draft:root") : undefined;
     if (position && !dragged.has(pending.message.entryId)) dragged.set(pending.message.entryId, position);
   }
@@ -800,15 +813,16 @@ async function submitDraft(text: string, images?: PromptImage[]) {
   const order = draftOrder;
   const targetSession = sessionKey.value;
   const targetDraft = draftState.value;
-  const targetPositions = submittedPositions;
+  const targetSubmissions = submissions;
+  const parentId = draftParent.value ?? null;
   const existingNodes = projection.value?.nodes ?? [];
   const slot = dragged.get(draftParent.value ? `draft:${draftParent.value}` : "draft:root");
   const position = slot && !slot.yielded ? { ...slot } : undefined;
   const requestId = (order || position) && session.current?.graph ? crypto.randomUUID() : undefined;
   if (requestId && order) rememberBranchOrder(`pending:${requestId}`, order);
-  if (requestId && position) submittedPositions.set(requestId, position);
+  if (requestId) submissions.set(requestId, { parentId, position });
   const delivered = await runDraftSubmit(
-    draftParent.value ?? null,
+    parentId,
     text,
     draftModel.value,
     draftThinking.value ?? inheritThinking(draftParent.value),
@@ -819,16 +833,18 @@ async function submitDraft(text: string, images?: PromptImage[]) {
   );
   if (!delivered) {
     if (requestId && targetSession === sessionKey.value) rememberBranchOrder(`pending:${requestId}`, undefined);
-    if (requestId) targetPositions.delete(requestId);
+    if (requestId) targetSubmissions.delete(requestId);
     return false;
   }
   if (targetSession !== sessionKey.value) return true;
-  if (delivered.nodeId && order) rememberBranchOrder(delivered.nodeId, order, requestId ? `pending:${requestId}` : undefined);
-  if (delivered.nodeId && position && (!requestId || submittedPositions.has(requestId))
-    && !existingNodes.some(node => node.id === delivered.nodeId)) {
-    if (!dragged.has(delivered.nodeId)) dragged.set(delivered.nodeId, position);
+  const id = requestId && delivered.nodeId && !delivered.nodeId.startsWith("pending:")
+    ? submittedNodeId(delivered.nodeId, parentId) : delivered.nodeId;
+  if (id && order) rememberBranchOrder(id, order, requestId ? `pending:${requestId}` : undefined);
+  if (id && position && (!requestId || submissions.has(requestId))
+    && !existingNodes.some(node => node.id === id)) {
+    if (!dragged.has(id)) dragged.set(id, position);
   }
-  if (requestId) submittedPositions.delete(requestId);
+  if (requestId && !id?.startsWith("pending:")) submissions.delete(requestId);
   if (targetDraft !== draftState.value) {
     rebuild();
     return true;
@@ -838,10 +854,10 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     await center(session.focusedNode ?? undefined, true);
     return true;
   }
-  const id = acceptSubmittedNode();
-  if (id) {
+  const acceptedId = acceptSubmittedNode();
+  if (acceptedId) {
     rebuild();
-    await center(id, true);
+    await center(acceptedId, true);
   }
   return true;
 }
@@ -861,7 +877,7 @@ function acceptSubmittedNode() {
 // branch back into its own lane, and the current card comes back into view.
 async function tidy() {
   dragged.clear();
-  submittedPositions.clear();
+  submissions.clear();
   rebuild();
   await center(defaultFocusId(), true);
 }
