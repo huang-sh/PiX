@@ -52,6 +52,9 @@ watch(nodes, items => {
 }, { flush: "post" });
 // Keep manual coordinates separate from temporary draft layout positions.
 const dragged = new Map<string, ManualPosition>();
+// A submission may be broadcast before its IPC reply supplies the node id.
+let submittedPositions = new Map<string, ManualPosition>();
+const rememberedSubmissions = new Map<string, Map<string, ManualPosition>>();
 // Sessions remember where they were left: manual card positions, measured card
 // sizes, and the pane viewport come back unchanged on return instead of
 // re-centering. Sizes matter because only visible cards ever measure — without
@@ -289,7 +292,11 @@ function rebuild() {
     const adoptDraft = creatingDraft === session.activeProjectId && session.creation?.status === "ready"
       && session.current?.session.path === session.creation.path;
     creatingDraft = preparingSession.value ? session.activeProjectId : undefined;
+    const adoptedPosition = adoptDraft ? dragged.get("draft:root") : undefined;
     dragged.clear();
+    if (adoptedPosition) dragged.set("draft:root", adoptedPosition);
+    submittedPositions = rememberedSubmissions.get(sessionKey.value) ?? new Map();
+    rememberedSubmissions.set(sessionKey.value, submittedPositions);
     restoredLayout = rememberedLayouts.get(sessionKey.value);
     restoredSizes = rememberedDimensions.get(sessionKey.value);
     branchOrder.clear();
@@ -314,6 +321,7 @@ function rebuild() {
     deleteError.value = "";
   }
   if (draftParent.value && !value.nodes.some(node => node.id === draftParent.value)) resetDraft();
+  const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   // The same submission changes ids as admission and the real turn arrive.
   for (const run of session.current?.graph?.runs ?? []) {
     const pendingId = `pending:${run.runId}`;
@@ -323,12 +331,11 @@ function rebuild() {
     const to = run.nodeId ?? pendingId;
     if (order !== undefined) {
       // A failed preflight can still report the existing source node.
-      const failedBeforeTurn = run.error && run.nodeId && nodes.value.some(node => node.id === run.nodeId);
+      const failedBeforeTurn = run.error && run.nodeId && (restoredSizes ?? previousNodes).has(run.nodeId);
       if (failedBeforeTurn || (!run.nodeId && run.status !== "running")) rememberBranchOrder(from, undefined);
       else if (to !== from) rememberBranchOrder(to, order, from);
     }
   }
-  const previousNodes = new Map(nodes.value.map(node => [node.id, node]));
   // Settled positions use the same measured card sizes the pane renders, so
   // lanes track real heights instead of the fixed 280×146 estimate pitch.
   // Unmeasured nodes keep the estimate until Vue Flow reports dimensions; a
@@ -345,12 +352,37 @@ function rebuild() {
     const before = autoPositions?.get(id);
     const after = positions.get(id);
     if (!after && !before && nodes.value.some(node => node.id === id)) continue;
-    if (!before || !after || (removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
+    if (!after || (before && removed && (before.x !== after.x || before.y !== after.y))) dragged.delete(id);
+  }
+  // Restore pending slots before translating their ids to admitted turns.
+  if (restoredLayout) {
+    const ids = new Set([...positions.keys(), ...session.currentPendingPrompts.map(pending => pending.message.entryId)]);
+    for (const run of session.current?.graph?.runs ?? []) {
+      ids.add(`pending:${run.runId}`);
+      if (run.requestId) ids.add(`pending:${run.requestId}`);
+    }
+    for (const [id, position] of restoredLayout) if (ids.has(id)) dragged.set(id, position);
+  }
+  for (const run of session.current?.graph?.runs ?? []) {
+    const pendingId = `pending:${run.runId}`;
+    const submittedId = run.requestId ? `pending:${run.requestId}` : pendingId;
+    const position = dragged.get(pendingId) ?? dragged.get(submittedId) ?? (run.requestId ? submittedPositions.get(run.requestId) : undefined);
+    if (!position) continue;
+    const failedBeforeTurn = run.error && run.nodeId && (restoredSizes ?? previousNodes).has(run.nodeId);
+    if (!failedBeforeTurn && (run.nodeId || run.status === "running")) {
+      const id = run.nodeId ?? pendingId;
+      if (!dragged.has(id)) dragged.set(id, position);
+    }
+    if (run.nodeId || run.status !== "running") dragged.delete(pendingId);
+    if (submittedId !== pendingId) dragged.delete(submittedId);
+    if (run.requestId) submittedPositions.delete(run.requestId);
+  }
+  for (const pending of session.currentPendingPrompts) {
+    const position = pending.requestId ? submittedPositions.get(pending.requestId)
+      : pending.targetNodeId === draftParent.value ? dragged.get(draftParent.value ? `draft:${draftParent.value}` : "draft:root") : undefined;
+    if (position && !dragged.has(pending.message.entryId)) dragged.set(pending.message.entryId, position);
   }
   autoPositions = positions;
-  // Returning to a session resumes the manual arrangement saved on leaving;
-  // only nodes still present here can carry their remembered slot.
-  if (restoredLayout) for (const [id, position] of restoredLayout) if (positions.has(id)) dragged.set(id, position);
   const placed = { nodes: value.nodes.map(node => ({ ...node, ...positions.get(node.id)!,
     ...dragged.get(node.id),
   })) };
@@ -463,6 +495,7 @@ function rebuild() {
   const draft: Node<DraftNodeData> | undefined = (parent || rootDraft) ? {
     id: draftId,
     type: "draft",
+    dragHandle: ".draft-drag-handle",
     // Keep the editor mounted for failure recovery, but hidden through both
     // the local submission and the server's pending-to-real-node handoff.
     style: { visibility: draftSending ? "hidden" : "visible", pointerEvents: draftSending ? "none" : "auto" },
@@ -669,7 +702,7 @@ async function reopenSession() {
 
 async function compose(id: string, direction?: BranchDirection) {
   ++retryRequest;
-  if (draftParent.value !== id) draftState.value = emptyDraft();
+  if (draftParent.value !== id) resetDraft();
   draftOrder = direction === "up" ? -++orderSequence : direction === "down" ? ++orderSequence : 0;
   const node = projection.value?.nodes.find((item) => item.id === id);
   draftParent.value = id;
@@ -755,6 +788,7 @@ function cancelDraft() {
 
 function resetDraft() {
   ++retryRequest;
+  dragged.delete(draftParent.value ? `draft:${draftParent.value}` : "draft:root");
   draftState.value = emptyDraft();
   draftParent.value = undefined;
   draftModel.value = undefined;
@@ -766,8 +800,13 @@ async function submitDraft(text: string, images?: PromptImage[]) {
   const order = draftOrder;
   const targetSession = sessionKey.value;
   const targetDraft = draftState.value;
-  const requestId = order && session.current?.graph ? crypto.randomUUID() : undefined;
+  const targetPositions = submittedPositions;
+  const existingNodes = projection.value?.nodes ?? [];
+  const slot = dragged.get(draftParent.value ? `draft:${draftParent.value}` : "draft:root");
+  const position = slot && !slot.yielded ? { ...slot } : undefined;
+  const requestId = (order || position) && session.current?.graph ? crypto.randomUUID() : undefined;
   if (requestId && order) rememberBranchOrder(`pending:${requestId}`, order);
+  if (requestId && position) submittedPositions.set(requestId, position);
   const delivered = await runDraftSubmit(
     draftParent.value ?? null,
     text,
@@ -775,15 +814,21 @@ async function submitDraft(text: string, images?: PromptImage[]) {
     draftThinking.value ?? inheritThinking(draftParent.value),
     images,
     requestId || targetDraft.promptOverride !== undefined
-      ? { ...(requestId ? { requestId, forceFork: true } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
+      ? { ...(requestId ? { requestId, ...(order ? { forceFork: true } : {}) } : {}), ...(targetDraft.promptOverride !== undefined ? { promptOverride: targetDraft.promptOverride } : {}) }
       : undefined,
   );
   if (!delivered) {
     if (requestId && targetSession === sessionKey.value) rememberBranchOrder(`pending:${requestId}`, undefined);
+    if (requestId) targetPositions.delete(requestId);
     return false;
   }
   if (targetSession !== sessionKey.value) return true;
   if (delivered.nodeId && order) rememberBranchOrder(delivered.nodeId, order, requestId ? `pending:${requestId}` : undefined);
+  if (delivered.nodeId && position && (!requestId || submittedPositions.has(requestId))
+    && !existingNodes.some(node => node.id === delivered.nodeId)) {
+    if (!dragged.has(delivered.nodeId)) dragged.set(delivered.nodeId, position);
+  }
+  if (requestId) submittedPositions.delete(requestId);
   if (targetDraft !== draftState.value) {
     rebuild();
     return true;
@@ -804,7 +849,11 @@ async function submitDraft(text: string, images?: PromptImage[]) {
 function acceptSubmittedNode() {
   const id = acceptSubmittedDraft();
   if (id && draftOrder && activeSession === sessionKey.value) rememberBranchOrder(id, draftOrder);
-  if (id) resetDraft();
+  if (id) {
+    const position = dragged.get(draftParent.value ? `draft:${draftParent.value}` : "draft:root");
+    if (position) dragged.set(id, position);
+    resetDraft();
+  }
   return id;
 }
 
@@ -812,6 +861,7 @@ function acceptSubmittedNode() {
 // branch back into its own lane, and the current card comes back into view.
 async function tidy() {
   dragged.clear();
+  submittedPositions.clear();
   rebuild();
   await center(defaultFocusId(), true);
 }

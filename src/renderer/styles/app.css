@@ -368,7 +368,8 @@ html[data-dot-grid="off"] :is(.session-flow, .welcome, .graph-empty) { backgroun
 .prompt-node.running::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 0; width: 3px; border-radius: 2px; background: var(--accent); }
 .prompt-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--ring), 0 4px 12px rgba(28,36,48,.06); }
 .prompt-node.search-hit { border-color: var(--accent); background: var(--accent-soft); }
-.draft-node > header { display: flex; align-items: center; justify-content: space-between; color: var(--faint); font-size: var(--font-size-caption); text-transform: uppercase; letter-spacing: .07em; }
+.draft-node > header { display: flex; align-items: center; justify-content: space-between; min-height: 24px; color: var(--faint); font-size: var(--font-size-caption); text-transform: uppercase; letter-spacing: .07em; cursor: grab; user-select: none; }
+.vue-flow__node.dragging .draft-drag-handle { cursor: grabbing; }
 .draft-node > header span { display: flex; align-items: center; gap: 4px; color: var(--accent-strong); font-weight: 800; }
 .node-meta { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: var(--font-size-caption); font-style: normal; }
 .node-meta span { display: flex; align-items: center; gap: 2px; }

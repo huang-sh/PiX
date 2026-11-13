@@ -1100,8 +1100,40 @@ try {
       return value;
     });
     await cdp.evaluate("new Promise(resolve => setTimeout(resolve, 350))");
+    await cdp.evaluate(`(() => {
+      const editor = document.querySelector('.draft-node textarea');
+      editor.value = 'Keep this draft while moving it';
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    const draftTransform = () => cdp.evaluate("document.querySelector('.vue-flow__node-draft').style.transform");
+    const dragDraftFrom = async selector => {
+      const point = await cdp.evaluate(`(() => {
+        const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+        return { x: rect.x + rect.width / 3, y: rect.y + (${JSON.stringify(selector)}.endsWith('textarea') ? 24 : rect.height / 2) };
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, ...point });
+      for (const delta of [4, 12, 24])
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', buttons: 1, x: point.x + delta, y: point.y + delta });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: point.x + 24, y: point.y + 24 });
+    };
+    const beforeDrag = await draftTransform();
+    await dragDraftFrom('.draft-drag-handle');
+    await retry(async () => {
+      if (await draftTransform() === beforeDrag) throw new Error('Dragging the draft header did not move the card');
+    });
+    const afterDrag = await draftTransform();
+    await dragDraftFrom('.draft-node textarea');
+    if (await draftTransform() !== afterDrag) throw new Error('Selecting draft text moved the card');
+    const draftText = await cdp.evaluate("document.querySelector('.draft-node textarea').value");
+    if (draftText !== 'Keep this draft while moving it') throw new Error('Dragging discarded the draft text');
     const graphShot = await cdp.send("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(artifacts, "gui-graph-draft.png"), Buffer.from(graphShot.data, "base64"));
+    await cdp.evaluate(`(() => {
+      const editor = document.querySelector('.draft-node textarea');
+      editor.value = '';
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
   }
   const closedGraphWidth = await cdp.evaluate(
     "document.querySelector('.graph').getBoundingClientRect().width",

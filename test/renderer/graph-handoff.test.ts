@@ -136,8 +136,10 @@ it("saves each concurrent draft's own order when both replies arrive together", 
     return text === "first" ? "turn:first" : "turn:second";
   });
   await graph.compose("turn:root", "up");
+  graph.rememberDrag({ node: { id: "draft:turn:root", position: { x: 1300, y: -700 } } });
   const first = graph.submitDraft("first");
   await graph.compose("turn:b", "up");
+  graph.rememberDrag({ node: { id: "draft:turn:b", position: { x: 1800, y: -900 } } });
   const second = graph.submitDraft("second");
   try {
     requests.forEach(resolve => resolve());
@@ -145,6 +147,8 @@ it("saves each concurrent draft's own order when both replies arrive together", 
     const orders = Object.values(useLayoutStore().layout.branchOrders!).flat();
     expect(orders).toContainEqual(["turn:first", -1]);
     expect(orders).toContainEqual(["turn:second", -2]);
+    expect(graph.nodes.find((node: any) => node.id === "turn:first").position).toEqual({ x: 1300, y: -700 });
+    expect(graph.nodes.find((node: any) => node.id === "turn:second").position).toEqual({ x: 1800, y: -900 });
   } finally { requests.forEach(resolve => resolve()); await Promise.all([first, second]); wrapper.unmount(); }
 });
 
