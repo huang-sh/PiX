@@ -20,7 +20,7 @@ jobs:
           - os: windows-latest
             targets: --win
           # FFF and ffi-rs install native optional dependencies per architecture.
-          - os: macos-14
+          - os: macos-15
             targets: --mac --arm64
           - os: macos-15-intel
             targets: --mac --x64

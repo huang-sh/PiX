@@ -51,12 +51,15 @@ describe("GraphPanel empty state", () => {
     expect(wrapper.find(".graph-empty").exists()).toBe(false);
     expect(draft().data.runnable).toBe(false);
     draft().data.draftState.text = "typed while creating";
+    const graph = (wrapper.vm as any).$.setupState;
+    graph.rememberDrag({ node: { id: "draft:root", position: { x: 800, y: 600 } } });
     session.applySnapshot({ session: { path: "/project/new.jsonl", id: "new" }, entries: [],
       projection: projectSession([], null), runtime: { available: true } } as SessionSnapshot);
     session.creation = { request: 1, status: "ready", path: "/project/new.jsonl" };
     await nextTick();
     expect(draft().data.runnable).toBe(true);
     expect(draft().data.draftState.text).toBe("typed while creating");
+    expect(draft().position).toEqual({ x: 800, y: 600 });
     wrapper.unmount();
   });
 
