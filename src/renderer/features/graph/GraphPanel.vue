@@ -818,7 +818,7 @@ async function submitDraft(text: string, images?: PromptImage[]) {
   const existingNodes = projection.value?.nodes ?? [];
   const slot = dragged.get(draftParent.value ? `draft:${draftParent.value}` : "draft:root");
   const position = slot && !slot.yielded ? { ...slot } : undefined;
-  const requestId = (order || position) && session.current?.graph ? crypto.randomUUID() : undefined;
+  const requestId = session.current?.graph ? crypto.randomUUID() : undefined;
   if (requestId && order) rememberBranchOrder(`pending:${requestId}`, order);
   if (requestId) submissions.set(requestId, { parentId, position });
   const delivered = await runDraftSubmit(
@@ -840,9 +840,10 @@ async function submitDraft(text: string, images?: PromptImage[]) {
   const id = requestId && delivered.nodeId && !delivered.nodeId.startsWith("pending:")
     ? submittedNodeId(delivered.nodeId, parentId) : delivered.nodeId;
   if (id && order) rememberBranchOrder(id, order, requestId ? `pending:${requestId}` : undefined);
-  if (id && position && (!requestId || submissions.has(requestId))
+  const submittedPosition = requestId ? targetSubmissions.get(requestId)?.position : position;
+  if (id && submittedPosition
     && !existingNodes.some(node => node.id === id)) {
-    if (!dragged.has(id)) dragged.set(id, position);
+    if (!dragged.has(id)) dragged.set(id, submittedPosition);
   }
   if (requestId && !id?.startsWith("pending:")) submissions.delete(requestId);
   if (targetDraft !== draftState.value) {
@@ -877,7 +878,8 @@ function acceptSubmittedNode() {
 // branch back into its own lane, and the current card comes back into view.
 async function tidy() {
   dragged.clear();
-  submissions.clear();
+  // Reset coordinates while retaining the original turn's identity and order.
+  for (const submission of submissions.values()) delete submission.position;
   rebuild();
   await center(defaultFocusId(), true);
 }

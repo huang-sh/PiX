@@ -246,3 +246,50 @@ it.each(["observed", "away", "late reply"])("hands position and order to the sub
   expect(orders).toContainEqual(["turn:sent", -1]);
   expect(orders.some(([id]) => id === "turn:queued")).toBe(false);
 });
+
+
+it.each([false, true])("keeps a pending drag on the original turn when queued input advances without a draft drag (away: %s)", async away => {
+  const { session, graph, at, move } = setup();
+  await graph.compose("turn:root");
+  let requestId = "store-generated-request";
+  vi.spyOn(session, "promptAt").mockImplementation(async (_parent, _text, _model, _thinking, _images, options) => {
+    requestId = options?.requestId ?? requestId;
+    session.current!.graph!.runs = [run(requestId)];
+    return "pending:run";
+  });
+  await graph.submitDraft("sent"); await flushPromises();
+  move("pending:run", { x: 1450, y: 820 });
+  const original = session.current!;
+  if (away) { session.applySnapshot(snapshot("B")); await flushPromises(); }
+  const entries = [...append(original).entries, { type: "message", id: "queued", parentId: "sent", timestamp: "10",
+    message: { role: "user", content: "queued follow-up" } }];
+  session.applySnapshot({ ...original, entries, projection: projectSession(entries, "queued"),
+    graph: { ...original.graph!, runs: [run(requestId, "turn:queued")] } });
+  await flushPromises();
+  expect(at("turn:sent")).toEqual({ x: 1450, y: 820 });
+  expect(at("turn:queued")).not.toEqual({ x: 1450, y: 820 });
+});
+
+it.each([false, true])("keeps the original turn's branch order after tidying a pending submission (away: %s)", async away => {
+  const { session, graph, at, move } = setup();
+  await graph.compose("turn:root", "up"); move("draft:turn:root");
+  let requestId = "";
+  vi.spyOn(session, "promptAt").mockImplementation(async (_parent, _text, _model, _thinking, _images, options) => {
+    requestId = options!.requestId!;
+    session.current!.graph!.runs = [run(requestId)];
+    return "pending:run";
+  });
+  await graph.submitDraft("sent"); await flushPromises();
+  await graph.tidy();
+  const original = session.current!;
+  if (away) { session.applySnapshot(snapshot("B")); await flushPromises(); }
+  const entries = [...append(original).entries, { type: "message", id: "queued", parentId: "sent", timestamp: "10",
+    message: { role: "user", content: "queued follow-up" } }];
+  session.applySnapshot({ ...original, entries, projection: projectSession(entries, "queued"),
+    graph: { ...original.graph!, runs: [run(requestId, "turn:queued")] } });
+  await flushPromises();
+  const orders = Object.values(useLayoutStore().layout.branchOrders!).flat();
+  expect(orders).toContainEqual(["turn:sent", -1]);
+  expect(orders.some(([id]) => id === "turn:queued")).toBe(false);
+  expect(at("turn:sent")).not.toEqual({ x: 1300, y: 700 });
+});

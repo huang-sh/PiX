@@ -299,13 +299,13 @@ describe("draft placement", () => {
     await graph.compose("turn:a");
     expect(draft().thinkingLevel).toBe(level);
     await draft().onSubmit("inherited");
-    expect(promptAt).toHaveBeenLastCalledWith("turn:a", "inherited", null, level, undefined, undefined);
+    expect(promptAt).toHaveBeenLastCalledWith("turn:a", "inherited", null, level, undefined, { requestId: expect.any(String) });
 
     await graph.compose("turn:a");
     draft().onThinking("high", true);
     expect(draft().thinkingLevel).toBe("high");
     await draft().onSubmit("override");
-    expect(promptAt).toHaveBeenLastCalledWith("turn:a", "override", null, "high", undefined, undefined);
+    expect(promptAt).toHaveBeenLastCalledWith("turn:a", "override", null, "high", undefined, { requestId: expect.any(String) });
 
     await graph.compose("turn:b");
     expect(draft().thinkingLevel).toBe("medium");
